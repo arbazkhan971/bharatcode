@@ -305,6 +305,54 @@ func TestStreamHonorsCancelledContext(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+// TestDefaultConfigBuildsHealthyRegistry asserts the embedded default
+// config is healthy without coupling to specific provider names. It
+// covers (a) the embedded defaults parse and validate, (b) building the
+// registry from them registers every provider without error, and (c)
+// every openai_compatible provider resolves to the openAICompatibleProvider
+// client. This is name-agnostic on purpose: any newly added
+// openai_compatible provider (google-gemini, xai, mistral, cerebras,
+// perplexity, etc.) is covered the moment it lands in the default config,
+// so the assertion neither hardcodes names nor races whoever edits the
+// config. It is fully offline: Default() unmarshals embedded bytes and
+// NewRegistry constructs structs, neither touches the network.
+func TestDefaultConfigBuildsHealthyRegistry(t *testing.T) {
+	cfg := config.Default()
+
+	// (a) The embedded default config parses and validates.
+	require.NoError(t, config.Validate(cfg))
+
+	// (b) The provider registry builds from the default config.
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	// (c) Every openai_compatible provider resolves to the
+	// openai_compatible client. Only assert the forward direction:
+	// the openai and lmstudio types also construct
+	// *openAICompatibleProvider, so an exclusive assertion would be
+	// wrong (see NewRegistry's type switch).
+	var openAICompatibleCount int
+	for _, prov := range cfg.Providers {
+		if prov.Disabled {
+			continue
+		}
+		provider, getErr := reg.Get(prov.Name)
+		require.NoErrorf(t, getErr, "provider %q should be registered", prov.Name)
+		require.Equalf(t, prov.Name, provider.Name(), "registered provider name should round-trip for %q", prov.Name)
+
+		if prov.Type == config.ProviderOpenAICompatible {
+			_, ok := provider.(*openAICompatibleProvider)
+			require.Truef(t, ok, "provider %q should resolve to an openai_compatible client", prov.Name)
+			openAICompatibleCount++
+		}
+	}
+
+	// Guard against a vacuous pass: the default config is expected to
+	// carry openai_compatible providers, so the loop above must have
+	// asserted on at least one.
+	require.Greater(t, openAICompatibleCount, 0, "default config should register openai_compatible providers")
+}
+
 func collectEvents(events <-chan Event) []Event {
 	var out []Event
 	for event := range events {

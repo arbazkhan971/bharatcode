@@ -1,0 +1,91 @@
+// Package mcp implements the Model Context Protocol client used by BharatCode.
+package mcp
+
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"time"
+)
+
+// Transport names the wire protocol used to reach an MCP server.
+type Transport string
+
+const (
+	// TransportStdio connects to a subprocess over stdin and stdout.
+	TransportStdio Transport = "stdio"
+	// TransportHTTP connects to a streamable HTTP endpoint.
+	TransportHTTP Transport = "http"
+	// TransportSSE connects to a server-sent-events endpoint.
+	TransportSSE Transport = "sse"
+)
+
+const serverNamePattern = `[a-z][a-z0-9_]{0,31}`
+
+var serverNameRE = regexp.MustCompile(`^` + serverNamePattern + `$`)
+
+// ServerConfig describes a single MCP server.
+type ServerConfig struct {
+	Name      string            `json:"name"`
+	Transport Transport         `json:"transport"`
+	Command   []string          `json:"command,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Timeout   time.Duration     `json:"timeout,omitempty"`
+}
+
+// Resource is a server-advertised resource the agent may read by URI.
+type Resource struct {
+	Server      string `json:"server"`
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	MimeType    string `json:"mime_type"`
+}
+
+// State reports the connection state of a single MCP server.
+type State int
+
+const (
+	// StateDisconnected means the server is not currently connected.
+	StateDisconnected State = iota
+	// StateConnecting means the client is dialing or re-dialing the server.
+	StateConnecting
+	// StateConnected means the server is connected and tools are available.
+	StateConnected
+	// StateFailed means reconnect attempts have been exhausted.
+	StateFailed
+)
+
+// Event is published whenever a server state or tool list changes.
+type Event struct {
+	Server    string
+	State     State
+	Err       error
+	ToolNames []string
+}
+
+// ErrToolUnavailable marks a tool whose backing MCP server is unusable.
+var ErrToolUnavailable = errors.New("mcp tool unavailable")
+
+// ValidateServerConfig checks one MCP server definition.
+func ValidateServerConfig(cfg ServerConfig) error {
+	if !serverNameRE.MatchString(cfg.Name) {
+		return fmt.Errorf("mcp server %q has invalid name: must match %s", cfg.Name, serverNamePattern)
+	}
+
+	switch cfg.Transport {
+	case TransportStdio:
+		if len(cfg.Command) == 0 || cfg.Command[0] == "" {
+			return fmt.Errorf("mcp server %q stdio transport requires command", cfg.Name)
+		}
+	case TransportHTTP, TransportSSE:
+		if cfg.URL == "" {
+			return fmt.Errorf("mcp server %q %s transport requires url", cfg.Name, cfg.Transport)
+		}
+	default:
+		return fmt.Errorf("mcp server %q has invalid transport %q", cfg.Name, cfg.Transport)
+	}
+
+	return nil
+}

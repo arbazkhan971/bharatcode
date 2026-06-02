@@ -1,0 +1,228 @@
+{
+  "providers": [
+    {
+      "name": "anthropic",
+      "type": "anthropic",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "models": [
+        "claude-sonnet-4-5"
+      ]
+    },
+    {
+      "name": "openai",
+      "type": "openai",
+      "api_key_env": "OPENAI_API_KEY",
+      "models": [
+        "gpt-4o"
+      ]
+    },
+    {
+      "name": "deepseek",
+      "type": "openai_compatible",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ]
+    },
+    {
+      "name": "moonshot",
+      "type": "openai_compatible",
+      "base_url": "https://api.moonshot.cn/v1",
+      "api_key_env": "MOONSHOT_API_KEY",
+      "models": [
+        "kimi-k2-0905-preview"
+      ]
+    },
+    {
+      "name": "groq",
+      "type": "openai_compatible",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key_env": "GROQ_API_KEY",
+      "models": [
+        "llama-3.3-70b-versatile",
+        "qwen-2.5-coder-32b"
+      ]
+    },
+    {
+      "name": "together",
+      "type": "openai_compatible",
+      "base_url": "https://api.together.xyz/v1",
+      "api_key_env": "TOGETHER_API_KEY",
+      "models": [
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+      ]
+    },
+    {
+      "name": "fireworks",
+      "type": "openai_compatible",
+      "base_url": "https://api.fireworks.ai/inference/v1",
+      "api_key_env": "FIREWORKS_API_KEY",
+      "models": [
+        "accounts/fireworks/models/qwen2p5-coder-32b-instruct"
+      ]
+    },
+    {
+      "name": "openrouter",
+      "type": "openai_compatible",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "models": [
+        "anthropic/claude-sonnet-4-5"
+      ]
+    },
+    {
+      "name": "ollama",
+      "type": "ollama",
+      "base_url": "http://localhost:11434",
+      "models": [
+        "qwen2.5-coder:32b"
+      ]
+    },
+    {
+      "name": "lmstudio",
+      "type": "lmstudio",
+      "base_url": "http://localhost:1234/v1",
+      "models": [
+        "qwen2.5-coder-32b-instruct"
+      ]
+    }
+  ],
+  "models": [
+    {
+      "id": "claude-sonnet-4-5",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 3.00,
+      "output_price_per_mtok_usd": 15.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "gpt-4o",
+      "provider": "openai",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 2.50,
+      "output_price_per_mtok_usd": 10.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "deepseek-chat",
+      "provider": "deepseek",
+      "context_window": 64000,
+      "input_price_per_mtok_usd": 0.27,
+      "output_price_per_mtok_usd": 1.10,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "deepseek-reasoner",
+      "provider": "deepseek",
+      "context_window": 64000,
+      "input_price_per_mtok_usd": 0.55,
+      "output_price_per_mtok_usd": 2.19,
+      "supports_images": false,
+      "supports_tools": false
+    },
+    {
+      "id": "kimi-k2-0905-preview",
+      "provider": "moonshot",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 0.60,
+      "output_price_per_mtok_usd": 2.50,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "llama-3.3-70b-versatile",
+      "provider": "groq",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.59,
+      "output_price_per_mtok_usd": 0.79,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "qwen-2.5-coder-32b",
+      "provider": "groq",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.79,
+      "output_price_per_mtok_usd": 0.79,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+      "provider": "together",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.88,
+      "output_price_per_mtok_usd": 0.88,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "accounts/fireworks/models/qwen2p5-coder-32b-instruct",
+      "provider": "fireworks",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.90,
+      "output_price_per_mtok_usd": 0.90,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "anthropic/claude-sonnet-4-5",
+      "provider": "openrouter",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 3.00,
+      "output_price_per_mtok_usd": 15.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "qwen2.5-coder:32b",
+      "provider": "ollama",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.00,
+      "output_price_per_mtok_usd": 0.00,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "qwen2.5-coder-32b-instruct",
+      "provider": "lmstudio",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.00,
+      "output_price_per_mtok_usd": 0.00,
+      "supports_images": false,
+      "supports_tools": true
+    }
+  ],
+  "permissions": {
+    "auto_approve": [
+      "view",
+      "ls",
+      "grep",
+      "glob"
+    ],
+    "always_prompt": [
+      "bash",
+      "edit",
+      "write",
+      "multiedit",
+      "fetch"
+    ]
+  },
+  "agents": [
+    {
+      "name": "coder",
+      "model": "deepseek-chat",
+      "system_prompt": "You are a helpful software engineering assistant."
+    }
+  ],
+  "ledger": {
+    "currency": "INR",
+    "usd_inr_rate": 83.50
+  }
+}

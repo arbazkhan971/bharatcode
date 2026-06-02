@@ -1,0 +1,276 @@
+package lsp
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/stretchr/testify/require"
+)
+
+func TestDiagnosticsPullStartsServerAndDeduplicatesPublishes(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	topic := pubsub.NewTopic[Diagnostic]("test_lsp", 16)
+	events, cancel := topic.Subscribe()
+	defer cancel()
+
+	manager := NewManager(testConfig("go", "fake-lsp"), topic)
+	// Generous timeout: the fake server re-execs this test binary, which can be
+	// slow to start when the full suite runs packages in parallel under load.
+	// The test asserts behavior, not latency, so the headroom is harmless.
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+	diagnostics, err := manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Len(t, diagnostics, 1)
+	require.Equal(t, Error, diagnostics[0].Severity)
+	require.Equal(t, "fake diagnostic", diagnostics[0].Message)
+
+	first := receiveDiagnostic(t, events)
+	require.Equal(t, diagnostics[0].Message, first.Message)
+
+	diagnostics, err = manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Len(t, diagnostics, 1)
+	requireNoDiagnostic(t, events)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
+func TestDiagnosticsPushFallback(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "push")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	// Generous timeout: the fake server re-execs this test binary, which can be
+	// slow to start when the full suite runs packages in parallel under load.
+	// The test asserts behavior, not latency, so the headroom is harmless.
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+	diagnostics, err := manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Len(t, diagnostics, 1)
+	require.Equal(t, Warning, diagnostics[0].Severity)
+	require.Equal(t, "push diagnostic", diagnostics[0].Message)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
+func TestMissingServerWarnsOnceAndDegrades(t *testing.T) {
+	tmp := t.TempDir()
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	topic := pubsub.NewTopic[Diagnostic]("test_lsp_missing", 16)
+	events, cancel := topic.Subscribe()
+	defer cancel()
+
+	manager := NewManager(testConfig("go", "definitely-missing-language-server"), topic)
+	ctx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+	diagnostics, err := manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Empty(t, diagnostics)
+
+	warning := receiveDiagnostic(t, events)
+	require.Equal(t, Warning, warning.Severity)
+	require.Contains(t, warning.Message, "not available")
+
+	diagnostics, err = manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Empty(t, diagnostics)
+	requireNoDiagnostic(t, events)
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
+func TestDiagnosticsUnsupportedExtensionDoesNothing(t *testing.T) {
+	tmp := t.TempDir()
+	source := filepath.Join(tmp, "README.md")
+	require.NoError(t, os.WriteFile(source, []byte("# test\n"), 0o644))
+
+	manager := NewManager(testConfig("go", "definitely-missing-language-server"), nil)
+	ctx, done := context.WithTimeout(context.Background(), time.Second)
+	defer done()
+	diagnostics, err := manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Empty(t, diagnostics)
+}
+
+func testConfig(language, command string) *config.Config {
+	cfg := config.Default()
+	cfg.LSP = []config.LSPServer{{
+		Name:      "test",
+		Command:   command,
+		Languages: []string{language},
+		RootFiles: []string{"go.mod"},
+	}}
+	return cfg
+}
+
+func receiveDiagnostic(t *testing.T, events <-chan Diagnostic) Diagnostic {
+	t.Helper()
+	select {
+	case diagnostic := <-events:
+		return diagnostic
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for diagnostic")
+		return Diagnostic{}
+	}
+}
+
+func requireNoDiagnostic(t *testing.T, events <-chan Diagnostic) {
+	t.Helper()
+	select {
+	case diagnostic := <-events:
+		t.Fatalf("unexpected diagnostic: %+v", diagnostic)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func fakeServerPath(t *testing.T, mode string) string {
+	t.Helper()
+	dir := t.TempDir()
+	name := "fake-lsp"
+	path := filepath.Join(dir, name)
+	if runtime.GOOS == "windows" {
+		path += ".bat"
+		content := fmt.Sprintf("@echo off\r\nset BHARATCODE_FAKE_LSP=1\r\nset BHARATCODE_FAKE_LSP_MODE=%s\r\n\"%s\" -test.run=TestFakeLSPServer --\r\n", mode, os.Args[0])
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o755))
+		return dir
+	}
+
+	content := fmt.Sprintf("#!/bin/sh\nBHARATCODE_FAKE_LSP=1 BHARATCODE_FAKE_LSP_MODE=%s %q -test.run=TestFakeLSPServer --\n", mode, os.Args[0])
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o755))
+	return dir
+}
+
+func TestFakeLSPServer(t *testing.T) {
+	if os.Getenv("BHARATCODE_FAKE_LSP") != "1" {
+		return
+	}
+	runFakeLSPServer()
+	os.Exit(0)
+}
+
+func runFakeLSPServer() {
+	reader := bufio.NewReader(os.Stdin)
+	mode := os.Getenv("BHARATCODE_FAKE_LSP_MODE")
+	for {
+		raw, err := readPayload(reader)
+		if err != nil {
+			return
+		}
+		var msg incomingMessage
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			return
+		}
+		switch msg.Method {
+		case "initialize":
+			result := map[string]any{
+				"capabilities": map[string]any{},
+			}
+			if mode == "pull" {
+				result["capabilities"] = map[string]any{
+					"diagnosticProvider": map[string]any{
+						"interFileDependencies": false,
+						"workspaceDiagnostics":  false,
+					},
+				}
+			}
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result:  mustRaw(result),
+			})
+		case "textDocument/didOpen":
+			if mode == "push" {
+				var params struct {
+					TextDocument struct {
+						URI string `json:"uri"`
+					} `json:"textDocument"`
+				}
+				_ = json.Unmarshal(msg.Params, &params)
+				_ = writePayload(os.Stdout, notificationMessage{
+					JSONRPC: jsonRPCVersion,
+					Method:  "textDocument/publishDiagnostics",
+					Params: map[string]any{
+						"uri": params.TextDocument.URI,
+						"diagnostics": []map[string]any{{
+							"range":    fakeRange(),
+							"severity": int(Warning),
+							"message":  "push diagnostic",
+							"source":   "fake",
+						}},
+					},
+				})
+			}
+		case "textDocument/diagnostic":
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result: mustRaw(map[string]any{
+					"kind": "full",
+					"items": []map[string]any{{
+						"range":    fakeRange(),
+						"severity": int(Error),
+						"message":  "fake diagnostic",
+						"source":   "fake",
+					}},
+				}),
+			})
+		case "shutdown":
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result:  mustRaw(nil),
+			})
+		case "exit":
+			return
+		}
+	}
+}
+
+func fakeRange() map[string]any {
+	return map[string]any{
+		"start": map[string]any{"line": 0, "character": 0},
+		"end":   map[string]any{"line": 0, "character": 4},
+	}
+}
+
+func mustRaw(v any) json.RawMessage {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return data
+}

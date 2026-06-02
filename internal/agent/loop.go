@@ -63,6 +63,18 @@ type Loop struct {
 	// compactedLen records the on-disk message count at compaction time, so Run
 	// can graft messages that arrived after compaction onto the snapshot.
 	compactedLen int
+
+	// steerMu guards the steering queue below. Steer writes it (possibly from a
+	// different goroutine than Run), and Run drains it at safe boundaries.
+	steerMu sync.Mutex
+	// steerQueue holds user steering messages queued mid-run via Steer. Run
+	// drains them at the top of each step so they reach the provider as the next
+	// user messages without restarting the turn.
+	steerQueue []string
+	// running reports whether a Run is currently in flight. Steer reads it to
+	// tell the caller whether the steering text was queued onto a live turn or
+	// must be started as a fresh prompt.
+	running bool
 }
 
 // New constructs a Loop from cfg.
@@ -105,6 +117,67 @@ func (l *Loop) Interrupt() {
 	if l.cancelRun != nil {
 		l.cancelRun()
 	}
+}
+
+// Steer queues text as a steering message for the in-flight Run. When a Run is
+// active, the text is appended to the conversation as the next user message at
+// the next safe boundary (after the current tool batch, before the next
+// provider call), so the agent course-corrects without a full restart. It
+// returns true when a Run was in flight and the message was queued onto it, and
+// false when no Run was active; in the latter case the caller should start the
+// text as a fresh turn. Steer is safe to call from any goroutine.
+func (l *Loop) Steer(text string) (queued bool) {
+	if text == "" {
+		return false
+	}
+	l.steerMu.Lock()
+	defer l.steerMu.Unlock()
+	if !l.running {
+		return false
+	}
+	l.steerQueue = append(l.steerQueue, text)
+	return true
+}
+
+// drainSteering removes and returns all queued steering messages, converting
+// each into a user message bound to sessionID. It returns nil when the queue is
+// empty.
+func (l *Loop) drainSteering(sessionID string) []message.Message {
+	l.steerMu.Lock()
+	defer l.steerMu.Unlock()
+	if len(l.steerQueue) == 0 {
+		return nil
+	}
+	out := make([]message.Message, 0, len(l.steerQueue))
+	for _, text := range l.steerQueue {
+		out = append(out, textMessage(sessionID, message.RoleUser, text))
+	}
+	l.steerQueue = l.steerQueue[:0]
+	return out
+}
+
+// hasSteering reports whether any steering messages are queued.
+func (l *Loop) hasSteering() bool {
+	l.steerMu.Lock()
+	defer l.steerMu.Unlock()
+	return len(l.steerQueue) > 0
+}
+
+// PendingSteering drains and returns any steering messages that were queued but
+// not consumed by a Run (for example, text that arrived between the loop's
+// final steering check and the run mutex releasing). The TUI uses this after a
+// turn finishes to start the leftover text as a fresh prompt so no steering
+// message is lost. It returns the raw queued text in order.
+func (l *Loop) PendingSteering() []string {
+	l.steerMu.Lock()
+	defer l.steerMu.Unlock()
+	if len(l.steerQueue) == 0 {
+		return nil
+	}
+	out := make([]string, len(l.steerQueue))
+	copy(out, l.steerQueue)
+	l.steerQueue = l.steerQueue[:0]
+	return out
 }
 
 // Compact condenses the session's conversation in memory so the next provider
@@ -180,11 +253,17 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	l.cancelMu.Lock()
 	l.cancelRun = cancel
 	l.cancelMu.Unlock()
+	l.steerMu.Lock()
+	l.running = true
+	l.steerMu.Unlock()
 	defer func() {
 		cancel()
 		l.cancelMu.Lock()
 		l.cancelRun = nil
 		l.cancelMu.Unlock()
+		l.steerMu.Lock()
+		l.running = false
+		l.steerMu.Unlock()
 	}()
 
 	l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventTurnStarted})
@@ -208,6 +287,18 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	detector := &loopDetector{}
 
 	for step := 0; step < l.cfg.MaxSteps; step++ {
+		// Drain any steering messages queued via Steer at this safe boundary
+		// (always after a complete tool batch, never between an assistant
+		// tool_use and its tool_result). Each is appended as the next user
+		// message so the agent course-corrects without restarting the turn.
+		for _, steerMsg := range l.drainSteering(sessionID) {
+			if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, steerMsg); err != nil {
+				return fmt.Errorf("appending steering message: %w", err)
+			}
+			l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventLLMResponse, Message: &steerMsg})
+			history = append(history, steerMsg)
+		}
+
 		assistant, pendingToolCalls, usage, err := l.callProvider(runCtx, history)
 		if err != nil {
 			failure := textMessage(sessionID, message.RoleAssistant, "provider failed: "+err.Error())
@@ -233,6 +324,12 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		history = append(history, assistant)
 
 		if len(pendingToolCalls) == 0 {
+			// The model would end the turn, but if steering arrived while it was
+			// composing this reply, keep going so the queued message is consumed
+			// as the next user message instead of being deferred to a restart.
+			if l.hasSteering() {
+				continue
+			}
 			l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventTurnFinished})
 			return nil
 		}

@@ -191,6 +191,14 @@ type model struct {
 	// persisted session messages are loaded (the same source as /diff). Tests
 	// set it to return a fixed slice, mirroring the exportDir test seam.
 	editDiffSource func() []message.Message
+
+	// tabs holds the open session tabs. Each tab owns its own chat List and
+	// session identity; the active tab's per-session fields are mirrored onto
+	// the model above (m.chat, m.sessionID, ...) so the rest of the TUI reads
+	// them unchanged. A default launch holds exactly one tab, in which case the
+	// tab bar is hidden and behavior is identical to before the feature.
+	tabs      []tab
+	activeTab int
 }
 
 func newModel(ctx context.Context, deps Dependencies) *model {
@@ -231,6 +239,9 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	if m.deps.Prompts == nil {
 		m.deps.Prompts = loadPromptRegistry(deps.Cfg)
 	}
+	// Seed the single default tab from the freshly wired active state. With one
+	// tab the tab bar stays hidden, so the default render is unchanged.
+	m.initTabs()
 	return m
 }
 
@@ -361,6 +372,18 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "ctrl+t":
+		// Open a new session tab and switch to it.
+		return m, m.newTab()
+	case "ctrl+w":
+		// Close the active tab (the last tab is kept).
+		return m, m.closeTab()
+	case "ctrl+tab", "ctrl+right":
+		// Cycle to the next tab (wraps); no-op with a single tab.
+		return m, m.nextTab()
+	case "ctrl+shift+tab", "ctrl+left":
+		// Cycle to the previous tab (wraps); no-op with a single tab.
+		return m, m.prevTab()
 	case "ctrl+p":
 		m.pushModelPicker()
 		return m, nil
@@ -489,8 +512,13 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	if text == "/search" || strings.HasPrefix(text, "/search ") {
 		return m.handleSearch(text)
 	}
+	if text == "/tab" || strings.HasPrefix(text, "/tab ") {
+		return m.handleTabCommand(text)
+	}
 
 	switch text {
+	case "/tabs":
+		return m.handleTabsList()
 	case "/help":
 		m.helpVisible = true
 	case "/clear":
@@ -672,13 +700,27 @@ func (m *model) renderMain() string {
 		input += "▌"
 	}
 
-	parts := []string{
-		header,
-		m.clampChat(chatBody, m.layout.chat.H),
+	// The tab bar is rendered between the header and the chat when more than one
+	// tab is open. With a single tab it is empty and the row is omitted, so the
+	// default layout is byte-for-byte unchanged. It borrows a chat row, so the
+	// chat body is clamped one line shorter when the bar is present to preserve
+	// the overall height.
+	tabBar := m.renderTabBar(m.width)
+	chatH := m.layout.chat.H
+	if tabBar != "" {
+		chatH = max(0, chatH-1)
+	}
+
+	parts := []string{header}
+	if tabBar != "" {
+		parts = append(parts, tabBar)
+	}
+	parts = append(parts,
+		m.clampChat(chatBody, chatH),
 		clampHeight(input, m.layout.input.H),
 		m.status.Render(m.width),
 		m.footer.Render(m.width),
-	}
+	)
 	return strings.Join(parts, "\n")
 }
 
@@ -805,6 +847,8 @@ func slashHelp() string {
 		"/help - list commands",
 		"/clear - clear visible chat",
 		"/sessions - restore a recent session",
+		"/tab [new|next|prev|close|N] - open or switch session tabs (Ctrl+T new, Ctrl+Right/Left switch)",
+		"/tabs - list open tabs",
 		"/compact - summarize older turns to shrink context",
 		"/fork - branch the current session",
 		"/diff - show the latest edit diff",

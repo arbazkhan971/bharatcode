@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
@@ -22,6 +23,20 @@ import (
 )
 
 const defaultMaxSteps = 50
+
+// planModePrompt is appended to the system prompt while the Loop runs in plan
+// mode. It instructs the agent to investigate read-only and produce a
+// step-by-step plan for approval instead of executing changes, mirroring the
+// read-only tool restriction enforced by toolAllowed.
+const planModePrompt = `
+
+# Plan Mode (read-only)
+
+You are operating in PLAN MODE. You may ONLY use read-only tools to investigate;
+file-mutating and command-running tools (write, edit, bash, and similar) are
+disabled and will be refused. Do NOT attempt to make changes. Instead, produce a
+clear, step-by-step PLAN describing exactly what you would do, then stop and wait
+for the user to approve it. Execution only begins after the plan is approved.`
 
 // writeClassTools names the file-mutating tools whose successful runs fire a
 // FileEdit lifecycle hook. The agent loop detects mutations by tool name so it
@@ -55,6 +70,12 @@ type Config struct {
 	SystemPrompt  string
 	ToolAllowList []string
 	MaxSteps      int
+	// PlanMode starts the Loop in plan mode: the agent is restricted to
+	// read-only tools and is prompted to output a step-by-step plan rather than
+	// execute changes. Approve transitions out of plan mode so execution tools
+	// become available again. It defaults to false (normal execution), which is
+	// the non-breaking default.
+	PlanMode bool
 	// ToolResultMaxBytes caps the byte length of a single tool result before it
 	// is appended to the conversation history, so one oversized output (a giant
 	// file read, verbose bash output) cannot blow the context window. A
@@ -124,6 +145,12 @@ type Loop struct {
 	// model. Run holds runMu for its entire duration and rejects concurrent
 	// runs, so no further synchronization is needed.
 	activeModel string
+
+	// planMode reports whether the Loop is currently restricted to read-only
+	// tools and prompted to produce a plan. It is initialised from cfg.PlanMode
+	// and cleared by Approve. It is atomic because Approve may be called from a
+	// different goroutine than the in-flight Run that reads it.
+	planMode atomic.Bool
 }
 
 // New constructs a Loop from cfg.
@@ -151,7 +178,7 @@ func New(cfg Config) *Loop {
 		}
 		allowed[name] = struct{}{}
 	}
-	return &Loop{
+	l := &Loop{
 		cfg:         cfg,
 		name:        cfg.Name,
 		allowed:     allowed,
@@ -159,11 +186,27 @@ func New(cfg Config) *Loop {
 		sleep:       contextSleep,
 		activeModel: cfg.Model,
 	}
+	l.planMode.Store(cfg.PlanMode)
+	return l
 }
 
 // Name returns the configured agent name.
 func (l *Loop) Name() string {
 	return l.name
+}
+
+// PlanMode reports whether the Loop is currently restricted to read-only tools
+// and prompted to produce a plan.
+func (l *Loop) PlanMode() bool {
+	return l.planMode.Load()
+}
+
+// Approve transitions the Loop out of plan mode so execution tools (write, edit,
+// bash, and similar) become available again and the plan-mode prompt is no
+// longer appended. It takes effect on the next provider call. Approve is safe to
+// call from any goroutine; calling it when not in plan mode is a no-op.
+func (l *Loop) Approve() {
+	l.planMode.Store(false)
 }
 
 // Interrupt cancels an in-flight Run.
@@ -541,7 +584,7 @@ func (l *Loop) callProvider(ctx context.Context, history []message.Message) (mes
 		Model:        l.activeModel,
 		Messages:     history,
 		Tools:        l.llmTools(),
-		SystemPrompt: l.cfg.SystemPrompt,
+		SystemPrompt: l.systemPrompt(),
 	})
 	if err != nil {
 		return message.Message{}, nil, nil, err
@@ -616,14 +659,23 @@ func (l *Loop) callProvider(ctx context.Context, history []message.Message) (mes
 	}
 }
 
+// systemPrompt returns the system prompt for the current provider call. In plan
+// mode it appends the plan-mode instruction so the agent is prompted to produce
+// a plan rather than execute; once Approve clears plan mode, the base prompt is
+// used unchanged.
+func (l *Loop) systemPrompt() string {
+	if l.planMode.Load() {
+		return l.cfg.SystemPrompt + planModePrompt
+	}
+	return l.cfg.SystemPrompt
+}
+
 func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCall) (result tools.Result) {
 	tool, ok := l.cfg.Tools.Get(call.Name)
 	if !ok {
 		return tools.Result{Content: "unknown tool: " + call.Name, IsError: true}
 	}
-	_, allowedLimited := l.allowed[call.Name]
-	allowed := len(l.allowed) == 0 || allowedLimited
-	wrapped := hookedTool{inner: tool, hooks: l.cfg.Hooks, sessionID: sessionID, agentName: l.name, allowed: allowed}
+	wrapped := hookedTool{inner: tool, hooks: l.cfg.Hooks, sessionID: sessionID, agentName: l.name, allowed: l.toolAllowed(call.Name)}
 	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolCalled, ToolName: call.Name})
 	result, err := l.runToolSafely(ctx, &wrapped, call)
 	if err != nil {
@@ -657,10 +709,8 @@ func (l *Loop) runToolSafely(ctx context.Context, wrapped *hookedTool, call pend
 func (l *Loop) llmTools() []llm.Tool {
 	out := []llm.Tool{}
 	for _, tool := range l.cfg.Tools.List() {
-		if len(l.allowed) > 0 {
-			if _, ok := l.allowed[tool.Name()]; !ok {
-				continue
-			}
+		if !l.toolAllowed(tool.Name()) {
+			continue
 		}
 		out = append(out, llm.Tool{
 			Name:        tool.Name(),
@@ -669,6 +719,28 @@ func (l *Loop) llmTools() []llm.Tool {
 		})
 	}
 	return out
+}
+
+// toolAllowed reports whether the named tool may run on this turn. It applies
+// the configured allow-list first (when non-empty, only listed tools pass), then
+// layers plan mode on top, which can only further restrict the set to read-only
+// tools. When plan mode is off and no allow-list is configured this reduces to
+// "always allowed", preserving the unrestricted default. The two effects
+// intersect — plan mode never expands a configured allow-list — so a custom
+// agent restricted to a few tools does not gain new ones when plan mode turns
+// on.
+func (l *Loop) toolAllowed(name string) bool {
+	if len(l.allowed) > 0 {
+		if _, ok := l.allowed[name]; !ok {
+			return false
+		}
+	}
+	if l.planMode.Load() {
+		if _, ok := readOnlySet[name]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *Loop) contextWindow() int {

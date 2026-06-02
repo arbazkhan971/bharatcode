@@ -440,7 +440,7 @@ func TestValidate_MalformedMessages(t *testing.T) {
 			Content: []ContentBlock{ToolUseBlock{Name: "bash"}},
 		},
 	}
-	require.ErrorIs(t, Validate(msgNoUseID), ErrUnknownBlockType)
+	require.ErrorIs(t, Validate(msgNoUseID), ErrEmptyToolUseID)
 
 	// ToolUse duplicate ID
 	msgDupUseID := []Message{
@@ -453,7 +453,19 @@ func TestValidate_MalformedMessages(t *testing.T) {
 			},
 		},
 	}
-	require.ErrorIs(t, Validate(msgDupUseID), ErrUnknownBlockType)
+	require.ErrorIs(t, Validate(msgDupUseID), ErrDuplicateToolUseID)
+
+	// ToolUse in a non-assistant-role message.
+	msgToolUseUserRole := []Message{
+		{
+			ID:   "m1",
+			Role: RoleUser,
+			Content: []ContentBlock{
+				ToolUseBlock{ID: "t1", Name: "bash"},
+			},
+		},
+	}
+	require.ErrorIs(t, Validate(msgToolUseUserRole), ErrToolUseRole)
 
 	// ToolResult missing ToolUseID
 	msgNoResID := []Message{
@@ -509,6 +521,31 @@ func TestValidate_MalformedMessages(t *testing.T) {
 	// If m1 has user role, then ToolUseBlock fails role validation (requires assistant).
 	// So msgResBeforeUse fails either way. Let's verify that.
 	require.Error(t, Validate(msgResBeforeUse))
+}
+
+// unknownBlock is a ContentBlock implementation whose Type() is not one of the
+// recognized BlockType values, exercising Validate's default branch.
+type unknownBlock struct{}
+
+// Type returns an unrecognized BlockType.
+func (unknownBlock) Type() BlockType {
+	return BlockType("alien")
+}
+
+func TestValidate_UnknownBlockType_ReturnsUnknownBlockType(t *testing.T) {
+	// A genuinely unrecognized block type must still map to ErrUnknownBlockType,
+	// keeping it distinct from the tool_use ID and role sentinels.
+	messages := []Message{
+		{
+			ID:      "m1",
+			Role:    RoleUser,
+			Content: []ContentBlock{unknownBlock{}},
+		},
+	}
+
+	err := Validate(messages)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrUnknownBlockType)
 }
 
 func BenchmarkMarshalMessage_TextOnly(b *testing.B) {

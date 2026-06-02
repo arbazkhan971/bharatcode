@@ -174,13 +174,13 @@ func Validate(messages []Message) error {
 			switch b := block.(type) {
 			case ToolUseBlock:
 				if b.ID == "" {
-					return fmt.Errorf("tool_use ID is empty at message %d, block %d: %w", i, j, ErrUnknownBlockType)
+					return fmt.Errorf("tool_use ID is empty at message %d, block %d: %w", i, j, ErrEmptyToolUseID)
 				}
 				if _, exists := toolUses[b.ID]; exists {
-					return fmt.Errorf("duplicate tool_use ID %q: %w", b.ID, ErrUnknownBlockType)
+					return fmt.Errorf("duplicate tool_use ID %q: %w", b.ID, ErrDuplicateToolUseID)
 				}
 				if m.Role != RoleAssistant {
-					return fmt.Errorf("tool_use at message %d requires assistant role: %w", i, ErrUnknownBlockType)
+					return fmt.Errorf("tool_use at message %d requires assistant role: %w", i, ErrToolUseRole)
 				}
 				toolUses[b.ID] = blockLoc{msgIdx: i, blockIdx: j}
 

@@ -189,6 +189,12 @@ var (
 	ErrToolUseWithoutResult = errors.New("tool_use without following tool_result")
 	ErrEmptyContent         = errors.New("message has no content blocks")
 	ErrUnknownBlockType     = errors.New("unknown content block type")
+	// ErrEmptyToolUseID indicates a tool_use block with an empty ID.
+	ErrEmptyToolUseID = errors.New("tool_use block has empty ID")
+	// ErrDuplicateToolUseID indicates two tool_use blocks share the same ID.
+	ErrDuplicateToolUseID = errors.New("duplicate tool_use ID")
+	// ErrToolUseRole indicates a tool_use block in a non-assistant-role message.
+	ErrToolUseRole = errors.New("tool_use block requires assistant role")
 )
 
 // MarshalJSON serializes a Message into JSON, converting the Content slice

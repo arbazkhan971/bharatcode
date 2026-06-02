@@ -259,6 +259,36 @@ func (m *Manager) Format(ctx context.Context, path string) ([]TextEdit, error) {
 	return edits, nil
 }
 
+// CodeActions returns the quick fixes and refactorings the language server
+// offers for the range in file, starting a server if needed. A nil slice with a
+// nil error means no server is configured for the file or the server offers no
+// actions for the range.
+func (m *Manager) CodeActions(ctx context.Context, file string, rng Range) ([]CodeAction, error) {
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return nil, fmt.Errorf("resolving code actions path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	actions, err := c.codeAction(ctx, abs, rng)
+	if err != nil {
+		return nil, err
+	}
+	return actions, nil
+}
+
 // WorkspaceSymbols returns the symbols matching query across the workspace,
 // starting servers if needed. Every discovered language server is queried and
 // the matches are aggregated. A nil slice with a nil error means no server is

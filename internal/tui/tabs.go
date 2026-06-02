@@ -253,8 +253,8 @@ func (m *model) handleTabsList() (tea.Model, tea.Cmd) {
 			marker = "> "
 		}
 		title := "new session"
-		if m.tabs[i].sessionPersisted {
-			title = "session " + shortSessionID(m.tabs[i].sessionID)
+		if m.tabPersisted(i) {
+			title = "session " + shortSessionID(m.tabSessionID(i))
 		}
 		lines = append(lines, fmt.Sprintf("%s%d: %s", marker, i+1, title))
 	}
@@ -279,10 +279,31 @@ func parseTabIndex(s string) (int, bool) {
 	return n, true
 }
 
+// tabSessionID returns the session identifier shown for tab index. For the
+// active tab it reads the live model field, which is authoritative: ensureSession
+// and restoreSession update m.sessionID without re-snapshotting, so the snapshot
+// in m.tabs[activeTab] can lag behind until the next save. Other tabs read their
+// snapshot, which is current because they are inactive.
+func (m *model) tabSessionID(index int) string {
+	if index == m.activeTab {
+		return m.sessionID
+	}
+	return m.tabs[index].sessionID
+}
+
+// tabPersisted reports whether tab index has a persisted session, reading the
+// live model field for the active tab (see tabSessionID for why).
+func (m *model) tabPersisted(index int) bool {
+	if index == m.activeTab {
+		return m.sessionPersisted
+	}
+	return m.tabs[index].sessionPersisted
+}
+
 // tabLabel renders one tab's short label for the tab bar: its 1-based number and
 // a compact session identifier (or "new" for an unpersisted tab).
-func tabLabel(index int, t tab) string {
-	return fmt.Sprintf("%d:%s", index+1, shortSessionID(t.sessionID))
+func (m *model) tabLabel(index int) string {
+	return fmt.Sprintf("%d:%s", index+1, shortSessionID(m.tabSessionID(index)))
 }
 
 // renderTabBar renders the tab bar shown above the chat when more than one tab
@@ -297,7 +318,7 @@ func (m *model) renderTabBar(width int) string {
 	}
 	styled := make([]string, len(m.tabs))
 	for i := range m.tabs {
-		label := " " + tabLabel(i, m.tabs[i]) + " "
+		label := " " + m.tabLabel(i) + " "
 		if i == m.activeTab {
 			styled[i] = m.theme.Header.Render(label)
 		} else {

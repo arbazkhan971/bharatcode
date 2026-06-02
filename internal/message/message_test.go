@@ -211,6 +211,108 @@ func TestRoundTrip_MixedContent(t *testing.T) {
 	require.Equal(t, msg.Content[4], decoded.Content[4])
 }
 
+func TestRoundTrip_AttachmentBlock(t *testing.T) {
+	att := AttachmentBlock{
+		Filename: "spec.pdf",
+		MimeType: "application/pdf",
+		Data:     []byte("%PDF-1.7 binary\x00\xff bytes"),
+		Path:     "/var/tmp/spec.pdf",
+		Size:     5_000_000_000, // exceeds 2 GiB to exercise int64 sizing.
+	}
+
+	msg := Message{
+		ID:        "msg-att",
+		SessionID: "sess-1",
+		Role:      RoleUser,
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		Content:   []ContentBlock{att},
+	}
+
+	data, err := json.Marshal(msg)
+	require.NoError(t, err)
+
+	var decoded Message
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	require.Len(t, decoded.Content, 1)
+	require.Equal(t, BlockAttachment, decoded.Content[0].Type())
+
+	got, ok := decoded.Content[0].(AttachmentBlock)
+	require.True(t, ok)
+	require.Equal(t, att.Filename, got.Filename)
+	require.Equal(t, att.MimeType, got.MimeType)
+	require.Equal(t, att.Size, got.Size)
+	require.Equal(t, att.Path, got.Path)
+	require.Equal(t, att.Data, got.Data)
+	// Full structural fidelity, including the byte payload.
+	require.Equal(t, att, got)
+}
+
+// TestAttachmentBlock_CoexistsWithTextAndToolBlocks builds a message mixing an
+// AttachmentBlock with text and tool blocks, round-trips it, and asserts every
+// block survives in order with its attachment fields intact. It also exercises
+// the AddAttachment/Attachments helpers and confirms Validate accepts a slice
+// containing an AttachmentBlock alongside a properly paired tool_use/tool_result.
+func TestAttachmentBlock_CoexistsWithTextAndToolBlocks(t *testing.T) {
+	att := AttachmentBlock{
+		Filename: "logs.txt",
+		MimeType: "text/plain",
+		Data:     []byte("line1\nline2\n"),
+		Path:     "",
+		Size:     12,
+	}
+
+	// Assistant message: text + tool_use + attachment, the latter added via the helper.
+	assistant := Message{
+		ID:        "m-assistant",
+		SessionID: "sess-1",
+		Role:      RoleAssistant,
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		Content: []ContentBlock{
+			TextBlock{Text: "Attaching the logs you asked for."},
+			ToolUseBlock{ID: "t-1", Name: "read_file", Input: json.RawMessage(`{"path":"logs.txt"}`)},
+		},
+	}
+	returned := assistant.AddAttachment(att)
+	require.Equal(t, att, returned)
+	require.Len(t, assistant.Content, 3)
+
+	// Attachments helper lists only the attachment, skipping text/tool blocks.
+	listed := assistant.Attachments()
+	require.Len(t, listed, 1)
+	require.Equal(t, att, listed[0])
+
+	// Round-trip the mixed message and assert each block survives in order.
+	data, err := json.Marshal(assistant)
+	require.NoError(t, err)
+
+	var decoded Message
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	require.Len(t, decoded.Content, 3)
+	require.Equal(t, BlockText, decoded.Content[0].Type())
+	require.Equal(t, BlockToolUse, decoded.Content[1].Type())
+	require.Equal(t, BlockAttachment, decoded.Content[2].Type())
+	require.Equal(t, assistant.Content[0], decoded.Content[0])
+	require.Equal(t, assistant.Content[2], decoded.Content[2])
+
+	// The attachment survives intact after the round trip via the helper too.
+	require.Equal(t, []AttachmentBlock{att}, decoded.Attachments())
+
+	// Validate must accept the attachment coexisting with a paired
+	// tool_use/tool_result across messages.
+	user := Message{
+		ID:        "m-user",
+		SessionID: "sess-1",
+		Role:      RoleUser,
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+		Content: []ContentBlock{
+			ToolResultBlock{ToolUseID: "t-1", Content: "ok"},
+			att,
+		},
+	}
+	require.NoError(t, Validate([]Message{decoded, user}))
+}
+
 func TestUnmarshal_UnknownBlockType_ReturnsError(t *testing.T) {
 	invalidJSON := `{
 		"id": "msg-err",

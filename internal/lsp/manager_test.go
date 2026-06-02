@@ -266,6 +266,51 @@ func TestFormatReturnsEdits(t *testing.T) {
 	require.NoError(t, manager.Shutdown(ctx))
 }
 
+func TestCodeActionsReturnsActions(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	rng := Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}}
+	actions, err := manager.CodeActions(ctx, source, rng)
+	require.NoError(t, err)
+	require.Equal(t, []CodeAction{
+		{
+			Title: "Remove unused import",
+			Kind:  "quickfix",
+			Edit: WorkspaceEdit{
+				Changes: map[string][]TextEdit{
+					source: {{
+						Range:   rng,
+						NewText: "",
+					}},
+				},
+			},
+		},
+		{
+			Title: "Organize Imports",
+			Command: &Command{
+				Title:     "Organize Imports",
+				Command:   "editor.action.organizeImports",
+				Arguments: []json.RawMessage{json.RawMessage(fmt.Sprintf("%q", pathToURI(source)))},
+			},
+		},
+	}, actions)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
 func TestDocumentSymbolsReturnsSymbols(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -680,6 +725,39 @@ func runFakeLSPServer() {
 							"range":   fakeRange(),
 							"newText": params.NewName,
 						}},
+					},
+				}),
+			})
+		case "textDocument/codeAction":
+			var params struct {
+				TextDocument struct {
+					URI string `json:"uri"`
+				} `json:"textDocument"`
+			}
+			_ = json.Unmarshal(msg.Params, &params)
+			// Return both shapes the LSP spec multiplexes into the array: a
+			// full CodeAction carrying an edit, and a bare Command (its
+			// "command" field is a string), so both parse branches are exercised.
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result: mustRaw([]map[string]any{
+					{
+						"title": "Remove unused import",
+						"kind":  "quickfix",
+						"edit": map[string]any{
+							"changes": map[string]any{
+								params.TextDocument.URI: []map[string]any{{
+									"range":   fakeRange(),
+									"newText": "",
+								}},
+							},
+						},
+					},
+					{
+						"title":     "Organize Imports",
+						"command":   "editor.action.organizeImports",
+						"arguments": []any{params.TextDocument.URI},
 					},
 				}),
 			})

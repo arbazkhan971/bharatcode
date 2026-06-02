@@ -89,6 +89,13 @@ func representativeMessage() Message {
 				Input: json.RawMessage(`{ "command" : "ls <dir> & pwd" ,  "n": 2 }`),
 			},
 			ImageBlock{MimeType: "image/png", Data: []byte{0xde, 0xad, 0xbe, 0xef}},
+			AttachmentBlock{
+				Filename: "report <final>.pdf",
+				MimeType: "application/pdf",
+				Data:     []byte{0x25, 0x50, 0x44, 0x46},
+				Path:     "/tmp/report <final>.pdf",
+				Size:     4,
+			},
 			ToolResultBlock{ToolUseID: "t-1", Content: "out<put>", IsError: true},
 		},
 	}

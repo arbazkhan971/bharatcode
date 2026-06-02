@@ -140,6 +140,10 @@ type agentHarness struct {
 	model *model
 	repo  *session.Repo
 	bus   *pubsub.Topic[agent.Event]
+	// msgCh receives every tea.Msg produced by background run and listen
+	// goroutines launched via startBatch.  drain reads from it to ensure
+	// runDoneMsg is never dropped even when loop.Run exceeds listenPollTimeout.
+	msgCh chan tea.Msg
 }
 
 func newAgentHarness(t *testing.T, provider llm.Provider) *agentHarness {
@@ -193,26 +197,84 @@ func newAgentHarness(t *testing.T, provider llm.Provider) *agentHarness {
 	m := newModel(context.Background(), deps)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	// Start the listen loop exactly as Init would.
-	h := &agentHarness{model: m, repo: repo, bus: bus}
+	h := &agentHarness{
+		model: m,
+		repo:  repo,
+		bus:   bus,
+		// Buffer is large enough to hold all events from a goal-loop run plus
+		// the runDoneMsg for each iteration.  The scripted provider emits a
+		// small fixed number of events per turn, so (maxGoalIterations+2)*16
+		// is more than ample.
+		msgCh: make(chan tea.Msg, (maxGoalIterations+2)*16),
+	}
 	h.run(t, m.ensureListening())
 	return h
 }
 
-// submit feeds a plain prompt through the real input + enter path and pumps the
-// commands it produces.
+// submit feeds a plain prompt through the real input + enter path and launches
+// the resulting commands into background goroutines that forward their results
+// to h.msgCh.  drain then reads from h.msgCh so runDoneMsg is never lost even
+// when loop.Run takes longer than listenPollTimeout.
 func (h *agentHarness) submit(t *testing.T, text string) {
 	t.Helper()
 	h.model.input.WriteString(text)
 	_, cmd := h.model.Update(keySpecial("enter", tea.KeyEnter))
-	h.run(t, cmd)
+	h.startBatch(t, cmd)
 }
 
-// submitSlash feeds a slash command through the real input + enter path.
+// submitSlash feeds a slash command through the real input + enter path.  Like
+// submit, it routes the run batch through h.msgCh.
 func (h *agentHarness) submitSlash(t *testing.T, text string) {
 	t.Helper()
 	h.model.input.WriteString(text)
 	_, cmd := h.model.Update(keySpecial("enter", tea.KeyEnter))
-	h.run(t, cmd)
+	h.startBatch(t, cmd)
+}
+
+// startBatch evaluates cmd and launches every resulting sub-command in its own
+// goroutine, forwarding each non-nil result to h.msgCh.  For a tea.BatchMsg
+// every sub-command runs concurrently; for a plain cmd a single goroutine is
+// used.  cmd() is never called in the caller's goroutine: this prevents a
+// blocking run or listen command from stalling the drain loop.
+func (h *agentHarness) startBatch(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		return
+	}
+	// Call cmd() in a goroutine and immediately redirect the result.  Batch
+	// commands return instantaneously (they just wrap their args); run and
+	// listen commands block for variable durations.
+	peeked := make(chan tea.Msg, 1)
+	go func() { peeked <- cmd() }()
+
+	select {
+	case msg := <-peeked:
+		if msg == nil {
+			return
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			// Expand the batch: launch each sub-command concurrently.
+			for _, sub := range batch {
+				c := sub
+				go func() {
+					if result := c(); result != nil {
+						h.msgCh <- result
+					}
+				}()
+			}
+			return
+		}
+		// Plain (non-batch) result arrived immediately: forward it.
+		h.msgCh <- msg
+	case <-time.After(listenPollTimeout):
+		// cmd() is still blocking (loop.Run or listenAgent).  Let the existing
+		// goroutine complete on its own and forward via msgCh when it does.
+		go func() {
+			if result := <-peeked; result != nil {
+				h.msgCh <- result
+			}
+		}()
+	}
 }
 
 // listenPollTimeout bounds a single listen command in tests. Real agent events
@@ -247,10 +309,15 @@ func (h *agentHarness) pump(t *testing.T, cmd tea.Cmd) {
 	h.pump(t, next)
 }
 
-// drain repeatedly pumps the listen loop until done returns true or the overall
-// deadline passes. Background agent goroutines publish events asynchronously, so
-// it re-issues the listen command between checks; real events are consumed
-// immediately and only genuine quiescence costs a poll timeout.
+// drain drives the model forward until done() returns true or the overall
+// deadline passes.  It reads exclusively from h.msgCh, which is the single
+// delivery point for both runDoneMsg (from the run goroutine) and agentEventMsg
+// (from the listen goroutine chain started by startBatch).  Reading only from
+// msgCh — never creating additional competing goroutines via pump — ensures no
+// event is stolen and every streaming fragment reaches the chat model.
+//
+// When Update returns a command (e.g. continueRun for the goal loop), drain
+// routes it through startBatch so the next runDoneMsg also appears on msgCh.
 func (h *agentHarness) drain(t *testing.T, done func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -258,7 +325,17 @@ func (h *agentHarness) drain(t *testing.T, done func() bool) {
 		if time.Now().After(deadline) {
 			t.Fatalf("drain timed out; running=%v goalActive=%v", h.model.running, h.model.goalActive)
 		}
-		h.pump(t, h.model.listenAgent())
+		select {
+		case msg := <-h.msgCh:
+			_, next := h.model.Update(msg)
+			if next != nil {
+				// continueRun (goal loop) or listenAgent (event chain):
+				// keep the goroutine pipeline alive.
+				h.startBatch(t, next)
+			}
+		case <-time.After(listenPollTimeout):
+			// msgCh quiet; re-check done() and loop.
+		}
 	}
 }
 

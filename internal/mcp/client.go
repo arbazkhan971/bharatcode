@@ -46,9 +46,12 @@ type remoteClient interface {
 	ListTools(context.Context, mcpsdk.ListToolsRequest) (*mcpsdk.ListToolsResult, error)
 	ListResources(context.Context, mcpsdk.ListResourcesRequest) (*mcpsdk.ListResourcesResult, error)
 	ReadResource(context.Context, mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error)
+	Subscribe(context.Context, mcpsdk.SubscribeRequest) error
+	Unsubscribe(context.Context, mcpsdk.UnsubscribeRequest) error
 	ListPrompts(context.Context, mcpsdk.ListPromptsRequest) (*mcpsdk.ListPromptsResult, error)
 	GetPrompt(context.Context, mcpsdk.GetPromptRequest) (*mcpsdk.GetPromptResult, error)
 	OnConnectionLost(func(error))
+	OnNotification(func(mcpsdk.JSONRPCNotification))
 }
 
 // forceKiller is implemented by remote clients that own a child process and
@@ -110,6 +113,37 @@ type Server struct {
 	tools     []tools.Tool
 	resources []Resource
 	prompts   []Prompt
+	// subscribed is the set of resource URIs the client has an active
+	// subscription for on this server. Notification delivery is gated on
+	// membership: an updated notification for a URI not in the set is dropped.
+	// It is touched by Subscribe/Unsubscribe on the caller goroutine and by the
+	// notification handler on the conn's read goroutine, so it is guarded by mu.
+	subscribed map[string]struct{}
+}
+
+// addSubscription records uri as actively subscribed on this server.
+func (s *Server) addSubscription(uri string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.subscribed == nil {
+		s.subscribed = make(map[string]struct{})
+	}
+	s.subscribed[uri] = struct{}{}
+}
+
+// removeSubscription clears any active subscription for uri on this server.
+func (s *Server) removeSubscription(uri string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.subscribed, uri)
+}
+
+// isSubscribed reports whether uri currently has an active subscription.
+func (s *Server) isSubscribed(uri string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.subscribed[uri]
+	return ok
 }
 
 // Name returns the configured server name.
@@ -139,12 +173,30 @@ func (s *Server) snapshot() (State, remoteClient) {
 
 // Client manages all configured MCP servers for one session.
 type Client struct {
-	cfg     *config.Config
-	perms   *permission.Checker
-	bus     *pubsub.Topic[Event]
-	mu      sync.RWMutex
-	servers []*Server
-	sampler Sampler
+	cfg          *config.Config
+	perms        *permission.Checker
+	bus          *pubsub.Topic[Event]
+	mu           sync.RWMutex
+	servers      []*Server
+	sampler      Sampler
+	onResUpdated func(ResourceUpdate)
+}
+
+// SetResourceUpdateHandler installs the callback invoked when a subscribed
+// resource changes on a server. The handler receives the server name and URI
+// of the updated resource. Passing nil disables delivery. It may be called at
+// any time; updates for URIs without an active subscription are never
+// delivered, even when a handler is set.
+func (c *Client) SetResourceUpdateHandler(fn func(ResourceUpdate)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onResUpdated = fn
+}
+
+func (c *Client) resourceUpdateHandler() func(ResourceUpdate) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.onResUpdated
 }
 
 // SetSampler installs the callback that handles server-requested LLM
@@ -372,6 +424,77 @@ func (c *Client) ReadResource(ctx context.Context, uri string) ([]byte, string, 
 	return resourceBytes(result.Contents[0])
 }
 
+// Subscribe registers interest in change notifications for the resource named
+// by uri. After it returns, a notifications/resources/updated notification from
+// the owning server for this URI is delivered to the handler installed via
+// SetResourceUpdateHandler. The server is resolved from the URI's "server://"
+// prefix, mirroring ReadResource.
+func (c *Client) Subscribe(ctx context.Context, uri string) error {
+	server, conn, err := c.resourceServer("subscribing to", uri)
+	if err != nil {
+		return err
+	}
+
+	// Record the subscription before issuing the request so an update that
+	// arrives the instant the server acknowledges is gated in, not dropped.
+	server.addSubscription(uri)
+
+	ctx, cancel := withServerTimeout(ctx, server.cfg.Timeout)
+	defer cancel()
+
+	if err := conn.Subscribe(ctx, mcpsdk.SubscribeRequest{
+		Params: mcpsdk.SubscribeParams{URI: uri},
+	}); err != nil {
+		server.removeSubscription(uri)
+		return fmt.Errorf("subscribing to mcp resource %q: %w", uri, err)
+	}
+	return nil
+}
+
+// Unsubscribe cancels a subscription previously registered with Subscribe.
+// After it returns, updates for this URI are no longer delivered, even if the
+// server keeps sending them: delivery is gated on the client-side subscription
+// set, which this clears first.
+func (c *Client) Unsubscribe(ctx context.Context, uri string) error {
+	server, conn, err := c.resourceServer("unsubscribing from", uri)
+	if err != nil {
+		return err
+	}
+
+	// Stop delivery first: once removed from the set, any further updates the
+	// server sends for this URI are dropped by the notification handler.
+	server.removeSubscription(uri)
+
+	ctx, cancel := withServerTimeout(ctx, server.cfg.Timeout)
+	defer cancel()
+
+	if err := conn.Unsubscribe(ctx, mcpsdk.UnsubscribeRequest{
+		Params: mcpsdk.UnsubscribeParams{URI: uri},
+	}); err != nil {
+		return fmt.Errorf("unsubscribing from mcp resource %q: %w", uri, err)
+	}
+	return nil
+}
+
+// resourceServer resolves the connected server that owns the resource named by
+// uri, using its "server://" prefix. action labels the operation for error
+// messages (for example "subscribing to").
+func (c *Client) resourceServer(action, uri string) (*Server, remoteClient, error) {
+	serverName, _, ok := strings.Cut(uri, "://")
+	if !ok || serverName == "" {
+		return nil, nil, fmt.Errorf("%s mcp resource %q: missing server URI prefix", action, uri)
+	}
+	server := c.serverByName(serverName)
+	if server == nil {
+		return nil, nil, fmt.Errorf("%s mcp resource %q: unknown server %q", action, uri, serverName)
+	}
+	state, conn := server.snapshot()
+	if state != StateConnected || conn == nil {
+		return nil, nil, fmt.Errorf("%s mcp resource %q: %w", action, uri, ErrToolUnavailable)
+	}
+	return server, conn, nil
+}
+
 // Prompts returns a snapshot of prompt templates across every server.
 func (c *Client) Prompts() []Prompt {
 	c.mu.RLock()
@@ -445,6 +568,7 @@ func (c *Client) connectServer(ctx context.Context, server *Server) {
 	conn.OnConnectionLost(func(err error) {
 		c.handleDisconnect(server, err)
 	})
+	c.installNotificationHandler(server, conn)
 	if err := c.refresh(ctx, server, conn); err != nil {
 		_ = conn.Close()
 		c.publish(ctx, Event{Server: server.Name(), State: StateFailed, Err: err})
@@ -476,6 +600,7 @@ func (c *Client) handleDisconnect(server *Server, lost error) {
 			conn.OnConnectionLost(func(err error) {
 				c.handleDisconnect(server, err)
 			})
+			c.installNotificationHandler(server, conn)
 			if err = c.refresh(ctx, server, conn); err == nil {
 				server.setState(StateConnected, conn)
 				c.publish(ctx, Event{
@@ -498,6 +623,34 @@ func (c *Client) handleDisconnect(server *Server, lost error) {
 	server.setState(StateFailed, nil)
 	c.publish(ctx, Event{Server: server.Name(), State: StateFailed, Err: lost})
 	server.logger.ErrorContext(ctx, "MCP server failed after reconnect attempts", "err", lost)
+}
+
+// installNotificationHandler routes the conn's server-pushed notifications to
+// the client. It handles notifications/resources/updated by delivering the
+// updated URI to the resource-update handler, but only when the client holds an
+// active subscription for that URI; updates for unsubscribed URIs are dropped.
+// Other notification methods are ignored. The handler runs on the conn's read
+// goroutine, so it touches the subscription set under the server lock.
+func (c *Client) installNotificationHandler(server *Server, conn remoteClient) {
+	conn.OnNotification(func(notification mcpsdk.JSONRPCNotification) {
+		if notification.Method != mcpsdk.MethodNotificationResourceUpdated {
+			return
+		}
+		uri, ok := notification.Params.AdditionalFields["uri"].(string)
+		if !ok || uri == "" {
+			return
+		}
+		// Gate delivery on the client-side subscription set so an Unsubscribe
+		// stops delivery even if the server keeps sending updates.
+		if !server.isSubscribed(uri) {
+			return
+		}
+		handler := c.resourceUpdateHandler()
+		if handler == nil {
+			return
+		}
+		handler(ResourceUpdate{Server: server.Name(), URI: uri})
+	})
 }
 
 func (c *Client) refresh(ctx context.Context, server *Server, conn remoteClient) error {

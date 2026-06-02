@@ -162,6 +162,77 @@ func TestDefinitionReturnsLocations(t *testing.T) {
 	require.NoError(t, manager.Shutdown(ctx))
 }
 
+func TestReferencesReturnsLocations(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	locations, err := manager.References(ctx, source, 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, []Location{
+		{
+			Path: source,
+			Range: Range{
+				Start: Position{Line: 0, Character: 0},
+				End:   Position{Line: 0, Character: 4},
+			},
+		},
+		{
+			Path: source,
+			Range: Range{
+				Start: Position{Line: 2, Character: 0},
+				End:   Position{Line: 2, Character: 4},
+			},
+		},
+	}, locations)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
+func TestRenameReturnsEdits(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	edit, err := manager.Rename(ctx, source, 0, 0, "Renamed")
+	require.NoError(t, err)
+	require.Equal(t, WorkspaceEdit{
+		Changes: map[string][]TextEdit{
+			source: {{
+				Range: Range{
+					Start: Position{Line: 0, Character: 0},
+					End:   Position{Line: 0, Character: 4},
+				},
+				NewText: "Renamed",
+			}},
+		},
+	}, edit)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
 func TestMissingServerWarnsOnceAndDegrades(t *testing.T) {
 	tmp := t.TempDir()
 	source := filepath.Join(tmp, "main.go")
@@ -369,6 +440,50 @@ func runFakeLSPServer() {
 					"uri":   params.TextDocument.URI,
 					"range": fakeRange(),
 				}}),
+			})
+		case "textDocument/references":
+			var params struct {
+				TextDocument struct {
+					URI string `json:"uri"`
+				} `json:"textDocument"`
+			}
+			_ = json.Unmarshal(msg.Params, &params)
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result: mustRaw([]map[string]any{
+					{
+						"uri":   params.TextDocument.URI,
+						"range": fakeRange(),
+					},
+					{
+						"uri": params.TextDocument.URI,
+						"range": map[string]any{
+							"start": map[string]any{"line": 2, "character": 0},
+							"end":   map[string]any{"line": 2, "character": 4},
+						},
+					},
+				}),
+			})
+		case "textDocument/rename":
+			var params struct {
+				TextDocument struct {
+					URI string `json:"uri"`
+				} `json:"textDocument"`
+				NewName string `json:"newName"`
+			}
+			_ = json.Unmarshal(msg.Params, &params)
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result: mustRaw(map[string]any{
+					"changes": map[string]any{
+						params.TextDocument.URI: []map[string]any{{
+							"range":   fakeRange(),
+							"newText": params.NewName,
+						}},
+					},
+				}),
 			})
 		case "shutdown":
 			_ = writePayload(os.Stdout, responseMessage{

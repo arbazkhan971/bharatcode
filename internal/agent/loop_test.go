@@ -561,6 +561,9 @@ type scriptProvider struct {
 	mu      sync.Mutex
 	scripts [][]llm.Event
 	reqs    []llm.Request
+	// contextWindow overrides the reported model context window. When zero, it
+	// defaults to 8192 so existing tests are unaffected.
+	contextWindow int
 }
 
 func (p *scriptProvider) Name() string {
@@ -591,10 +594,14 @@ func (p *scriptProvider) Stream(ctx context.Context, req llm.Request) (<-chan ll
 }
 
 func (p *scriptProvider) Models() []llm.Model {
+	window := p.contextWindow
+	if window == 0 {
+		window = 8192
+	}
 	return []llm.Model{{
 		ID:            "fake-model",
 		Provider:      "fake",
-		ContextWindow: 8192,
+		ContextWindow: window,
 		SupportsTools: true,
 	}}
 }

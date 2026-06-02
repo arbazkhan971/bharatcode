@@ -97,6 +97,12 @@ func (c *client) initialize(ctx context.Context) error {
 				"definition": map[string]any{
 					"dynamicRegistration": false,
 				},
+				"references": map[string]any{
+					"dynamicRegistration": false,
+				},
+				"rename": map[string]any{
+					"dynamicRegistration": false,
+				},
 			},
 		},
 	})

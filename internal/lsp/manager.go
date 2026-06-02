@@ -140,6 +140,66 @@ func (m *Manager) Definition(ctx context.Context, path string, line, col int) ([
 	return locations, nil
 }
 
+// References returns every location referencing the symbol at the position in
+// path, including its declaration, starting a server if needed. A nil slice
+// with a nil error means no server is configured for the file or the symbol has
+// no references.
+func (m *Manager) References(ctx context.Context, path string, line, col int) ([]Location, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving references path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	locations, err := c.references(ctx, abs, line, col)
+	if err != nil {
+		return nil, err
+	}
+	return locations, nil
+}
+
+// Rename returns the file edits the language server would apply to rename the
+// symbol at the position in path to newName, starting a server if needed. An
+// empty WorkspaceEdit with a nil error means no server is configured for the
+// file or the symbol cannot be renamed.
+func (m *Manager) Rename(ctx context.Context, path string, line, col int, newName string) (WorkspaceEdit, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return WorkspaceEdit{}, fmt.Errorf("resolving rename path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return WorkspaceEdit{}, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return WorkspaceEdit{}, err
+	}
+	if !ok {
+		return WorkspaceEdit{}, nil
+	}
+
+	edit, err := c.rename(ctx, abs, line, col, newName)
+	if err != nil {
+		return WorkspaceEdit{}, err
+	}
+	return edit, nil
+}
+
 // Shutdown terminates every running language-server process.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()

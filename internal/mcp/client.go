@@ -179,6 +179,7 @@ type Client struct {
 	mu           sync.RWMutex
 	servers      []*Server
 	sampler      Sampler
+	elicit       ElicitationHandler
 	roots        rootsStore
 	onResUpdated func(ResourceUpdate)
 	onToolProg   func(ToolProgress)
@@ -235,6 +236,23 @@ func (c *Client) currentSampler() Sampler {
 	return c.sampler
 }
 
+// SetElicitationHandler installs the callback that collects structured input
+// from the user when a server requests it mid-tool-call (elicitation/create).
+// It must be called before Start so the elicitation capability is advertised
+// when each server connects. Passing nil disables elicitation. The handler is
+// shared by every configured server.
+func (c *Client) SetElicitationHandler(fn ElicitationHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.elicit = fn
+}
+
+func (c *Client) currentElicitationHandler() ElicitationHandler {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.elicit
+}
+
 // SetRoots replaces the filesystem roots the client advertises to MCP servers
 // (typically the session's workspace directories) and notifies every connected
 // server that the list changed, prompting it to re-issue roots/list. It may be
@@ -265,6 +283,7 @@ func (c *Client) currentRoots() []Root {
 func (c *Client) connectConfig(server *Server) ServerConfig {
 	cfg := server.cfg
 	cfg.Sampler = c.currentSampler()
+	cfg.Elicit = c.currentElicitationHandler()
 	cfg.RootsEnabled = len(c.currentRoots()) > 0
 	return cfg
 }
@@ -281,6 +300,22 @@ func (c *Client) installSampler(conn remoteClient) {
 	}
 	if recv, ok := conn.(samplingReceiver); ok {
 		recv.setSamplingHandler(&samplingHandler{sample: sampler})
+	}
+}
+
+// installElicitation hands the elicitation handler to a conn that can receive
+// one. The production *mcpclient.Client has the handler wired at construction
+// via WithElicitationHandler and does not implement elicitationReceiver, so this
+// is a no-op for it. A conn that does implement it (such as a test double)
+// captures the handler and can drive a server's elicitation/create request
+// through it. It is the elicitation counterpart to installSampler.
+func (c *Client) installElicitation(conn remoteClient) {
+	handler := c.currentElicitationHandler()
+	if handler == nil {
+		return
+	}
+	if recv, ok := conn.(elicitationReceiver); ok {
+		recv.setElicitationHandler(&elicitationHandler{elicit: handler})
 	}
 }
 
@@ -626,6 +661,7 @@ func (c *Client) connectServer(ctx context.Context, server *Server) {
 	}
 
 	c.installSampler(conn)
+	c.installElicitation(conn)
 	c.installRoots(conn)
 	conn.OnConnectionLost(func(err error) {
 		c.handleDisconnect(server, err)
@@ -659,6 +695,7 @@ func (c *Client) handleDisconnect(server *Server, lost error) {
 		conn, err := newRemote(ctx, c.connectConfig(server))
 		if err == nil {
 			c.installSampler(conn)
+			c.installElicitation(conn)
 			c.installRoots(conn)
 			conn.OnConnectionLost(func(err error) {
 				c.handleDisconnect(server, err)
@@ -858,6 +895,11 @@ func connectMCP(ctx context.Context, cfg ServerConfig) (remoteClient, error) {
 	var clientOpts []mcpclient.ClientOption
 	if cfg.Sampler != nil {
 		clientOpts = append(clientOpts, mcpclient.WithSamplingHandler(&samplingHandler{sample: cfg.Sampler}))
+	}
+	// Likewise advertise elicitation and route a server's elicitation/create
+	// request to the injected handler when one is configured.
+	if cfg.Elicit != nil {
+		clientOpts = append(clientOpts, mcpclient.WithElicitationHandler(&elicitationHandler{elicit: cfg.Elicit}))
 	}
 
 	var cli *mcpclient.Client

@@ -29,6 +29,7 @@ type fakeRemote struct {
 	closeCount   int
 	lost         func(error)
 	sampling     mcpclient.SamplingHandler
+	elicitation  mcpclient.ElicitationHandler
 	notify       func(mcpsdk.JSONRPCNotification)
 	subscribed   []string
 	unsubscribed []string
@@ -53,6 +54,12 @@ type fakeRemote struct {
 // drive a server-issued sampling/createMessage request through it.
 func (f *fakeRemote) setSamplingHandler(h mcpclient.SamplingHandler) {
 	f.sampling = h
+}
+
+// setElicitationHandler records the handler the client installs, letting the
+// test drive a server-issued elicitation/create request through it.
+func (f *fakeRemote) setElicitationHandler(h mcpclient.ElicitationHandler) {
+	f.elicitation = h
 }
 
 // setRootsHandler records the roots handler the client installs, letting the
@@ -665,6 +672,127 @@ func TestSamplingHandlesServerRequest(t *testing.T) {
 	require.Equal(t, "sampled reply", text.Text)
 	require.Equal(t, "test-model", result.Model)
 	require.Equal(t, "endTurn", result.StopReason)
+}
+
+func TestElicitationHandlesServerRequest(t *testing.T) {
+	remote := &fakeRemote{}
+	var connectCfg ServerConfig
+	withFakeConnector(t, func(_ context.Context, cfg ServerConfig) (remoteClient, error) {
+		connectCfg = cfg
+		return remote, nil
+	})
+
+	var gotReq ElicitationRequest
+	var calls int
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "server", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	client.SetElicitationHandler(func(_ context.Context, req ElicitationRequest) (ElicitationResponse, error) {
+		calls++
+		gotReq = req
+		return ElicitationResponse{
+			Action:  ElicitationAccept,
+			Content: map[string]any{"name": "Ada", "age": float64(36)},
+		}, nil
+	})
+
+	require.NoError(t, client.Start(context.Background()))
+
+	// The elicitation capability is advertised at connect time via the injected
+	// handler, and the client installed its handler on the conn.
+	require.NotNil(t, connectCfg.Elicit, "elicitation handler not injected at connect time")
+	require.NotNil(t, remote.elicitation, "client did not install an elicitation handler on the conn")
+
+	// The server issues an elicitation/create request through that handler.
+	// Parameters are round-tripped through JSON first so the requested schema
+	// arrives as a decoded JSON object (map[string]any), exactly as it does over
+	// the wire — not as an already-typed Go value.
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string"},
+			"age":  map[string]any{"type": "integer"},
+		},
+		"required": []any{"name"},
+	}
+	params := mcpsdk.ElicitationParams{
+		Message:         "Please provide your name and age.",
+		RequestedSchema: schema,
+	}
+	raw, err := json.Marshal(params)
+	require.NoError(t, err)
+	var wireParams mcpsdk.ElicitationParams
+	require.NoError(t, json.Unmarshal(raw, &wireParams))
+	// Sanity check that this exercises the wire shape, not a typed Go value.
+	require.IsType(t, map[string]any{}, wireParams.RequestedSchema)
+
+	serverReq := mcpsdk.ElicitationRequest{
+		Request: mcpsdk.Request{Method: string(mcpsdk.MethodElicitationCreate)},
+		Params:  wireParams,
+	}
+	result, err := remote.elicitation.Elicit(context.Background(), serverReq)
+	require.NoError(t, err)
+
+	// The handler was invoked once with the server's prompt and schema. The
+	// schema reaches the handler as the raw JSON the server sent, unchanged.
+	require.Equal(t, 1, calls)
+	require.Equal(t, "Please provide your name and age.", gotReq.Message)
+	schemaJSON, err := json.Marshal(schema)
+	require.NoError(t, err)
+	require.JSONEq(t, string(schemaJSON), string(gotReq.Schema))
+
+	// The user's response is returned to the server in the SDK result: the
+	// accept action and the structured content, conforming to the schema.
+	require.Equal(t, mcpsdk.ElicitationResponseActionAccept, result.Action)
+	require.Equal(t, map[string]any{"name": "Ada", "age": float64(36)}, result.Content)
+}
+
+func TestElicitationNotInstalledWithoutHandler(t *testing.T) {
+	remote := &fakeRemote{}
+	var connectCfg ServerConfig
+	withFakeConnector(t, func(_ context.Context, cfg ServerConfig) (remoteClient, error) {
+		connectCfg = cfg
+		return remote, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "server", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	// Without a handler, none is injected at connect time and none is installed
+	// on the conn, so the elicitation capability is never advertised.
+	require.Nil(t, connectCfg.Elicit)
+	require.Nil(t, remote.elicitation)
+}
+
+func TestElicitationHandlerDeclinePassesActionWithoutContent(t *testing.T) {
+	h := &elicitationHandler{elicit: func(context.Context, ElicitationRequest) (ElicitationResponse, error) {
+		// A decline carries no content even if some is set; content is only
+		// meaningful on accept.
+		return ElicitationResponse{
+			Action:  ElicitationDecline,
+			Content: map[string]any{"ignored": true},
+		}, nil
+	}}
+	result, err := h.Elicit(context.Background(), mcpsdk.ElicitationRequest{})
+	require.NoError(t, err)
+	require.Equal(t, mcpsdk.ElicitationResponseActionDecline, result.Action)
+	require.Nil(t, result.Content, "content returned to server on a non-accept action")
+}
+
+func TestElicitationHandlerPropagatesHandlerError(t *testing.T) {
+	h := &elicitationHandler{elicit: func(context.Context, ElicitationRequest) (ElicitationResponse, error) {
+		return ElicitationResponse{}, errors.New("user-facing UI unavailable")
+	}}
+	_, err := h.Elicit(context.Background(), mcpsdk.ElicitationRequest{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "user-facing UI unavailable")
+}
+
+func TestElicitationHandlerRequiresHandler(t *testing.T) {
+	h := &elicitationHandler{}
+	_, err := h.Elicit(context.Background(), mcpsdk.ElicitationRequest{})
+	require.Error(t, err)
 }
 
 func TestRootsAnsweredFromConfiguredRoots(t *testing.T) {

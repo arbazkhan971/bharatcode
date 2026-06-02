@@ -28,6 +28,18 @@ import (
 // same skills as the coder agent.
 var readOnlyTaskTools = []string{"diagnostics", "glob", "grep", "ls", "skill", "view", "web_fetch", "web_search"}
 
+// readOnlySet is the membership form of readOnlyTaskTools, used by the Loop's
+// plan-mode restriction to decide whether a tool is read-only. Both share one
+// source of truth so the read-only definition cannot drift between the task
+// agent's allow-list and plan mode.
+var readOnlySet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(readOnlyTaskTools))
+	for _, name := range readOnlyTaskTools {
+		m[name] = struct{}{}
+	}
+	return m
+}()
+
 // Dependencies bundles shared collaborators for Coordinator-created loops.
 type Dependencies struct {
 	Tools       *tools.Registry

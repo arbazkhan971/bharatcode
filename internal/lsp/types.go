@@ -42,6 +42,77 @@ type Location struct {
 	Range Range
 }
 
+// SymbolKind is the kind of program construct a symbol names, mirroring the LSP
+// SymbolKind enumeration.
+type SymbolKind int
+
+const (
+	// File names a file symbol.
+	File SymbolKind = iota + 1
+	// Module names a module symbol.
+	Module
+	// Namespace names a namespace symbol.
+	Namespace
+	// Package names a package symbol.
+	Package
+	// Class names a class symbol.
+	Class
+	// Method names a method symbol.
+	Method
+	// Property names a property symbol.
+	Property
+	// Field names a field symbol.
+	Field
+	// Constructor names a constructor symbol.
+	Constructor
+	// Enum names an enum symbol.
+	Enum
+	// Interface names an interface symbol.
+	Interface
+	// Function names a function symbol.
+	Function
+	// Variable names a variable symbol.
+	Variable
+	// Constant names a constant symbol.
+	Constant
+	// String names a string symbol.
+	String
+	// Number names a number symbol.
+	Number
+	// Boolean names a boolean symbol.
+	Boolean
+	// Array names an array symbol.
+	Array
+	// Object names an object symbol.
+	Object
+	// Key names a key symbol.
+	Key
+	// Null names a null symbol.
+	Null
+	// EnumMember names an enum member symbol.
+	EnumMember
+	// Struct names a struct symbol.
+	Struct
+	// Event names an event symbol.
+	Event
+	// Operator names an operator symbol.
+	Operator
+	// TypeParameter names a type parameter symbol.
+	TypeParameter
+)
+
+// Symbol describes one named program construct reported by a language server,
+// such as a function, type, or variable. The same shape carries both document
+// symbols (textDocument/documentSymbol) and workspace symbols
+// (workspace/symbol).
+type Symbol struct {
+	Name          string
+	Kind          SymbolKind
+	Path          string
+	Range         Range
+	ContainerName string
+}
+
 // WorkspaceEdit describes the file edits a rename produces, keyed by file path.
 type WorkspaceEdit struct {
 	Changes map[string][]TextEdit

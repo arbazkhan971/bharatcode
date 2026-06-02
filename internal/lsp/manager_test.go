@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,6 +230,98 @@ func TestRenameReturnsEdits(t *testing.T) {
 			}},
 		},
 	}, edit)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
+func TestDocumentSymbolsReturnsSymbols(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	symbols, err := manager.DocumentSymbols(ctx, source)
+	require.NoError(t, err)
+	require.Equal(t, []Symbol{
+		{
+			Name:  "main",
+			Kind:  Function,
+			Path:  source,
+			Range: Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}},
+		},
+		{
+			Name:  "Server",
+			Kind:  Struct,
+			Path:  source,
+			Range: Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}},
+		},
+		{
+			Name:          "Start",
+			Kind:          Method,
+			Path:          source,
+			Range:         Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}},
+			ContainerName: "Server",
+		},
+	}, symbols)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
+func TestWorkspaceSymbolsReturnsMatches(t *testing.T) {
+	// Resolve symlinks in the temp dir so the expected path matches what the
+	// fake server reports. The server derives its symbol URI from os.Getwd()
+	// (after the test chdirs into tmp), which canonicalizes symlinks — e.g. on
+	// macOS /tmp -> /private/tmp. EvalSymlinks is a no-op where the temp dir is
+	// already canonical (Linux), so this only corrects the comparison, never
+	// weakens it: the assertion stays full-path equality.
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	wantRange := Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}}
+	// The fake server builds its location uris from its working directory, which
+	// the runtime resolves through any symlinks (on macOS /tmp -> /private/tmp),
+	// so the expected path must be resolved the same way.
+	resolved, err := filepath.EvalSymlinks(tmp)
+	require.NoError(t, err)
+	wantSource := filepath.Join(resolved, "main.go")
+
+	// "Ser" matches only "Server"; the server filters by the query.
+	symbols, err := manager.WorkspaceSymbols(ctx, "Ser")
+	require.NoError(t, err)
+	require.Equal(t, []Symbol{
+		{Name: "Server", Kind: Struct, Path: wantSource, Range: wantRange},
+	}, symbols)
+
+	// "S" matches both "Server" and "Start".
+	symbols, err = manager.WorkspaceSymbols(ctx, "S")
+	require.NoError(t, err)
+	require.Equal(t, []Symbol{
+		{Name: "Server", Kind: Struct, Path: wantSource, Range: wantRange},
+		{Name: "Start", Kind: Method, Path: wantSource, Range: wantRange, ContainerName: "Server"},
+	}, symbols)
 
 	require.NoError(t, manager.Shutdown(ctx))
 }
@@ -464,6 +557,79 @@ func runFakeLSPServer() {
 						},
 					},
 				}),
+			})
+		case "textDocument/documentSymbol":
+			// Answer with hierarchical DocumentSymbol nodes (no location uri),
+			// including a nested child, so the flattening path is exercised.
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result: mustRaw([]map[string]any{
+					{
+						"name":  "main",
+						"kind":  int(Function),
+						"range": fakeRange(),
+					},
+					{
+						"name":  "Server",
+						"kind":  int(Struct),
+						"range": fakeRange(),
+						"children": []map[string]any{{
+							"name":  "Start",
+							"kind":  int(Method),
+							"range": fakeRange(),
+						}},
+					},
+				}),
+			})
+		case "workspace/symbol":
+			var params struct {
+				Query string `json:"query"`
+			}
+			_ = json.Unmarshal(msg.Params, &params)
+			// The fake server runs with its working directory set to the
+			// workspace root, so the source file lives alongside it.
+			workspaceDir, _ := os.Getwd()
+			uri := pathToURI(filepath.Join(workspaceDir, "main.go"))
+			// Return SymbolInformation entries whose name contains the query, so
+			// the test can assert real query filtering.
+			all := []map[string]any{
+				{
+					"name": "Server",
+					"kind": int(Struct),
+					"location": map[string]any{
+						"uri":   uri,
+						"range": fakeRange(),
+					},
+				},
+				{
+					"name":          "Start",
+					"kind":          int(Method),
+					"containerName": "Server",
+					"location": map[string]any{
+						"uri":   uri,
+						"range": fakeRange(),
+					},
+				},
+				{
+					"name": "Helper",
+					"kind": int(Function),
+					"location": map[string]any{
+						"uri":   uri,
+						"range": fakeRange(),
+					},
+				},
+			}
+			matches := make([]map[string]any, 0, len(all))
+			for _, sym := range all {
+				if params.Query == "" || strings.Contains(sym["name"].(string), params.Query) {
+					matches = append(matches, sym)
+				}
+			}
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result:  mustRaw(matches),
 			})
 		case "textDocument/rename":
 			var params struct {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -198,6 +199,81 @@ func (m *Manager) Rename(ctx context.Context, path string, line, col int, newNam
 		return WorkspaceEdit{}, err
 	}
 	return edit, nil
+}
+
+// DocumentSymbols returns the symbols the language server reports for the file,
+// starting a server if needed. A nil slice with a nil error means no server is
+// configured for the file or the server reported no symbols.
+func (m *Manager) DocumentSymbols(ctx context.Context, path string) ([]Symbol, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving document symbols path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	symbols, err := c.documentSymbol(ctx, abs)
+	if err != nil {
+		return nil, err
+	}
+	return symbols, nil
+}
+
+// WorkspaceSymbols returns the symbols matching query across the workspace,
+// starting servers if needed. Every discovered language server is queried and
+// the matches are aggregated. A nil slice with a nil error means no server is
+// configured or no server reported a match.
+func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]Symbol, error) {
+	// Resolve the server root from a path inside the workspace, since
+	// rootForPath searches upward from a file's directory.
+	rootMarker := filepath.Join(m.root, "_")
+	var symbols []Symbol
+	for _, spec := range m.workspaceSpecs(ctx) {
+		c, ok, err := m.client(ctx, spec, rootMarker)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		matches, err := c.workspaceSymbol(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		symbols = append(symbols, matches...)
+	}
+	return symbols, nil
+}
+
+// workspaceSpecs returns the discovered language specs whose files are present
+// in the workspace, sorted by name for a deterministic query order.
+func (m *Manager) workspaceSpecs(ctx context.Context) []languageSpec {
+	names := make([]string, 0, len(m.specs))
+	for name := range m.specs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	specs := make([]languageSpec, 0, len(names))
+	for _, name := range names {
+		spec := m.specs[name]
+		if !m.languageDiscovered(ctx, spec) {
+			continue
+		}
+		specs = append(specs, spec)
+	}
+	return specs
 }
 
 // Shutdown terminates every running language-server process.

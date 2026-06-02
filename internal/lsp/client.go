@@ -103,6 +103,15 @@ func (c *client) initialize(ctx context.Context) error {
 				"rename": map[string]any{
 					"dynamicRegistration": false,
 				},
+				"documentSymbol": map[string]any{
+					"dynamicRegistration":               false,
+					"hierarchicalDocumentSymbolSupport": true,
+				},
+			},
+			"workspace": map[string]any{
+				"symbol": map[string]any{
+					"dynamicRegistration": false,
+				},
 			},
 		},
 	})

@@ -57,6 +57,34 @@ func (c *client) references(ctx context.Context, path string, line, col int) ([]
 	return parseReferences(result)
 }
 
+// documentSymbol issues a textDocument/documentSymbol request and returns the
+// symbols the server reports for the file. The path is supplied so symbols can
+// carry it, since a DocumentSymbol response omits the document uri.
+func (c *client) documentSymbol(ctx context.Context, path string) ([]Symbol, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/documentSymbol", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting document symbols: %w", err)
+	}
+	return parseDocumentSymbols(path, result)
+}
+
+// workspaceSymbol issues a workspace/symbol request for query and returns the
+// matching symbols the server reports across the workspace.
+func (c *client) workspaceSymbol(ctx context.Context, query string) ([]Symbol, error) {
+	result, err := c.request(ctx, "workspace/symbol", map[string]any{
+		"query": query,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting workspace symbols: %w", err)
+	}
+	return parseWorkspaceSymbols(result)
+}
+
 // rename issues a textDocument/rename request for the position and returns the
 // edits the server would apply to rename the symbol to newName.
 func (c *client) rename(ctx context.Context, path string, line, col int, newName string) (WorkspaceEdit, error) {
@@ -125,6 +153,161 @@ func parseRename(raw json.RawMessage) (WorkspaceEdit, error) {
 		changes[path] = edits
 	}
 	return WorkspaceEdit{Changes: changes}, nil
+}
+
+// wireDocumentSymbol mirrors the LSP DocumentSymbol structure, a hierarchical
+// symbol scoped to a single document. The document uri is not repeated on each
+// entry, so the caller supplies the path.
+type wireDocumentSymbol struct {
+	Name     string               `json:"name"`
+	Kind     int                  `json:"kind"`
+	Range    wireRange            `json:"range"`
+	Children []wireDocumentSymbol `json:"children"`
+}
+
+// wireSymbolInformation mirrors the LSP SymbolInformation/WorkspaceSymbol
+// structure, a flat symbol that carries its own location. WorkspaceSymbol may
+// omit the location range, leaving only the uri.
+type wireSymbolInformation struct {
+	Name          string `json:"name"`
+	Kind          int    `json:"kind"`
+	ContainerName string `json:"containerName"`
+	Location      struct {
+		URI   string    `json:"uri"`
+		Range wireRange `json:"range"`
+	} `json:"location"`
+}
+
+// parseDocumentSymbols extracts the symbols of a textDocument/documentSymbol
+// response. The result is either an array of DocumentSymbol (hierarchical) or
+// SymbolInformation (flat), or null. Hierarchical children are flattened into a
+// single slice so every named construct is returned.
+func parseDocumentSymbols(path string, raw json.RawMessage) ([]Symbol, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if raw[0] != '[' {
+		return nil, fmt.Errorf("parsing document symbols response: unexpected value %q", string(raw))
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("parsing document symbols response: %w", err)
+	}
+	out := make([]Symbol, 0, len(items))
+	for _, item := range items {
+		// A "location" field is the discriminator for SymbolInformation; a
+		// DocumentSymbol has none and instead carries an inline range and
+		// optional children.
+		if hasLocationField(item) {
+			symbol, ok, err := parseSymbolInformation(item)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				out = append(out, symbol)
+			}
+			continue
+		}
+		symbols, err := flattenDocumentSymbol(path, item)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, symbols...)
+	}
+	return out, nil
+}
+
+// flattenDocumentSymbol parses one DocumentSymbol object and appends it and all
+// of its descendants, recording each child's parent name as its container.
+func flattenDocumentSymbol(path string, raw json.RawMessage) ([]Symbol, error) {
+	var node wireDocumentSymbol
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return nil, fmt.Errorf("parsing document symbol: %w", err)
+	}
+	return appendDocumentSymbol(nil, path, "", node), nil
+}
+
+func appendDocumentSymbol(out []Symbol, path, container string, node wireDocumentSymbol) []Symbol {
+	out = append(out, Symbol{
+		Name:          node.Name,
+		Kind:          SymbolKind(node.Kind),
+		Path:          path,
+		Range:         convertRange(node.Range),
+		ContainerName: container,
+	})
+	for _, child := range node.Children {
+		out = appendDocumentSymbol(out, path, node.Name, child)
+	}
+	return out
+}
+
+// parseWorkspaceSymbols extracts the symbols of a workspace/symbol response.
+// The result is an array of SymbolInformation or WorkspaceSymbol, or null.
+func parseWorkspaceSymbols(raw json.RawMessage) ([]Symbol, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if raw[0] != '[' {
+		return nil, fmt.Errorf("parsing workspace symbols response: unexpected value %q", string(raw))
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("parsing workspace symbols response: %w", err)
+	}
+	out := make([]Symbol, 0, len(items))
+	for _, item := range items {
+		symbol, ok, err := parseSymbolInformation(item)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, symbol)
+		}
+	}
+	return out, nil
+}
+
+// parseSymbolInformation parses one SymbolInformation or WorkspaceSymbol
+// object. It reports ok=false when the entry carries no location uri.
+func parseSymbolInformation(raw json.RawMessage) (Symbol, bool, error) {
+	var info wireSymbolInformation
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return Symbol{}, false, fmt.Errorf("parsing symbol information: %w", err)
+	}
+	if info.Location.URI == "" {
+		return Symbol{}, false, nil
+	}
+	path, err := uriToPath(info.Location.URI)
+	if err != nil {
+		return Symbol{}, false, fmt.Errorf("parsing symbol information uri: %w", err)
+	}
+	return Symbol{
+		Name:          info.Name,
+		Kind:          SymbolKind(info.Kind),
+		Path:          path,
+		Range:         convertRange(info.Location.Range),
+		ContainerName: info.ContainerName,
+	}, true, nil
+}
+
+// hasLocationField reports whether a JSON object carries a non-null "location"
+// field, the discriminator between SymbolInformation and DocumentSymbol.
+func hasLocationField(raw json.RawMessage) bool {
+	var probe struct {
+		Location json.RawMessage `json:"location"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return len(probe.Location) > 0 && string(probe.Location) != "null"
+}
+
+// convertRange converts a wire range into the exported Range type.
+func convertRange(r wireRange) Range {
+	return Range{
+		Start: Position{Line: r.Start.Line, Character: r.Start.Character},
+		End:   Position{Line: r.End.Line, Character: r.End.Character},
+	}
 }
 
 // parseHover extracts the textual contents of a textDocument/hover response.

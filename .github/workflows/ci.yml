@@ -1,0 +1,129 @@
+name: CI
+
+# Continuous integration for BharatCode.
+# Runs on every push and pull request. Covers build, test, race detector,
+# vet, formatting, embedded-config validation, and a cross-compile matrix.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  # Build + unit tests + vet + gofmt + config validation across the two
+  # primary developer/CI platforms.
+  build-test:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Pin explicitly to 1.25. go.mod declares 1.24.0, so go-version-file
+          # would disagree with the required toolchain; 1.25 builds the module fine.
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: gofmt check
+        # gofmt -l exits 0 even when it lists unformatted files, so the listing
+        # alone is not a gate. Fail explicitly when the list is non-empty.
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Validate embedded default config
+        run: go run ./scripts/validate-defaults.go
+
+  # Race detector runs separately because it is slower and requires cgo.
+  # Do NOT set CGO_ENABLED=0 here: -race needs cgo, and both runners ship a
+  # C toolchain by default.
+  race:
+    name: race detector (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Test with race detector
+        run: go test -race ./...
+
+  # Prove the tree cross-compiles for the supported targets. Cross-compilation
+  # does not need the target OS, so this whole matrix runs on a single Linux
+  # runner.
+  cross-compile:
+    name: cross-compile (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Cross-compile all packages
+        # The full windows build currently passes for every package in the
+        # tree, but it has historically been fragile (internal/lsp and others).
+        # Mark it non-blocking on windows only: a regression surfaces as a
+        # warning annotation without blocking merges. For linux/darwin the
+        # expression is false, so this remains a hard gate.
+        continue-on-error: ${{ matrix.goos == 'windows' }}
+        run: go build ./...
+
+      - name: Cross-compile windows-clean core (hard gate)
+        # internal/shell and internal/lsp use build-tagged proc_windows.go /
+        # proc_unix.go files and are guaranteed windows-clean. This step has no
+        # continue-on-error, so it is a genuine blocking gate for windows even
+        # though the full windows build above is non-blocking.
+        if: matrix.goos == 'windows'
+        run: go build ./internal/shell ./internal/lsp

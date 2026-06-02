@@ -58,6 +58,12 @@ type Repo struct {
 	// at most once per Repo. See archive.go.
 	archiveMu    sync.Mutex
 	archiveReady bool
+
+	// tagsMu guards lazy creation of the session_tags side table; tagsReady is
+	// set once the CREATE TABLE has succeeded so the DDL runs at most once per
+	// Repo. See tags.go.
+	tagsMu    sync.Mutex
+	tagsReady bool
 }
 
 // Sentinel errors returned by Repo methods.
@@ -345,6 +351,19 @@ func (r *Repo) Delete(ctx context.Context, id string) error {
 	if exists {
 		if _, err := r.database.ExecContext(ctx, `DELETE FROM session_archive WHERE session_id = ?`, id); err != nil {
 			return fmt.Errorf("deleting session %s archive marker: %w", id, err)
+		}
+	}
+	// Clear any tag rows for this id so a tag never references a deleted session
+	// (and a later session reusing the id does not inherit stale tags). As with
+	// the archive marker, skip if no tag has ever been written rather than
+	// creating the side table on the delete path.
+	tagsExist, err := r.tagsTableExists(ctx)
+	if err != nil {
+		return fmt.Errorf("deleting session %s: %w", id, err)
+	}
+	if tagsExist {
+		if _, err := r.database.ExecContext(ctx, `DELETE FROM session_tags WHERE session_id = ?`, id); err != nil {
+			return fmt.Errorf("deleting session %s tags: %w", id, err)
 		}
 	}
 	return nil

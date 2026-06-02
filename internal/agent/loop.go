@@ -55,6 +55,12 @@ type Config struct {
 	SystemPrompt  string
 	ToolAllowList []string
 	MaxSteps      int
+	// ToolResultMaxBytes caps the byte length of a single tool result before it
+	// is appended to the conversation history, so one oversized output (a giant
+	// file read, verbose bash output) cannot blow the context window. A
+	// non-positive value selects defaultToolResultMaxBytes. Error results are
+	// never truncated.
+	ToolResultMaxBytes int
 	// Compactor condenses the conversation before it is sent to the provider
 	// when Compact is invoked. When nil, a default drop-and-mark Compactor is
 	// used.
@@ -466,12 +472,16 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 
 			result := l.runTool(runCtx, sessionID, call)
 			l.fireFileEditHook(runCtx, sessionID, call, result)
+			// Bound oversized tool output before it enters the conversation
+			// history so a single giant result cannot blow the context window.
+			// Error results pass through so their essential message stays intact.
+			content := truncateToolResult(result.Content, l.toolResultMaxBytes(), result.IsError)
 			toolMsg := message.Message{
 				SessionID: sessionID,
 				Role:      message.RoleUser,
 				Content: []message.ContentBlock{message.ToolResultBlock{
 					ToolUseID: call.ID,
-					Content:   result.Content,
+					Content:   content,
 					IsError:   result.IsError,
 				}},
 				CreatedAt: time.Now().UTC(),

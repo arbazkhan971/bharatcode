@@ -196,7 +196,6 @@ func newAgentHarness(t *testing.T, provider llm.Provider) *agentHarness {
 
 	m := newModel(context.Background(), deps)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	// Start the listen loop exactly as Init would.
 	h := &agentHarness{
 		model: m,
 		repo:  repo,
@@ -207,7 +206,13 @@ func newAgentHarness(t *testing.T, provider llm.Provider) *agentHarness {
 		// is more than ample.
 		msgCh: make(chan tea.Msg, (maxGoalIterations+2)*16),
 	}
-	h.run(t, m.ensureListening())
+	// Subscribe to the agent bus exactly as Init would, but for its side effect
+	// only: ensureListening sets m.eventCh, which drain reads directly as the
+	// SOLE reader.  We discard the returned listen command so no background
+	// goroutine ever competes with drain for events on eventCh — concurrent
+	// readers would make len(m.eventCh) a lie and reintroduce the dropped-event
+	// race this harness exists to avoid.
+	_ = m.ensureListening()
 	return h
 }
 
@@ -231,50 +236,63 @@ func (h *agentHarness) submitSlash(t *testing.T, text string) {
 	h.startBatch(t, cmd)
 }
 
-// startBatch evaluates cmd and launches every resulting sub-command in its own
-// goroutine, forwarding each non-nil result to h.msgCh.  For a tea.BatchMsg
-// every sub-command runs concurrently; for a plain cmd a single goroutine is
-// used.  cmd() is never called in the caller's goroutine: this prevents a
-// blocking run or listen command from stalling the drain loop.
+// startBatch evaluates cmd and launches the blocking RUN command into a
+// background goroutine that forwards its terminal runDoneMsg to h.msgCh.  A
+// startRun batch is [runCmd, listenCmd]; continueRun returns a bare runCmd.  The
+// listen command is deliberately NOT launched: drain is the sole reader of
+// m.eventCh, so spawning a listener here would steal events and make the
+// len(m.eventCh) termination check unreliable.  Any agentEventMsg that does
+// surface (it never should, since the listener is dropped) is discarded rather
+// than forwarded, keeping h.msgCh a pure runDoneMsg/continuation channel.
 func (h *agentHarness) startBatch(t *testing.T, cmd tea.Cmd) {
 	t.Helper()
 	if cmd == nil {
 		return
 	}
-	// Call cmd() in a goroutine and immediately redirect the result.  Batch
-	// commands return instantaneously (they just wrap their args); run and
-	// listen commands block for variable durations.
+	// Batch commands return instantaneously (they just wrap their sub-commands);
+	// run commands block for the whole turn.  Evaluate cmd() in a goroutine with
+	// a short peek so a blocking run command does not stall the caller, then
+	// route only run/continuation results onward.
 	peeked := make(chan tea.Msg, 1)
 	go func() { peeked <- cmd() }()
 
 	select {
 	case msg := <-peeked:
-		if msg == nil {
-			return
-		}
-		if batch, ok := msg.(tea.BatchMsg); ok {
-			// Expand the batch: launch each sub-command concurrently.
-			for _, sub := range batch {
-				c := sub
-				go func() {
-					if result := c(); result != nil {
-						h.msgCh <- result
-					}
-				}()
-			}
-			return
-		}
-		// Plain (non-batch) result arrived immediately: forward it.
-		h.msgCh <- msg
+		h.dispatchBatchResult(msg)
 	case <-time.After(listenPollTimeout):
-		// cmd() is still blocking (loop.Run or listenAgent).  Let the existing
-		// goroutine complete on its own and forward via msgCh when it does.
+		// cmd() is still blocking (loop.Run).  Hand it to a goroutine that
+		// forwards the eventual runDoneMsg via msgCh.
+		go func() { h.dispatchBatchResult(<-peeked) }()
+	}
+}
+
+// dispatchBatchResult routes one command result.  A startRun batch is
+// constructed as tea.Batch(runCmd, ensureListening()); tea.Batch preserves the
+// argument order in the resulting BatchMsg slice (compactCmds only filters
+// nils), so the run command is always the first element and the listen command
+// the second.  We launch ONLY the run command — the listen command is dropped
+// because drain reads m.eventCh directly as the sole reader.  Launching the
+// listener here would race drain for events and make the len(m.eventCh)
+// termination check unreliable.  A bare runDoneMsg (from continueRun) is
+// forwarded directly.
+func (h *agentHarness) dispatchBatchResult(msg tea.Msg) {
+	if msg == nil {
+		return
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		if len(batch) == 0 {
+			return
+		}
+		runCmd := batch[0]
 		go func() {
-			if result := <-peeked; result != nil {
+			if result := runCmd(); result != nil {
 				h.msgCh <- result
 			}
 		}()
+		return
 	}
+	// A non-batch result is the run command's terminal runDoneMsg.
+	h.msgCh <- msg
 }
 
 // listenPollTimeout bounds a single listen command in tests. Real agent events
@@ -309,32 +327,47 @@ func (h *agentHarness) pump(t *testing.T, cmd tea.Cmd) {
 	h.pump(t, next)
 }
 
-// drain drives the model forward until done() returns true or the overall
-// deadline passes.  It reads exclusively from h.msgCh, which is the single
-// delivery point for both runDoneMsg (from the run goroutine) and agentEventMsg
-// (from the listen goroutine chain started by startBatch).  Reading only from
-// msgCh — never creating additional competing goroutines via pump — ensures no
-// event is stolen and every streaming fragment reaches the chat model.
+// drain drives the model forward until done() reports true AND every agent
+// event published for the turn(s) has been rendered into the chat.
 //
-// When Update returns a command (e.g. continueRun for the goal loop), drain
-// routes it through startBatch so the next runDoneMsg also appears on msgCh.
+// drain is the SOLE reader of m.eventCh.  Because loop.Run publishes all of a
+// turn's events into the bus (a buffered channel) BEFORE it returns, the
+// runDoneMsg that flips m.running can arrive while trailing events are still
+// buffered in m.eventCh, undrained.  Stopping on done() alone therefore races:
+// it can quit before "All done with the task." (the final turn's text) reaches
+// the chat.  The real terminator is "the run is done AND m.eventCh is empty" —
+// authoritative precisely because nothing else reads m.eventCh concurrently.
+//
+// Events are read straight from m.eventCh and fed through Update so the genuine
+// integration surface (handleAgentEvent -> chat) runs; the listen command it
+// returns is discarded (drain owns the channel).  Run lifecycle messages
+// (runDoneMsg) and goal-loop continuations arrive on h.msgCh from startBatch.
 func (h *agentHarness) drain(t *testing.T, done func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
-	for !done() {
+	for {
+		if done() && len(h.model.eventCh) == 0 {
+			return
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("drain timed out; running=%v goalActive=%v", h.model.running, h.model.goalActive)
+			t.Fatalf("drain timed out; running=%v goalActive=%v buffered=%d",
+				h.model.running, h.model.goalActive, len(h.model.eventCh))
 		}
 		select {
+		case ev := <-h.model.eventCh:
+			// Feed the event through the real Update path; drop the listen
+			// command it returns since drain reads m.eventCh itself.
+			_, _ = h.model.Update(agentEventMsg(ev))
 		case msg := <-h.msgCh:
 			_, next := h.model.Update(msg)
 			if next != nil {
-				// continueRun (goal loop) or listenAgent (event chain):
-				// keep the goroutine pipeline alive.
+				// continueRun (goal loop): keep the run pipeline alive. Its
+				// follow-up runDoneMsg returns on h.msgCh via startBatch.
 				h.startBatch(t, next)
 			}
 		case <-time.After(listenPollTimeout):
-			// msgCh quiet; re-check done() and loop.
+			// Both channels momentarily quiet (e.g. loop.Run still running and
+			// has not published yet); re-check the terminator and loop.
 		}
 	}
 }

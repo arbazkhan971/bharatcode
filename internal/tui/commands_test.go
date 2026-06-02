@@ -220,6 +220,29 @@ func TestSlashStatus_ShowsModelSessionAndCount(t *testing.T) {
 	require.GreaterOrEqual(t, count, 2, "persisted message count must be real")
 }
 
+// TestSlashPlanAndApprove_TogglesPlanModeOnLiveLoop is the /plan and /approve
+// contract test: /plan enables plan mode on the live agent loop and /approve
+// exits it, with a confirmation dialog at each step.
+func TestSlashPlanAndApprove_TogglesPlanModeOnLiveLoop(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	require.False(t, m.deps.Agent.PlanMode(), "plan mode is off before /plan")
+
+	h.submitSlash(t, "/plan")
+	require.True(t, m.deps.Agent.PlanMode(), "/plan must enable plan mode on the live loop")
+	require.True(t, m.dialogs.Contains("plan"))
+
+	// Dismiss the confirmation dialog (enter) before issuing the next command,
+	// since an open dialog intercepts keypresses.
+	m.Update(keySpecial("enter", tea.KeyEnter))
+	require.Equal(t, 0, m.dialogs.Len(), "the plan confirmation must be dismissable")
+
+	h.submitSlash(t, "/approve")
+	require.False(t, m.deps.Agent.PlanMode(), "/approve must exit plan mode")
+}
+
 // TestSlashDiff_RendersLatestEdit is the /diff contract test: the most recent
 // edit tool call's before/after text must appear in the rendered diff.
 func TestSlashDiff_RendersLatestEdit(t *testing.T) {

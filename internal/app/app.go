@@ -182,6 +182,15 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	closers = append(closers, closeStep{name: "lsp", close: app.LSP.Shutdown})
 
 	app.MCP = mcp.NewClient(app.Cfg, app.Permission, app.Bus.MCP)
+	// Install the MCP request handlers before Start so the corresponding
+	// capabilities are advertised when each server connects. Roots scope servers
+	// to the workspace; the sampler answers server-requested LLM completions via
+	// the app's own providers (lazily resolved, since the agent is built later);
+	// elicitation auto-declines so a server prompting for structured input does
+	// not hang the connection.
+	app.MCP.SetRoots([]mcp.Root{{URI: "file://" + projectDir, Name: filepath.Base(projectDir)}})
+	app.MCP.SetSampler(app.mcpSampler)
+	app.MCP.SetElicitationHandler(autoDeclineElicitation)
 	if err := app.MCP.Start(rootCtx); err != nil {
 		return rollback(fmt.Errorf("constructing mcp: %w", err))
 	}
@@ -209,6 +218,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		MCP:         app.MCP,
 		Bus:         app.Bus.Agent,
 		Providers:   providers,
+		Router:      routerFromConfig(app.Cfg),
 	})
 	if err != nil {
 		return rollback(fmt.Errorf("constructing agent: %w", err))
@@ -368,8 +378,14 @@ func closeOne(ctx context.Context, step closeStep) error {
 	}
 }
 
+// configuredProviders resolves every enabled provider from the registry and
+// applies the optional composable wrappers configured in cfg. Each provider is
+// wrapped, innermost-first, in a FailoverProvider when it declares fallbacks,
+// then in a CachingProvider when caching is enabled, so a cache hit short-
+// circuits before any failover chain runs. With no fallbacks and caching off
+// (the defaults) the raw registry provider is returned unchanged.
 func configuredProviders(cfg *config.Config, reg *llm.Registry) map[string]llm.Provider {
-	out := make(map[string]llm.Provider)
+	base := make(map[string]llm.Provider)
 	for _, provider := range cfg.Providers {
 		if provider.Disabled {
 			continue
@@ -377,10 +393,88 @@ func configuredProviders(cfg *config.Config, reg *llm.Registry) map[string]llm.P
 		name := strings.ToLower(provider.Name)
 		p, err := reg.Get(name)
 		if err == nil {
-			out[name] = p
+			base[name] = p
 		}
 	}
+
+	fallbacks := configuredFallbacks(cfg)
+	out := make(map[string]llm.Provider, len(base))
+	for name, primary := range base {
+		out[name] = wrapProvider(name, primary, base, fallbacks, cfg.Cache)
+	}
 	return out
+}
+
+// configuredFallbacks indexes each provider's declared fallback names by the
+// lowercased provider name. A provider with no fallbacks is omitted, so the
+// common case allocates nothing per provider.
+func configuredFallbacks(cfg *config.Config) map[string][]string {
+	out := make(map[string][]string)
+	for _, provider := range cfg.Providers {
+		if provider.Disabled || len(provider.Fallbacks) == 0 {
+			continue
+		}
+		out[strings.ToLower(provider.Name)] = provider.Fallbacks
+	}
+	return out
+}
+
+// wrapProvider applies the failover and caching wrappers to primary as
+// configured. Failover is applied first (innermost) so that an outer cache hit
+// avoids the chain entirely. Both wrappers degrade to a no-op pass-through when
+// not configured, so the returned provider equals primary in the default case.
+func wrapProvider(name string, primary llm.Provider, base map[string]llm.Provider, fallbacks map[string][]string, cache config.CacheConfig) llm.Provider {
+	p := primary
+	if chain := resolveFallbackChain(name, base, fallbacks); len(chain) > 0 {
+		if fp, err := llm.NewFailoverProvider(primary, chain...); err == nil {
+			p = fp
+		}
+	}
+	if cache.Enabled {
+		var store llm.ResponseCache
+		if cache.MaxEntries > 0 {
+			store = llm.NewLRUCache(cache.MaxEntries)
+		}
+		if cp, err := llm.NewCachingProvider(p, store); err == nil {
+			p = cp
+		}
+	}
+	return p
+}
+
+// resolveFallbackChain maps the configured fallback names for the named provider
+// to their resolved providers, in order, skipping unknown, disabled, or
+// self-referential names so a typo or a fallback to oneself never breaks the
+// chain.
+func resolveFallbackChain(name string, base map[string]llm.Provider, fallbacks map[string][]string) []llm.Provider {
+	names := fallbacks[name]
+	if len(names) == 0 {
+		return nil
+	}
+	chain := make([]llm.Provider, 0, len(names))
+	for _, fb := range names {
+		fbName := strings.ToLower(fb)
+		if fbName == name {
+			continue
+		}
+		if p, ok := base[fbName]; ok {
+			chain = append(chain, p)
+		}
+	}
+	return chain
+}
+
+// routerFromConfig returns the cost-aware router to install on every agent loop,
+// or nil when routing is disabled. Returning nil leaves each loop pinned to its
+// configured model — the non-breaking default.
+func routerFromConfig(cfg *config.Config) agent.Router {
+	if cfg == nil || !cfg.Routing.Enabled {
+		return nil
+	}
+	return agent.CostAwareRouter{
+		PromptLenThreshold: cfg.Routing.PromptLenThreshold,
+		ToolsImplyComplex:  cfg.Routing.ToolsImplyComplex,
+	}
 }
 
 func resolvePaths(opts Options) (projectDir, globalConfigPath, projectConfigPath, dbPath string, err error) {

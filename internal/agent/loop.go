@@ -201,6 +201,16 @@ func (l *Loop) PlanMode() bool {
 	return l.planMode.Load()
 }
 
+// SetPlanMode turns plan mode on or off at runtime. Turning it on restricts the
+// next provider call to read-only tools and appends the plan-mode prompt;
+// turning it off (equivalent to Approve) restores execution tools. It takes
+// effect on the next provider call and is safe to call from any goroutine, so a
+// UI can toggle plan mode on a live Loop without recreating it (which would lose
+// session state). Approve remains the dedicated "exit plan mode" affordance.
+func (l *Loop) SetPlanMode(on bool) {
+	l.planMode.Store(on)
+}
+
 // Approve transitions the Loop out of plan mode so execution tools (write, edit,
 // bash, and similar) become available again and the plan-mode prompt is no
 // longer appended. It takes effect on the next provider call. Approve is safe to
@@ -580,12 +590,14 @@ type pendingToolCall struct {
 }
 
 func (l *Loop) callProvider(ctx context.Context, history []message.Message) (message.Message, []pendingToolCall, *llm.Usage, error) {
-	events, err := l.cfg.Provider.Stream(ctx, llm.Request{
+	req := llm.Request{
 		Model:        l.activeModel,
 		Messages:     history,
 		Tools:        l.llmTools(),
 		SystemPrompt: l.systemPrompt(),
-	})
+	}
+	l.applyReasoning(&req)
+	events, err := l.cfg.Provider.Stream(ctx, req)
 	if err != nil {
 		return message.Message{}, nil, nil, err
 	}
@@ -750,6 +762,37 @@ func (l *Loop) contextWindow() int {
 		}
 	}
 	return 0
+}
+
+// applyReasoning populates the per-model reasoning controls on req from the
+// active model's configuration. ReasoningEffort is forwarded only when
+// configured non-empty, and Thinking only when a positive budget is configured.
+// Both are gated by the provider against the model id, so populating them for a
+// model that does not support the feature is harmless: the provider omits the
+// unsupported field rather than failing the request. Models that configure
+// neither leave req unchanged, preserving prior behavior.
+func (l *Loop) applyReasoning(req *llm.Request) {
+	model, ok := findModelByID(l.cfg.Provider.Models(), l.activeModel)
+	if !ok {
+		return
+	}
+	if model.ReasoningEffort != "" {
+		req.ReasoningEffort = model.ReasoningEffort
+	}
+	if model.ThinkingBudget > 0 {
+		req.Thinking = &llm.ThinkingConfig{BudgetTokens: model.ThinkingBudget}
+	}
+}
+
+// findModelByID returns the model with the given id from models and whether it
+// was found.
+func findModelByID(models []llm.Model, id string) (llm.Model, bool) {
+	for _, m := range models {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return llm.Model{}, false
 }
 
 // resolveTurnModel picks the model for this turn. With no Router it returns the

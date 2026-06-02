@@ -283,6 +283,25 @@ func (c *Config) merge(other *Config) {
 	if other.Sandbox.Mode != "" {
 		c.Sandbox.Mode = other.Sandbox.Mode
 	}
+
+	// CacheConfig merge
+	if other.Cache.Enabled {
+		c.Cache.Enabled = true
+	}
+	if other.Cache.MaxEntries != 0 {
+		c.Cache.MaxEntries = other.Cache.MaxEntries
+	}
+
+	// RoutingConfig merge
+	if other.Routing.Enabled {
+		c.Routing.Enabled = true
+	}
+	if other.Routing.PromptLenThreshold != 0 {
+		c.Routing.PromptLenThreshold = other.Routing.PromptLenThreshold
+	}
+	if other.Routing.ToolsImplyComplex {
+		c.Routing.ToolsImplyComplex = true
+	}
 }
 
 // interpolate performs environment variable expansion on specific fields.

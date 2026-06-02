@@ -85,6 +85,16 @@ type Model struct {
 	SupportsImages        bool    `json:"supports_images"`
 	SupportsTools         bool    `json:"supports_tools"`
 	Pending               bool    `json:"pending,omitempty"`
+	// ReasoningEffort is the configured hidden-reasoning budget for an OpenAI
+	// reasoning model ("low", "medium", "high"), or empty for none. The agent
+	// loop copies it onto Request.ReasoningEffort for this model; providers gate
+	// it by model id, so it is harmless on a non-reasoning model.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ThinkingBudget is the configured extended-thinking token budget for an
+	// Anthropic thinking model, or zero for none. The agent loop copies it onto
+	// Request.Thinking for this model when positive; providers gate it by model
+	// id, so it is harmless on a non-thinking model.
+	ThinkingBudget int `json:"thinking_budget,omitempty"`
 }
 
 // Usage records provider-reported token counts.

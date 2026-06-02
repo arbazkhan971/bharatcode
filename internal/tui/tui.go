@@ -536,6 +536,10 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.handleDiff()
 	case "/status":
 		return m.handleStatus()
+	case "/plan":
+		return m.handlePlan()
+	case "/approve":
+		return m.handleApprove()
 	case "/model":
 		m.pushModelPicker()
 	case "/agent":
@@ -856,6 +860,8 @@ func slashHelp() string {
 		"/copy [last|all] - copy the last assistant reply or the whole chat to the clipboard",
 		"/search <term> - find a term in the chat; Ctrl+/ next match, Ctrl+\\ previous",
 		"/status - show model, session, and spend",
+		"/plan - restrict the agent to read-only tools and propose a plan",
+		"/approve - exit plan mode and re-enable execution tools",
 		"/model - open model picker",
 		"/agent - open agent picker",
 		"/goal [text|run|stop|clear] - show, set, run, stop, or clear the goal",

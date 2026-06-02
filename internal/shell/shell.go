@@ -62,7 +62,8 @@ type Shell struct {
 	bus         *pubsub.Topic[pubsub.ShellJobPayload]
 	jobs        sync.Map // Map of jobID string -> *jobState
 	cleanup     chan struct{}
-	sandboxMode SandboxMode // OS-level confinement applied to every command.
+	sandboxMode SandboxMode      // OS-level confinement applied to every command.
+	now         func() time.Time // Injectable clock; defaults to time.Now (see startTTLWatcher).
 }
 
 // jobState tracks the runtime details of an active or finished job.
@@ -71,6 +72,7 @@ type jobState struct {
 	id              string
 	command         string
 	startedAt       time.Time
+	finishedAt      time.Time // Zero until the job reaches a terminal status; basis for TTL eviction.
 	status          JobStatus
 	exitCode        int
 	stdout          strings.Builder
@@ -90,6 +92,7 @@ func New(bus *pubsub.Topic[pubsub.ShellJobPayload], opts ...Option) *Shell {
 	s := &Shell{
 		bus:     bus,
 		cleanup: make(chan struct{}),
+		now:     time.Now,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -277,6 +280,10 @@ func (s *Shell) Start(ctx context.Context, cmdStr string, opts RunOpts) (string,
 				}
 			}
 		}
+
+		// Record when the job actually finished so the TTL watcher can grant the
+		// full grace window from completion, not from start.
+		state.finishedAt = s.now()
 
 		// Publish completion.
 		s.publishUpdate(jobID, "", nil, true)

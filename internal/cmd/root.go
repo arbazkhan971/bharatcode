@@ -83,6 +83,7 @@ func newRootCmd() *cobra.Command {
 		newLogoutCmd(),
 		newModelsCmd(),
 		newSessionsCmd(),
+		newShareCmd(),
 		newStatsCmd(),
 		newBudgetCmd(),
 		newUpdateProvidersCmd(),

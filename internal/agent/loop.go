@@ -228,6 +228,26 @@ func (l *Loop) Compact(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("loading session messages: %w", err)
 	}
 
+	condensed, err := l.compactHistory(ctx, history)
+	if err != nil {
+		return err
+	}
+
+	l.compactMu.Lock()
+	l.compacted = condensed
+	l.compactedLen = len(history)
+	l.compactMu.Unlock()
+
+	return nil
+}
+
+// compactHistory runs history through the configured Compactor (or the default
+// drop-and-mark Compactor) and enforces the preserve-latest-user invariant: if
+// the Compactor dropped the most recent genuine user message, it is re-appended
+// so the live prompt is never lost. The system prompt is preserved
+// automatically because it is carried in the Config and sent to the provider
+// separately, never within the history. The returned slice is a fresh copy.
+func (l *Loop) compactHistory(ctx context.Context, history []message.Message) ([]message.Message, error) {
 	compactor := l.cfg.Compactor
 	if compactor == nil {
 		compactor = newDropAndMarkCompactor(2)
@@ -236,7 +256,7 @@ func (l *Loop) Compact(ctx context.Context, sessionID string) error {
 	input := append([]message.Message(nil), history...)
 	condensed, err := compactor.Compact(ctx, input)
 	if err != nil {
-		return fmt.Errorf("compacting history: %w", err)
+		return nil, fmt.Errorf("compacting history: %w", err)
 	}
 	condensed = append([]message.Message(nil), condensed...)
 
@@ -248,13 +268,7 @@ func (l *Loop) Compact(ctx context.Context, sessionID string) error {
 			condensed = append(condensed, latest)
 		}
 	}
-
-	l.compactMu.Lock()
-	l.compacted = condensed
-	l.compactedLen = len(history)
-	l.compactMu.Unlock()
-
-	return nil
+	return condensed, nil
 }
 
 // applyCompaction grafts messages that arrived after the last Compact call onto
@@ -271,6 +285,54 @@ func (l *Loop) applyCompaction(history []message.Message) []message.Message {
 		out = append(out, history[l.compactedLen:]...)
 	}
 	return out
+}
+
+// fitHistory ensures history fits the model's usable context window before it
+// is sent to the provider. When the window is unknown (zero), it preserves the
+// historical behavior of leaving history untouched. When history already fits,
+// it is returned unchanged.
+//
+// On overflow it first invokes the Compactor to SUMMARIZE the conversation
+// (preserving the system prompt automatically and the latest genuine user
+// message explicitly) rather than hard-dropping. If the compacted history fits,
+// it is used. If compaction does not free enough room, it falls back to
+// drop-oldest truncation so the turn still proceeds.
+//
+// If the latest genuine user message alone exceeds the usable window, no
+// strategy can make the turn fit; fitHistory returns ErrContextOverflow rather
+// than looping or silently sending an over-window request.
+func (l *Loop) fitHistory(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	window := l.contextWindow()
+	if window <= 0 {
+		// Unknown window: keep the prior behavior of sending history as-is.
+		return history, nil
+	}
+
+	budget := fitBudget(window, l.cfg.SystemPrompt)
+	if fitsBudget(history, budget) {
+		return history, nil
+	}
+
+	// The latest genuine user message must always survive a fit. If it alone
+	// exceeds the budget, no compaction or drop-oldest can rescue the turn.
+	if idx := latestUserIndex(history); idx >= 0 {
+		if estimateMessageTokens(history[idx]) > budget {
+			return nil, ErrContextOverflow
+		}
+	}
+
+	// Try compaction first: summarize rather than hard-drop.
+	condensed, err := l.compactHistory(ctx, history)
+	if err != nil {
+		return nil, err
+	}
+	if fitsBudget(condensed, budget) {
+		return condensed, nil
+	}
+
+	// Compaction did not free enough room: fall back to drop-oldest, which
+	// always retains the latest user message.
+	return truncateForContext(history, window), nil
 }
 
 // Run drives a single user turn.
@@ -334,7 +396,11 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	}
 
 	history = l.applyCompaction(history)
-	history = truncateForContext(history, l.contextWindow())
+	history, err = l.fitHistory(runCtx, history)
+	if err != nil {
+		l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventRunError, Err: err})
+		return err
+	}
 	detector := &loopDetector{}
 
 	for step := 0; step < l.cfg.MaxSteps; step++ {

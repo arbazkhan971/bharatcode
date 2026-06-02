@@ -371,20 +371,31 @@ func TestSamplingHandlesServerRequest(t *testing.T) {
 	require.NotNil(t, remote.sampling, "client did not install a sampling handler on the conn")
 
 	// The server issues a sampling/createMessage request through that handler.
-	serverReq := mcpsdk.CreateMessageRequest{
-		Request: mcpsdk.Request{Method: string(mcpsdk.MethodSamplingCreateMessage)},
-		CreateMessageParams: mcpsdk.CreateMessageParams{
-			SystemPrompt: "be terse",
-			MaxTokens:    256,
-			Temperature:  0.5,
-			Messages: []mcpsdk.SamplingMessage{
-				{Role: mcpsdk.RoleUser, Content: mcpsdk.NewTextContent("hello from server")},
-				{Role: mcpsdk.RoleAssistant, Content: mcpsdk.NewTextContent("prior turn")},
-			},
-			ModelPreferences: &mcpsdk.ModelPreferences{
-				Hints: []mcpsdk.ModelHint{{Name: "sonnet"}, {Name: "haiku"}},
-			},
+	// Parameters are round-tripped through JSON first so the message content
+	// arrives as a decoded JSON object (map[string]any), exactly as it does over
+	// the wire — not as already-typed Go content.
+	params := mcpsdk.CreateMessageParams{
+		SystemPrompt: "be terse",
+		MaxTokens:    256,
+		Temperature:  0.5,
+		Messages: []mcpsdk.SamplingMessage{
+			{Role: mcpsdk.RoleUser, Content: mcpsdk.NewTextContent("hello from server")},
+			{Role: mcpsdk.RoleAssistant, Content: mcpsdk.NewTextContent("prior turn")},
 		},
+		ModelPreferences: &mcpsdk.ModelPreferences{
+			Hints: []mcpsdk.ModelHint{{Name: "sonnet"}, {Name: "haiku"}},
+		},
+	}
+	raw, err := json.Marshal(params)
+	require.NoError(t, err)
+	var wireParams mcpsdk.CreateMessageParams
+	require.NoError(t, json.Unmarshal(raw, &wireParams))
+	// Sanity check that this exercises the wire shape, not typed Go content.
+	require.IsType(t, map[string]any{}, wireParams.Messages[0].Content)
+
+	serverReq := mcpsdk.CreateMessageRequest{
+		Request:             mcpsdk.Request{Method: string(mcpsdk.MethodSamplingCreateMessage)},
+		CreateMessageParams: wireParams,
 	}
 	result, err := remote.sampling.CreateMessage(context.Background(), serverReq)
 	require.NoError(t, err)

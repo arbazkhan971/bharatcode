@@ -166,8 +166,14 @@ func (s *anthropicStreamState) handle(ctx context.Context, ev sseEvent, events c
 		s.blockName = chunk.ContentBlock.Name
 		s.blockInput.Reset()
 		s.blockActive = true
-		if s.blockType == "tool_use" {
+		switch s.blockType {
+		case "tool_use":
 			send(ctx, events, ToolUseStartEvent{ID: s.blockID, Name: s.blockName})
+		case "redacted_thinking":
+			// Redacted thinking carries an encrypted data payload with no
+			// human-readable text and no deltas. It is intentionally skipped: it
+			// is never surfaced as a ThinkingEvent so encrypted reasoning does
+			// not leak into the UI, and the block is dropped at content_block_stop.
 		}
 	case "content_block_delta":
 		var chunk anthropicContentBlockDelta
@@ -297,7 +303,7 @@ func (p *anthropicProvider) buildAnthropicRequest(req Request) (anthropicRequest
 		maxTokens = defaultAnthropicMaxTokens
 	}
 
-	return anthropicRequest{
+	out := anthropicRequest{
 		Model:       req.Model,
 		System:      system,
 		Messages:    messages,
@@ -305,7 +311,17 @@ func (p *anthropicProvider) buildAnthropicRequest(req Request) (anthropicRequest
 		MaxTokens:   maxTokens,
 		Temperature: req.Temperature,
 		Stream:      true,
-	}, nil
+	}
+
+	// Extended thinking is opt-in per request and only emitted when the model
+	// supports it. Anthropic requires the default sampling temperature while
+	// thinking is enabled, so the temperature override is dropped to avoid a 400.
+	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 && modelSupportsThinking(p.models, req.Model) {
+		out.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: req.Thinking.BudgetTokens}
+		out.Temperature = 0
+	}
+
+	return out, nil
 }
 
 // ephemeralCacheControl returns the cache_control marker Anthropic uses to open
@@ -391,7 +407,15 @@ type anthropicRequest struct {
 	Tools       []anthropicTool        `json:"tools,omitempty"`
 	MaxTokens   int                    `json:"max_tokens"`
 	Temperature float64                `json:"temperature,omitempty"`
+	Thinking    *anthropicThinking     `json:"thinking,omitempty"`
 	Stream      bool                   `json:"stream"`
+}
+
+// anthropicThinking enables extended thinking on a Messages request. The only
+// supported type is "enabled"; budget_tokens caps the visible reasoning pass.
+type anthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 // anthropicSystemBlock is one entry of the structured system-prompt array. The

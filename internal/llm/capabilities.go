@@ -32,6 +32,35 @@ func isReasoningModel(id string) bool {
 	return false
 }
 
+// thinkingModelSubstrings lists case-insensitive markers in Anthropic model ids
+// whose models support extended thinking (Claude 3.7 Sonnet and the Claude 4
+// families). The Anthropic provider only emits the thinking request field for a
+// configured model whose id matches one of these markers, so a caller that opts
+// into thinking against a non-thinking model does not trigger a 400.
+var thinkingModelSubstrings = []string{
+	"claude-3-7-sonnet",
+	"claude-sonnet-4",
+	"claude-opus-4",
+	"claude-haiku-4",
+}
+
+// modelSupportsThinking reports whether the configured model named by id is an
+// Anthropic model that supports extended thinking. The match is on the model id
+// so callers configure ids such as "claude-sonnet-4-20250514" and the request
+// builder gates the thinking field automatically.
+func modelSupportsThinking(models []Model, id string) bool {
+	if _, ok := findModel(models, id); !ok {
+		return false
+	}
+	lid := strings.ToLower(strings.TrimSpace(id))
+	for _, marker := range thinkingModelSubstrings {
+		if strings.Contains(lid, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func modelSupportsTools(models []Model, id string) bool {
 	model, ok := findModel(models, id)
 	return ok && model.SupportsTools

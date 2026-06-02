@@ -96,6 +96,18 @@ func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (M
 	return i, err
 }
 
+const countMessagesBySession = `-- name: CountMessagesBySession :one
+SELECT COUNT(*) FROM messages
+WHERE session_id = ?
+`
+
+func (q *Queries) CountMessagesBySession(ctx context.Context, sessionID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMessagesBySession, sessionID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createSession = `-- name: CreateSession :one
 INSERT INTO sessions (
     id, project_path, title, model, agent, created_at, updated_at, message_count
@@ -307,6 +319,49 @@ ORDER BY created_at ASC
 
 func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error) {
 	rows, err := q.db.QueryContext(ctx, listMessagesBySession, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Message
+	for rows.Next() {
+		var i Message
+		if err := rows.Scan(
+			&i.ID,
+			&i.SessionID,
+			&i.Role,
+			&i.ContentJson,
+			&i.ParentID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMessagesBySessionPaged = `-- name: ListMessagesBySessionPaged :many
+SELECT id, session_id, role, content_json, parent_id, created_at FROM messages
+WHERE session_id = ?
+ORDER BY created_at ASC, rowid ASC
+LIMIT ? OFFSET ?
+`
+
+type ListMessagesBySessionPagedParams struct {
+	SessionID string `json:"session_id"`
+	Limit     int64  `json:"limit"`
+	Offset    int64  `json:"offset"`
+}
+
+func (q *Queries) ListMessagesBySessionPaged(ctx context.Context, arg ListMessagesBySessionPagedParams) ([]Message, error) {
+	rows, err := q.db.QueryContext(ctx, listMessagesBySessionPaged, arg.SessionID, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}

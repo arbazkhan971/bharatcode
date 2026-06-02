@@ -378,7 +378,59 @@ func (r *Repo) Messages(ctx context.Context, sessionID string) ([]message.Messag
 	if err != nil {
 		return nil, fmt.Errorf("listing messages for session %s: %w", sessionID, err)
 	}
+	return decodeMessageRows(rows)
+}
 
+// MessagesPage returns a single window of a session's messages, oldest first,
+// skipping offset rows and returning at most limit of them. It lets callers
+// such as the TUI and exports stream a long transcript a page at a time
+// instead of loading every message into memory. The window order matches
+// Messages (oldest first), with a stable tie-break for messages sharing the
+// same created_at second, so paging through with increasing offsets visits
+// every message exactly once.
+//
+// A limit <= 0 returns no rows (an empty, non-nil slice); callers wanting the
+// whole transcript should use Messages. A negative offset is treated as 0.
+// Use MessageCount to learn how many pages a session has.
+func (r *Repo) MessagesPage(ctx context.Context, sessionID string, limit, offset int) ([]message.Message, error) {
+	if limit <= 0 {
+		return []message.Message{}, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	rows, err := r.database.Queries.ListMessagesBySessionPaged(ctx, sqlc.ListMessagesBySessionPagedParams{
+		SessionID: sessionID,
+		Limit:     int64(limit),
+		Offset:    int64(offset),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing messages page for session %s: %w", sessionID, err)
+	}
+	return decodeMessageRows(rows)
+}
+
+// MessageCount returns the number of messages stored for sessionID. It counts
+// rows directly rather than reading the session's denormalized MessageCount,
+// so it is accurate even for sessions written outside AppendMessage (for
+// example, forks). It is the companion to MessagesPage for computing how many
+// pages a transcript spans. A session with no messages (or an unknown ID)
+// returns 0 with no error.
+func (r *Repo) MessageCount(ctx context.Context, sessionID string) (int, error) {
+	n, err := r.database.Queries.CountMessagesBySession(ctx, sessionID)
+	if err != nil {
+		return 0, fmt.Errorf("counting messages for session %s: %w", sessionID, err)
+	}
+	return int(n), nil
+}
+
+// decodeMessageRows converts sqlc message rows into message.Message values,
+// preserving row order. It marshals each row into a helper envelope matching
+// the JSON shape message.Message expects, then deserializes via the message
+// package's custom UnmarshalJSON so every content block is parsed with that
+// package's logic.
+func decodeMessageRows(rows []sqlc.Message) ([]message.Message, error) {
 	messages := make([]message.Message, len(rows))
 	for i, row := range rows {
 		type msgEnvelope struct {
@@ -390,10 +442,6 @@ func (r *Repo) Messages(ctx context.Context, sessionID string) ([]message.Messag
 			CreatedAt time.Time       `json:"created_at"`
 		}
 
-		// We marshal the row's values into a helper struct that matches the
-		// JSON structure message.Message expects, then deserialize using
-		// message.Message's custom UnmarshalJSON. This ensures all content
-		// blocks are parsed correctly using the message package's logic.
 		env := msgEnvelope{
 			ID:        row.ID,
 			SessionID: row.SessionID,

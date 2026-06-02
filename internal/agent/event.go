@@ -43,3 +43,9 @@ var ErrUnknownAgent = errors.New("unknown agent")
 
 // ErrLoopDetected is folded into the session when repeated tool calls trip.
 var ErrLoopDetected = errors.New("loop detected: 3 identical tool calls in a row")
+
+// ErrContextOverflow is returned when the latest user message alone exceeds the
+// model's usable context window, so no amount of compaction or drop-oldest
+// truncation can make the turn fit. The loop returns it rather than looping
+// indefinitely or silently sending an over-window request.
+var ErrContextOverflow = errors.New("context overflow: latest user message exceeds the model context window")

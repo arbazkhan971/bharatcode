@@ -150,10 +150,7 @@ func truncateForContext(messages []message.Message, contextWindow int) []message
 	if contextWindow <= 0 {
 		return append([]message.Message(nil), messages...)
 	}
-	limit := contextWindow - reservedResponseTokens
-	if limit < 1024 {
-		limit = contextWindow
-	}
+	limit := messageBudget(contextWindow)
 	if len(messages) <= 2 {
 		return append([]message.Message(nil), messages...)
 	}
@@ -183,12 +180,67 @@ func truncateForContext(messages []message.Message, contextWindow int) []message
 	return out
 }
 
+// messageBudget returns the token budget available for conversation messages
+// given a context window, reserving headroom for the model's response. It
+// mirrors the historical truncateForContext math: subtract the reserved
+// response tokens, but fall back to the full window when the reservation would
+// leave an implausibly small budget (a sign of a tiny, likely test, window).
+func messageBudget(contextWindow int) int {
+	limit := contextWindow - reservedResponseTokens
+	if limit < 1024 {
+		limit = contextWindow
+	}
+	return limit
+}
+
+// fitBudget returns the token budget available for conversation messages once
+// both the reserved response headroom and the system prompt (which the provider
+// sends alongside the messages but outside the history) are accounted for. It
+// is used by the automatic-compaction path to decide whether a history fits the
+// window. The returned budget may be non-positive when the system prompt alone
+// crowds out the window; callers treat a non-positive budget as "nothing fits".
+func fitBudget(contextWindow int, systemPrompt string) int {
+	return messageBudget(contextWindow) - estimateTextTokens(systemPrompt)
+}
+
+// historyTokens estimates the total tokens a history occupies on the wire.
+func historyTokens(messages []message.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += estimateMessageTokens(msg)
+	}
+	return total
+}
+
+// fitsBudget reports whether messages fit within budget tokens. A non-positive
+// budget never fits a non-empty history.
+func fitsBudget(messages []message.Message, budget int) bool {
+	if len(messages) == 0 {
+		return true
+	}
+	return historyTokens(messages) <= budget
+}
+
 func estimateMessageTokens(msg message.Message) int {
 	data, err := json.Marshal(msg.Content)
 	if err != nil {
 		return 256
 	}
 	n := len(data) / 4
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// estimateTextTokens estimates the tokens occupied by a raw text string, using
+// the same ~4-bytes-per-token heuristic as estimateMessageTokens. An empty
+// string costs zero tokens.
+func estimateTextTokens(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := len(s) / 4
 	if n < 1 {
 		return 1
 	}

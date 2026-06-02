@@ -113,11 +113,18 @@ func modelPreferenceHints(prefs *mcpsdk.ModelPreferences) []string {
 }
 
 // toContent normalizes a SamplingMessage's Content (typed as any by the SDK)
-// into an mcpsdk.Content so it can be rendered by contentText. Already-typed
-// content is returned unchanged; an untyped value becomes empty text.
+// into an mcpsdk.Content so it can be rendered by contentText. Content already
+// of a concrete type is returned unchanged; content delivered over the wire
+// arrives as a decoded JSON object (map[string]any) and is parsed by type.
+// Anything else becomes empty text.
 func toContent(content any) mcpsdk.Content {
-	if c, ok := content.(mcpsdk.Content); ok {
-		return c
+	switch v := content.(type) {
+	case mcpsdk.Content:
+		return v
+	case map[string]any:
+		if parsed, err := mcpsdk.ParseContent(v); err == nil {
+			return parsed
+		}
 	}
 	return mcpsdk.NewTextContent("")
 }

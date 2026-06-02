@@ -15,6 +15,14 @@ import (
 // userStreamID is the chat-list key for echoed user input.
 const userStreamID = "local-user"
 
+// queuedStreamPrefix is the chat-list key prefix for queued steering messages.
+// A per-message counter suffix keeps each queued bubble distinct.
+const queuedStreamPrefix = "local-queued"
+
+// queuedPrefix labels a steering message in the chat so the user can see it is
+// queued for the in-flight turn rather than already sent.
+const queuedPrefix = "[queued] "
+
 // agentEventMsg carries a single agent.Event into the Bubble Tea update loop.
 type agentEventMsg agent.Event
 
@@ -220,6 +228,14 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	if cmd := m.advanceGoal(done.last); cmd != nil {
 		return m, cmd
+	}
+	// Deliver any steering text that arrived after the loop's final steering
+	// check but before its run mutex released: the agent could not consume it,
+	// so start it as a fresh turn here. This is also the path for a message
+	// queued in the same narrow window where Steer still reported "queued".
+	// continueRun reuses the existing listener rather than spawning a second.
+	if pending := m.deps.Agent.PendingSteering(); len(pending) > 0 {
+		return m, m.continueRun(strings.Join(pending, "\n"))
 	}
 	return m, nil
 }

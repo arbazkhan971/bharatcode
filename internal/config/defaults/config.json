@@ -148,6 +148,24 @@
       ]
     },
     {
+      "name": "sarvam",
+      "type": "openai_compatible",
+      "base_url": "https://api.sarvam.ai/v1",
+      "api_key_env": "SARVAM_API_KEY",
+      "models": [
+        "sarvam-m"
+      ]
+    },
+    {
+      "name": "krutrim",
+      "type": "openai_compatible",
+      "base_url": "https://cloud.olakrutrim.com/v1",
+      "api_key_env": "KRUTRIM_API_KEY",
+      "models": [
+        "Krutrim-spectre-v2"
+      ]
+    },
+    {
       "name": "ollama",
       "type": "ollama",
       "base_url": "http://localhost:11434",
@@ -351,6 +369,24 @@
       "context_window": 128000,
       "input_price_per_mtok_usd": 0.38,
       "output_price_per_mtok_usd": 0.40,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "sarvam-m",
+      "provider": "sarvam",
+      "context_window": 32768,
+      "input_price_per_mtok_usd": 0.50,
+      "output_price_per_mtok_usd": 1.50,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "Krutrim-spectre-v2",
+      "provider": "krutrim",
+      "context_window": 8192,
+      "input_price_per_mtok_usd": 0.50,
+      "output_price_per_mtok_usd": 1.50,
       "supports_images": false,
       "supports_tools": true
     },

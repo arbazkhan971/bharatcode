@@ -141,10 +141,11 @@ type model struct {
 	quitting         bool
 
 	// Agent run state.
-	running     bool
-	turn        int
-	eventCh     <-chan agent.Event
-	eventCancel func()
+	running      bool
+	turn         int
+	queueCounter int
+	eventCh      <-chan agent.Event
+	eventCancel  func()
 
 	// Autonomous goal-loop state (CHANGE 2).
 	goalActive    bool
@@ -329,7 +330,29 @@ func (m *model) submitInput() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") {
 		return m.handleSlash(text)
 	}
+	// While a turn is in flight, a plain message is queued as steering for the
+	// running agent instead of starting a second concurrent Run (which would
+	// panic on the loop's run mutex). It is delivered at the next safe boundary.
+	if m.running {
+		return m.steerRun(text)
+	}
 	return m.startRun(text)
+}
+
+// steerRun queues text as a steering message for the in-flight agent turn and
+// surfaces it in the chat as a queued user message. If the run finished between
+// the running check and Steer (a narrow race), Steer reports it was not queued
+// and the text is started as a fresh turn instead.
+func (m *model) steerRun(text string) (tea.Model, tea.Cmd) {
+	if !m.deps.Agent.Steer(text) {
+		return m.startRun(text)
+	}
+	m.queueCounter++
+	id := fmt.Sprintf("%s-%d", queuedStreamPrefix, m.queueCounter)
+	m.chat.Stream(id, queuedPrefix+text)
+	m.chat.FinishStream(id)
+	m.chat.Reindex(id)
+	return m, nil
 }
 
 func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {

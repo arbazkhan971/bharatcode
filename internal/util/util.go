@@ -41,6 +41,66 @@ func ExpandPath(p string) string {
 	return filepath.Clean(p)
 }
 
+// ExpandHome expands a leading `~` to the user's home directory.
+// Unlike ExpandPath it does not substitute environment variables, so
+// it is safe for inputs that may legitimately contain a literal `$`.
+// A bare `~` expands to the home directory; `~/x` and `~\x` expand to
+// home joined with `x`. Any other input (including `~user`) is
+// returned cleaned but otherwise untouched. An empty input returns an
+// empty string. ExpandHome never returns an error; if the home
+// directory cannot be determined the leading `~` is left in place.
+func ExpandHome(p string) string {
+	if p == "" {
+		return ""
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~\\") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			if p == "~" {
+				p = home
+			} else {
+				p = filepath.Join(home, p[2:])
+			}
+		}
+	}
+	return filepath.Clean(p)
+}
+
+// ShortenPath shortens an absolute path for display by replacing a
+// leading home-directory prefix with `~`. It is an alias of ShortPath
+// kept for naming symmetry with ExpandHome. Returns p unchanged if it
+// is not under the home directory or if the home directory cannot be
+// determined.
+func ShortenPath(p string) string {
+	return ShortPath(p)
+}
+
+// RelOrAbs returns target expressed relative to base when doing so
+// yields a shorter, descendant path (no leading "..") and the relative
+// form is not longer than the absolute one; otherwise it returns the
+// cleaned absolute target. Passing base explicitly keeps the result
+// deterministic and independent of the process working directory. Both
+// paths are cleaned before comparison. An empty base returns the
+// cleaned target unchanged.
+func RelOrAbs(base, target string) string {
+	target = filepath.Clean(target)
+	if base == "" {
+		return target
+	}
+	rel, err := filepath.Rel(filepath.Clean(base), target)
+	if err != nil {
+		return target
+	}
+	// Reject paths that escape base or that are not shorter to display.
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return target
+	}
+	if len(rel) >= len(target) {
+		return target
+	}
+	return rel
+}
+
 // ShortPath replaces a leading home-directory prefix with `~`. It is
 // the inverse of ExpandPath for display purposes. Returns p unchanged
 // if it is not under the home directory or if the home directory

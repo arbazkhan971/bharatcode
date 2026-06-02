@@ -35,6 +35,71 @@ func TestExpandPath(t *testing.T) {
 	require.Equal(t, filepath.Clean("/abc/def"), ExpandPath("/abc/def"))
 }
 
+func TestExpandHome(t *testing.T) {
+	t.Setenv("HOME", "/h/u")
+	t.Setenv("USERPROFILE", "/h/u") // For Windows.
+
+	// Empty input.
+	require.Equal(t, "", ExpandHome(""))
+
+	// Bare tilde.
+	require.Equal(t, filepath.Clean("/h/u"), ExpandHome("~"))
+
+	// Tilde with subpath.
+	require.Equal(t, filepath.Clean("/h/u/foo/bar"), ExpandHome("~/foo/bar"))
+
+	// Absolute path untouched.
+	require.Equal(t, filepath.Clean("/abc/def"), ExpandHome("/abc/def"))
+
+	// Unlike ExpandPath, a literal `$VAR` is preserved, not expanded.
+	require.Equal(t, filepath.Clean("/h/u/$NOT_EXPANDED"), ExpandHome("~/$NOT_EXPANDED"))
+
+	// `~user` form is not expanded.
+	require.Equal(t, filepath.Clean("~alice/foo"), ExpandHome("~alice/foo"))
+}
+
+func TestShortenPath(t *testing.T) {
+	t.Setenv("HOME", "/h/u")
+	t.Setenv("USERPROFILE", "/h/u")
+
+	// Empty input.
+	require.Equal(t, "", ShortenPath(""))
+
+	// Under home gets the `~` prefix.
+	require.Equal(t, "~"+string(filepath.Separator)+"foo", ShortenPath(filepath.Clean("/h/u/foo")))
+
+	// Exactly home.
+	require.Equal(t, "~", ShortenPath(filepath.Clean("/h/u")))
+
+	// Outside home unchanged.
+	require.Equal(t, filepath.Clean("/other/path"), ShortenPath(filepath.Clean("/other/path")))
+
+	// ShortenPath is the inverse of ExpandHome for home-relative paths.
+	require.Equal(t, filepath.Clean("/h/u/foo"), ExpandHome(ShortenPath(filepath.Clean("/h/u/foo"))))
+}
+
+func TestRelOrAbs(t *testing.T) {
+	sep := string(filepath.Separator)
+
+	// Empty base returns the cleaned target.
+	require.Equal(t, filepath.Clean("/a/b/c"), RelOrAbs("", "/a/b/c"))
+
+	// Descendant collapses to the shorter relative form.
+	require.Equal(t, "c"+sep+"d", RelOrAbs(filepath.Clean("/a/b"), filepath.Clean("/a/b/c/d")))
+
+	// Direct child.
+	require.Equal(t, "file.txt", RelOrAbs(filepath.Clean("/a/b"), filepath.Clean("/a/b/file.txt")))
+
+	// Target equal to base shortens to ".".
+	require.Equal(t, ".", RelOrAbs(filepath.Clean("/a/b"), filepath.Clean("/a/b")))
+
+	// Sibling/escaping path keeps the absolute form (no ".." display).
+	require.Equal(t, filepath.Clean("/a/x"), RelOrAbs(filepath.Clean("/a/b"), filepath.Clean("/a/x")))
+
+	// Unrelated root keeps absolute.
+	require.Equal(t, filepath.Clean("/other"), RelOrAbs(filepath.Clean("/a/b"), filepath.Clean("/other")))
+}
+
 func TestShortPath(t *testing.T) {
 	t.Setenv("HOME", "/h/u")
 	t.Setenv("USERPROFILE", "/h/u")

@@ -78,6 +78,7 @@ func newRootCmd() *cobra.Command {
 	root.SetContext(withRootOptions(context.Background(), opts))
 
 	root.AddCommand(
+		newInitCmd(),
 		newRunCmd(),
 		newLoginCmd(),
 		newLogoutCmd(),

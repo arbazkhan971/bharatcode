@@ -128,6 +128,81 @@ func TestParseReferencesShapes(t *testing.T) {
 	})
 }
 
+func TestParseDocumentSymbolsShapes(t *testing.T) {
+	uri := pathToURI("/tmp/example/main.go")
+	wantPath, err := uriToPath(uri)
+	require.NoError(t, err)
+	rng := `"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":4}}`
+	wantRange := Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}}
+
+	t.Run("hierarchical_document_symbols", func(t *testing.T) {
+		raw := `[{"name":"Server","kind":23,` + rng + `,"children":[{"name":"Start","kind":6,` + rng + `}]}]`
+		symbols, err := parseDocumentSymbols(wantPath, json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, []Symbol{
+			{Name: "Server", Kind: Struct, Path: wantPath, Range: wantRange},
+			{Name: "Start", Kind: Method, Path: wantPath, Range: wantRange, ContainerName: "Server"},
+		}, symbols)
+	})
+
+	t.Run("flat_symbol_information", func(t *testing.T) {
+		raw := `[{"name":"Helper","kind":12,"location":{"uri":"` + uri + `",` + rng + `}}]`
+		symbols, err := parseDocumentSymbols("/ignored", json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, []Symbol{
+			{Name: "Helper", Kind: Function, Path: wantPath, Range: wantRange},
+		}, symbols)
+	})
+
+	t.Run("null_result", func(t *testing.T) {
+		symbols, err := parseDocumentSymbols(wantPath, json.RawMessage(`null`))
+		require.NoError(t, err)
+		require.Nil(t, symbols)
+	})
+
+	t.Run("empty_array", func(t *testing.T) {
+		symbols, err := parseDocumentSymbols(wantPath, json.RawMessage(`[]`))
+		require.NoError(t, err)
+		require.Empty(t, symbols)
+	})
+}
+
+func TestParseWorkspaceSymbolsShapes(t *testing.T) {
+	uri := pathToURI("/tmp/example/main.go")
+	wantPath, err := uriToPath(uri)
+	require.NoError(t, err)
+	rng := `"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":4}}`
+	wantRange := Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}}
+
+	t.Run("symbol_information_array", func(t *testing.T) {
+		raw := `[{"name":"Server","kind":23,"containerName":"pkg","location":{"uri":"` + uri + `",` + rng + `}}]`
+		symbols, err := parseWorkspaceSymbols(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, []Symbol{
+			{Name: "Server", Kind: Struct, Path: wantPath, Range: wantRange, ContainerName: "pkg"},
+		}, symbols)
+	})
+
+	t.Run("skips_entry_without_uri", func(t *testing.T) {
+		raw := `[{"name":"Orphan","kind":12,"location":{"uri":"",` + rng + `}}]`
+		symbols, err := parseWorkspaceSymbols(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Empty(t, symbols)
+	})
+
+	t.Run("null_result", func(t *testing.T) {
+		symbols, err := parseWorkspaceSymbols(json.RawMessage(`null`))
+		require.NoError(t, err)
+		require.Nil(t, symbols)
+	})
+
+	t.Run("empty_array", func(t *testing.T) {
+		symbols, err := parseWorkspaceSymbols(json.RawMessage(`[]`))
+		require.NoError(t, err)
+		require.Empty(t, symbols)
+	})
+}
+
 func TestParseRenameShapes(t *testing.T) {
 	uri := pathToURI("/tmp/example/main.go")
 	wantPath, err := uriToPath(uri)

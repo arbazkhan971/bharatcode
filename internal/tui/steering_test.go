@@ -89,6 +89,64 @@ func TestSubmitWhileRunning_QueuesAsSteeringAndDelivers(t *testing.T) {
 	msgs, err := h.repo.Messages(context.Background(), m.sessionID)
 	require.NoError(t, err)
 	require.True(t, sessionHasUserText(msgs, steerText), "steering text must be delivered to the agent as a user message")
+
+	// The steering text appears exactly once in the chat: as the queued bubble,
+	// never echoed into the assistant's reply or double-rendered on delivery.
+	require.Equal(t, 1, strings.Count(plainText(m.chat.Render(200)), steerText), "steering text must render exactly once (queued bubble only)")
+}
+
+// TestSteeringDoesNotLeakIntoLaterTurnAfterInterrupt locks the fix for stale
+// steering: a message queued onto an interrupted turn must not be carried into
+// a later, unrelated run. The agent drains its steering queue unconditionally
+// at the top of every turn, so the TUI must clear leftovers on a failed run.
+func TestSteeringDoesNotLeakIntoLaterTurnAfterInterrupt(t *testing.T) {
+	provider := &gatedProvider{release: make(chan struct{})}
+	provider.scripts = [][]llm.Event{
+		// Turn 1 is gated open and then interrupted; it never completes.
+		{llm.DeltaTextEvent{Text: "starting"}, llm.EndEvent{}},
+		// A later, unrelated run. Its request must NOT carry the stale steering.
+		{llm.DeltaTextEvent{Text: "second prompt reply"}, llm.EndEvent{}},
+	}
+
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	const steerText = "stale steering that must not leak"
+
+	// Start and gate the first run.
+	m.input.WriteString("first prompt")
+	_, startCmd := m.Update(keySpecial("enter", tea.KeyEnter))
+	require.True(t, m.running)
+	msgCh := runBatch(t, startCmd)
+	waitForCalls(t, provider, 1)
+
+	// Queue steering onto the in-flight (gated) turn.
+	m.input.WriteString(steerText)
+	_, steerCmd := m.Update(keySpecial("enter", tea.KeyEnter))
+	require.Nil(t, steerCmd)
+
+	// Interrupt: the gated provider returns on ctx cancellation, the run errors
+	// out, and the queued steering is left undrained on the shared Loop.
+	m.deps.Agent.Interrupt()
+	close(provider.release)
+	done := drainUntilRunDone(t, h, msgCh)
+	require.Error(t, done.err, "interrupted run must report an error")
+	require.False(t, m.running)
+
+	// The leftover steering must have been cleared, not carried forward.
+	require.Empty(t, m.deps.Agent.PendingSteering(), "interrupt must clear leftover steering")
+
+	// Run a second, unrelated prompt to completion and assert no leak.
+	m.input.WriteString("second prompt")
+	_, startCmd2 := m.Update(keySpecial("enter", tea.KeyEnter))
+	require.True(t, m.running)
+	msgCh2 := runBatch(t, startCmd2)
+	done2 := drainUntilRunDone(t, h, msgCh2)
+	require.NoError(t, done2.err)
+
+	msgs, err := h.repo.Messages(context.Background(), m.sessionID)
+	require.NoError(t, err)
+	require.False(t, sessionHasUserText(msgs, steerText), "stale steering must not leak into a later run")
 }
 
 // runBatch executes the tea.Batch returned by startRun, launching every

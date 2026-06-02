@@ -49,6 +49,11 @@ type Request struct {
 	Temperature  float64
 	MaxTokens    int
 	SystemPrompt string
+	// ReasoningEffort selects how much hidden reasoning an OpenAI reasoning
+	// model (o-series, gpt-5 reasoning) spends before answering. Valid values
+	// are provider-defined ("low", "medium", "high"). It is passed through to
+	// the OpenAI request only for reasoning models and ignored otherwise.
+	ReasoningEffort string
 }
 
 // Tool describes one callable function available to the model.

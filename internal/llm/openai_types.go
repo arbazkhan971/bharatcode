@@ -9,6 +9,10 @@ type openAIChatRequest struct {
 	Stream      bool            `json:"stream"`
 	Temperature float64         `json:"temperature,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
+	// ReasoningEffort is sent only for OpenAI reasoning models (o-series,
+	// gpt-5 reasoning) when the request specifies one. It is omitted for
+	// non-reasoning models and when empty.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type openAIMessage struct {

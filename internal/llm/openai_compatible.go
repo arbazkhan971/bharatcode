@@ -174,12 +174,23 @@ func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error
 	}
 
 	body := openAIChatRequest{
-		Model:       req.Model,
-		Messages:    messages,
-		Tools:       tools,
-		Stream:      true,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		Model:     req.Model,
+		Messages:  messages,
+		Tools:     tools,
+		Stream:    true,
+		MaxTokens: req.MaxTokens,
+	}
+	// Reasoning models (o-series, gpt-5 reasoning) reject temperature and
+	// instead accept reasoning_effort. Non-reasoning models keep the classic
+	// temperature param and ignore reasoning_effort. Gate both by model id so
+	// we never send a param the API would 400 on. Temperature stays unset (and
+	// thus omitted) for reasoning models, preserving the prior omitempty
+	// behavior for every other model: a zero temperature is omitted so the
+	// provider applies its own default.
+	if isReasoningModel(req.Model) {
+		body.ReasoningEffort = req.ReasoningEffort
+	} else {
+		body.Temperature = req.Temperature
 	}
 	return body, nil
 }

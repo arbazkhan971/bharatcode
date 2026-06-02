@@ -112,6 +112,87 @@ func TestSlashFork_CreatesAndSwitchesToNewSession(t *testing.T) {
 	require.Equal(t, "remember this thread", firstUserText(msgs), "fork must copy the source transcript")
 }
 
+// TestSlashCompact_ShrinksHistoryAndConfirms is the /compact contract test. It
+// seeds a multi-turn session, runs /compact, and asserts two things:
+//   - the confirmation surfaces in the chat, and
+//   - the compaction seam actually fired: the next provider request carries a
+//     SMALLER history than the full persisted transcript. The default compactor
+//     keeps the last 2 messages plus a synthetic marker, so a transcript of
+//     several messages must shrink. This proves the handler wired to the loop's
+//     Compact method, not merely that it printed a string.
+func TestSlashCompact_ShrinksHistoryAndConfirms(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "post-compact reply"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// Seed a persisted session with a transcript well beyond the compactor's
+	// keepRecent tail so compaction must drop messages.
+	s := &session.Session{Title: "Long thread", Model: "fake-model", Agent: "coder"}
+	require.NoError(t, h.repo.Create(context.Background(), s))
+	for i := 0; i < 6; i++ {
+		require.NoError(t, h.repo.AppendMessage(context.Background(), s.ID, message.Message{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "user turn"}},
+		}))
+		require.NoError(t, h.repo.AppendMessage(context.Background(), s.ID, message.Message{
+			Role:    message.RoleAssistant,
+			Content: []message.ContentBlock{message.TextBlock{Text: "assistant turn"}},
+		}))
+	}
+	persisted, err := h.repo.Messages(context.Background(), s.ID)
+	require.NoError(t, err)
+	require.Greater(t, len(persisted), 3, "the seeded transcript must exceed the compactor tail")
+
+	m.sessionID = s.ID
+	m.sessionPersisted = true
+
+	h.submitSlash(t, "/compact")
+
+	// The confirmation is surfaced in the chat (named deliverable).
+	require.Contains(t, plainText(m.chat.Render(200)), "Context compacted",
+		"/compact must surface a confirmation in the chat")
+	require.False(t, m.dialogs.Contains("error"), "a successful compaction must not raise an error dialog")
+
+	// The seam actually fired: the next turn's provider request must carry a
+	// smaller history than the full persisted transcript.
+	h.submit(t, "continue please")
+	h.drain(t, func() bool { return !m.running })
+
+	sent := provider.lastRequest().Messages
+	require.NotEmpty(t, sent, "the post-compact turn must reach the provider")
+	// persisted has 12 messages at compact time; the post-compact request must
+	// carry far fewer (the compactor keeps a small tail plus a marker, then the
+	// loop grafts only the one new prompt onto the snapshot).
+	require.Less(t, len(sent), len(persisted),
+		"compaction must shrink the history the agent sends to the provider")
+	// The on-disk transcript is never mutated by compaction.
+	after, err := h.repo.Messages(context.Background(), s.ID)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(after), len(persisted),
+		"compaction must not delete persisted messages from the session")
+}
+
+// TestSlashCompact_NoSession_ShowsPlaceholder asserts /compact is a no-op with
+// an explanatory dialog before any session has been persisted.
+func TestSlashCompact_NoSession_ShowsPlaceholder(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	require.False(t, m.sessionPersisted)
+	h.submitSlash(t, "/compact")
+
+	require.True(t, m.dialogs.Contains("compact"), "/compact must surface a guard dialog with no session")
+	require.Contains(t, plainText(m.dialogs.Render(200)), "No active session")
+	require.NotContains(t, plainText(m.chat.Render(200)), "Context compacted",
+		"no confirmation must appear when there is nothing to compact")
+}
+
 // TestSlashStatus_ShowsModelSessionAndCount is the /status contract test: the
 // panel must contain the model, the session id, and the message count.
 func TestSlashStatus_ShowsModelSessionAndCount(t *testing.T) {

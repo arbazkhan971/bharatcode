@@ -295,13 +295,15 @@ type scriptedProvider struct {
 	mu      sync.Mutex
 	scripts [][]llm.Event
 	callN   int
+	lastReq llm.Request
 }
 
 func (p *scriptedProvider) Name() string { return "fake" }
 
-func (p *scriptedProvider) Stream(ctx context.Context, _ llm.Request) (<-chan llm.Event, error) {
+func (p *scriptedProvider) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event, error) {
 	p.mu.Lock()
 	p.callN++
+	p.lastReq = req
 	var events []llm.Event
 	if len(p.scripts) > 0 {
 		events = p.scripts[0]
@@ -334,6 +336,15 @@ func (p *scriptedProvider) calls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.callN
+}
+
+// lastRequest returns a copy of the most recent request the loop sent to the
+// provider, letting a test inspect the history the agent actually transmitted
+// (e.g. to confirm compaction shrank it).
+func (p *scriptedProvider) lastRequest() llm.Request {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastReq
 }
 
 // echoTool is a minimal real tool so EventToolCalled fires for the scripted

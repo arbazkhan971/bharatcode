@@ -14,6 +14,27 @@ import (
 // (with a warning) when it is absent.
 const bwrapBinary = "bwrap"
 
+// init wires the default functional probe for Linux. On locked-down hosts bwrap
+// is frequently present yet nonfunctional because user namespaces are disabled;
+// the probe catches that case so we degrade to plain bash instead of failing
+// every command.
+func init() {
+	sandboxProbe = linuxSandboxProbe
+}
+
+// linuxSandboxProbe reports whether bwrap is present and can actually construct
+// a sandbox in this environment. It folds the PATH lookup and a trivial no-op
+// run (exercising user-namespace, mount-namespace and net-unshare setup) into
+// one check so a present-but-broken launcher degrades like a missing one. The
+// probe argv mirrors the integration test's so production and test logic cannot
+// drift.
+func linuxSandboxProbe() bool {
+	if _, err := exec.LookPath(bwrapBinary); err != nil {
+		return false
+	}
+	return exec.Command(bwrapBinary, "--ro-bind", "/", "/", "--unshare-net", "true").Run() == nil
+}
+
 // wrapCommand builds the argv used to execute cmdStr under the requested
 // sandbox mode on Linux, preferring bubblewrap (bwrap).
 //
@@ -36,8 +57,9 @@ const bwrapBinary = "bwrap"
 // Paths are canonicalised with filepath.EvalSymlinks so the bind source and
 // destination match the paths the command actually resolves. An empty
 // workspace under workspace-write degrades to no sandbox with a warning,
-// matching the macOS behaviour. If bwrap is not on PATH we fall back to a
-// plain bash invocation and log a warning rather than failing.
+// matching the macOS behaviour. If the cached functional probe reports bwrap is
+// missing or unusable (e.g. user namespaces disabled on a locked-down host) we
+// fall back to a plain bash invocation and log a warning rather than failing.
 func wrapCommand(mode SandboxMode, workspace, cmdStr string) []string {
 	if !mode.confines() {
 		return plainBash(cmdStr)
@@ -48,8 +70,11 @@ func wrapCommand(mode SandboxMode, workspace, cmdStr string) []string {
 		return plainBash(cmdStr)
 	}
 
-	if _, err := exec.LookPath(bwrapBinary); err != nil {
-		slog.Warn("sandbox: bwrap not found on PATH; running without sandbox", "error", err)
+	// Gate on a cached functional probe rather than a bare PATH lookup: on a
+	// locked-down host bwrap may be present yet unable to create a user
+	// namespace, which would otherwise make every command fail. The probe runs
+	// at most once per process and degrades to plain bash when it fails.
+	if !sandboxLauncherUsable() {
 		return plainBash(cmdStr)
 	}
 

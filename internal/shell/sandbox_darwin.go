@@ -16,6 +16,26 @@ import (
 // degrade gracefully if a stripped environment lacks it.
 const sandboxExecBinary = "sandbox-exec"
 
+// init wires the default functional probe for macOS. The probe is harmless
+// here: sandbox-exec is reliable, so the no-op run succeeds and confinement
+// stays enabled. It still guards against a stripped environment where
+// sandbox-exec is missing from PATH.
+func init() {
+	sandboxProbe = darwinSandboxProbe
+}
+
+// darwinSandboxProbe reports whether sandbox-exec is present and can construct a
+// minimal sandbox in this environment. It folds the PATH lookup and a trivial
+// no-op run into one check so a present-but-unusable launcher degrades like a
+// missing one. The probe argv mirrors the integration test's so production and
+// test logic cannot drift.
+func darwinSandboxProbe() bool {
+	if _, err := exec.LookPath(sandboxExecBinary); err != nil {
+		return false
+	}
+	return exec.Command(sandboxExecBinary, "-p", "(version 1)(allow default)", "true").Run() == nil
+}
+
 // wrapCommand builds the argv used to execute cmdStr under the requested
 // sandbox mode on macOS.
 //
@@ -40,8 +60,8 @@ const sandboxExecBinary = "sandbox-exec"
 //
 // If the workspace is empty (e.g. the hooks path that runs with no cwd) we
 // cannot scope writes safely, so we degrade to no sandbox with a warning
-// rather than emit a profile with an empty subpath. Likewise if sandbox-exec
-// is missing from PATH.
+// rather than emit a profile with an empty subpath. Likewise if the cached
+// functional probe reports sandbox-exec is missing or unusable.
 func wrapCommand(mode SandboxMode, workspace, cmdStr string) []string {
 	if !mode.confines() {
 		return plainBash(cmdStr)
@@ -52,8 +72,10 @@ func wrapCommand(mode SandboxMode, workspace, cmdStr string) []string {
 		return plainBash(cmdStr)
 	}
 
-	if _, err := exec.LookPath(sandboxExecBinary); err != nil {
-		slog.Warn("sandbox: sandbox-exec not found on PATH; running without sandbox", "error", err)
+	// Gate on a cached functional probe rather than a bare PATH lookup: a
+	// present-but-broken launcher must degrade to plain bash, not fail every
+	// command. The probe runs at most once per process.
+	if !sandboxLauncherUsable() {
 		return plainBash(cmdStr)
 	}
 

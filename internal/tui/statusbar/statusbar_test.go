@@ -1,0 +1,32 @@
+package statusbar
+
+import (
+	"testing"
+	"time"
+
+	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
+	"github.com/stretchr/testify/require"
+)
+
+func TestFieldsPresent(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{
+		Theme:     styles.Default(),
+		Model:     "kimi-k2",
+		Agent:     "coder",
+		SessionID: "abcdef123456",
+		StartedAt: start,
+		Now:       start.Add(time.Second),
+	}
+	first := bar.Render(160)
+	bar.Now = start.Add(2 * time.Second)
+	second := bar.Render(160)
+
+	require.Contains(t, first, "kimi-k2")
+	require.Contains(t, first, "coder")
+	require.Contains(t, first, "abcdef12")
+	require.Contains(t, first, "1s")
+	require.Contains(t, second, "2s")
+}

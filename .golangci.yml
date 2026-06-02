@@ -1,0 +1,31 @@
+# golangci-lint configuration (v1 schema).
+# Enables a sensible default linter set for BharatCode. Generated code under
+# internal/db/sqlc is excluded — it is produced by `sqlc generate` and should
+# not be linted or formatted by hand.
+
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - ineffassign
+    - unused
+    - gofumpt
+
+issues:
+  # Do not lint sqlc-generated code.
+  exclude-dirs:
+    - internal/db/sqlc
+  exclude-rules:
+    - path: internal/db/sqlc
+      linters:
+        - govet
+        - errcheck
+        - staticcheck
+        - ineffassign
+        - unused
+        - gofumpt

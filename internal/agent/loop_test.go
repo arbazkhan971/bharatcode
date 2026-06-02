@@ -1,0 +1,399 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/llm"
+	"github.com/arbazkhan971/bharatcode/internal/message"
+	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/arbazkhan971/bharatcode/internal/session"
+	"github.com/arbazkhan971/bharatcode/internal/tools"
+	"github.com/stretchr/testify/require"
+)
+
+func TestRunDrivesToolLoopAndPersistsMessages(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+	view := &recordingTool{name: "view", result: "hello"}
+	edit := &recordingTool{name: "edit", result: "edited"}
+	registry.Register(view)
+	registry.Register(edit)
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "I will inspect it."},
+			llm.ToolUseEndEvent{ID: "call-1", Name: "view", Input: json.RawMessage(`{"path":"testdata/hello.txt"}`)},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+		{
+			llm.ToolUseEndEvent{ID: "call-2", Name: "edit", Input: json.RawMessage(`{"path":"testdata/hello.txt"}`)},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 12, OutputTokens: 6}},
+		},
+		{
+			llm.DeltaTextEvent{Text: "Done."},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 8, OutputTokens: 4}},
+		},
+	}}
+
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		Bus:          pubsub.NewTopic[Event]("agent-test", 16),
+		SystemPrompt: "test prompt",
+	})
+	err := loop.Run(ctx, sessionID, userMessage("please update it"))
+	require.NoError(t, err)
+
+	require.Equal(t, []string{`{"path":"testdata/hello.txt"}`}, view.calls)
+	require.Equal(t, []string{`{"path":"testdata/hello.txt"}`}, edit.calls)
+	messages, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, messages, 6)
+	require.Equal(t, message.RoleUser, messages[0].Role)
+	require.Equal(t, message.RoleAssistant, messages[1].Role)
+	require.Equal(t, message.RoleUser, messages[2].Role)
+	require.Equal(t, message.RoleAssistant, messages[5].Role)
+}
+
+func TestLoopDetectionStopsBeforeThirdIdenticalToolRun(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+	bash := &recordingTool{name: "bash", result: "x"}
+	registry.Register(bash)
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{toolCall("1", "bash", `{"command":"echo x"}`), llm.EndEvent{}},
+		{toolCall("2", "bash", `{"command":"echo x"}`), llm.EndEvent{}},
+		{toolCall("3", "bash", `{"command":"echo x"}`), llm.EndEvent{}},
+		{toolCall("4", "bash", `{"command":"echo x"}`), llm.EndEvent{}},
+	}}
+	bus := pubsub.NewTopic[Event]("agent-test", 16)
+	events, cancel := bus.Subscribe()
+	defer cancel()
+
+	loop := New(Config{
+		Name:     "coder",
+		Model:    "fake-model",
+		Provider: provider,
+		Tools:    registry,
+		Sessions: repo,
+		Bus:      bus,
+	})
+	err := loop.Run(ctx, sessionID, userMessage("loop"))
+	require.NoError(t, err)
+	require.Len(t, bash.calls, 2)
+
+	var sawLoop bool
+	for {
+		select {
+		case event := <-events:
+			if event.Kind == EventLoopDetected {
+				sawLoop = true
+			}
+		default:
+			require.True(t, sawLoop)
+			messages, err := repo.Messages(ctx, sessionID)
+			require.NoError(t, err)
+			last := messages[len(messages)-1]
+			require.Contains(t, textOf(last), ErrLoopDetected.Error())
+			return
+		}
+	}
+}
+
+func TestInterruptCancelsRun(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+	provider := &blockingProvider{started: make(chan struct{})}
+	loop := New(Config{
+		Name:     "coder",
+		Model:    "fake-model",
+		Provider: provider,
+		Tools:    registry,
+		Sessions: repo,
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- loop.Run(ctx, sessionID, userMessage("wait"))
+	}()
+	<-provider.started
+	loop.Interrupt()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		require.True(t, errors.Is(err, context.Canceled), err.Error())
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not return after Interrupt")
+	}
+}
+
+func TestCoordinatorBuiltinsListDeterministically(t *testing.T) {
+	provider := &scriptProvider{}
+	coord, err := NewCoordinator(nil, Dependencies{
+		Sessions:  testRepo(t),
+		Providers: map[string]llm.Provider{"fake": provider},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"coder", "task"}, coord.List())
+}
+
+func TestRenderPromptIncludesEnvironmentAndTools(t *testing.T) {
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "view", desc: "Read a file."})
+	prompt, err := renderPrompt(context.Background(), "coder", "", registry, nil)
+	require.NoError(t, err)
+	require.Contains(t, prompt, "Working directory:")
+	require.Contains(t, prompt, "Platform:")
+	require.Contains(t, prompt, "Git branch:")
+	require.Contains(t, prompt, "view: Read a file.")
+}
+
+func TestInjectInstructionsAppendsWhenProvided(t *testing.T) {
+	base := "You are BharatCode's primary coding agent."
+	instr := "PROJECT-RULE: never log secrets."
+
+	out := injectInstructions(base, instr)
+
+	// Base prompt is preserved.
+	require.Contains(t, out, base)
+	// Injected instructions are present, under the delimited header.
+	require.Contains(t, out, projectInstructionsHeader)
+	require.Contains(t, out, instr)
+	// The injected section comes after the base prompt.
+	require.Less(t, strings.Index(out, base), strings.Index(out, instr))
+	// The header introduces the instructions (delimited section).
+	require.Less(t, strings.Index(out, projectInstructionsHeader), strings.Index(out, instr))
+}
+
+func TestInjectInstructionsEmptyLeavesBaseUnchanged(t *testing.T) {
+	base := "You are BharatCode's primary coding agent."
+
+	require.Equal(t, base, injectInstructions(base, ""))
+	require.Equal(t, base, injectInstructions(base, "   \n\t  "))
+	// No delimiter header leaks in when there is nothing to inject.
+	require.NotContains(t, injectInstructions(base, ""), projectInstructionsHeader)
+}
+
+func TestRenderPromptInjectsProjectInstructions(t *testing.T) {
+	dir := t.TempDir()
+	instr := "PROJECT-MARKER-9f3a: enforce gofumpt on save."
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(instr), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	require.NoError(t, os.Chdir(dir))
+
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "view", desc: "Read a file."})
+
+	prompt, err := renderPrompt(context.Background(), "coder", "", registry, nil)
+	require.NoError(t, err)
+
+	require.Contains(t, prompt, projectInstructionsHeader)
+	require.Contains(t, prompt, instr)
+}
+
+func testRepo(t *testing.T) *session.Repo {
+	t.Helper()
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	return session.NewRepo(database)
+}
+
+func testSession(t *testing.T, repo *session.Repo) string {
+	t.Helper()
+	s := &session.Session{
+		ID:          "session-" + time.Now().Format("150405.000000000"),
+		ProjectPath: t.TempDir(),
+		Title:       "New session",
+		Model:       "fake-model",
+		Agent:       "coder",
+	}
+	require.NoError(t, repo.Create(context.Background(), s))
+	return s.ID
+}
+
+func userMessage(text string) message.Message {
+	return message.Message{
+		Role:    message.RoleUser,
+		Content: []message.ContentBlock{message.TextBlock{Text: text}},
+	}
+}
+
+type fakeRegistry struct {
+	mu    sync.RWMutex
+	tools map[string]tools.Tool
+}
+
+func newFakeRegistry() *fakeRegistry {
+	return &fakeRegistry{tools: map[string]tools.Tool{}}
+}
+
+func (r *fakeRegistry) Register(t tools.Tool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[t.Name()] = t
+}
+
+func (r *fakeRegistry) Get(name string) (tools.Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[name]
+	return t, ok
+}
+
+func (r *fakeRegistry) List() []tools.Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]tools.Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		out = append(out, t)
+	}
+	return out
+}
+
+func toolCall(id, name, input string) llm.Event {
+	return llm.ToolUseEndEvent{ID: id, Name: name, Input: json.RawMessage(input)}
+}
+
+func textOf(msg message.Message) string {
+	var out string
+	for _, block := range msg.Content {
+		if b, ok := block.(message.TextBlock); ok {
+			out += b.Text
+		}
+	}
+	return out
+}
+
+type recordingTool struct {
+	name   string
+	desc   string
+	result string
+	mu     sync.Mutex
+	calls  []string
+}
+
+func (t *recordingTool) Name() string {
+	return t.name
+}
+
+func (t *recordingTool) Description() string {
+	if t.desc != "" {
+		return t.desc
+	}
+	return "Test tool " + t.name
+}
+
+func (t *recordingTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+
+func (t *recordingTool) Run(ctx context.Context, args json.RawMessage) (tools.Result, error) {
+	_ = ctx
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls = append(t.calls, string(args))
+	return tools.Result{Content: t.result}, nil
+}
+
+type scriptProvider struct {
+	mu      sync.Mutex
+	scripts [][]llm.Event
+	reqs    []llm.Request
+}
+
+func (p *scriptProvider) Name() string {
+	return "fake"
+}
+
+func (p *scriptProvider) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event, error) {
+	p.mu.Lock()
+	p.reqs = append(p.reqs, req)
+	var events []llm.Event
+	if len(p.scripts) > 0 {
+		events = p.scripts[0]
+		p.scripts = p.scripts[1:]
+	}
+	p.mu.Unlock()
+	ch := make(chan llm.Event, len(events))
+	go func() {
+		defer close(ch)
+		for _, event := range events {
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- event:
+			}
+		}
+	}()
+	return ch, nil
+}
+
+func (p *scriptProvider) Models() []llm.Model {
+	return []llm.Model{{
+		ID:            "fake-model",
+		Provider:      "fake",
+		ContextWindow: 8192,
+		SupportsTools: true,
+	}}
+}
+
+func (p *scriptProvider) SupportsTools() bool {
+	return true
+}
+
+func (p *scriptProvider) SupportsImages() bool {
+	return false
+}
+
+type blockingProvider struct {
+	started chan struct{}
+}
+
+func (p *blockingProvider) Name() string {
+	return "fake"
+}
+
+func (p *blockingProvider) Stream(ctx context.Context, req llm.Request) (<-chan llm.Event, error) {
+	_ = req
+	ch := make(chan llm.Event)
+	close(p.started)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func (p *blockingProvider) Models() []llm.Model {
+	return []llm.Model{{ID: "fake-model", Provider: "fake", ContextWindow: 8192}}
+}
+
+func (p *blockingProvider) SupportsTools() bool {
+	return true
+}
+
+func (p *blockingProvider) SupportsImages() bool {
+	return false
+}

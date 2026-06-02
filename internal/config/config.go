@@ -81,6 +81,12 @@ const (
 	ProviderOllama ProviderType = "ollama"
 	// ProviderLMStudio is for LM Studio local API.
 	ProviderLMStudio ProviderType = "lmstudio"
+	// ProviderOpenAIResponses is for the OpenAI Responses API shape.
+	ProviderOpenAIResponses ProviderType = "openai_responses"
+	// ProviderCodexOAuth is the experimental provider that reuses the Codex
+	// CLI's stored ChatGPT subscription token. It talks to OpenAI's private
+	// Codex backend; unsupported and outside OpenAI's third-party terms.
+	ProviderCodexOAuth ProviderType = "codex_oauth"
 )
 
 // Provider describes one LLM endpoint. APIKeyEnv names an

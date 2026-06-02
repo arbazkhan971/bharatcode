@@ -128,6 +128,38 @@ func TestParseReferencesShapes(t *testing.T) {
 	})
 }
 
+func TestParseFormattingShapes(t *testing.T) {
+	wantRange := Range{
+		Start: Position{Line: 1, Character: 2},
+		End:   Position{Line: 3, Character: 4},
+	}
+	rangeJSON := `"range":{"start":{"line":1,"character":2},"end":{"line":3,"character":4}}`
+
+	t.Run("edit_array", func(t *testing.T) {
+		raw := `[{` + rangeJSON + `,"newText":"formatted\n"}]`
+		edits, err := parseFormatting(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, []TextEdit{{Range: wantRange, NewText: "formatted\n"}}, edits)
+	})
+
+	t.Run("null_result", func(t *testing.T) {
+		edits, err := parseFormatting(json.RawMessage(`null`))
+		require.NoError(t, err)
+		require.Nil(t, edits)
+	})
+
+	t.Run("empty_array", func(t *testing.T) {
+		edits, err := parseFormatting(json.RawMessage(`[]`))
+		require.NoError(t, err)
+		require.Empty(t, edits)
+	})
+
+	t.Run("unexpected_value", func(t *testing.T) {
+		_, err := parseFormatting(json.RawMessage(`{"changes":{}}`))
+		require.Error(t, err)
+	})
+}
+
 func TestParseDocumentSymbolsShapes(t *testing.T) {
 	uri := pathToURI("/tmp/example/main.go")
 	wantPath, err := uriToPath(uri)

@@ -102,6 +102,54 @@ func (c *client) rename(ctx context.Context, path string, line, col int, newName
 	return parseRename(result)
 }
 
+// format issues a textDocument/formatting request for the document and returns
+// the edits the server would apply to reformat it. The options field is
+// required by the LSP spec; gopls and other servers override these with their
+// own configuration, so the values only need to be present and valid.
+func (c *client) format(ctx context.Context, path string) ([]TextEdit, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/formatting", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"options": map[string]any{
+			"tabSize":      4,
+			"insertSpaces": false,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting formatting: %w", err)
+	}
+	return parseFormatting(result)
+}
+
+// parseFormatting extracts the edits of a textDocument/formatting response. The
+// result is a flat array of TextEdit ({range, newText}) or null, so it is
+// normalized into []TextEdit.
+func parseFormatting(raw json.RawMessage) ([]TextEdit, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if raw[0] != '[' {
+		return nil, fmt.Errorf("parsing formatting response: unexpected value %q", string(raw))
+	}
+	var items []struct {
+		Range   wireRange `json:"range"`
+		NewText string    `json:"newText"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("parsing formatting response: %w", err)
+	}
+	out := make([]TextEdit, 0, len(items))
+	for _, item := range items {
+		out = append(out, TextEdit{
+			Range:   convertRange(item.Range),
+			NewText: item.NewText,
+		})
+	}
+	return out, nil
+}
+
 // parseReferences extracts the locations of a textDocument/references response.
 // The result is an array of Locations or null, so it is normalized into
 // []Location, reusing the definition array parser.

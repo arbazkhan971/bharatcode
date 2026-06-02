@@ -65,6 +65,17 @@ type Config struct {
 	// when Compact is invoked. When nil, a default drop-and-mark Compactor is
 	// used.
 	Compactor Compactor
+	// Router selects which configured model to use for each turn, enabling
+	// cost-aware routing of cheap models to simple turns and stronger models to
+	// complex ones. When nil, no routing occurs and the Loop always uses Model,
+	// which is the default, non-breaking behavior.
+	Router Router
+	// RouteHint is an explicit complexity override forwarded to Router on every
+	// turn this Loop runs. It is set once at construction (a Loop serves many
+	// Run calls), so it pins the same hint for the Loop's lifetime rather than
+	// varying per turn. It defaults to ComplexityUnset, leaving the Router to
+	// derive complexity from each turn. It is ignored when Router is nil.
+	RouteHint TurnComplexity
 }
 
 // Loop runs a single named agent for one session at a time.
@@ -106,6 +117,13 @@ type Loop struct {
 	// Production uses contextSleep; tests inject a no-op recorder so retries do
 	// not sleep for real.
 	sleep sleepFunc
+
+	// activeModel is the model resolved for the current turn. It is set once at
+	// the top of Run (from the configured Router, or cfg.Model when no Router is
+	// set) and read by every per-step provider call so the whole turn uses one
+	// model. Run holds runMu for its entire duration and rejects concurrent
+	// runs, so no further synchronization is needed.
+	activeModel string
 }
 
 // New constructs a Loop from cfg.
@@ -134,11 +152,12 @@ func New(cfg Config) *Loop {
 		allowed[name] = struct{}{}
 	}
 	return &Loop{
-		cfg:     cfg,
-		name:    cfg.Name,
-		allowed: allowed,
-		backoff: llm.Backoff{},
-		sleep:   contextSleep,
+		cfg:         cfg,
+		name:        cfg.Name,
+		allowed:     allowed,
+		backoff:     llm.Backoff{},
+		sleep:       contextSleep,
+		activeModel: cfg.Model,
 	}
 }
 
@@ -402,11 +421,21 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	}
 
 	history = l.applyCompaction(history)
+
+	// Resolve which model serves this turn BEFORE fitting history, so the whole
+	// turn (every step, retry, usage record, and the context-window budget used
+	// by fitHistory) uses one model. Routing only inspects the latest genuine
+	// user message, which is present pre-fit and is guaranteed to survive a fit,
+	// so deciding here yields the same choice as deciding post-fit. With no
+	// Router this is exactly cfg.Model, preserving prior behavior.
+	l.activeModel = l.resolveTurnModel(history)
+
 	history, err = l.fitHistory(runCtx, history)
 	if err != nil {
 		l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventRunError, Err: err})
 		return err
 	}
+
 	detector := &loopDetector{}
 
 	for step := 0; step < l.cfg.MaxSteps; step++ {
@@ -509,7 +538,7 @@ type pendingToolCall struct {
 
 func (l *Loop) callProvider(ctx context.Context, history []message.Message) (message.Message, []pendingToolCall, *llm.Usage, error) {
 	events, err := l.cfg.Provider.Stream(ctx, llm.Request{
-		Model:        l.cfg.Model,
+		Model:        l.activeModel,
 		Messages:     history,
 		Tools:        l.llmTools(),
 		SystemPrompt: l.cfg.SystemPrompt,
@@ -644,11 +673,38 @@ func (l *Loop) llmTools() []llm.Tool {
 
 func (l *Loop) contextWindow() int {
 	for _, model := range l.cfg.Provider.Models() {
-		if model.ID == l.cfg.Model {
+		if model.ID == l.activeModel {
 			return model.ContextWindow
 		}
 	}
 	return 0
+}
+
+// resolveTurnModel picks the model for this turn. With no Router it returns the
+// configured default unchanged, so routing is strictly opt-in. With a Router it
+// asks the policy to choose from the provider's models; an empty or unknown
+// choice falls back to the configured default so a declining Router never
+// breaks the turn.
+func (l *Loop) resolveTurnModel(history []message.Message) string {
+	if l.cfg.Router == nil {
+		return l.cfg.Model
+	}
+	models := l.cfg.Provider.Models()
+	turn := Turn{
+		History:        history,
+		ToolsAvailable: len(l.llmTools()) > 0,
+		Hint:           l.cfg.RouteHint,
+	}
+	choice := l.cfg.Router.Route(turn, models)
+	if choice == "" {
+		return l.cfg.Model
+	}
+	for _, m := range models {
+		if m.ID == choice {
+			return choice
+		}
+	}
+	return l.cfg.Model
 }
 
 func (l *Loop) recordUsage(ctx context.Context, sessionID string, usage llm.Usage) error {
@@ -659,7 +715,7 @@ func (l *Loop) recordUsage(ctx context.Context, sessionID string, usage llm.Usag
 		ID:           newID(),
 		SessionID:    sessionID,
 		Provider:     l.cfg.Provider.Name(),
-		Model:        l.cfg.Model,
+		Model:        l.activeModel,
 		InputTokens:  usage.InputTokens,
 		OutputTokens: usage.OutputTokens,
 		At:           time.Now(),

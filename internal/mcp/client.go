@@ -179,6 +179,7 @@ type Client struct {
 	mu           sync.RWMutex
 	servers      []*Server
 	sampler      Sampler
+	roots        rootsStore
 	onResUpdated func(ResourceUpdate)
 	onToolProg   func(ToolProgress)
 }
@@ -234,11 +235,37 @@ func (c *Client) currentSampler() Sampler {
 	return c.sampler
 }
 
+// SetRoots replaces the filesystem roots the client advertises to MCP servers
+// (typically the session's workspace directories) and notifies every connected
+// server that the list changed, prompting it to re-issue roots/list. It may be
+// called at any time; the roots are shared by every configured server. The
+// roots-changed notification reaches only conns connected at call time; a server
+// that connects later receives the current roots when it issues roots/list. To
+// have the roots capability advertised at init, call SetRoots before Start.
+func (c *Client) SetRoots(roots []Root) {
+	c.roots.set(roots)
+	for _, server := range c.Servers() {
+		_, conn := server.snapshot()
+		if conn == nil {
+			continue
+		}
+		if recv, ok := conn.(rootsReceiver); ok {
+			recv.sendRootsListChanged(rootsListChangedNotification())
+		}
+	}
+}
+
+// currentRoots returns a snapshot of the advertised roots.
+func (c *Client) currentRoots() []Root {
+	return c.roots.snapshot()
+}
+
 // connectConfig returns the server's config with the client's current sampler
-// injected, so the connector can advertise and handle sampling.
+// and roots state injected, so the connector can advertise and handle both.
 func (c *Client) connectConfig(server *Server) ServerConfig {
 	cfg := server.cfg
 	cfg.Sampler = c.currentSampler()
+	cfg.RootsEnabled = len(c.currentRoots()) > 0
 	return cfg
 }
 
@@ -255,6 +282,21 @@ func (c *Client) installSampler(conn remoteClient) {
 	if recv, ok := conn.(samplingReceiver); ok {
 		recv.setSamplingHandler(&samplingHandler{sample: sampler})
 	}
+}
+
+// installRoots hands a roots handler to a conn that can receive one, so a
+// server's roots/list request is answered with the client's current roots. The
+// handler reads the roots live via the client's store, so a later SetRoots is
+// reflected without re-installing. The production *mcpclient.Client exposes no
+// hook to field roots/list and does not implement rootsReceiver, so this is a
+// no-op for it; a conn that does implement it (such as a test double) captures
+// the handler and can drive a server's roots/list request through it.
+func (c *Client) installRoots(conn remoteClient) {
+	recv, ok := conn.(rootsReceiver)
+	if !ok {
+		return
+	}
+	recv.setRootsHandler(&rootsHandler{provide: c.currentRoots})
 }
 
 // NewClient constructs a Client without contacting MCP servers.
@@ -584,6 +626,7 @@ func (c *Client) connectServer(ctx context.Context, server *Server) {
 	}
 
 	c.installSampler(conn)
+	c.installRoots(conn)
 	conn.OnConnectionLost(func(err error) {
 		c.handleDisconnect(server, err)
 	})
@@ -616,6 +659,7 @@ func (c *Client) handleDisconnect(server *Server, lost error) {
 		conn, err := newRemote(ctx, c.connectConfig(server))
 		if err == nil {
 			c.installSampler(conn)
+			c.installRoots(conn)
 			conn.OnConnectionLost(func(err error) {
 				c.handleDisconnect(server, err)
 			})
@@ -874,7 +918,7 @@ func connectMCP(ctx context.Context, cfg ServerConfig) (remoteClient, error) {
 				Name:    "bharatcode",
 				Version: "0.1.0",
 			},
-			Capabilities: mcpsdk.ClientCapabilities{},
+			Capabilities: clientCapabilities(cfg),
 		},
 	}); err != nil {
 		_ = cli.Close()
@@ -884,6 +928,22 @@ func connectMCP(ctx context.Context, cfg ServerConfig) (remoteClient, error) {
 		return &stdioRemote{remoteClient: cli, proc: capturedCmd.Process}, nil
 	}
 	return cli, nil
+}
+
+// clientCapabilities builds the capabilities the client advertises at init.
+// The roots capability (with list-changed support) is declared when the config
+// enables it, telling the server it may issue roots/list and expect a
+// notifications/roots/list_changed when the roots change. The sampling
+// capability is advertised separately by the SDK client when a sampling handler
+// is wired at construction, so it is not set here.
+func clientCapabilities(cfg ServerConfig) mcpsdk.ClientCapabilities {
+	var caps mcpsdk.ClientCapabilities
+	if cfg.RootsEnabled {
+		caps.Roots = &struct {
+			ListChanged bool `json:"listChanged,omitempty"`
+		}{ListChanged: true}
+	}
+	return caps
 }
 
 func filteredEnv(overrides map[string]string) []string {

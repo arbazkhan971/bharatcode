@@ -107,6 +107,9 @@ func (c *client) initialize(ctx context.Context) error {
 					"dynamicRegistration":               false,
 					"hierarchicalDocumentSymbolSupport": true,
 				},
+				"formatting": map[string]any{
+					"dynamicRegistration": false,
+				},
 			},
 			"workspace": map[string]any{
 				"symbol": map[string]any{

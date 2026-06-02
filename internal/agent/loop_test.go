@@ -564,6 +564,10 @@ type scriptProvider struct {
 	// contextWindow overrides the reported model context window. When zero, it
 	// defaults to 8192 so existing tests are unaffected.
 	contextWindow int
+	// models overrides the reported model catalog. When nil, the provider
+	// reports a single "fake-model" so existing tests are unaffected. Routing
+	// tests set this to expose two priced, named models.
+	models []llm.Model
 }
 
 func (p *scriptProvider) Name() string {
@@ -594,6 +598,9 @@ func (p *scriptProvider) Stream(ctx context.Context, req llm.Request) (<-chan ll
 }
 
 func (p *scriptProvider) Models() []llm.Model {
+	if p.models != nil {
+		return p.models
+	}
 	window := p.contextWindow
 	if window == 0 {
 		window = 8192

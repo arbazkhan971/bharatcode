@@ -22,7 +22,11 @@ const defaultRequestTimeout = 2 * time.Minute
 // without the chat/completions path changing. Making it selectable from a
 // config file additionally requires adding the constant and allowing it in the
 // config package validator; that lives outside this package and is a followup.
-const providerOpenAIResponses = config.ProviderType("openai_responses")
+const providerOpenAIResponses = config.ProviderOpenAIResponses
+
+// providerCodexOAuth is the experimental provider that reuses the Codex CLI's
+// stored ChatGPT subscription token. See codexOAuthProvider for the caveats.
+const providerCodexOAuth = config.ProviderCodexOAuth
 
 // Registry holds configured providers and is safe for concurrent callers.
 type Registry struct {
@@ -86,6 +90,10 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 				baseURL = "https://api.openai.com/v1"
 			}
 			provider = newOpenAIResponsesProvider(p.Name, baseURL, p.APIKeyEnv, models, client)
+		case providerCodexOAuth:
+			// Experimental: reuses the Codex CLI's local subscription token.
+			// BaseURL overrides the auth-file path for tests; empty = default.
+			provider = newCodexOAuthProvider(p.Name, models, client, p.BaseURL)
 		case config.ProviderOpenAICompatible, config.ProviderLMStudio:
 			provider = newOpenAICompatibleProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
 		case config.ProviderOllama:

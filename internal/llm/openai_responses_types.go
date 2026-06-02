@@ -13,6 +13,13 @@ type responsesRequest struct {
 	// ReasoningEffort is sent only for OpenAI reasoning models when the request
 	// specifies one; it is omitted for non-reasoning models and when empty.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Store controls server-side response retention. The ChatGPT Codex backend
+	// requires store=false; the pointer keeps the field omitted (default
+	// behavior) for the standard OpenAI Responses path.
+	Store *bool `json:"store,omitempty"`
+	// Include requests extra output fields (for example
+	// "reasoning.encrypted_content" on the Codex backend). Omitted when empty.
+	Include []string `json:"include,omitempty"`
 }
 
 // responsesInputItem is one element of the Responses input array. A message

@@ -17,6 +17,13 @@
       ]
     },
     {
+      "name": "codex",
+      "type": "codex_oauth",
+      "models": [
+        "gpt-5.5"
+      ]
+    },
+    {
       "name": "deepseek",
       "type": "openai_compatible",
       "base_url": "https://api.deepseek.com/v1",

@@ -155,6 +155,36 @@ func (m *model) handleFork() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// compactStreamID is the chat-list key for the /compact confirmation. A fixed
+// id keeps it distinct from per-turn assistant bubbles; only one confirmation
+// is shown at a time, so it does not need a counter suffix.
+const compactStreamID = "local-compact"
+
+// compactConfirmation is the message surfaced in the chat after a successful
+// manual context compaction.
+const compactConfirmation = "Context compacted — older turns summarized."
+
+// handleCompact condenses the active session's conversation in memory via the
+// agent loop's Compactor seam, so the next provider request sends a smaller
+// history. It is a no-op with an explanatory dialog when there is no persisted
+// session yet. On success it surfaces a confirmation in the chat. Compaction
+// never mutates the on-disk transcript; it only changes what the agent sends to
+// the provider on subsequent turns.
+func (m *model) handleCompact() (tea.Model, tea.Cmd) {
+	if !m.sessionPersisted {
+		m.dialogs.Push(&dialog.Text{DialogID: "compact", Title: "Compact", Body: "No active session to compact yet. Send a prompt first.", Theme: m.theme})
+		return m, nil
+	}
+	if err := m.deps.Agent.Compact(m.ctx, m.sessionID); err != nil {
+		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Compact failed", Body: err.Error(), Theme: m.theme})
+		return m, nil
+	}
+	m.chat.Stream(compactStreamID, compactConfirmation)
+	m.chat.FinishStream(compactStreamID)
+	m.chat.Reindex(compactStreamID)
+	return m, nil
+}
+
 // handleDiff renders the most recent edit, multiedit, or write tool call for
 // the active session as a before/after unified diff. It surfaces an
 // informational dialog when no such change exists.

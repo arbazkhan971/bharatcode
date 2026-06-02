@@ -142,6 +142,12 @@ func TestSteerFromAnotherGoroutineDoesNotRace(t *testing.T) {
 	// After the run releases, the running flag is clear and Steer no longer
 	// queues (it reports not-in-flight), matching the sentinel contract.
 	require.False(t, loop.Steer("after"), "Steer after Run must report not queued")
+
+	// Leftover steering that was hammered onto the interrupted turn but never
+	// drained remains retrievable via PendingSteering (the caller is responsible
+	// for discarding or delivering it), and draining it leaves the queue empty.
+	require.NotEmpty(t, loop.PendingSteering(), "undrained steering must be retrievable after an interrupted run")
+	require.Empty(t, loop.PendingSteering(), "PendingSteering must clear the queue")
 }
 
 // requestHasUserText reports whether req carries a user message containing text.

@@ -371,6 +371,8 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.helpVisible = false
 	case "/sessions":
 		return m.openSessionPicker()
+	case "/compact":
+		return m.handleCompact()
 	case "/fork":
 		return m.handleFork()
 	case "/diff":
@@ -565,6 +567,7 @@ func slashHelp() string {
 		"/help - list commands",
 		"/clear - clear visible chat",
 		"/sessions - restore a recent session",
+		"/compact - summarize older turns to shrink context",
 		"/fork - branch the current session",
 		"/diff - show the latest edit diff",
 		"/status - show model, session, and spend",

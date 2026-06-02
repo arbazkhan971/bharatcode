@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"text/template"
@@ -15,12 +16,35 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
+	"github.com/arbazkhan971/bharatcode/internal/skills"
 	"github.com/arbazkhan971/bharatcode/internal/tools"
 )
 
 // projectInstructionsHeader delimits the project-instructions section
 // injected into the assembled system prompt.
 const projectInstructionsHeader = "# Project Instructions (AGENTS.md)"
+
+// availableSkillsHeader delimits the available-skills section injected
+// into the assembled system prompt.
+const availableSkillsHeader = "## Available skills"
+
+// skillSearchDirs returns the skills root directories to scan, global
+// first then project, so project skills override global ones. It is a
+// package var so tests can supply hermetic temp roots without touching
+// the developer's real ~/.bharatcode/skills.
+var skillSearchDirs = defaultSkillSearchDirs
+
+// defaultSkillSearchDirs returns the standard skills roots: the global
+// ~/.bharatcode/skills directory and the project ./.bharatcode/skills
+// directory under workdir.
+func defaultSkillSearchDirs(workdir string) []string {
+	var dirs []string
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".bharatcode", "skills"))
+	}
+	dirs = append(dirs, filepath.Join(workdir, ".bharatcode", "skills"))
+	return dirs
+}
 
 //go:embed templates/*.md.tpl
 var templateFS embed.FS
@@ -93,7 +117,28 @@ func renderPrompt(ctx context.Context, agentName, promptOverride string, registr
 		slog.Warn("Loading project instructions for system prompt", "error", err)
 		instructions = ""
 	}
-	return injectInstructions(base, instructions), nil
+	assembled := injectInstructions(base, instructions)
+
+	// Inject a summary of discoverable skills so the model knows which
+	// capabilities it can invoke. A load failure is non-fatal: the
+	// prompt renders without the section.
+	set, err := skills.LoadSkills(skillSearchDirs(workdir)...)
+	if err != nil {
+		slog.Warn("Loading skills for system prompt", "error", err)
+		return assembled, nil
+	}
+	return injectSkills(assembled, set.Summaries()), nil
+}
+
+// injectSkills appends the available-skills section to base, clearly
+// delimited. When summaries is empty after trimming, base is returned
+// unchanged so that no skills means no change to the prompt.
+func injectSkills(base, summaries string) string {
+	summaries = strings.TrimSpace(summaries)
+	if summaries == "" {
+		return base
+	}
+	return base + "\n\n" + availableSkillsHeader + "\n\n" + summaries
 }
 
 // injectInstructions appends the project-instructions section to base,

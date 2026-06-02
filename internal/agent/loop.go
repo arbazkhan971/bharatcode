@@ -247,7 +247,6 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	if !l.runMu.TryLock() {
 		panic("agent: Run called concurrently on one Loop")
 	}
-	defer l.runMu.Unlock()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	l.cancelMu.Lock()
@@ -261,6 +260,11 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		l.cancelMu.Lock()
 		l.cancelRun = nil
 		l.cancelMu.Unlock()
+		// Release the run mutex BEFORE clearing the running flag so a caller that
+		// observes running==false (and starts a fresh Run) never finds the mutex
+		// still held. Clearing running last also closes the window where Steer
+		// could queue onto a turn that has already stopped draining.
+		l.runMu.Unlock()
 		l.steerMu.Lock()
 		l.running = false
 		l.steerMu.Unlock()
@@ -295,7 +299,6 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, steerMsg); err != nil {
 				return fmt.Errorf("appending steering message: %w", err)
 			}
-			l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventLLMResponse, Message: &steerMsg})
 			history = append(history, steerMsg)
 		}
 

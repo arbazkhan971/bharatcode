@@ -1,5 +1,60 @@
 package shell
 
+import (
+	"log/slog"
+	"sync"
+	"sync/atomic"
+)
+
+// sandboxProbe reports whether the OS sandbox launcher for this platform is
+// both present and actually functional in the current environment. It is a
+// package var (not a const func) so tests can inject a broken or working probe
+// without needing a real misconfigured launcher on the host. The default is set
+// per platform: darwin and linux supply a real probe that runs a trivial no-op
+// through the launcher; platforms without a launcher leave it nil.
+//
+// Folding the presence check (exec.LookPath) and the functional check (running
+// a no-op) into a single probe is deliberate: a present-but-broken launcher
+// (e.g. bwrap on a host with user namespaces disabled) must be treated as
+// unavailable exactly like a missing one, and tests that inject a "working"
+// probe must reach the sandboxed path even on a host that lacks the binary.
+var sandboxProbe func() bool
+
+// probe caching state. sandboxLauncherUsable runs sandboxProbe at most once per
+// process and caches the boolean result. The pair is reassignable (rather than
+// a bare sync.Once) so tests can reset the cache between cases via
+// resetSandboxProbe; sync.Once cannot be reset.
+var (
+	probeOnce    sync.Once
+	probeResult  atomic.Bool
+	probeWarnMsg = "sandbox: launcher unavailable or non-functional in this environment; running without sandbox"
+)
+
+// sandboxLauncherUsable returns the cached functional-probe result, running the
+// probe exactly once. If the probe is nil (no launcher on this platform) or
+// reports failure, it returns false and logs a single warning the first time so
+// the operator learns the requested boundary is not being enforced. Subsequent
+// calls return the cached value without re-probing or re-warning.
+func sandboxLauncherUsable() bool {
+	probeOnce.Do(func() {
+		ok := sandboxProbe != nil && sandboxProbe()
+		probeResult.Store(ok)
+		if !ok {
+			slog.Warn(probeWarnMsg)
+		}
+	})
+	return probeResult.Load()
+}
+
+// resetSandboxProbe clears the cached probe result so the next
+// sandboxLauncherUsable call re-runs the probe. It exists for tests, which need
+// a fresh cache between the broken-launcher and working-launcher cases and to
+// avoid one test poisoning the global cache for another.
+func resetSandboxProbe() {
+	probeOnce = sync.Once{}
+	probeResult.Store(false)
+}
+
 // SandboxMode selects the OS-level confinement applied around every bash
 // command this Shell executes. Unlike the permission prompt (which is an
 // in-process policy gate the model can be coaxed past), a SandboxMode maps

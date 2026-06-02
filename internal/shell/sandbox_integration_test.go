@@ -3,7 +3,6 @@ package shell
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -34,30 +33,14 @@ func sandboxBinaryAvailable() (string, bool) {
 	default:
 		return "", false
 	}
-	if _, err := exec.LookPath(bin); err != nil {
-		return bin, false
-	}
-	if !sandboxLauncherWorks(bin) {
+	// Delegate to the production functional probe so the skip gate and the
+	// runtime sandbox decision cannot drift: if the probe says the launcher is
+	// unusable here, wrapCommand will degrade to plain bash, so the enforcement
+	// assertions below would be meaningless and we skip instead.
+	if sandboxProbe == nil || !sandboxProbe() {
 		return bin, false
 	}
 	return bin, true
-}
-
-// sandboxLauncherWorks runs a no-op command through the launcher to confirm it
-// can actually construct a sandbox in this environment (not merely that the
-// binary exists). The probe argv mirrors the real wrapper just enough to
-// exercise namespace/profile setup.
-func sandboxLauncherWorks(bin string) bool {
-	switch bin {
-	case "bwrap":
-		// Exercises user-namespace + mount-namespace + net-unshare setup, which
-		// is exactly what fails on locked-down CI runners.
-		return exec.Command(bin, "--ro-bind", "/", "/", "--unshare-net", "true").Run() == nil
-	case "sandbox-exec":
-		return exec.Command(bin, "-p", "(version 1)(allow default)", "true").Run() == nil
-	default:
-		return false
-	}
 }
 
 // TestSandbox_WorkspaceWriteEnforcement asserts REAL kernel enforcement: under

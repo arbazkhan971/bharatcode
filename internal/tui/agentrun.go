@@ -222,19 +222,25 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	m.chat.FinishStream(m.assistantStreamID())
 	m.chat.Reindex(m.assistantStreamID())
 
+	// Drain any steering text the agent could not consume (it arrived after the
+	// loop's final steering check but before its run mutex released). The queue
+	// lives on the shared Loop and the run loop drains it unconditionally at the
+	// next turn, so it must be cleared here on EVERY run-end to avoid leaking
+	// into an unrelated future turn.
+	pending := m.deps.Agent.PendingSteering()
+
 	if done.err != nil {
+		// The turn errored or was interrupted: discard the leftover steering
+		// rather than auto-starting it, since the user likely just cancelled.
 		m.stopGoal()
 		return m, nil
 	}
 	if cmd := m.advanceGoal(done.last); cmd != nil {
 		return m, cmd
 	}
-	// Deliver any steering text that arrived after the loop's final steering
-	// check but before its run mutex released: the agent could not consume it,
-	// so start it as a fresh turn here. This is also the path for a message
-	// queued in the same narrow window where Steer still reported "queued".
-	// continueRun reuses the existing listener rather than spawning a second.
-	if pending := m.deps.Agent.PendingSteering(); len(pending) > 0 {
+	// Deliver the leftover steering as a fresh turn. continueRun reuses the
+	// existing listener rather than spawning a second.
+	if len(pending) > 0 {
 		return m, m.continueRun(strings.Join(pending, "\n"))
 	}
 	return m, nil

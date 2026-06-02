@@ -277,18 +277,63 @@ func (c *client) readLoop(stdout io.Reader) {
 			continue
 		}
 		msg.raw = raw
-		if msg.ID != nil {
+		switch {
+		case msg.ID != nil && msg.Method != "":
+			// A message carrying BOTH an id and a method is a server->client
+			// request, not a response. Route it to the request handler so the
+			// server is answered; treating it as a response would corrupt the
+			// pending channel for the client's own request of the same id.
+			c.handleServerRequest(*msg.ID, msg.Method)
+		case msg.ID != nil:
+			// An id with no method is a response to one of our requests.
 			c.deliverResponse(responseMessage{
 				JSONRPC: jsonRPCVersion,
 				ID:      *msg.ID,
 				Result:  msg.Result,
 				Error:   msg.Error,
 			})
-			continue
-		}
-		if msg.Method == "textDocument/publishDiagnostics" {
+		case msg.Method == "textDocument/publishDiagnostics":
 			c.handlePublishDiagnostics(msg.Params)
+		default:
+			// Any other notification (method, no id) is ignored.
 		}
+	}
+}
+
+// jsonRPCMethodNotFound is the standard JSON-RPC error code for an
+// unrecognized method.
+const jsonRPCMethodNotFound = -32601
+
+// handleServerRequest answers a server-initiated request so the language
+// server does not stall waiting for a reply. Requests that expect data are
+// answered with a minimal valid result; unrecognized requests get a
+// MethodNotFound error.
+func (c *client) handleServerRequest(id int64, method string) {
+	switch method {
+	case "workspace/configuration":
+		// Reply with an empty configuration item. A null entry is a valid
+		// "no configuration" answer that every server tolerates.
+		c.respond(id, json.RawMessage(`[null]`), nil)
+	case "client/registerCapability", "client/unregisterCapability", "window/workDoneProgress/create":
+		// These expect an empty success result.
+		c.respond(id, json.RawMessage(`null`), nil)
+	default:
+		c.respond(id, nil, &responseError{
+			Code:    jsonRPCMethodNotFound,
+			Message: fmt.Sprintf("method not supported: %s", method),
+		})
+	}
+}
+
+// respond writes a response to a server-initiated request.
+func (c *client) respond(id int64, result json.RawMessage, respErr *responseError) {
+	if err := c.write(responseMessage{
+		JSONRPC: jsonRPCVersion,
+		ID:      id,
+		Result:  result,
+		Error:   respErr,
+	}); err != nil {
+		slog.Debug("Failed to answer language server request", "language", c.spec.name, "error", err)
 	}
 }
 

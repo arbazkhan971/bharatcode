@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -218,6 +220,73 @@ func TestToolNameTruncation(t *testing.T) {
 	require.LessOrEqual(t, len([]rune(name)), maxToolNameRunes)
 	require.Contains(t, name, "…")
 	require.Equal(t, name, joinedToolName("filesystem", "this_tool_name_is_long_enough_to_need_truncation_because_providers_limit_names"))
+}
+
+// hangingRemote is a remote whose Close blocks until released, used to verify
+// Stop does not hang and takes the force-kill fallback past its deadline.
+type hangingRemote struct {
+	fakeRemote
+	release chan struct{}
+	killed  atomic.Bool
+}
+
+func (h *hangingRemote) Close() error {
+	<-h.release // Block past Stop's deadline.
+	return nil
+}
+
+func (h *hangingRemote) forceKill() bool {
+	h.killed.Store(true)
+	return true
+}
+
+func TestStopForceKillsServerWhenCloseHangs(t *testing.T) {
+	remote := &hangingRemote{release: make(chan struct{})}
+	// Ensure the blocked Close goroutine can exit at test teardown.
+	t.Cleanup(func() { close(remote.release) })
+
+	server := &Server{
+		name:   "stuck",
+		state:  StateConnected,
+		conn:   remote,
+		logger: slog.Default(),
+	}
+	client := &Client{servers: []*Server{server}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	returned := make(chan error, 1)
+	go func() {
+		returned <- client.Stop(ctx)
+	}()
+
+	select {
+	case err := <-returned:
+		// Stop must return within the deadline (well under the 2s guard).
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop hung instead of force-killing the server past its deadline")
+	}
+
+	require.True(t, remote.killed.Load(), "Stop did not take the force-kill fallback")
+	require.Equal(t, StateDisconnected, server.State())
+}
+
+func TestStopReturnsWhenCloseSucceeds(t *testing.T) {
+	remote := &fakeRemote{}
+	server := &Server{
+		name:   "ok",
+		state:  StateConnected,
+		conn:   remote,
+		logger: slog.Default(),
+	}
+	client := &Client{servers: []*Server{server}}
+
+	require.NoError(t, client.Stop(context.Background()))
+	require.Equal(t, 1, remote.closeCount)
+	require.Equal(t, StateDisconnected, server.State())
 }
 
 func TestStartReportsConnectionFailureAsEvent(t *testing.T) {

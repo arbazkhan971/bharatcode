@@ -115,6 +115,85 @@ func TestLoopDetectionStopsBeforeThirdIdenticalToolRun(t *testing.T) {
 	}
 }
 
+func TestRunRecoversFromPanickingToolAndContinues(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+	registry.Register(&panickingTool{name: "boom", panicMsg: "kaboom"})
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "Running the tool."},
+			llm.ToolUseEndEvent{ID: "call-1", Name: "boom", Input: json.RawMessage(`{}`)},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+		{
+			llm.DeltaTextEvent{Text: "Done."},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 8, OutputTokens: 4}},
+		},
+	}}
+	bus := pubsub.NewTopic[Event]("agent-test", 16)
+	events, cancel := bus.Subscribe()
+	defer cancel()
+
+	loop := New(Config{
+		Name:     "coder",
+		Model:    "fake-model",
+		Provider: provider,
+		Tools:    registry,
+		Sessions: repo,
+		Bus:      bus,
+	})
+
+	// (a) Run returns without the panic escaping the agent goroutine.
+	err := loop.Run(ctx, sessionID, userMessage("explode please"))
+	require.NoError(t, err)
+
+	// (c) An EventRunError was published for the panicking tool.
+	var sawRunError bool
+	for {
+		stop := false
+		select {
+		case event := <-events:
+			if event.Kind == EventRunError && event.ToolName == "boom" {
+				sawRunError = true
+				require.Error(t, event.Err)
+				require.Contains(t, event.Err.Error(), "panicked")
+			}
+		default:
+			stop = true
+		}
+		if stop {
+			break
+		}
+	}
+	require.True(t, sawRunError, "expected an EventRunError for the panicking tool")
+
+	messages, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+
+	// (b) The tool produced an IsError result whose content mentions the panic.
+	var toolResult *message.ToolResultBlock
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if b, ok := block.(message.ToolResultBlock); ok {
+				rb := b
+				toolResult = &rb
+			}
+		}
+	}
+	require.NotNil(t, toolResult, "expected a tool-result block in the session")
+	require.True(t, toolResult.IsError)
+	require.Contains(t, toolResult.Content, "panicked")
+	require.Contains(t, toolResult.Content, "kaboom")
+
+	// (d) The loop continued: the scripted "Done." assistant message was processed.
+	require.Len(t, provider.reqs, 2)
+	last := messages[len(messages)-1]
+	require.Equal(t, message.RoleAssistant, last.Role)
+	require.Contains(t, textOf(last), "Done.")
+}
+
 func TestInterruptCancelsRun(t *testing.T) {
 	ctx := context.Background()
 	repo := testRepo(t)
@@ -315,6 +394,29 @@ func (t *recordingTool) Run(ctx context.Context, args json.RawMessage) (tools.Re
 	defer t.mu.Unlock()
 	t.calls = append(t.calls, string(args))
 	return tools.Result{Content: t.result}, nil
+}
+
+type panickingTool struct {
+	name     string
+	panicMsg string
+}
+
+func (t *panickingTool) Name() string {
+	return t.name
+}
+
+func (t *panickingTool) Description() string {
+	return "Tool that panics for " + t.name
+}
+
+func (t *panickingTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+
+func (t *panickingTool) Run(ctx context.Context, args json.RawMessage) (tools.Result, error) {
+	_ = ctx
+	_ = args
+	panic(t.panicMsg)
 }
 
 type scriptProvider struct {

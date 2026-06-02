@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -283,7 +285,7 @@ func (l *Loop) callProvider(ctx context.Context, history []message.Message) (mes
 	}
 }
 
-func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCall) tools.Result {
+func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCall) (result tools.Result) {
 	tool, ok := l.cfg.Tools.Get(call.Name)
 	if !ok {
 		return tools.Result{Content: "unknown tool: " + call.Name, IsError: true}
@@ -292,13 +294,32 @@ func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCa
 	allowed := len(l.allowed) == 0 || allowedLimited
 	wrapped := hookedTool{inner: tool, hooks: l.cfg.Hooks, sessionID: sessionID, agentName: l.name, allowed: allowed}
 	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolCalled, ToolName: call.Name})
-	result, err := wrapped.Run(ctx, call.Input)
+	result, err := l.runToolSafely(ctx, &wrapped, call)
 	if err != nil {
 		l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventRunError, ToolName: call.Name, Err: err})
 		return tools.Result{Content: err.Error(), IsError: true}
 	}
 	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolResult, ToolName: call.Name})
 	return result
+}
+
+// runToolSafely runs the tool and converts any panic into an error so a single
+// misbehaving tool cannot take down the agent loop. The recovered panic is
+// logged with its stack and surfaced to the caller as an error.
+func (l *Loop) runToolSafely(ctx context.Context, wrapped *hookedTool, call pendingToolCall) (result tools.Result, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			slog.Error("tool panicked",
+				slog.String("tool", call.Name),
+				slog.Any("panic", r),
+				slog.String("stack", string(stack)),
+			)
+			err = fmt.Errorf("tool %q panicked: %v", call.Name, r)
+			result = tools.Result{}
+		}
+	}()
+	return wrapped.Run(ctx, call.Input)
 }
 
 func (l *Loop) llmTools() []llm.Tool {

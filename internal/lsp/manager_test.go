@@ -55,6 +55,36 @@ func TestDiagnosticsPullStartsServerAndDeduplicatesPublishes(t *testing.T) {
 	require.NoError(t, manager.Shutdown(ctx))
 }
 
+// TestDiagnosticsSurvivesServerInitiatedRequest proves that a server->client
+// request carrying an id that collides with the client's own request ids does
+// not corrupt the client's pending response. On the old id-first routing, the
+// server's workspace/configuration request (id=1) was delivered as a bogus
+// nil response into the channel awaiting the client's own id=1, yielding empty
+// diagnostics. With method-aware routing the diagnostics arrive intact.
+func TestDiagnosticsSurvivesServerInitiatedRequest(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "serverrequest")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+	diagnostics, err := manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Len(t, diagnostics, 1, "diagnostics must survive the colliding server request")
+	require.Equal(t, Error, diagnostics[0].Severity)
+	require.Equal(t, "fake diagnostic", diagnostics[0].Message)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
 func TestDiagnosticsPushFallback(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PATH", fakeServerPath(t, "push")+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -199,7 +229,7 @@ func runFakeLSPServer() {
 			result := map[string]any{
 				"capabilities": map[string]any{},
 			}
-			if mode == "pull" {
+			if mode == "pull" || mode == "serverrequest" {
 				result["capabilities"] = map[string]any{
 					"diagnosticProvider": map[string]any{
 						"interFileDependencies": false,
@@ -235,6 +265,20 @@ func runFakeLSPServer() {
 				})
 			}
 		case "textDocument/diagnostic":
+			if mode == "serverrequest" {
+				// Fire a server->client request that REUSES the client's
+				// in-flight request id. Fire-and-forget: a correct client
+				// replies (a response with no method, which it ignores) and
+				// still matches the real response below to its pending channel.
+				// Buggy id-first routing instead delivers this as a nil-result
+				// response into that channel, yielding zero diagnostics.
+				_ = writePayload(os.Stdout, requestMessage{
+					JSONRPC: jsonRPCVersion,
+					ID:      *msg.ID,
+					Method:  "workspace/configuration",
+					Params:  map[string]any{"items": []map[string]any{{"section": "fake"}}},
+				})
+			}
 			_ = writePayload(os.Stdout, responseMessage{
 				JSONRPC: jsonRPCVersion,
 				ID:      *msg.ID,

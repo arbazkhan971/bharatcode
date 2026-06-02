@@ -10,9 +10,11 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/tools"
 	"github.com/arbazkhan971/bharatcode/internal/util"
 	mcpclient "github.com/mark3labs/mcp-go/client"
+	mcptransport "github.com/mark3labs/mcp-go/client/transport"
 	mcpsdk "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -32,6 +35,9 @@ const (
 	maxBackoff         = 30 * time.Second
 	maxToolNameRunes   = 64
 	reconnectJitterPct = 0.2
+	// stopDeadline caps how long Stop waits for a server's Close before
+	// force-killing the child process and abandoning the close.
+	stopDeadline = 5 * time.Second
 )
 
 type remoteClient interface {
@@ -43,9 +49,39 @@ type remoteClient interface {
 	OnConnectionLost(func(error))
 }
 
+// forceKiller is implemented by remote clients that own a child process and
+// can hard-kill it when a graceful Close hangs past the stop deadline.
+type forceKiller interface {
+	// forceKill terminates the underlying child process. It reports whether a
+	// process was actually killed.
+	forceKill() bool
+}
+
 type connector func(context.Context, ServerConfig) (remoteClient, error)
 
 var newRemote connector = connectMCP
+
+// stdioRemote wraps a stdio-backed remote client so Stop can hard-kill the
+// child process when Close hangs. mcp-go keeps the *exec.Cmd in an unexported
+// field with no accessor, so the process handle is captured at launch time via
+// a custom command factory.
+type stdioRemote struct {
+	remoteClient
+	proc *os.Process
+}
+
+// forceKill sends SIGKILL to the captured child process, if any.
+func (s *stdioRemote) forceKill() bool {
+	if s.proc == nil {
+		return false
+	}
+	// Process.Kill is SIGKILL on Unix; signal explicitly to be unambiguous and
+	// fall back to Kill on platforms where Signal is unsupported.
+	if err := s.proc.Signal(syscall.SIGKILL); err != nil {
+		_ = s.proc.Kill()
+	}
+	return true
+}
 
 var (
 	randMu     sync.Mutex
@@ -150,31 +186,28 @@ func (c *Client) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop disconnects every server.
+// Stop disconnects every server. Each server gets a bounded deadline (the
+// caller's context, capped at stopDeadline); if a server's Close has not
+// returned by then, Stop force-kills the child process where the handle is
+// reachable and abandons the close goroutine rather than leaking it.
 func (c *Client) Stop(ctx context.Context) error {
+	deadline := stopDeadline
+	if d, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(d); remaining < deadline {
+			deadline = remaining
+		}
+	}
+	stopCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+
 	var wg sync.WaitGroup
 	errs := make(chan error, len(c.servers))
 	for _, server := range c.Servers() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, conn := server.snapshot()
-			if conn == nil {
-				server.setState(StateDisconnected, nil)
-				return
-			}
-			done := make(chan error, 1)
-			go func() {
-				done <- conn.Close()
-			}()
-			select {
-			case <-ctx.Done():
-				errs <- fmt.Errorf("stopping mcp server %q: %w", server.Name(), ctx.Err())
-			case err := <-done:
-				if err != nil {
-					errs <- fmt.Errorf("stopping mcp server %q: %w", server.Name(), err)
-				}
-				server.setState(StateDisconnected, nil)
+			if err := c.stopServer(stopCtx, server); err != nil {
+				errs <- err
 			}
 		}()
 	}
@@ -187,6 +220,45 @@ func (c *Client) Stop(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// stopServer closes a single server, force-killing its child process if Close
+// does not return before stopCtx's deadline. The Close goroutine uses a
+// buffered channel so it never blocks on send, even when abandoned.
+func (c *Client) stopServer(stopCtx context.Context, server *Server) error {
+	_, conn := server.snapshot()
+	if conn == nil {
+		server.setState(StateDisconnected, nil)
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.Close()
+	}()
+
+	select {
+	case <-stopCtx.Done():
+		killed := false
+		if killer, ok := conn.(forceKiller); ok {
+			killed = killer.forceKill()
+		}
+		server.logger.Warn(
+			"MCP server did not close before deadline",
+			"err", stopCtx.Err(),
+			"force_killed", killed,
+		)
+		// The Close goroutine is abandoned but cannot leak a send: done is
+		// buffered. Mark the server disconnected regardless.
+		server.setState(StateDisconnected, nil)
+		return fmt.Errorf("stopping mcp server %q: %w", server.Name(), stopCtx.Err())
+	case err := <-done:
+		server.setState(StateDisconnected, nil)
+		if err != nil {
+			return fmt.Errorf("stopping mcp server %q: %w", server.Name(), err)
+		}
+		return nil
+	}
 }
 
 // Tools returns a snapshot of MCP-bridged tools across every server.
@@ -401,11 +473,23 @@ func connectMCP(ctx context.Context, cfg ServerConfig) (remoteClient, error) {
 
 	var cli *mcpclient.Client
 	var err error
+	// capturedCmd records the stdio child command so Stop can hard-kill it if a
+	// graceful Close hangs; mcp-go exposes no accessor for its internal handle.
+	var capturedCmd *exec.Cmd
 	switch cfg.Transport {
 	case TransportStdio:
 		command := util.ExpandPath(cfg.Command[0])
 		env := filteredEnv(cfg.Env)
-		cli, err = mcpclient.NewStdioMCPClient(command, env, cfg.Command[1:]...)
+		cmdFunc := func(cmdCtx context.Context, name string, cmdEnv []string, args []string) (*exec.Cmd, error) {
+			cmd := exec.CommandContext(cmdCtx, name, args...)
+			cmd.Env = append(os.Environ(), cmdEnv...)
+			capturedCmd = cmd
+			return cmd, nil
+		}
+		cli, err = mcpclient.NewStdioMCPClientWithOptions(
+			command, env, cfg.Command[1:],
+			mcptransport.WithCommandFunc(cmdFunc),
+		)
 	case TransportHTTP:
 		cli, err = mcpclient.NewStreamableHttpClient(cfg.URL)
 	case TransportSSE:
@@ -430,6 +514,9 @@ func connectMCP(ctx context.Context, cfg ServerConfig) (remoteClient, error) {
 	}); err != nil {
 		_ = cli.Close()
 		return nil, fmt.Errorf("initializing mcp client for %q: %w", cfg.Name, err)
+	}
+	if cfg.Transport == TransportStdio && capturedCmd != nil && capturedCmd.Process != nil {
+		return &stdioRemote{remoteClient: cli, proc: capturedCmd.Process}, nil
 	}
 	return cli, nil
 }

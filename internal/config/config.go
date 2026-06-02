@@ -14,15 +14,28 @@ import (
 // snake_case names. Slice fields preserve insertion order; merge
 // semantics are documented per-field on the merge() method.
 type Config struct {
-	Providers   []Provider   `json:"providers"`
-	Models      []Model      `json:"models"`
-	Permissions PermConfig   `json:"permissions"`
-	Agents      []Agent      `json:"agents"`
-	Hooks       []Hook       `json:"hooks"`
-	MCP         []MCPServer  `json:"mcp"`
-	LSP         []LSPServer  `json:"lsp"`
-	Ledger      LedgerConfig `json:"ledger"`
-	Options     Options      `json:"options"`
+	Providers   []Provider    `json:"providers"`
+	Models      []Model       `json:"models"`
+	Permissions PermConfig    `json:"permissions"`
+	Agents      []Agent       `json:"agents"`
+	Hooks       []Hook        `json:"hooks"`
+	MCP         []MCPServer   `json:"mcp"`
+	LSP         []LSPServer   `json:"lsp"`
+	Ledger      LedgerConfig  `json:"ledger"`
+	Options     Options       `json:"options"`
+	Sandbox     SandboxConfig `json:"sandbox"`
+}
+
+// SandboxConfig selects the OS-level confinement applied around shell command
+// execution. Mode is one of "off", "workspace-write" (the default: reads
+// anywhere, writes restricted to the workspace and temp dir, no network),
+// "read-only" (no writes, no network), or "full" (no sandbox). The string is
+// mapped to a shell.SandboxMode at wiring time; config does not import shell,
+// so unknown values are tolerated here and resolved to the safe default by the
+// shell layer. When the platform or its sandbox launcher is unavailable the
+// mode degrades to off with a logged warning rather than failing.
+type SandboxConfig struct {
+	Mode string `json:"mode,omitempty"`
 }
 
 // ProviderType identifies the API dialect a Provider speaks. A

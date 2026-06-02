@@ -171,7 +171,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	app.Permission = permission.New(app.Cfg, app.Bus.Permission)
 	app.Permission.SetYolo(opts.YOLO)
 
-	app.Shell = shell.New(app.Bus.Shell)
+	app.Shell = shell.New(app.Bus.Shell, shell.WithSandboxMode(shell.ParseSandboxMode(app.Cfg.Sandbox.Mode)))
 	closers = append(closers, closeStep{name: "shell", close: func(context.Context) error {
 		app.Shell.Shutdown()
 		return nil

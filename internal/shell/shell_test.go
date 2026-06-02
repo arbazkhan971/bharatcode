@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package shell implements execution of bash commands and background tracking.
 package shell_test
 

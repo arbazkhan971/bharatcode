@@ -59,9 +59,10 @@ var MaxCaptureSize = 10 * 1024 * 1024
 
 // Shell manages execution and tracking of bash processes.
 type Shell struct {
-	bus     *pubsub.Topic[pubsub.ShellJobPayload]
-	jobs    sync.Map // Map of jobID string -> *jobState
-	cleanup chan struct{}
+	bus         *pubsub.Topic[pubsub.ShellJobPayload]
+	jobs        sync.Map // Map of jobID string -> *jobState
+	cleanup     chan struct{}
+	sandboxMode SandboxMode // OS-level confinement applied to every command.
 }
 
 // jobState tracks the runtime details of an active or finished job.
@@ -82,11 +83,16 @@ type jobState struct {
 	rawStderrBytes  int64
 }
 
-// New constructs a Shell manager with the given pubsub topic.
-func New(bus *pubsub.Topic[pubsub.ShellJobPayload]) *Shell {
+// New constructs a Shell manager with the given pubsub topic. Optional
+// Options (e.g. WithSandboxMode) configure execution behaviour; with no
+// options the Shell runs commands unconfined (SandboxOff).
+func New(bus *pubsub.Topic[pubsub.ShellJobPayload], opts ...Option) *Shell {
 	s := &Shell{
 		bus:     bus,
 		cleanup: make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	go s.startTTLWatcher()
 	return s
@@ -143,11 +149,14 @@ func (s *Shell) Start(ctx context.Context, cmdStr string, opts RunOpts) (string,
 	}
 	s.jobs.Store(jobID, state)
 
-	// Build the bash -c command.
-	cmd := exec.Command("bash", "-c", cmdStr)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true, // Start in a new process group for clean signaling.
-	}
+	// Build the command, wrapping it with the OS-level sandbox launcher when
+	// a confining sandbox mode is active. wrapCommand returns the full argv
+	// (e.g. ["sandbox-exec","-p",profile,"bash","-c",cmd] on macOS,
+	// ["bwrap",...,"bash","-c",cmd] on Linux), or a plain ["bash","-c",cmd]
+	// when the mode is off or the launcher is unavailable.
+	argv := wrapCommand(s.sandboxMode, opts.Cwd, cmdStr)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.SysProcAttr = sysProcAttr()
 
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
@@ -227,13 +236,13 @@ func (s *Shell) Start(ctx context.Context, cmdStr string, opts RunOpts) (string,
 		case <-timeoutChan:
 			timeoutExpired = true
 			if cmd.Process != nil {
-				// Signal negative pid to kill the whole process group.
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				// Kill the whole process group (negative pid on Unix).
+				killProcessGroup(cmd.Process.Pid)
 			}
 			exitErr = <-errChan
 		case <-ctx.Done():
 			if cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				killProcessGroup(cmd.Process.Pid)
 			}
 			exitErr = <-errChan
 		}

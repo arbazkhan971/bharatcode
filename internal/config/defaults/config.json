@@ -398,5 +398,8 @@
   "ledger": {
     "currency": "INR",
     "usd_inr_rate": 83.50
+  },
+  "sandbox": {
+    "mode": "workspace-write"
   }
 }

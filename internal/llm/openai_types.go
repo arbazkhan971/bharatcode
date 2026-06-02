@@ -13,9 +13,26 @@ type openAIChatRequest struct {
 
 type openAIMessage struct {
 	Role       string                  `json:"role"`
-	Content    string                  `json:"content,omitempty"`
+	Content    any                     `json:"content,omitempty"`
 	ToolCallID string                  `json:"tool_call_id,omitempty"`
 	ToolCalls  []openAIMessageToolCall `json:"tool_calls,omitempty"`
+	// Images carries top-level base64 image data for Ollama's /api/chat,
+	// which does not use OpenAI-style image_url content parts. It is omitted
+	// for OpenAI-compatible providers.
+	Images []string `json:"images,omitempty"`
+}
+
+// openAIContentPart is one element of a multimodal message content array. A
+// text part sets Text; an image part sets Type "image_url" and ImageURL.
+type openAIContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openAIImageURL `json:"image_url,omitempty"`
+}
+
+// openAIImageURL carries an image reference, here always an inline data URL.
+type openAIImageURL struct {
+	URL string `json:"url"`
 }
 
 type openAIMessageToolCall struct {

@@ -157,11 +157,15 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 		SessionID:        sessionID,
 		MonthlyBudgetINR: deps.Cfg.Ledger.MaxInrPerMonth,
 	}
+	chatList := chat.New()
+	// Render assistant markdown with syntax-highlighted code blocks. The TUI
+	// ships a dark theme, so use glamour's dark style.
+	chatList.EnableMarkdown("dark")
 	m := &model{
 		ctx:           ctx,
 		deps:          deps,
 		theme:         theme,
-		chat:          chat.New(),
+		chat:          chatList,
 		footer:        footer,
 		status:        statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
 		notifications: notification.NewFocusAware(notification.Noop{}),

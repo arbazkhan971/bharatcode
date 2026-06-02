@@ -65,7 +65,8 @@ func Validate(cfg *Config) error {
 	// 3. Every Hook.Event is a known HookEvent constant.
 	for i, hook := range cfg.Hooks {
 		switch hook.Event {
-		case HookPreToolUse, HookPostToolUse, HookOnError, HookOnSession:
+		case HookPreToolUse, HookPostToolUse, HookOnError, HookOnSession,
+			HookSessionStart, HookSessionEnd, HookFileEdit:
 			// Valid
 		default:
 			return fmt.Errorf("invalid hook event %q at /hooks/%d/event", hook.Event, i)

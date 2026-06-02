@@ -34,7 +34,7 @@ func TestCompletionRejectsUnknownShell(t *testing.T) {
 	stdout, stderr, err := executeRoot(t, "completion", "powershell")
 	require.Error(t, err)
 	require.Empty(t, stdout)
-	require.Contains(t, stderr, "invalid argument")
+	require.Contains(t, stderr, "unsupported shell")
 }
 
 func TestCompletionRequiresExactlyOneArg(t *testing.T) {

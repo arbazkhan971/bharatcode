@@ -22,20 +22,17 @@ type providerUpdateSummary struct {
 // modelsDevProvider is one provider entry in the Models.dev registry
 // (https://models.dev/api.json). The top-level document is a map of
 // provider id to this structure. Only the fields BharatCode consumes
-// are decoded; unknown fields are ignored.
+// are decoded; unknown fields (name, npm, doc, ...) are ignored.
 type modelsDevProvider struct {
-	ID     string                     `json:"id"`
-	Name   string                     `json:"name"`
-	NPM    string                     `json:"npm"`
-	API    string                     `json:"api"`
-	Env    []string                   `json:"env"`
-	Models map[string]modelsDevModel  `json:"models"`
+	ID     string                    `json:"id"`
+	API    string                    `json:"api"`
+	Env    []string                  `json:"env"`
+	Models map[string]modelsDevModel `json:"models"`
 }
 
 // modelsDevModel is one model entry under a Models.dev provider.
 type modelsDevModel struct {
 	ID         string `json:"id"`
-	Name       string `json:"name"`
 	Attachment bool   `json:"attachment"`
 	ToolCall   bool   `json:"tool_call"`
 	Modalities struct {
@@ -189,10 +186,11 @@ func mergeProviderRegistry(cfg *config.Config, data []byte) (providerUpdateSumma
 }
 
 // providerTypeFor maps a Models.dev provider to a BharatCode
-// ProviderType. The mapping keys off the provider id and npm adapter;
-// anything that is not a recognised first-party dialect falls back to
-// openai_compatible, which is what the Models.dev "@ai-sdk/openai-compatible"
-// adapter denotes and the safe default for unknown OpenAI-style APIs.
+// ProviderType. The mapping keys off the provider id alone; anything
+// that is not a recognised first-party dialect falls back to
+// openai_compatible, which is what the bulk of Models.dev providers
+// (the "@ai-sdk/openai-compatible" adapter) use and the safe default
+// for unknown OpenAI-style APIs.
 func providerTypeFor(p modelsDevProvider) config.ProviderType {
 	switch p.ID {
 	case "anthropic":

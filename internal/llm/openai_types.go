@@ -9,10 +9,21 @@ type openAIChatRequest struct {
 	Stream      bool            `json:"stream"`
 	Temperature float64         `json:"temperature,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
+	// StreamOptions carries streaming-only flags. It is set only on streaming
+	// requests so the provider returns token usage in the final stream chunk;
+	// it is omitted otherwise.
+	StreamOptions *openAIStreamOptions `json:"stream_options,omitempty"`
 	// ReasoningEffort is sent only for OpenAI reasoning models (o-series,
 	// gpt-5 reasoning) when the request specifies one. It is omitted for
 	// non-reasoning models and when empty.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+}
+
+// openAIStreamOptions toggles streaming extras. IncludeUsage asks the provider
+// to append a final chunk carrying prompt/completion token counts, which
+// OpenAI otherwise omits from streamed responses.
+type openAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type openAIMessage struct {

@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -16,10 +18,15 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
+	"github.com/arbazkhan971/bharatcode/internal/skills"
 	"github.com/arbazkhan971/bharatcode/internal/tools"
 )
 
-var readOnlyTaskTools = []string{"diagnostics", "glob", "grep", "ls", "view", "web_fetch", "web_search"}
+// readOnlyTaskTools is the allow-list for the read-only "task" agent.
+// It includes "skill" because loading a skill's instruction body is a
+// read-only operation and the task agent should be able to consult the
+// same skills as the coder agent.
+var readOnlyTaskTools = []string{"diagnostics", "glob", "grep", "ls", "skill", "view", "web_fetch", "web_search"}
 
 // Dependencies bundles shared collaborators for Coordinator-created loops.
 type Dependencies struct {
@@ -41,6 +48,11 @@ type Coordinator struct {
 	mu     sync.RWMutex
 	agents []agentDef
 	ready  bool
+	// skillTool lazily loads skill bodies on demand. It is built once in
+	// Start over the discovered skill set and folded into every agent's
+	// effective tool set, so any agent can call the "skill" tool to load a
+	// skill's full SKILL.md body without bloating the base prompt.
+	skillTool *skillTool
 }
 
 type agentDef struct {
@@ -81,6 +93,12 @@ func NewCoordinator(cfg *config.Config, deps Dependencies) (*Coordinator, error)
 func (c *Coordinator) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Build the skill-loading tool once, before rendering any prompt, so it
+	// appears in every agent's effective tool set and rendered tool list. A
+	// load failure is non-fatal: the tool is still registered over an empty
+	// set so allow-listing "skill" never fails tool validation.
+	c.skillTool = c.loadSkillTool()
 
 	for i := range c.agents {
 		c.applyConfigAgent(&c.agents[i])
@@ -191,9 +209,36 @@ func (c *Coordinator) resolveProvider(modelID string) (llm.Provider, string, str
 
 func (c *Coordinator) effectiveRegistry() toolSource {
 	return combinedTools{
-		base: c.deps.Tools,
-		mcp:  c.mcpTools(),
+		base:  c.deps.Tools,
+		mcp:   c.mcpTools(),
+		extra: c.extraTools(),
 	}
+}
+
+// loadSkillTool discovers the available skills and returns a skill tool
+// over them. A load failure is logged and falls back to an empty set so
+// the tool is always present and callable.
+func (c *Coordinator) loadSkillTool() *skillTool {
+	workdir, err := os.Getwd()
+	if err != nil {
+		slog.Warn("Loading skills for skill tool: getting working directory", "error", err)
+		return newSkillTool(nil)
+	}
+	set, err := skills.LoadSkills(skillSearchDirs(workdir)...)
+	if err != nil {
+		slog.Warn("Loading skills for skill tool", "error", err)
+		return newSkillTool(nil)
+	}
+	return newSkillTool(set)
+}
+
+// extraTools returns the agent-package tools folded into every agent's
+// effective tool set, independent of the shared tools registry.
+func (c *Coordinator) extraTools() []tools.Tool {
+	if c.skillTool == nil {
+		return nil
+	}
+	return []tools.Tool{c.skillTool}
 }
 
 func (c *Coordinator) mcpTools() []tools.Tool {
@@ -209,8 +254,9 @@ type toolSource interface {
 }
 
 type combinedTools struct {
-	base *tools.Registry
-	mcp  []tools.Tool
+	base  *tools.Registry
+	mcp   []tools.Tool
+	extra []tools.Tool
 }
 
 func (r combinedTools) Get(name string) (tools.Tool, bool) {
@@ -224,6 +270,11 @@ func (r combinedTools) Get(name string) (tools.Tool, bool) {
 			return t, true
 		}
 	}
+	for _, t := range r.extra {
+		if t.Name() == name {
+			return t, true
+		}
+	}
 	return nil, false
 }
 
@@ -233,6 +284,7 @@ func (r combinedTools) List() []tools.Tool {
 		out = append(out, r.base.List()...)
 	}
 	out = append(out, r.mcp...)
+	out = append(out, r.extra...)
 	sort.Slice(out, func(i, j int) bool {
 		return strings.Compare(out[i].Name(), out[j].Name()) < 0
 	})

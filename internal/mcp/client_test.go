@@ -19,7 +19,10 @@ import (
 type fakeRemote struct {
 	tools       []mcpsdk.Tool
 	resources   []mcpsdk.Resource
+	prompts     []mcpsdk.Prompt
 	resourceOut *mcpsdk.ReadResourceResult
+	promptOut   *mcpsdk.GetPromptResult
+	promptArgs  map[string]string
 	callOut     *mcpsdk.CallToolResult
 	callCount   int
 	closeCount  int
@@ -54,6 +57,18 @@ func (f *fakeRemote) ReadResource(context.Context, mcpsdk.ReadResourceRequest) (
 		return f.resourceOut, nil
 	}
 	return &mcpsdk.ReadResourceResult{}, nil
+}
+
+func (f *fakeRemote) ListPrompts(context.Context, mcpsdk.ListPromptsRequest) (*mcpsdk.ListPromptsResult, error) {
+	return &mcpsdk.ListPromptsResult{Prompts: f.prompts}, nil
+}
+
+func (f *fakeRemote) GetPrompt(_ context.Context, req mcpsdk.GetPromptRequest) (*mcpsdk.GetPromptResult, error) {
+	f.promptArgs = req.Params.Arguments
+	if f.promptOut != nil {
+		return f.promptOut, nil
+	}
+	return &mcpsdk.GetPromptResult{}, nil
 }
 
 func (f *fakeRemote) OnConnectionLost(fn func(error)) {
@@ -213,6 +228,112 @@ func TestReadResource(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(data))
 	require.Equal(t, "text/plain", mimeType)
+}
+
+func TestClientDiscoversPrompts(t *testing.T) {
+	remote := &fakeRemote{
+		prompts: []mcpsdk.Prompt{{
+			Name:        "summarize",
+			Description: "Summarize a document.",
+			Arguments: []mcpsdk.PromptArgument{
+				{Name: "doc", Description: "the document", Required: true},
+				{Name: "tone", Description: "the tone"},
+			},
+		}},
+	}
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return remote, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "prompts", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	require.Equal(t, []Prompt{{
+		Server:      "prompts",
+		Name:        "summarize",
+		Description: "Summarize a document.",
+		Arguments: []PromptArgument{
+			{Name: "doc", Description: "the document", Required: true},
+			{Name: "tone", Description: "the tone", Required: false},
+		},
+	}}, client.Prompts())
+}
+
+func TestGetPrompt(t *testing.T) {
+	remote := &fakeRemote{
+		prompts: []mcpsdk.Prompt{{Name: "summarize", Description: "Summarize a document."}},
+		promptOut: &mcpsdk.GetPromptResult{
+			Description: "Summarize a document.",
+			Messages: []mcpsdk.PromptMessage{
+				{
+					Role:    mcpsdk.RoleUser,
+					Content: mcpsdk.TextContent{Type: "text", Text: "Please summarize: hello world"},
+				},
+				{
+					Role:    mcpsdk.RoleAssistant,
+					Content: mcpsdk.TextContent{Type: "text", Text: "On it."},
+				},
+			},
+		},
+	}
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return remote, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "prompts", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	messages, err := client.GetPrompt(
+		context.Background(),
+		"prompts",
+		"summarize",
+		map[string]string{"doc": "hello world"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []PromptMessage{
+		{Role: "user", Content: "Please summarize: hello world"},
+		{Role: "assistant", Content: "On it."},
+	}, messages)
+	// The arguments reach the remote verbatim.
+	require.Equal(t, map[string]string{"doc": "hello world"}, remote.promptArgs)
+}
+
+func TestPromptsAggregateAcrossServers(t *testing.T) {
+	remotes := map[string]*fakeRemote{
+		"alpha": {prompts: []mcpsdk.Prompt{{Name: "a_prompt", Description: "from alpha"}}},
+		"beta":  {prompts: []mcpsdk.Prompt{{Name: "b_prompt", Description: "from beta"}}},
+	}
+	withFakeConnector(t, func(_ context.Context, cfg ServerConfig) (remoteClient, error) {
+		return remotes[cfg.Name], nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{
+			{Name: "alpha", Transport: "stdio", Command: "server"},
+			{Name: "beta", Transport: "stdio", Command: "server"},
+		},
+	}, nil, nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	// Prompts surface in config order, each stamped with its origin server.
+	require.Equal(t, []Prompt{
+		{Server: "alpha", Name: "a_prompt", Description: "from alpha", Arguments: []PromptArgument{}},
+		{Server: "beta", Name: "b_prompt", Description: "from beta", Arguments: []PromptArgument{}},
+	}, client.Prompts())
+}
+
+func TestGetPromptUnknownServer(t *testing.T) {
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return &fakeRemote{}, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "prompts", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	_, err := client.GetPrompt(context.Background(), "missing", "summarize", nil)
+	require.Error(t, err)
 }
 
 func TestToolNameTruncation(t *testing.T) {

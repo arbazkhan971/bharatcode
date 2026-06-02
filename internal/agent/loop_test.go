@@ -16,6 +16,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
+	"github.com/arbazkhan971/bharatcode/internal/skills"
 	"github.com/arbazkhan971/bharatcode/internal/tools"
 	"github.com/stretchr/testify/require"
 )
@@ -66,6 +67,143 @@ func TestRunDrivesToolLoopAndPersistsMessages(t *testing.T) {
 	require.Equal(t, message.RoleAssistant, messages[1].Role)
 	require.Equal(t, message.RoleUser, messages[2].Role)
 	require.Equal(t, message.RoleAssistant, messages[5].Role)
+}
+
+func TestRunInvokesSkillToolAndInjectsBody(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	// Load a real skill set from a temp dir holding one SKILL.md. The body
+	// is a distinctive multi-word marker, deliberately different from the
+	// description, so the assertion proves the tool returns the BODY and not
+	// the summary the system prompt already advertises.
+	const (
+		skillDescription = "Cut a tagged release"
+		skillBody        = "RELEASE-BODY-MARKER-7c2f: run the release checklist step by step."
+	)
+	skillsRoot := filepath.Join(t.TempDir(), ".bharatcode", "skills")
+	writeSkillFixture(t, skillsRoot, "release",
+		"---\nname: release\ndescription: "+skillDescription+"\n---\n"+skillBody+"\n")
+	set, err := skills.LoadSkills(skillsRoot)
+	require.NoError(t, err)
+	loaded, ok := set.Get("release")
+	require.True(t, ok, "fixture skill must load")
+	require.Equal(t, skillBody, loaded.Body, "fixture body must survive parsing")
+
+	registry := newFakeRegistry()
+	registry.Register(newSkillTool(set))
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		// Turn 1: the model invokes the skill tool by name.
+		{
+			llm.DeltaTextEvent{Text: "Loading the release skill."},
+			llm.ToolUseEndEvent{ID: "call-1", Name: skillToolName, Input: json.RawMessage(`{"name":"release"}`)},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+		// Turn 2: text-only reply ends the turn — the loop must have continued.
+		{
+			llm.DeltaTextEvent{Text: "Skill loaded. Proceeding."},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 8, OutputTokens: 4}},
+		},
+	}}
+
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		Bus:          pubsub.NewTopic[Event]("agent-test", 16),
+		SystemPrompt: "test prompt",
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("use the release skill")))
+
+	// The loop continued past the tool call: two provider turns ran and the
+	// final persisted message is the second turn's assistant text.
+	require.Len(t, provider.reqs, 2)
+
+	messages, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+	last := messages[len(messages)-1]
+	require.Equal(t, message.RoleAssistant, last.Role)
+	require.Contains(t, textOf(last), "Skill loaded. Proceeding.")
+
+	// The skill BODY actually reached the conversation as the tool result.
+	var skillResult *message.ToolResultBlock
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if b, ok := block.(message.ToolResultBlock); ok && b.ToolUseID == "call-1" {
+				rb := b
+				skillResult = &rb
+			}
+		}
+	}
+	require.NotNil(t, skillResult, "expected a tool-result block for the skill call")
+	require.False(t, skillResult.IsError)
+	require.Equal(t, skillBody, skillResult.Content, "tool must return the skill body verbatim")
+	require.Contains(t, skillResult.Content, "RELEASE-BODY-MARKER-7c2f")
+	// Returning the summary instead of the body must fail this test.
+	require.NotEqual(t, skillDescription, skillResult.Content)
+	require.NotContains(t, skillResult.Content, skillDescription)
+}
+
+func TestCoordinatorWiresSkillToolIntoAgents(t *testing.T) {
+	// Point the skill loader at a hermetic temp root so the test never reads
+	// the developer's real ~/.bharatcode/skills and only sees this fixture.
+	skillsRoot := filepath.Join(t.TempDir(), ".bharatcode", "skills")
+	writeSkillFixture(t, skillsRoot, "release",
+		"---\nname: release\ndescription: Cut a tagged release\n---\nbody text here\n")
+	restore := skillSearchDirs
+	skillSearchDirs = func(string) []string { return []string{skillsRoot} }
+	t.Cleanup(func() { skillSearchDirs = restore })
+
+	coord, err := NewCoordinator(nil, Dependencies{
+		Tools:     tools.NewRegistry(tools.Dependencies{}),
+		Sessions:  testRepo(t),
+		Providers: map[string]llm.Provider{"fake": &scriptProvider{}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, coord.Start(context.Background()))
+
+	// The unrestricted "coder" agent must see the skill tool, and so must
+	// the read-only "task" agent (its allow-list includes "skill"). This
+	// exercises effectiveRegistry -> combinedTools.extra -> readOnlyTaskTools,
+	// which the Loop-level test above bypasses.
+	for _, name := range []string{"coder", "task"} {
+		loop, err := coord.Agent(name)
+		require.NoError(t, err, "agent %q", name)
+		require.True(t, hasLLMTool(loop, skillToolName), "agent %q must expose the skill tool", name)
+	}
+}
+
+func hasLLMTool(loop *Loop, name string) bool {
+	for _, tool := range loop.llmTools() {
+		if tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSkillToolUnknownSkillReturnsError(t *testing.T) {
+	skillsRoot := filepath.Join(t.TempDir(), ".bharatcode", "skills")
+	writeSkillFixture(t, skillsRoot, "release",
+		"---\nname: release\ndescription: Cut a tagged release\n---\nbody text here\n")
+	set, err := skills.LoadSkills(skillsRoot)
+	require.NoError(t, err)
+
+	tool := newSkillTool(set)
+	res, err := tool.Run(context.Background(), json.RawMessage(`{"name":"missing"}`))
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "unknown skill: missing")
+
+	// A missing name is an error result, not a Go error.
+	res, err = tool.Run(context.Background(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	require.Contains(t, res.Content, "skill name is required")
 }
 
 func TestLoopDetectionStopsBeforeThirdIdenticalToolRun(t *testing.T) {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -104,8 +106,11 @@ func TestAnthropicStreamsTextToolAndUsage(t *testing.T) {
 	require.IsType(t, StartEvent{}, got[0])
 	require.IsType(t, EndEvent{}, got[len(got)-1])
 
-	// The system prompt is carried as the top-level system field, not a message.
-	require.Equal(t, "You are concise.", captured.System)
+	// The system prompt is carried as the top-level system field, not a message,
+	// as a structured text-block array carrying the prompt text.
+	require.Len(t, captured.System, 1)
+	require.Equal(t, "text", captured.System[0].Type)
+	require.Equal(t, "You are concise.", captured.System[0].Text)
 	require.True(t, captured.Stream)
 	require.Equal(t, 256, captured.MaxTokens)
 	require.Len(t, captured.Tools, 1)
@@ -167,6 +172,229 @@ func TestAnthropicConvertsToolResultHistory(t *testing.T) {
 	require.Equal(t, "tool_result", captured.Messages[1].Content[0].Type)
 	require.Equal(t, "toolu_1", captured.Messages[1].Content[0].ToolUseID)
 	require.Equal(t, "answer", captured.Messages[1].Content[0].Content)
+}
+
+// writeMinimalAnthropicSSE writes a minimal well-formed SSE stream carrying the
+// supplied usage block so tests can drive a request to completion without
+// reproducing the full event sequence.
+func writeMinimalAnthropicSSE(w http.ResponseWriter, usageJSON string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	fmt.Fprint(w, "event: message_start\n"+
+		"data: {\"type\":\"message_start\",\"message\":{\"usage\":"+usageJSON+"}}\n\n")
+	fmt.Fprint(w, "event: message_stop\n"+
+		"data: {\"type\":\"message_stop\"}\n\n")
+}
+
+// newAnthropicTestProvider wires a registry-backed Anthropic provider that
+// points at server and authenticates with a stub key. It mirrors the setup the
+// other tests in this file use.
+func newAnthropicTestProvider(t *testing.T, serverURL string) Provider {
+	t.Helper()
+	t.Setenv("ANTHROPIC_TEST_KEY", "test-key")
+	cfg := testConfig("anthropic", config.ProviderAnthropic, serverURL+"/v1")
+	cfg.Providers[0].APIKeyEnv = "ANTHROPIC_TEST_KEY"
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	provider, err := reg.Get("anthropic")
+	require.NoError(t, err)
+	return provider
+}
+
+// TestAnthropicMarksSystemAndToolsWithCacheControl asserts, against the raw
+// wire bytes, that the request carries cache_control ephemeral on the system
+// block and on the (last) tool when a system prompt and tools are present.
+func TestAnthropicMarksSystemAndToolsWithCacheControl(t *testing.T) {
+	var rawBody []byte
+	var captured anthropicRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		rawBody = b
+		require.NoError(t, json.Unmarshal(b, &captured))
+		writeMinimalAnthropicSSE(w, `{"input_tokens":5,"output_tokens":1}`)
+	}))
+	defer server.Close()
+
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+		Tools: []Tool{
+			{Name: "first", Description: "First tool.", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`)},
+			{Name: "second", Description: "Second tool.", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`)},
+		},
+		SystemPrompt: "You are concise.",
+		MaxTokens:    128,
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	// Raw-byte assertions: the documented ephemeral marker is literally on the
+	// wire, not merely reconstructable from a symmetric round-trip.
+	body := string(rawBody)
+	require.Contains(t, body, `"cache_control":{"type":"ephemeral"}`)
+
+	// Exactly two cache breakpoints: one for the system prefix, one for the
+	// tools prefix. Anthropic permits at most four.
+	require.Equal(t, 2, strings.Count(body, `"cache_control"`))
+
+	// Structural assertions: the marker sits on the system block.
+	require.Len(t, captured.System, 1)
+	require.Equal(t, "text", captured.System[0].Type)
+	require.Equal(t, "You are concise.", captured.System[0].Text)
+	require.NotNil(t, captured.System[0].CacheControl)
+	require.Equal(t, "ephemeral", captured.System[0].CacheControl.Type)
+
+	// The marker sits on the LAST tool only; the earlier tool carries none.
+	require.Len(t, captured.Tools, 2)
+	require.Nil(t, captured.Tools[0].CacheControl)
+	require.NotNil(t, captured.Tools[1].CacheControl)
+	require.Equal(t, "ephemeral", captured.Tools[1].CacheControl.Type)
+}
+
+// TestAnthropicNoSystemPromptOmitsSystemAndCacheControl asserts that with no
+// system prompt the request omits the system field entirely and emits no
+// system cache_control, and that tools (when absent) introduce no breakpoint.
+func TestAnthropicNoSystemPromptOmitsSystemAndCacheControl(t *testing.T) {
+	var rawBody []byte
+	var captured anthropicRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		rawBody = b
+		require.NoError(t, json.Unmarshal(b, &captured))
+		writeMinimalAnthropicSSE(w, `{"input_tokens":3,"output_tokens":1}`)
+	}))
+	defer server.Close()
+
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+		// No tools, no system prompt.
+		MaxTokens: 64,
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	body := string(rawBody)
+	// The system key must be absent entirely (omitempty), not an empty block.
+	require.NotContains(t, body, `"system"`)
+	// With no system and no tools there are no cache breakpoints.
+	require.NotContains(t, body, `"cache_control"`)
+	require.Empty(t, captured.System)
+	require.Empty(t, captured.Tools)
+}
+
+// TestAnthropicMarksToolsWhenSystemAbsent asserts that tools still receive a
+// cache_control marker when there is no system prompt, so the tools prefix is
+// cached independently of the system prefix.
+func TestAnthropicMarksToolsWhenSystemAbsent(t *testing.T) {
+	var rawBody []byte
+	var captured anthropicRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		rawBody = b
+		require.NoError(t, json.Unmarshal(b, &captured))
+		writeMinimalAnthropicSSE(w, `{"input_tokens":5,"output_tokens":1}`)
+	}))
+	defer server.Close()
+
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+		Tools: []Tool{{Name: "only", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`)}},
+		// No system prompt.
+		MaxTokens: 64,
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	body := string(rawBody)
+	require.NotContains(t, body, `"system"`)
+	// Exactly one breakpoint: the tools prefix, with no system block to mark.
+	require.Equal(t, 1, strings.Count(body, `"cache_control"`))
+	require.Empty(t, captured.System)
+	require.Len(t, captured.Tools, 1)
+	require.NotNil(t, captured.Tools[0].CacheControl)
+	require.Equal(t, "ephemeral", captured.Tools[0].CacheControl.Type)
+}
+
+// TestAnthropicPopulatesCacheUsageFromResponse asserts the usage mapping carries
+// cache_read_input_tokens (and cache_creation_input_tokens) from the provider
+// response into the EndEvent usage fields.
+func TestAnthropicPopulatesCacheUsageFromResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		writeMinimalAnthropicSSE(w, `{"input_tokens":20,"output_tokens":7,"cache_read_input_tokens":15,"cache_creation_input_tokens":3}`)
+	}))
+	defer server.Close()
+
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+		SystemPrompt: "You are concise.",
+		MaxTokens:    64,
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	require.Equal(t, 1, countEndEvents(got))
+	require.Contains(t, got, EndEvent{Usage: Usage{
+		InputTokens:      20,
+		OutputTokens:     7,
+		CacheReadTokens:  15,
+		CacheWriteTokens: 3,
+	}})
+}
+
+// TestAnthropicCachingDisabledOmitsCacheControl asserts that when prompt caching
+// is turned off the request carries no cache_control markers at all.
+func TestAnthropicCachingDisabledOmitsCacheControl(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		rawBody = b
+		writeMinimalAnthropicSSE(w, `{"input_tokens":4,"output_tokens":1}`)
+	}))
+	defer server.Close()
+
+	// Build through the registry so the model (with tool support) is wired, then
+	// flip caching off on the concrete provider. The registry always enables it.
+	provider := newAnthropicTestProvider(t, server.URL)
+	p := provider.(*anthropicProvider)
+	p.promptCaching = false
+
+	events, err := p.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+		Tools:        []Tool{{Name: "only", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`)}},
+		SystemPrompt: "You are concise.",
+		MaxTokens:    64,
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	require.NotContains(t, string(rawBody), `"cache_control"`)
 }
 
 func textDeltaSequence(events []Event) []string {

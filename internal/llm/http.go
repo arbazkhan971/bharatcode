@@ -219,6 +219,16 @@ func readSSE(ctx context.Context, r io.Reader, handle func(sseEvent) error) erro
 			_, _ = strconv.Atoi(value)
 		}
 	}
+	// When the context is cancelled mid-stream the transport aborts the
+	// in-flight Body.Read, so scanner.Scan returns false carrying a
+	// connection-closed/net error rather than a wrapped context.Canceled.
+	// Check the context unconditionally before inspecting scanner.Err so a
+	// cancellation surfaces as ctx.Err() and never as a garbage scan error or a
+	// truncated flush of a half-read event. On the clean path ctx.Err is nil and
+	// this is a no-op.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("reading provider stream: %w", err)
+	}
 	if err := scanner.Err(); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return fmt.Errorf("reading provider stream: %w", err)

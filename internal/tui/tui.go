@@ -165,6 +165,16 @@ type model struct {
 	// directory (the workspace). Tests set it to a temp directory.
 	exportDir string
 
+	// copyToClipboard writes text to the system clipboard. It defaults to a
+	// shell-out implementation (pbcopy/wl-copy/xclip/xsel) that degrades
+	// gracefully when no utility is installed; tests inject a stub.
+	copyToClipboard copyFunc
+
+	// chatScroll is the number of lines the chat viewport is scrolled up from the
+	// bottom. Zero anchors the view to the newest content (the default, unchanged
+	// behavior); a positive value reveals older lines. The mouse wheel adjusts it.
+	chatScroll int
+
 	// filetree is the togglable file-tree + diff side panel. It is hidden by
 	// default, so the default render is unchanged.
 	filetree filetree
@@ -193,21 +203,22 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	// style follows the active theme so light/dark stay consistent.
 	chatList.EnableMarkdown(theme.Markdown)
 	m := &model{
-		ctx:           ctx,
-		deps:          deps,
-		theme:         theme,
-		themeName:     theme.Name,
-		chat:          chatList,
-		footer:        footer,
-		status:        statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
-		notifications: notification.NewFocusAware(notification.Noop{}),
-		focus:         focusInput,
-		width:         minWidth,
-		height:        minHeight,
-		startedAt:     now,
-		now:           now,
-		sessionID:     sessionID,
-		workspaceRoot: workingDir(),
+		ctx:             ctx,
+		deps:            deps,
+		theme:           theme,
+		themeName:       theme.Name,
+		chat:            chatList,
+		footer:          footer,
+		status:          statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
+		notifications:   notification.NewFocusAware(notification.Noop{}),
+		focus:           focusInput,
+		width:           minWidth,
+		height:          minHeight,
+		startedAt:       now,
+		now:             now,
+		sessionID:       sessionID,
+		workspaceRoot:   workingDir(),
+		copyToClipboard: systemClipboardCopy,
 	}
 	if deps.Permission != nil {
 		m.applyApprovalMode(deps.Permission.GetApprovalMode())
@@ -254,6 +265,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleAgentEvent(msg)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.MouseWheelMsg:
+		return m.handleMouseWheel(msg)
 	default:
 		return m, nil
 	}
@@ -457,6 +470,9 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	if text == "/theme" || strings.HasPrefix(text, "/theme ") {
 		return m.handleTheme(text), nil
 	}
+	if text == "/copy" || strings.HasPrefix(text, "/copy ") {
+		return m.handleCopy(text)
+	}
 
 	switch text {
 	case "/help":
@@ -640,12 +656,45 @@ func (m *model) renderMain() string {
 
 	parts := []string{
 		header,
-		clampHeight(chatBody, m.layout.chat.H),
+		m.clampChat(chatBody, m.layout.chat.H),
 		clampHeight(input, m.layout.input.H),
 		m.status.Render(m.width),
 		m.footer.Render(m.width),
 	}
 	return strings.Join(parts, "\n")
+}
+
+// clampChat renders the chat body into a window of at most height lines,
+// honoring m.chatScroll. A scroll of 0 anchors the window to the bottom (the
+// newest content), matching the prior bottom-clamp behavior; a positive scroll
+// reveals that many lines of older content. The offset is clamped to the
+// scrollable range here so callers (the mouse-wheel handler) need not know the
+// rendered line count, and an over-scroll past the top simply pins to the first
+// line. It also writes the clamped offset back so the model never retains an
+// out-of-range scroll after a resize or content change.
+func (m *model) clampChat(s string, height int) string {
+	if height <= 0 {
+		m.chatScroll = 0
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	maxScroll := len(lines) - height
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.chatScroll > maxScroll {
+		m.chatScroll = maxScroll
+	}
+	if m.chatScroll < 0 {
+		m.chatScroll = 0
+	}
+	if len(lines) <= height {
+		return s
+	}
+	// end is exclusive; scrolling up by chatScroll moves the window earlier.
+	end := len(lines) - m.chatScroll
+	start := end - height
+	return strings.Join(lines[start:end], "\n")
 }
 
 func (m *model) pushModelPicker() {
@@ -742,6 +791,7 @@ func slashHelp() string {
 		"/fork - branch the current session",
 		"/diff - show the latest edit diff",
 		"/export [md|html] - write the session transcript to a file",
+		"/copy [last|all] - copy the last assistant reply or the whole chat to the clipboard",
 		"/status - show model, session, and spend",
 		"/model - open model picker",
 		"/agent - open agent picker",

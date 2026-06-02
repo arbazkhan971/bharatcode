@@ -116,6 +116,43 @@ func (l *List) Clear() {
 	l.renderRegions = 0
 }
 
+// LastAssistantText returns the raw (unrendered) body of the most recent
+// assistant message, or "" when no assistant message is present. It returns the
+// source text rather than the ANSI-styled render so copied output is plain and
+// paste-friendly.
+func (l *List) LastAssistantText() string {
+	for i := len(l.items) - 1; i >= 0; i-- {
+		if l.items[i].role == message.RoleAssistant {
+			return l.items[i].body
+		}
+	}
+	return ""
+}
+
+// TranscriptText returns the whole visible conversation as plain text, one
+// message per block separated by blank lines. Each block is prefixed with its
+// role (for example "user" or "assistant"). It returns "" when the list is
+// empty.
+func (l *List) TranscriptText() string {
+	if len(l.items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i := range l.items {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		role := string(l.items[i].role)
+		if role == "" {
+			role = "message"
+		}
+		b.WriteString(role)
+		b.WriteString(":\n")
+		b.WriteString(l.items[i].body)
+	}
+	return b.String()
+}
+
 // Render returns the rendered message list for width.
 func (l *List) Render(width int) string {
 	if width < 1 {

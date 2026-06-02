@@ -35,11 +35,15 @@ type Session struct {
 }
 
 // ListFilter narrows a Repo.List call.
-// A zero ListFilter returns every session, newest first.
+// A zero ListFilter returns every non-archived session, newest first.
 type ListFilter struct {
 	ProjectPath string    // Exact-match filter; empty disables.
 	Since       time.Time // UpdatedAt >= Since; zero disables.
 	Limit       int       // 0 means no limit.
+	// IncludeArchived, when true, makes List return archived sessions
+	// alongside active ones. When false (the default), archived sessions are
+	// hidden. See Archive for how a session becomes archived.
+	IncludeArchived bool
 }
 
 // Repo is the public handle for session storage. All methods take
@@ -48,6 +52,12 @@ type ListFilter struct {
 type Repo struct {
 	database *db.DB
 	mu       sync.Mutex
+
+	// archiveMu guards lazy creation of the session_archive side table;
+	// archiveReady is set once the CREATE TABLE has succeeded so the DDL runs
+	// at most once per Repo. See archive.go.
+	archiveMu    sync.Mutex
+	archiveReady bool
 }
 
 // Sentinel errors returned by Repo methods.
@@ -135,18 +145,29 @@ func (r *Repo) Get(ctx context.Context, id string) (*Session, error) {
 }
 
 // List returns sessions matching the filter, ordered by UpdatedAt DESC.
+// Archived sessions are excluded unless f.IncludeArchived is true.
 func (r *Repo) List(ctx context.Context, f ListFilter) ([]Session, error) {
 	var sinceUnix int64
 	if !f.Since.IsZero() {
 		sinceUnix = f.Since.UTC().Unix()
 	}
 
+	// When archived sessions are hidden we cannot push f.Limit down to SQL:
+	// the limit must apply to the visible (post-filter) rows, not to the raw
+	// rows, or we could return fewer than Limit active sessions while more
+	// exist past archived ones. So we fetch unlimited, drop archived rows,
+	// then truncate to Limit in Go.
+	sqlLimit := int64(f.Limit)
+	if !f.IncludeArchived {
+		sqlLimit = 0
+	}
+
 	params := sqlc.ListSessionsFilteredParams{
 		Column1: f.ProjectPath,
 		Column2: f.ProjectPath,
 		Column3: sinceUnix,
-		Column4: int64(f.Limit),
-		Column5: int64(f.Limit),
+		Column4: sqlLimit,
+		Column5: sqlLimit,
 	}
 
 	rows, err := r.database.Queries.ListSessionsFiltered(ctx, params)
@@ -154,9 +175,22 @@ func (r *Repo) List(ctx context.Context, f ListFilter) ([]Session, error) {
 		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
 
-	sessions := make([]Session, len(rows))
-	for i, row := range rows {
-		sessions[i] = Session{
+	var archived map[string]struct{}
+	if !f.IncludeArchived {
+		archived, err = r.archivedSet(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("listing sessions: %w", err)
+		}
+	}
+
+	sessions := make([]Session, 0, len(rows))
+	for _, row := range rows {
+		if !f.IncludeArchived {
+			if _, ok := archived[row.ID]; ok {
+				continue
+			}
+		}
+		sessions = append(sessions, Session{
 			ID:           row.ID,
 			ProjectPath:  row.ProjectPath,
 			Title:        row.Title,
@@ -165,6 +199,9 @@ func (r *Repo) List(ctx context.Context, f ListFilter) ([]Session, error) {
 			CreatedAt:    time.Unix(row.CreatedAt, 0).UTC(),
 			UpdatedAt:    time.Unix(row.UpdatedAt, 0).UTC(),
 			MessageCount: int(row.MessageCount),
+		})
+		if !f.IncludeArchived && f.Limit > 0 && len(sessions) == f.Limit {
+			break
 		}
 	}
 	return sessions, nil
@@ -172,9 +209,12 @@ func (r *Repo) List(ctx context.Context, f ListFilter) ([]Session, error) {
 
 // Search returns sessions whose title or first user message contains query
 // as a case-insensitive substring, ordered by UpdatedAt DESC (matching List).
-// An empty query returns every session. Search reads message content for each
-// session via Messages, so it scales with total stored messages; callers that
-// need only title matching should prefer a narrower filter.
+// An empty query returns every non-archived session. Archived sessions are
+// excluded from results because Search draws from the default List view; use
+// List with ListFilter.IncludeArchived to reach archived sessions. Search reads
+// message content for each session via Messages, so it scales with total stored
+// messages; callers that need only title matching should prefer a narrower
+// filter.
 func (r *Repo) Search(ctx context.Context, query string) ([]Session, error) {
 	all, err := r.List(ctx, ListFilter{})
 	if err != nil {
@@ -286,13 +326,26 @@ func (r *Repo) Update(ctx context.Context, s *Session) error {
 	return nil
 }
 
-// Delete removes the session row. The schema FK cascade also removes
+// Delete hard-deletes the session row. The schema FK cascade also removes
 // every messages.session_id, file_changes.session_id, and
-// ledger_entries.session_id row matching id.
+// ledger_entries.session_id row matching id. Any archive marker for id is
+// also cleared so a later session reusing the id is not silently hidden.
 func (r *Repo) Delete(ctx context.Context, id string) error {
-	err := r.database.Queries.DeleteSession(ctx, id)
+	if err := r.database.Queries.DeleteSession(ctx, id); err != nil {
+		return fmt.Errorf("deleting session %s: %w", id, err)
+	}
+	// Clear any archive marker so a later session reusing this id is not
+	// silently hidden. If no session has ever been archived the side table does
+	// not exist yet and there is nothing to clear, so we skip rather than
+	// create the table on the delete path.
+	exists, err := r.archiveTableExists(ctx)
 	if err != nil {
 		return fmt.Errorf("deleting session %s: %w", id, err)
+	}
+	if exists {
+		if _, err := r.database.ExecContext(ctx, `DELETE FROM session_archive WHERE session_id = ?`, id); err != nil {
+			return fmt.Errorf("deleting session %s archive marker: %w", id, err)
+		}
 	}
 	return nil
 }

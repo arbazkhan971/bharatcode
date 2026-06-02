@@ -36,6 +36,12 @@ type Position struct {
 	Character int
 }
 
+// Location identifies a range within a file, as returned by go-to-definition.
+type Location struct {
+	Path  string
+	Range Range
+}
+
 type languageSpec struct {
 	name       string
 	extension  map[string]struct{}

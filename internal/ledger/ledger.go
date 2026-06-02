@@ -8,6 +8,12 @@
 // discarded and recomputed from token counts — this is the load-bearing
 // invariant that makes the ledger trustworthy.
 //
+// Per-entry USD is stored at full float precision; INR is rounded to two
+// decimals only at the summary boundary, where the aggregate is computed
+// as roundCents(SUM(usd) * rate). Rounding once over the summed USD avoids
+// the per-entry drift that summing individually-rounded INR values would
+// introduce.
+//
 // Time windows (WindowDay, WindowMonth) are evaluated in local time
 // so that "today" and "this calendar month" match what the user sees
 // in their terminal.
@@ -76,15 +82,16 @@ const (
 // Entry is one recorded LLM API call. CostUSD and CostINR on the
 // incoming value are ignored; Record recomputes both from token counts.
 type Entry struct {
-	ID           string    `json:"id"`
-	SessionID    string    `json:"session_id"`
-	Provider     string    `json:"provider"` // E.g. "anthropic", "deepseek", "moonshot".
-	Model        string    `json:"model"`    // Provider-scoped model ID.
-	InputTokens  int       `json:"input_tokens"`
-	OutputTokens int       `json:"output_tokens"`
-	CostUSD      float64   `json:"cost_usd"` // Ignored on input; recomputed.
-	CostINR      float64   `json:"cost_inr"` // Ignored on input; recomputed.
-	At           time.Time `json:"at"`
+	ID              string    `json:"id"`
+	SessionID       string    `json:"session_id"`
+	Provider        string    `json:"provider"` // E.g. "anthropic", "deepseek", "moonshot".
+	Model           string    `json:"model"`    // Provider-scoped model ID.
+	InputTokens     int       `json:"input_tokens"`
+	OutputTokens    int       `json:"output_tokens"`
+	CacheReadTokens int       `json:"cache_read_tokens"` // Tokens served from a provider cache; priced at the cache rate when configured.
+	CostUSD         float64   `json:"cost_usd"`          // Ignored on input; recomputed.
+	CostINR         float64   `json:"cost_inr"`          // Ignored on input; recomputed.
+	At              time.Time `json:"at"`
 }
 
 // Summary rolls Entry rows up over a Window.
@@ -109,10 +116,13 @@ type BudgetVerdict struct {
 	PlannedINR float64     `json:"planned_inr"` // The plannedCostINR argument.
 }
 
-// modelPricing holds per-million-token prices for one model.
+// modelPricing holds per-million-token prices for one model. A zero
+// cacheReadPerMTok means cache-read tokens are not separately priced and
+// therefore contribute nothing to cost.
 type modelPricing struct {
-	inputPerMTok  float64
-	outputPerMTok float64
+	inputPerMTok     float64
+	outputPerMTok    float64
+	cacheReadPerMTok float64
 }
 
 // Ledger is the public handle for cost tracking and budget enforcement.
@@ -153,10 +163,21 @@ func roundCents(x float64) float64 {
 	return math.Round(x*100) / 100
 }
 
+// summaryINR derives an aggregate INR cost from a precise USD sum using
+// the spec's sum-then-round formula: roundCents(SUM(usd) * rate). This is
+// the single rounding boundary for any rolled-up window, so the displayed
+// total never drifts from round(sum_usd * rate) the way summing
+// per-entry-rounded INR values would.
+func (l *Ledger) summaryINR(totalUSD float64) float64 {
+	return roundCents(totalUSD * l.cfg.UsdInrRate)
+}
+
 // Record persists e and, on success, publishes a fresh WindowSession
 // Summary for e.SessionID on the bus. CostUSD and CostINR on the
 // incoming Entry are ignored; Record recomputes both from e.InputTokens,
-// e.OutputTokens, and config-derived prices for (e.Provider, e.Model).
+// e.OutputTokens, e.CacheReadTokens, and config-derived prices for
+// (e.Provider, e.Model). Cache-read tokens add to the cost only when the
+// model's pricing carries a cache rate; otherwise they contribute nothing.
 // Returns ErrUnknownModel if no pricing is configured for the model.
 func (l *Ledger) Record(ctx context.Context, e Entry) error {
 	key := strings.ToLower(e.Provider) + "/" + e.Model
@@ -166,7 +187,14 @@ func (l *Ledger) Record(ctx context.Context, e Entry) error {
 	}
 
 	// Recompute costs from token counts; never trust caller-supplied values.
-	usd := (float64(e.InputTokens)*p.inputPerMTok + float64(e.OutputTokens)*p.outputPerMTok) / 1_000_000
+	// Cache-read tokens are included only when the model has a cache rate;
+	// with cacheReadPerMTok == 0 the term contributes nothing.
+	usd := (float64(e.InputTokens)*p.inputPerMTok +
+		float64(e.OutputTokens)*p.outputPerMTok +
+		float64(e.CacheReadTokens)*p.cacheReadPerMTok) / 1_000_000
+	// Store the per-entry INR rounded for display, but note that
+	// aggregation derives total INR from SUM(cost_usd) * rate so the
+	// summary matches roundCents(sum_usd * rate) exactly (see summaryINR).
 	inr := roundCents(usd * l.cfg.UsdInrRate)
 
 	at := e.At
@@ -223,11 +251,12 @@ func (l *Ledger) sessionSummary(ctx context.Context, sessionID string) (Summary,
 	if err != nil {
 		return Summary{}, fmt.Errorf("querying session summary: %w", err)
 	}
+	totalUSD := toFloat64(row.TotalUsd)
 	return Summary{
 		Window:       WindowSession,
 		SessionID:    sessionID,
-		CostUSD:      toFloat64(row.TotalUsd),
-		CostINR:      toFloat64(row.TotalInr),
+		CostUSD:      totalUSD,
+		CostINR:      l.summaryINR(totalUSD),
 		InputTokens:  int(toInt64(row.TotalInput)),
 		OutputTokens: int(toInt64(row.TotalOutput)),
 		CallCount:    int(row.CallCount),
@@ -248,11 +277,12 @@ func (l *Ledger) Summary(ctx context.Context, sessionID string, window Window) (
 		if err != nil {
 			return Summary{}, fmt.Errorf("querying session summary for %s: %w", sessionID, err)
 		}
+		totalUSD := toFloat64(row.TotalUsd)
 		return Summary{
 			Window:       WindowSession,
 			SessionID:    sessionID,
-			CostUSD:      toFloat64(row.TotalUsd),
-			CostINR:      toFloat64(row.TotalInr),
+			CostUSD:      totalUSD,
+			CostINR:      l.summaryINR(totalUSD),
 			InputTokens:  int(toInt64(row.TotalInput)),
 			OutputTokens: int(toInt64(row.TotalOutput)),
 			CallCount:    int(row.CallCount),
@@ -292,10 +322,11 @@ func (l *Ledger) periodSummary(ctx context.Context, win Window, start, end time.
 	if err != nil {
 		return Summary{}, fmt.Errorf("querying %s summary: %w", win, err)
 	}
+	totalUSD := toFloat64(row.TotalUsd)
 	return Summary{
 		Window:       win,
-		CostUSD:      toFloat64(row.TotalUsd),
-		CostINR:      toFloat64(row.TotalInr),
+		CostUSD:      totalUSD,
+		CostINR:      l.summaryINR(totalUSD),
 		InputTokens:  int(toInt64(row.TotalInput)),
 		OutputTokens: int(toInt64(row.TotalOutput)),
 		CallCount:    int(row.CallCount),

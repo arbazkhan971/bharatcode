@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,33 @@ import (
 // through, which the fuzz harness treats as a contract violation.
 const panicSentinel = "internal tool panic"
 
+// offlineTransport fails every HTTP round-trip so the web tools can never reach
+// the real network during fuzzing, even if the mutator synthesizes a valid URL.
+type offlineTransport struct{}
+
+func (offlineTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("network disabled during fuzzing")
+}
+
+// installOfflineWebClients replaces the package-level HTTP clients and endpoint
+// used by web_fetch and web_search with offline-only stubs, restoring the
+// originals when the test ends. It must run before any tool is constructed,
+// because the web tools capture their client at construction time.
+func installOfflineWebClients(t *testing.T) {
+	t.Helper()
+	oldHTTP := httpClient
+	oldSearchClient := webSearchClient
+	oldSearchEndpoint := webSearchEndpoint
+	httpClient = &http.Client{Transport: offlineTransport{}}
+	webSearchClient = &http.Client{Transport: offlineTransport{}}
+	webSearchEndpoint = "http://127.0.0.1:0/"
+	t.Cleanup(func() {
+		httpClient = oldHTTP
+		webSearchClient = oldSearchClient
+		webSearchEndpoint = oldSearchEndpoint
+	})
+}
+
 // fuzzDeps builds an isolated, offline, default-denying dependency set for the
 // fuzz harness. The permission checker is constructed with a nil prompt bus and
 // the default Auto approval mode, so any tool that asks for permission (bash,
@@ -27,6 +55,7 @@ const panicSentinel = "internal tool panic"
 // throwaway temp directory so no fuzzed argument can touch real files.
 func fuzzDeps(t *testing.T) Dependencies {
 	t.Helper()
+	installOfflineWebClients(t)
 	cfg := &config.Config{
 		// Deny every tool explicitly so bash never runs an arbitrary command
 		// even if the prompt fallback behaviour changes.
@@ -51,46 +80,64 @@ func fuzzDeps(t *testing.T) Dependencies {
 	}
 }
 
-// assertToolContract runs one tool with the given raw args and asserts the
-// no-panic contract: the tool must return either an error result with a nil
-// error, or a real error (which for a cancelled context must be the context
-// error). A recovered panic — detectable by the sentinel the safe wrappers
-// inject — is always a failure.
-func assertToolContract(t *testing.T, ctx context.Context, tool Tool, raw json.RawMessage) {
+// assertNoPanic enforces the core invariant the recover wrappers exist to
+// guarantee: a tool's Run must never surface a recovered panic. The wrappers
+// fold any panic into a Result/error carrying panicSentinel, so its presence in
+// either output proves Run panicked.
+func assertNoPanic(t *testing.T, tool Tool, raw json.RawMessage, res Result, err error) {
 	t.Helper()
-	res, err := tool.Run(ctx, raw)
-
-	// A recovered panic surfaces as the sentinel in either the Result content
-	// or the returned error. Neither is acceptable: the wrapper exists to make
-	// the tool safe, but the underlying Run must not panic in the first place
-	// is what we prove — and if it did, the sentinel exposes it.
 	if strings.Contains(res.Content, panicSentinel) {
 		t.Fatalf("tool %q panicked (sentinel in content) for args %q: %s", tool.Name(), raw, res.Content)
 	}
 	if err != nil && strings.Contains(err.Error(), panicSentinel) {
 		t.Fatalf("tool %q panicked (sentinel in error) for args %q: %v", tool.Name(), raw, err)
 	}
+}
 
-	switch {
-	case err == nil:
-		// Success or a graceful error result are both fine. The only hard
-		// requirement is that a non-successful outcome is flagged as an error
-		// result rather than a silent empty success when the input was junk —
-		// but tools may legitimately succeed on parseable inputs, so we only
-		// require the absence of a panic here.
-		return
-	case ctx.Err() != nil:
-		// When the context is cancelled, a non-nil error must be the context
-		// error (wrapped or bare). Anything else means the tool ignored
-		// cancellation and failed for an unrelated reason.
-		if !errors.Is(err, ctx.Err()) {
-			t.Fatalf("tool %q returned non-context error under cancellation for args %q: %v", tool.Name(), raw, err)
-		}
-	default:
-		// A non-nil error with a live context is allowed only for genuine I/O
-		// style failures (e.g. reading a missing file). It must still not be a
-		// panic, which we already checked above.
-		return
+// assertToolContract runs one tool with the given raw args and asserts the
+// no-panic contract. A tool may legitimately succeed (parseable input), return
+// a graceful (IsError, nil) error result, or return a real I/O-style error; the
+// only forbidden outcome is a raw panic. The task lists (_, ctx.Err()) as an
+// allowed return under cancellation, not a mandated one, so the cancelled path
+// holds the same no-panic invariant rather than requiring the context error.
+func assertToolContract(t *testing.T, ctx context.Context, tool Tool, raw json.RawMessage) {
+	t.Helper()
+	res, err := tool.Run(ctx, raw)
+	assertNoPanic(t, tool, raw, res, err)
+}
+
+// assertGarbageRejected runs one tool with definitely-invalid JSON and asserts
+// the positive side of the contract: the tool must report a graceful error
+// result (IsError true, nil error) rather than panicking, succeeding silently,
+// or returning a non-nil error. This proves tools actively reject garbage, not
+// merely that they avoid crashing.
+func assertGarbageRejected(t *testing.T, tool Tool, raw json.RawMessage) {
+	t.Helper()
+	res, err := tool.Run(context.Background(), raw)
+	assertNoPanic(t, tool, raw, res, err)
+	if err != nil {
+		t.Fatalf("tool %q returned non-nil error for garbage args %q: %v", tool.Name(), raw, err)
+	}
+	if !res.IsError {
+		t.Fatalf("tool %q accepted garbage args %q without flagging an error result: %q", tool.Name(), raw, res.Content)
+	}
+}
+
+// garbageCorpus is the set of inputs that are invalid JSON for every tool, so
+// each tool must reject them with a graceful error result regardless of its
+// argument shape.
+func garbageCorpus() [][]byte {
+	return [][]byte{
+		[]byte(`{`),
+		[]byte(`}`),
+		[]byte(`[`),
+		[]byte(`]`),
+		[]byte(`{"`),
+		[]byte(`{"path"`),
+		[]byte(`{"path":}`),
+		[]byte(`not json at all`),
+		[]byte(`{,}`),
+		[]byte("{\x00}"),
 	}
 }
 
@@ -98,20 +145,15 @@ func assertToolContract(t *testing.T, ctx context.Context, tool Tool, raw json.R
 // seed corpus for every tool fuzz target. Running `go test -run=Fuzz` replays
 // these as ordinary tests, proving each tool handles them without panicking.
 func fuzzCorpus() [][]byte {
-	return [][]byte{
+	seeds := [][]byte{
 		// Empty and whitespace.
 		[]byte(``),
 		[]byte(`   `),
 		// Structurally broken JSON.
-		[]byte(`{`),
-		[]byte(`}`),
-		[]byte(`[`),
 		[]byte(`null`),
 		[]byte(`true`),
 		[]byte(`123`),
 		[]byte(`"a string"`),
-		[]byte(`{"`),
-		[]byte(`{"path"`),
 		// Wrong types for known fields.
 		[]byte(`{"path": 123}`),
 		[]byte(`{"path": ["a", "b"]}`),
@@ -135,23 +177,16 @@ func fuzzCorpus() [][]byte {
 		[]byte(`{"action": "list"}`),
 		[]byte(`{"action": "add", "text": "do a thing"}`),
 		[]byte(`{"action": "💣", "items": [{"content": "x"}]}`),
+		[]byte(`{"url": "http://127.0.0.1:0/", "prompt": "x"}`),
+		[]byte(`{"query": "anything"}`),
 		// Control characters and unicode.
 		[]byte("{\"path\": \"\x00\x01\x02\"}"),
 		[]byte(`{"path": "日本語/ファイル.go"}`),
 		// Deeply nested / large-ish nonsense.
 		[]byte(`{"items": [` + strings.Repeat(`{"id":"a","content":"b"},`, 50) + `{}]}`),
 	}
-}
-
-// runFuzzCorpusAgainstAllTools is the shared body for the per-tool fuzz targets
-// and for the corpus replay test: it feeds raw bytes to every registered tool
-// and enforces the no-panic contract.
-func runFuzzCorpusAgainstAllTools(t *testing.T, raw []byte) {
-	t.Helper()
-	registry := NewRegistry(fuzzDeps(t))
-	for _, tool := range registry.List() {
-		assertToolContract(t, context.Background(), tool, json.RawMessage(raw))
-	}
+	// The pure-garbage inputs belong in the seed corpus too.
+	return append(seeds, garbageCorpus()...)
 }
 
 // FuzzAllTools feeds arbitrary bytes as JSON arguments to every registered tool
@@ -163,13 +198,16 @@ func FuzzAllTools(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		runFuzzCorpusAgainstAllTools(t, raw)
+		registry := NewRegistry(fuzzDeps(t))
+		for _, tool := range registry.List() {
+			assertToolContract(t, context.Background(), tool, json.RawMessage(raw))
+		}
 	})
 }
 
 // FuzzToolsUnderCancelledContext repeats the contract checks with an
-// already-cancelled context, asserting that no tool panics and that any error
-// returned is the context error rather than an unrelated failure.
+// already-cancelled context, asserting that no tool panics regardless of how
+// far it gets before observing cancellation.
 func FuzzToolsUnderCancelledContext(f *testing.F) {
 	for _, seed := range fuzzCorpus() {
 		f.Add(seed)
@@ -184,15 +222,26 @@ func FuzzToolsUnderCancelledContext(f *testing.F) {
 	})
 }
 
+// TestToolsRejectGarbageArgs asserts the positive side of the contract: every
+// registered tool turns pure-garbage JSON into a graceful (IsError, nil) result
+// rather than panicking or silently succeeding.
+func TestToolsRejectGarbageArgs(t *testing.T) {
+	registry := NewRegistry(fuzzDeps(t))
+	for _, tool := range registry.List() {
+		for _, garbage := range garbageCorpus() {
+			assertGarbageRejected(t, tool, json.RawMessage(garbage))
+		}
+	}
+}
+
 // FuzzViewArgs targets the view tool directly so the corpus stays focused on
 // path/offset/limit shapes.
 func FuzzViewArgs(f *testing.F) {
 	for _, seed := range fuzzCorpus() {
 		f.Add(seed)
 	}
-	deps := func(t *testing.T) Tool { return newViewTool(fuzzDeps(t)) }
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		assertToolContract(t, context.Background(), deps(t), json.RawMessage(raw))
+		assertToolContract(t, context.Background(), newViewTool(fuzzDeps(t)), json.RawMessage(raw))
 	})
 }
 
@@ -234,5 +283,20 @@ func FuzzBashArgs(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		assertToolContract(t, context.Background(), newBashTool(fuzzDeps(t)), json.RawMessage(raw))
+	})
+}
+
+// FuzzGrepArgs targets the grep tool directly with the Go fallback forced on,
+// so the corpus exercises pattern compilation paths independent of whether
+// ripgrep happens to be installed.
+func FuzzGrepArgs(f *testing.F) {
+	for _, seed := range fuzzCorpus() {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		old := lookPath
+		lookPath = func(string) (string, error) { return "", os.ErrNotExist }
+		defer func() { lookPath = old }()
+		assertToolContract(t, context.Background(), newGrepTool(fuzzDeps(t)), json.RawMessage(raw))
 	})
 }

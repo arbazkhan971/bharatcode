@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -321,6 +322,38 @@ func (t *Tracker) ChangesForSession(ctx context.Context, sessionID string) ([]Ch
 	}
 
 	return changes, nil
+}
+
+// ChangedFiles returns the sorted, deduplicated set of absolute file
+// paths created or edited by sessionID. A path is included if it has
+// at least one OpCreate or OpEdit Change recorded for the session,
+// regardless of how many times it was written. OpDelete operations do
+// not, on their own, add a path: a path that was only ever deleted is
+// excluded, but a path that was created (or edited) and later deleted
+// remains in the set because it was created/edited during the session.
+//
+// The result is suitable for a /diff or status view; an empty session
+// yields an empty (non-nil) slice.
+func (t *Tracker) ChangedFiles(ctx context.Context, sessionID string) ([]string, error) {
+	changes, err := t.ChangesForSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("collecting changed files for session %s: %w", sessionID, err)
+	}
+
+	seen := make(map[string]struct{}, len(changes))
+	for _, c := range changes {
+		if c.Op == OpCreate || c.Op == OpEdit {
+			seen[c.Path] = struct{}{}
+		}
+	}
+
+	paths := make([]string, 0, len(seen))
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	return paths, nil
 }
 
 // HasConflict returns true if the current SHA-256 of path differs

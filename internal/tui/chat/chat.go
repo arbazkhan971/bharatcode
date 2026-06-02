@@ -153,6 +153,26 @@ func (l *List) TranscriptText() string {
 	return b.String()
 }
 
+// SearchLines reports the indices of lines in text that contain term, matched
+// case-insensitively. text is split on "\n", so the returned indices address
+// lines of that same split (line 0 is the first line). An empty term, or text
+// with no match, returns nil. It is a pure helper so both the transcript line
+// space and the rendered chat line space can be searched with one implementation
+// and the caller positions the viewport against whichever it scrolls.
+func SearchLines(text string, term string) []int {
+	if term == "" {
+		return nil
+	}
+	needle := strings.ToLower(term)
+	var matches []int
+	for i, line := range strings.Split(text, "\n") {
+		if strings.Contains(strings.ToLower(line), needle) {
+			matches = append(matches, i)
+		}
+	}
+	return matches
+}
+
 // Render returns the rendered message list for width.
 func (l *List) Render(width int) string {
 	if width < 1 {

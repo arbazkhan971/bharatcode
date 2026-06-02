@@ -37,6 +37,12 @@ type ServerConfig struct {
 	// (sampling/createMessage). It is injected at connect time rather than
 	// loaded from config, so it is excluded from JSON.
 	Sampler Sampler `json:"-"`
+
+	// RootsEnabled, when true, advertises the roots capability (with
+	// list-changed support) at init so the server may issue roots/list. Like
+	// Sampler, it reflects client state injected at connect time rather than
+	// loaded from config, so it is excluded from JSON.
+	RootsEnabled bool `json:"-"`
 }
 
 // Resource is a server-advertised resource the agent may read by URI.

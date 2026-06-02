@@ -175,6 +175,11 @@ type model struct {
 	// behavior); a positive value reveals older lines. The mouse wheel adjusts it.
 	chatScroll int
 
+	// search is the scrollback-search state for /search and the next/prev match
+	// keys. Its zero value is inert (no term, no matches), so a model that has
+	// never searched renders and scrolls exactly as before.
+	search searchState
+
 	// filetree is the togglable file-tree + diff side panel. It is hidden by
 	// default, so the default render is unchanged.
 	filetree filetree
@@ -370,6 +375,14 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+f":
 		m.filetree.toggle(m.workspaceRoot)
 		return m, nil
+	case "ctrl+/":
+		// Advance to the next scrollback-search match. With no active search it
+		// is inert, so the binding never disturbs an un-searched view.
+		return m.searchNext(), nil
+	case "ctrl+\\":
+		// Step to the previous scrollback-search match (inert when no search is
+		// active).
+		return m.searchPrev(), nil
 	case "esc":
 		if m.filetree.visible {
 			m.filetree.visible = false
@@ -473,12 +486,17 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	if text == "/copy" || strings.HasPrefix(text, "/copy ") {
 		return m.handleCopy(text)
 	}
+	if text == "/search" || strings.HasPrefix(text, "/search ") {
+		return m.handleSearch(text)
+	}
 
 	switch text {
 	case "/help":
 		m.helpVisible = true
 	case "/clear":
 		m.chat.Clear()
+		m.search.reset()
+		m.chatScroll = 0
 		m.helpVisible = false
 	case "/sessions":
 		return m.openSessionPicker()
@@ -792,6 +810,7 @@ func slashHelp() string {
 		"/diff - show the latest edit diff",
 		"/export [md|html] - write the session transcript to a file",
 		"/copy [last|all] - copy the last assistant reply or the whole chat to the clipboard",
+		"/search <term> - find a term in the chat; Ctrl+/ next match, Ctrl+\\ previous",
 		"/status - show model, session, and spend",
 		"/model - open model picker",
 		"/agent - open agent picker",

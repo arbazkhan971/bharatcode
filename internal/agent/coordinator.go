@@ -39,6 +39,11 @@ type Dependencies struct {
 	MCP         *mcp.Client
 	Bus         *pubsub.Topic[Event]
 	Providers   map[string]llm.Provider
+	// Router, when set, is forwarded to every Loop the Coordinator creates,
+	// enabling cost-aware model routing. It is nil by default, leaving routing
+	// off and each Loop pinned to its configured model — the non-breaking
+	// default. Inject a Router (for example, a CostAwareRouter) to opt in.
+	Router Router
 }
 
 // Coordinator manages configured named agents.
@@ -145,6 +150,7 @@ func (c *Coordinator) Agent(name string) (*Loop, error) {
 				Hooks:         c.deps.Hooks,
 				SystemPrompt:  def.systemPrompt,
 				ToolAllowList: def.tools,
+				Router:        c.deps.Router,
 			}), nil
 		}
 	}

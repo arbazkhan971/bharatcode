@@ -32,6 +32,13 @@ type fakeRemote struct {
 	notify       func(mcpsdk.JSONRPCNotification)
 	subscribed   []string
 	unsubscribed []string
+	// roots captures the roots handler the client installs, letting the test
+	// drive a server-issued roots/list request through it.
+	roots *rootsHandler
+	// rootsChangedMethods records the method of each roots-changed notification
+	// the client pushed to this conn, in order, as a real server's read
+	// goroutine would see them arrive off the wire.
+	rootsChangedMethods []string
 	// gotToken records the progress token attached to the most recent CallTool
 	// request, as it arrived on the conn.
 	gotToken any
@@ -46,6 +53,30 @@ type fakeRemote struct {
 // drive a server-issued sampling/createMessage request through it.
 func (f *fakeRemote) setSamplingHandler(h mcpclient.SamplingHandler) {
 	f.sampling = h
+}
+
+// setRootsHandler records the roots handler the client installs, letting the
+// test drive a server-issued roots/list request through it.
+func (f *fakeRemote) setRootsHandler(h *rootsHandler) {
+	f.roots = h
+}
+
+// sendRootsListChanged records the method of the roots-changed notification the
+// client pushed to this conn, as the client does when its advertised roots
+// change, letting the test assert the right notification was sent.
+func (f *fakeRemote) sendRootsListChanged(n mcpsdk.RootsListChangedNotification) {
+	f.rootsChangedMethods = append(f.rootsChangedMethods, n.Method)
+}
+
+// listRoots drives a server-pushed roots/list request through the installed
+// handler and returns the roots the client answered with, as a real server
+// would receive them off the wire.
+func (f *fakeRemote) listRoots(t *testing.T) []mcpsdk.Root {
+	t.Helper()
+	require.NotNil(t, f.roots, "client did not install a roots handler on the conn")
+	result, err := f.roots.ListRoots(context.Background(), mcpsdk.ListRootsRequest{})
+	require.NoError(t, err)
+	return result.Roots
 }
 
 // OnNotification records the notification handler the client installs, letting
@@ -634,6 +665,103 @@ func TestSamplingHandlesServerRequest(t *testing.T) {
 	require.Equal(t, "sampled reply", text.Text)
 	require.Equal(t, "test-model", result.Model)
 	require.Equal(t, "endTurn", result.StopReason)
+}
+
+func TestRootsAnsweredFromConfiguredRoots(t *testing.T) {
+	remote := &fakeRemote{}
+	var connectCfg ServerConfig
+	withFakeConnector(t, func(_ context.Context, cfg ServerConfig) (remoteClient, error) {
+		connectCfg = cfg
+		return remote, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "server", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+
+	// Roots set before Start are advertised at init: the connect config carries
+	// the capability flag the connector turns into a declared roots capability.
+	roots := []Root{
+		{URI: "file:///workspace/api", Name: "api"},
+		{URI: "file:///workspace/web", Name: "web"},
+	}
+	client.SetRoots(roots)
+	require.NoError(t, client.Start(context.Background()))
+	require.True(t, connectCfg.RootsEnabled, "roots capability not advertised at init")
+
+	// The client installed its roots handler on the conn at connect time, and a
+	// server-issued roots/list is answered with exactly the configured roots.
+	got := remote.listRoots(t)
+	require.Equal(t, []mcpsdk.Root{
+		{URI: "file:///workspace/api", Name: "api"},
+		{URI: "file:///workspace/web", Name: "web"},
+	}, got)
+}
+
+func TestSetRootsUpdatesRootsAndNotifiesListChanged(t *testing.T) {
+	remote := &fakeRemote{}
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return remote, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "server", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+
+	client.SetRoots([]Root{{URI: "file:///workspace/old", Name: "old"}})
+	require.NoError(t, client.Start(context.Background()))
+
+	// The initial roots are what a server's roots/list returns. No list-changed
+	// signal has reached the conn yet: the only SetRoots ran before connect.
+	require.Equal(t, []mcpsdk.Root{{URI: "file:///workspace/old", Name: "old"}}, remote.listRoots(t))
+	require.Empty(t, remote.rootsChangedMethods, "list-changed signaled before any post-connect SetRoots")
+
+	// SetRoots replaces the roots and signals the connected server that the list
+	// changed, via exactly one notifications/roots/list_changed, prompting it to
+	// re-issue roots/list.
+	client.SetRoots([]Root{
+		{URI: "file:///workspace/new", Name: "new"},
+		{URI: "file:///workspace/extra"},
+	})
+	require.Equal(t, []string{methodNotificationRootsListChanged}, remote.rootsChangedMethods,
+		"SetRoots did not signal the connected server with the right notification")
+
+	// A roots/list issued after the change is answered with the updated roots:
+	// the handler reads the client's live roots, so no re-install was needed.
+	require.Equal(t, []mcpsdk.Root{
+		{URI: "file:///workspace/new", Name: "new"},
+		{URI: "file:///workspace/extra"},
+	}, remote.listRoots(t))
+}
+
+func TestRootsNotAdvertisedWithoutRoots(t *testing.T) {
+	remote := &fakeRemote{}
+	var connectCfg ServerConfig
+	withFakeConnector(t, func(_ context.Context, cfg ServerConfig) (remoteClient, error) {
+		connectCfg = cfg
+		return remote, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "server", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	// With no roots configured, the capability is not advertised, and a server's
+	// roots/list (which the handler still answers) returns an empty list rather
+	// than nil entries.
+	require.False(t, connectCfg.RootsEnabled, "roots capability advertised without configured roots")
+	require.Empty(t, remote.listRoots(t))
+}
+
+func TestClientCapabilitiesDeclaresRoots(t *testing.T) {
+	// With roots enabled, the init capabilities declare roots with list-changed
+	// support, telling the server it may issue roots/list and expect a
+	// notifications/roots/list_changed when they change.
+	caps := clientCapabilities(ServerConfig{RootsEnabled: true})
+	require.NotNil(t, caps.Roots, "roots capability not declared when enabled")
+	require.True(t, caps.Roots.ListChanged, "roots list-changed support not declared")
+
+	// With roots disabled, the capability is absent so the server never expects
+	// the client to answer roots/list.
+	require.Nil(t, clientCapabilities(ServerConfig{}).Roots)
 }
 
 func TestSamplingNotInstalledWithoutSampler(t *testing.T) {

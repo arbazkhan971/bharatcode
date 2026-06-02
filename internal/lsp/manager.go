@@ -230,6 +230,35 @@ func (m *Manager) DocumentSymbols(ctx context.Context, path string) ([]Symbol, e
 	return symbols, nil
 }
 
+// Format returns the text edits the language server would apply to reformat the
+// file, starting a server if needed. A nil slice with a nil error means no
+// server is configured for the file or the file is already formatted.
+func (m *Manager) Format(ctx context.Context, path string) ([]TextEdit, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving format path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	edits, err := c.format(ctx, abs)
+	if err != nil {
+		return nil, err
+	}
+	return edits, nil
+}
+
 // WorkspaceSymbols returns the symbols matching query across the workspace,
 // starting servers if needed. Every discovered language server is queried and
 // the matches are aggregated. A nil slice with a nil error means no server is

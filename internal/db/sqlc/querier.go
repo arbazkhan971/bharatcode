@@ -10,6 +10,7 @@ import (
 
 type Querier interface {
 	AppendLedgerEntry(ctx context.Context, arg AppendLedgerEntryParams) (LedgerEntry, error)
+	CountMessagesBySession(ctx context.Context, sessionID string) (int64, error)
 	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	DeleteSession(ctx context.Context, id string) error
@@ -20,6 +21,7 @@ type Querier interface {
 	GetSessionOrigin(ctx context.Context, id string) (*string, error)
 	ListFileChangesBySession(ctx context.Context, sessionID string) ([]FileChange, error)
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
+	ListMessagesBySessionPaged(ctx context.Context, arg ListMessagesBySessionPagedParams) ([]Message, error)
 	ListSessions(ctx context.Context) ([]Session, error)
 	ListSessionsFiltered(ctx context.Context, arg ListSessionsFilteredParams) ([]Session, error)
 	RecordFileChange(ctx context.Context, arg RecordFileChangeParams) (FileChange, error)

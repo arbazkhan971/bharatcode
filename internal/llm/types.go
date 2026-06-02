@@ -54,6 +54,18 @@ type Request struct {
 	// are provider-defined ("low", "medium", "high"). It is passed through to
 	// the OpenAI request only for reasoning models and ignored otherwise.
 	ReasoningEffort string
+	// Thinking opts the request into Anthropic extended thinking. When set and
+	// the model supports it, the Anthropic provider streams thinking deltas as
+	// ThinkingEvents before the answer text. It is ignored by providers that do
+	// not support extended thinking.
+	Thinking *ThinkingConfig
+}
+
+// ThinkingConfig enables Anthropic extended thinking for a request. BudgetTokens
+// caps how many tokens the model may spend on its visible reasoning pass; it
+// must be a positive value below MaxTokens for the request to be accepted.
+type ThinkingConfig struct {
+	BudgetTokens int
 }
 
 // Tool describes one callable function available to the model.

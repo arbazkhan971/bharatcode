@@ -11,6 +11,7 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
+	"github.com/arbazkhan971/bharatcode/internal/hooks"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/mcp"
@@ -34,7 +35,7 @@ type Dependencies struct {
 	Sessions    *session.Repo
 	FileTracker *filetracker.Tracker
 	Ledger      *ledger.Ledger
-	Hooks       hookFirer
+	Hooks       *hooks.Engine
 	MCP         *mcp.Client
 	Bus         *pubsub.Topic[Event]
 	Providers   map[string]llm.Provider

@@ -1,10 +1,15 @@
+//go:build !windows
+
 package shell
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -114,6 +119,58 @@ func TestSandbox_NetworkBlocked(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqualf(t, StatusCompleted, job.Status,
 		"network connect should be blocked by the sandbox; stderr=%q", job.Stderr)
+}
+
+// TestSandbox_TimeoutKillsSleepUnderSandbox asserts the negative-pgid kill
+// reaches a process running UNDER the OS sandbox. Under a confining mode the
+// command tree is sandbox-exec/bwrap (the process-group leader) -> bash ->
+// sleep, so the timeout path must signal the whole group, not just bash, to
+// actually stop the sleep. The test captures the sleep's own PID, lets the
+// timeout fire, and verifies (1) the job is reported as a Timeout and (2) the
+// sleep descendant is genuinely gone. It SKIPS when the OS sandbox launcher is
+// unavailable so CI without sandbox-exec/bwrap never hard-fails.
+func TestSandbox_TimeoutKillsSleepUnderSandbox(t *testing.T) {
+	bin, ok := sandboxBinaryAvailable()
+	if !ok {
+		t.Skipf("OS sandbox binary %q unavailable; skipping sandbox timeout-kill test", bin)
+	}
+
+	sh := New(nil, WithSandboxMode(SandboxWorkspaceWrite))
+	defer sh.Shutdown()
+
+	workspace := t.TempDir()
+	// The sandbox confines writes to the workspace, so the PID file must live
+	// there for the inner command to be able to write it.
+	pidFile := filepath.Join(workspace, "sleep_pid")
+
+	// Start a long sleep as a background descendant and record its PID via $!.
+	// `wait` keeps bash (and thus the foreground process) alive until the sleep
+	// is reaped, so the job only ends via the timeout-driven group kill.
+	cmd := "sleep 100 & echo $! > " + shellQuote(pidFile) + "; wait"
+
+	job, err := sh.Run(context.Background(), cmd, RunOpts{
+		Cwd:     workspace,
+		Timeout: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Equalf(t, StatusTimeout, job.Status,
+		"command exceeding its timeout under the sandbox must be reported as Timeout; stderr=%q", job.Stderr)
+
+	// Read the descendant sleep PID the inner command recorded.
+	data, err := os.ReadFile(pidFile)
+	require.NoError(t, err, "sandboxed command should have written the sleep PID to the workspace")
+	var sleepPID int
+	_, err = fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &sleepPID)
+	require.NoError(t, err, "PID file must contain the sleep PID")
+	require.Positive(t, sleepPID, "captured sleep PID must be a real PID")
+
+	// The negative-pgid kill on timeout must have traversed the sandbox parent
+	// and reaped the sleep. Poll briefly because reaping is asynchronous; signal
+	// 0 probes liveness without affecting the process.
+	require.Eventually(t, func() bool {
+		return syscall.Kill(sleepPID, 0) != nil
+	}, 5*time.Second, 20*time.Millisecond,
+		"sleep descendant must be killed when the sandboxed command times out")
 }
 
 // outsideTempDir creates a directory that is guaranteed to be outside the OS

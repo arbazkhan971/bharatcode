@@ -51,6 +51,20 @@ SELECT * FROM messages
 WHERE session_id = ?
 ORDER BY created_at ASC;
 
+-- name: ListMessagesBySessionPaged :many
+-- Returns a single window of a session's messages, oldest first. The
+-- secondary sort on rowid gives a stable total order when several rows
+-- share the same created_at second, so successive (limit, offset) windows
+-- neither overlap nor skip rows.
+SELECT * FROM messages
+WHERE session_id = ?
+ORDER BY created_at ASC, rowid ASC
+LIMIT ? OFFSET ?;
+
+-- name: CountMessagesBySession :one
+SELECT COUNT(*) FROM messages
+WHERE session_id = ?;
+
 -- name: RecordFileChange :one
 INSERT INTO file_changes (
     id, session_id, path, operation, before_hash, after_hash, created_at

@@ -17,12 +17,14 @@ type Querier interface {
 	GetFileRead(ctx context.Context, arg GetFileReadParams) (FileRead, error)
 	GetLatestSessionByProjectPath(ctx context.Context, projectPath string) (Session, error)
 	GetSessionByID(ctx context.Context, id string) (Session, error)
+	GetSessionOrigin(ctx context.Context, id string) (*string, error)
 	ListFileChangesBySession(ctx context.Context, sessionID string) ([]FileChange, error)
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	ListSessions(ctx context.Context) ([]Session, error)
 	ListSessionsFiltered(ctx context.Context, arg ListSessionsFilteredParams) ([]Session, error)
 	RecordFileChange(ctx context.Context, arg RecordFileChangeParams) (FileChange, error)
 	RecordFileRead(ctx context.Context, arg RecordFileReadParams) error
+	SetSessionOrigin(ctx context.Context, arg SetSessionOriginParams) error
 	SumLedgerCostAndTokensByPeriod(ctx context.Context, arg SumLedgerCostAndTokensByPeriodParams) (SumLedgerCostAndTokensByPeriodRow, error)
 	SumLedgerCostByPeriod(ctx context.Context, arg SumLedgerCostByPeriodParams) (SumLedgerCostByPeriodRow, error)
 	SumLedgerCostBySession(ctx context.Context, sessionID string) (SumLedgerCostBySessionRow, error)

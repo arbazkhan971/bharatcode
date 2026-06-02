@@ -75,7 +75,11 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 		case config.ProviderOllama:
 			provider = newOllamaProvider(p.Name, p.BaseURL, models, client)
 		case config.ProviderAnthropic:
-			provider = unsupportedProvider{name: p.Name, models: models}
+			baseURL := p.BaseURL
+			if baseURL == "" {
+				baseURL = "https://api.anthropic.com/v1"
+			}
+			provider = newAnthropicProvider(p.Name, baseURL, p.APIKeyEnv, models, client)
 		default:
 			return nil, fmt.Errorf("constructing provider %q: %w", p.Name, ErrUnsupportedFeature)
 		}
@@ -116,46 +120,18 @@ func (r *Registry) ListModels() []Model {
 
 func newRetryingClient(timeout time.Duration) *http.Client {
 	c := retryablehttp.NewClient()
-	c.RetryMax = 1
+	// Retries are owned by the backoff loop in http.go, so disable the
+	// transport-level policy to keep attempt counts predictable.
+	c.RetryMax = 0
 	c.RetryWaitMin = 10 * time.Millisecond
 	c.RetryWaitMax = 100 * time.Millisecond
 	c.Logger = nil
 	c.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
-		if err != nil {
-			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
-		}
 		return false, nil
 	}
 	httpClient := c.StandardClient()
 	httpClient.Timeout = timeout
 	return httpClient
-}
-
-type unsupportedProvider struct {
-	name   string
-	models []Model
-}
-
-func (p unsupportedProvider) Name() string {
-	return p.name
-}
-
-func (p unsupportedProvider) Stream(ctx context.Context, req Request) (<-chan Event, error) {
-	return nil, fmt.Errorf("streaming with provider %q: %w", p.name, ErrNotYetSupported)
-}
-
-func (p unsupportedProvider) Models() []Model {
-	models := make([]Model, len(p.models))
-	copy(models, p.models)
-	return models
-}
-
-func (p unsupportedProvider) SupportsTools() bool {
-	return supportsTools(p.models)
-}
-
-func (p unsupportedProvider) SupportsImages() bool {
-	return supportsImages(p.models)
 }
 
 func supportsTools(models []Model) bool {

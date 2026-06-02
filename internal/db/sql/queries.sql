@@ -29,6 +29,15 @@ RETURNING *;
 DELETE FROM sessions
 WHERE id = ?;
 
+-- name: SetSessionOrigin :exec
+UPDATE sessions
+SET origin_session_id = ?
+WHERE id = ?;
+
+-- name: GetSessionOrigin :one
+SELECT origin_session_id FROM sessions
+WHERE id = ?;
+
 -- name: CreateMessage :one
 INSERT INTO messages (
     id, session_id, role, content_json, parent_id, created_at

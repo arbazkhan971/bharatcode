@@ -49,12 +49,13 @@ type Message struct {
 }
 
 type Session struct {
-	ID           string `json:"id"`
-	ProjectPath  string `json:"project_path"`
-	Title        string `json:"title"`
-	Model        string `json:"model"`
-	Agent        string `json:"agent"`
-	CreatedAt    int64  `json:"created_at"`
-	UpdatedAt    int64  `json:"updated_at"`
-	MessageCount int64  `json:"message_count"`
+	ID              string  `json:"id"`
+	ProjectPath     string  `json:"project_path"`
+	Title           string  `json:"title"`
+	Model           string  `json:"model"`
+	Agent           string  `json:"agent"`
+	CreatedAt       int64   `json:"created_at"`
+	UpdatedAt       int64   `json:"updated_at"`
+	MessageCount    int64   `json:"message_count"`
+	OriginSessionID *string `json:"origin_session_id"`
 }

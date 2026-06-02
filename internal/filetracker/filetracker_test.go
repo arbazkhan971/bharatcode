@@ -282,6 +282,142 @@ func TestHasConflict_ExternalEdit_BetweenReadAndWrite(t *testing.T) {
 	require.True(t, conflict)
 }
 
+func TestHasConflict_StaleRead_ReadModifyWrite(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-1"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	filePath := filepath.Join(t.TempDir(), "stale.txt")
+	original := []byte("v1 original")
+	err := os.WriteFile(filePath, original, 0o644)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	// Agent reads the file, capturing the baseline hash.
+	err = tracker.RecordRead(ctx, sid, filePath)
+	require.NoError(t, err)
+
+	// While the agent holds its in-memory view, an external process
+	// modifies the file on disk (e.g. another editor or a teammate).
+	err = os.WriteFile(filePath, []byte("v2 modified externally"), 0o644)
+	require.NoError(t, err)
+
+	// The agent now tries to persist an edit derived from the stale
+	// content it read. RecordWrite does not touch disk; it records the
+	// agent's intended mutation.
+	_, err = tracker.RecordWrite(ctx, sid, filePath, original, []byte("v2 agent edit"))
+	require.NoError(t, err)
+
+	// The on-disk content no longer matches the hash captured at read
+	// time, so the write is based on a stale read and must be flagged.
+	conflict, err := tracker.HasConflict(ctx, sid, filePath)
+	require.NoError(t, err)
+	require.True(t, conflict)
+}
+
+func TestChangedFiles_DedupAndSorted(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-1"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	ctx := context.Background()
+	tmp := t.TempDir()
+	pZebra := filepath.Join(tmp, "zebra.txt")
+	pApple := filepath.Join(tmp, "apple.txt")
+
+	// Sequence: create zebra, edit zebra twice, create apple. zebra is
+	// written three times but must appear once; output sorted by path.
+	_, err := tracker.RecordWrite(ctx, sid, pZebra, nil, []byte("z1"))
+	require.NoError(t, err)
+	_, err = tracker.RecordWrite(ctx, sid, pZebra, []byte("z1"), []byte("z2"))
+	require.NoError(t, err)
+	_, err = tracker.RecordWrite(ctx, sid, pZebra, []byte("z2"), []byte("z3"))
+	require.NoError(t, err)
+	_, err = tracker.RecordWrite(ctx, sid, pApple, nil, []byte("a1"))
+	require.NoError(t, err)
+
+	files, err := tracker.ChangedFiles(ctx, sid)
+	require.NoError(t, err)
+	require.Equal(t, []string{pApple, pZebra}, files)
+}
+
+func TestChangedFiles_DeleteOnlyExcluded_CreatedThenDeletedIncluded(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-1"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	ctx := context.Background()
+	tmp := t.TempDir()
+	pCreated := filepath.Join(tmp, "created.txt")
+	pDeletedOnly := filepath.Join(tmp, "deleted_only.txt")
+
+	// created.txt is created then deleted: still a changed file because
+	// it was created during the session.
+	_, err := tracker.RecordWrite(ctx, sid, pCreated, nil, []byte("hello"))
+	require.NoError(t, err)
+	_, err = tracker.RecordWrite(ctx, sid, pCreated, []byte("hello"), nil)
+	require.NoError(t, err)
+
+	// deleted_only.txt is only ever deleted (e.g. a pre-existing file the
+	// agent removed); it is not a created/edited file, so it is excluded.
+	_, err = tracker.RecordWrite(ctx, sid, pDeletedOnly, []byte("preexisting"), nil)
+	require.NoError(t, err)
+
+	files, err := tracker.ChangedFiles(ctx, sid)
+	require.NoError(t, err)
+	require.Equal(t, []string{pCreated}, files)
+}
+
+func TestChangedFiles_EmptySession_ReturnsEmptyNonNil(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-empty"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	files, err := tracker.ChangedFiles(context.Background(), sid)
+	require.NoError(t, err)
+	require.NotNil(t, files)
+	require.Empty(t, files)
+}
+
+func TestChangedFiles_OnlyOwnSession(t *testing.T) {
+	database := setupTestDB(t)
+	sidA := "session-A"
+	sidB := "session-B"
+	createTestSession(t, database, sidA)
+	createTestSession(t, database, sidB)
+	tracker := NewTracker(database, nil)
+
+	ctx := context.Background()
+	pA := filepath.Join(t.TempDir(), "a.txt")
+	pB := filepath.Join(t.TempDir(), "b.txt")
+	_, err := tracker.RecordWrite(ctx, sidA, pA, nil, []byte("a"))
+	require.NoError(t, err)
+	_, err = tracker.RecordWrite(ctx, sidB, pB, nil, []byte("b"))
+	require.NoError(t, err)
+
+	filesA, err := tracker.ChangedFiles(ctx, sidA)
+	require.NoError(t, err)
+	require.Equal(t, []string{pA}, filesA)
+}
+
+func TestChangedFiles_ContextCanceled_Errors(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-1"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := tracker.ChangedFiles(ctx, sid)
+	require.Error(t, err)
+}
+
 func TestHasConflict_NoReadRecorded_ReturnsFalse(t *testing.T) {
 	database := setupTestDB(t)
 	sid := "session-1"

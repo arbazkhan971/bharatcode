@@ -668,10 +668,19 @@ func TestRecord_ThenSummary_INRPrecision(t *testing.T) {
 	require.NoError(t, err)
 
 	totalUSD := (700.0 + 13000.0 + 210.0) / 1_000_000
-	// Each record is rounded individually; sum may differ from sum-then-round.
-	// The acceptance criterion says: summed INR matches round(sum * 83.50).
+	// Spec formula: total INR = roundCents(SUM(usd) * rate), rounded once at
+	// the summary boundary — NOT the sum of per-entry-rounded INR.
+	//
+	// sum-then-round:  roundCents(0.01391 * 83.50) = roundCents(1.161485) = 1.16
+	// per-entry-round: 0.06 + 1.09 + 0.02                                  = 1.17
+	//
+	// These differ by 0.01, so the assertion below discriminates the fix
+	// from the old per-entry-rounding behaviour. Assert EXACT equality
+	// (tight delta) to prove the sum-then-round formula is in effect.
 	expectedINR := math.Round(totalUSD*83.50*100) / 100
-	require.InDelta(t, expectedINR, sum.CostINR, 0.02)
+	require.InDelta(t, 1.16, expectedINR, 1e-9, "sanity: spec formula yields 1.16")
+	require.InDelta(t, expectedINR, sum.CostINR, 1e-9,
+		"Summary CostINR must equal roundCents(sum_usd*rate) exactly, not the per-entry-rounded sum 1.17")
 }
 
 func TestCheckBudget_AlreadyOverEighty_DoesNotReconfirm(t *testing.T) {

@@ -197,39 +197,6 @@ var (
 	ErrToolUseRole = errors.New("tool_use block requires assistant role")
 )
 
-// MarshalJSON serializes a Message into JSON, converting the Content slice
-// into raw JSON messages to preserve concrete types and their discriminators.
-func (m Message) MarshalJSON() ([]byte, error) {
-	rawBlocks := make([]json.RawMessage, 0, len(m.Content))
-	for i, block := range m.Content {
-		raw, err := json.Marshal(block)
-		if err != nil {
-			return nil, fmt.Errorf("marshalling content block at index %d: %w", i, err)
-		}
-		rawBlocks = append(rawBlocks, raw)
-	}
-
-	aux := struct {
-		ID        string            `json:"id"`
-		SessionID string            `json:"session_id"`
-		Role      Role              `json:"role"`
-		Content   []json.RawMessage `json:"content"`
-		ParentID  *string           `json:"parent_id,omitempty"`
-		CreatedAt time.Time         `json:"created_at"`
-		Usage     *TokenUsage       `json:"usage,omitempty"`
-	}{
-		ID:        m.ID,
-		SessionID: m.SessionID,
-		Role:      m.Role,
-		Content:   rawBlocks,
-		ParentID:  m.ParentID,
-		CreatedAt: m.CreatedAt,
-		Usage:     m.Usage,
-	}
-
-	return json.Marshal(aux)
-}
-
 // UnmarshalJSON deserializes a Message from JSON, dispatching each item in
 // Content to its concrete type based on the "type" field.
 func (m *Message) UnmarshalJSON(data []byte) error {

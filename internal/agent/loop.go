@@ -75,6 +75,14 @@ type Loop struct {
 	// tell the caller whether the steering text was queued onto a live turn or
 	// must be started as a fresh prompt.
 	running bool
+
+	// backoff drives the retry schedule for transient provider failures. It is
+	// defaulted in New and overridden in-package by tests for determinism.
+	backoff llm.Backoff
+	// sleep waits between provider retries, honouring context cancellation.
+	// Production uses contextSleep; tests inject a no-op recorder so retries do
+	// not sleep for real.
+	sleep sleepFunc
 }
 
 // New constructs a Loop from cfg.
@@ -102,7 +110,13 @@ func New(cfg Config) *Loop {
 		}
 		allowed[name] = struct{}{}
 	}
-	return &Loop{cfg: cfg, name: cfg.Name, allowed: allowed}
+	return &Loop{
+		cfg:     cfg,
+		name:    cfg.Name,
+		allowed: allowed,
+		backoff: llm.Backoff{},
+		sleep:   contextSleep,
+	}
 }
 
 // Name returns the configured agent name.
@@ -302,7 +316,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			history = append(history, steerMsg)
 		}
 
-		assistant, pendingToolCalls, usage, err := l.callProvider(runCtx, history)
+		assistant, pendingToolCalls, usage, err := l.callProviderWithRetry(runCtx, history)
 		if err != nil {
 			failure := textMessage(sessionID, message.RoleAssistant, "provider failed: "+err.Error())
 			_ = l.cfg.Sessions.AppendMessage(runCtx, sessionID, failure)

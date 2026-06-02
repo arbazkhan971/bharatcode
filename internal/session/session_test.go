@@ -1039,3 +1039,172 @@ func TestRepo_AppendMessage_CancelledContextBeforeUpdate(t *testing.T) {
 	err := repo.AppendMessage(cancelCtx, "cancel-append", makeTextMsg(message.RoleUser, "hello"))
 	require.Error(t, err)
 }
+
+// sessionIDs extracts the IDs of the given sessions for set assertions.
+func sessionIDs(sessions []session.Session) []string {
+	ids := make([]string, len(sessions))
+	for i, s := range sessions {
+		ids[i] = s.ID
+	}
+	return ids
+}
+
+// TestRepo_Search_ByTitle verifies that Search returns sessions whose title
+// contains the query and excludes those that do not.
+func TestRepo_Search_ByTitle(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	require.NoError(t, repo.Create(ctx, makeSession("s1", "/p", "Fix login bug")))
+	require.NoError(t, repo.Create(ctx, makeSession("s2", "/p", "Refactor payment flow")))
+	require.NoError(t, repo.Create(ctx, makeSession("s3", "/p", "Login page redesign")))
+
+	got, err := repo.Search(ctx, "login")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"s1", "s3"}, sessionIDs(got))
+}
+
+// TestRepo_Search_CaseInsensitive verifies that title matching ignores case.
+func TestRepo_Search_CaseInsensitive(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	require.NoError(t, repo.Create(ctx, makeSession("s1", "/p", "Database Migration")))
+	require.NoError(t, repo.Create(ctx, makeSession("s2", "/p", "Unrelated work")))
+
+	got, err := repo.Search(ctx, "DATABASE")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"s1"}, sessionIDs(got))
+}
+
+// TestRepo_Search_ByFirstUserMessage verifies that Search matches the text of
+// the first user message even when the title does not contain the query.
+func TestRepo_Search_ByFirstUserMessage(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	// Title is deliberately set so it does NOT contain the needle; the match
+	// must come from the first user message body.
+	require.NoError(t, repo.Create(ctx, makeSession("s1", "/p", "Session one")))
+	require.NoError(t, repo.AppendMessage(ctx, "s1",
+		makeTextMsg(message.RoleUser, "Please add OAuth support to the gateway")))
+
+	require.NoError(t, repo.Create(ctx, makeSession("s2", "/p", "Session two")))
+	require.NoError(t, repo.AppendMessage(ctx, "s2",
+		makeTextMsg(message.RoleUser, "Update the README")))
+
+	got, err := repo.Search(ctx, "oauth")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"s1"}, sessionIDs(got))
+}
+
+// TestRepo_Search_IgnoresNonUserMessages verifies that a match in an
+// assistant message does not cause a session to be returned.
+func TestRepo_Search_IgnoresNonUserMessages(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	require.NoError(t, repo.Create(ctx, makeSession("s1", "/p", "Session one")))
+	require.NoError(t, repo.AppendMessage(ctx, "s1",
+		makeTextMsg(message.RoleUser, "hello there")))
+	require.NoError(t, repo.AppendMessage(ctx, "s1",
+		makeTextMsg(message.RoleAssistant, "I will deploy to production now")))
+
+	got, err := repo.Search(ctx, "production")
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+// TestRepo_Search_EmptyQueryReturnsAll verifies that an empty query returns
+// every session, mirroring a zero ListFilter.
+func TestRepo_Search_EmptyQueryReturnsAll(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	require.NoError(t, repo.Create(ctx, makeSession("s1", "/p", "Alpha")))
+	require.NoError(t, repo.Create(ctx, makeSession("s2", "/p", "Beta")))
+
+	got, err := repo.Search(ctx, "")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"s1", "s2"}, sessionIDs(got))
+}
+
+// TestRepo_Search_NoMatchesReturnsEmpty verifies that a query matching nothing
+// returns an empty (non-nil-error) result.
+func TestRepo_Search_NoMatchesReturnsEmpty(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	require.NoError(t, repo.Create(ctx, makeSession("s1", "/p", "Alpha")))
+	require.NoError(t, repo.Create(ctx, makeSession("s2", "/p", "Beta")))
+
+	got, err := repo.Search(ctx, "zzz-no-such-thing")
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+// TestRepo_Search_OrderedByUpdatedAtDesc verifies that Search preserves the
+// newest-first ordering of List.
+func TestRepo_Search_OrderedByUpdatedAtDesc(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	older := makeSession("old", "/p", "shared keyword older")
+	older.UpdatedAt = time.Now().UTC().Add(-2 * time.Hour)
+	newer := makeSession("new", "/p", "shared keyword newer")
+	newer.UpdatedAt = time.Now().UTC().Add(-1 * time.Hour)
+	require.NoError(t, repo.Create(ctx, older))
+	require.NoError(t, repo.Create(ctx, newer))
+
+	got, err := repo.Search(ctx, "shared keyword")
+	require.NoError(t, err)
+	require.Equal(t, []string{"new", "old"}, sessionIDs(got))
+}
+
+// TestRepo_SetTitle_Persists verifies that SetTitle writes the new title and
+// leaves other fields unchanged.
+func TestRepo_SetTitle_Persists(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	s := makeSession("s1", "/project/x", "Original Title")
+	require.NoError(t, repo.Create(ctx, s))
+
+	require.NoError(t, repo.SetTitle(ctx, "s1", "Renamed Title"))
+
+	got, err := repo.Get(ctx, "s1")
+	require.NoError(t, err)
+	require.Equal(t, "Renamed Title", got.Title)
+	// Other mutable fields are untouched.
+	require.Equal(t, "/project/x", got.ProjectPath)
+	require.Equal(t, "deepseek-chat", got.Model)
+	require.Equal(t, "coder", got.Agent)
+}
+
+// TestRepo_SetTitle_FoundBySearch verifies that a renamed session is findable
+// by its new title and no longer by its old one.
+func TestRepo_SetTitle_FoundBySearch(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	require.NoError(t, repo.Create(ctx, makeSession("s1", "/p", "temporary name")))
+	require.NoError(t, repo.SetTitle(ctx, "s1", "permanent label"))
+
+	byNew, err := repo.Search(ctx, "permanent")
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"s1"}, sessionIDs(byNew))
+
+	byOld, err := repo.Search(ctx, "temporary")
+	require.NoError(t, err)
+	require.Empty(t, byOld)
+}
+
+// TestRepo_SetTitle_NotFound verifies that SetTitle on an unknown id returns
+// ErrNotFound.
+func TestRepo_SetTitle_NotFound(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	err := repo.SetTitle(ctx, "does-not-exist", "whatever")
+	require.ErrorIs(t, err, session.ErrNotFound)
+}

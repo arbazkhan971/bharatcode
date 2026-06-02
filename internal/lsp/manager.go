@@ -82,6 +82,64 @@ func (m *Manager) Diagnostics(ctx context.Context, path string) ([]Diagnostic, e
 	return diagnostics, nil
 }
 
+// Hover returns the hover text the language server reports for the position in
+// path, starting a server if needed. An empty string with a nil error means no
+// server is configured for the file or the server reported no hover.
+func (m *Manager) Hover(ctx context.Context, path string, line, col int) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolving hover path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return "", nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", nil
+	}
+
+	text, err := c.hover(ctx, abs, line, col)
+	if err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+// Definition returns the locations the language server resolves the symbol at
+// the position in path to, starting a server if needed. A nil slice with a nil
+// error means no server is configured for the file or the symbol is undefined.
+func (m *Manager) Definition(ctx context.Context, path string, line, col int) ([]Location, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving definition path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	locations, err := c.definition(ctx, abs, line, col)
+	if err != nil {
+		return nil, err
+	}
+	return locations, nil
+}
+
 // Shutdown terminates every running language-server process.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()

@@ -170,6 +170,84 @@ func (r *Repo) List(ctx context.Context, f ListFilter) ([]Session, error) {
 	return sessions, nil
 }
 
+// Search returns sessions whose title or first user message contains query
+// as a case-insensitive substring, ordered by UpdatedAt DESC (matching List).
+// An empty query returns every session. Search reads message content for each
+// session via Messages, so it scales with total stored messages; callers that
+// need only title matching should prefer a narrower filter.
+func (r *Repo) Search(ctx context.Context, query string) ([]Session, error) {
+	all, err := r.List(ctx, ListFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("searching sessions: %w", err)
+	}
+
+	if query == "" {
+		return all, nil
+	}
+
+	needle := strings.ToLower(query)
+	matches := make([]Session, 0, len(all))
+	for _, s := range all {
+		if strings.Contains(strings.ToLower(s.Title), needle) {
+			matches = append(matches, s)
+			continue
+		}
+
+		msgs, err := r.Messages(ctx, s.ID)
+		if err != nil {
+			return nil, fmt.Errorf("searching sessions: %w", err)
+		}
+		if first := firstUserMessageText(msgs); first != "" &&
+			strings.Contains(strings.ToLower(first), needle) {
+			matches = append(matches, s)
+		}
+	}
+	return matches, nil
+}
+
+// SetTitle persists a new title for the session with the given id and bumps
+// its UpdatedAt. Other mutable fields are left unchanged. Returns ErrNotFound
+// if no session has that id.
+func (r *Repo) SetTitle(ctx context.Context, id, title string) error {
+	existing, err := r.Get(ctx, id)
+	if err != nil {
+		return fmt.Errorf("setting session title: %w", err)
+	}
+
+	params := sqlc.UpdateSessionParams{
+		ID:           existing.ID,
+		ProjectPath:  existing.ProjectPath,
+		Title:        title,
+		Model:        existing.Model,
+		Agent:        existing.Agent,
+		UpdatedAt:    time.Now().UTC().Unix(),
+		MessageCount: int64(existing.MessageCount),
+	}
+	if _, err := r.database.Queries.UpdateSession(ctx, params); err != nil {
+		return fmt.Errorf("setting session title in database: %w", err)
+	}
+	return nil
+}
+
+// firstUserMessageText returns the text of the first text block of the first
+// user message in msgs, or "" if there is none.
+func firstUserMessageText(msgs []message.Message) string {
+	for _, m := range msgs {
+		if m.Role != message.RoleUser {
+			continue
+		}
+		for _, block := range m.Content {
+			if textBlock, ok := block.(message.TextBlock); ok {
+				return textBlock.Text
+			}
+			if textBlock, ok := block.(*message.TextBlock); ok {
+				return textBlock.Text
+			}
+		}
+	}
+	return ""
+}
+
 // Update writes mutable fields (Title, Model, Agent, UpdatedAt). Other
 // fields are ignored. UpdatedAt is set to time.Now() if zero.
 func (r *Repo) Update(ctx context.Context, s *Session) error {

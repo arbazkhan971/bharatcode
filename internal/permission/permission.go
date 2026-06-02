@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
@@ -75,6 +76,86 @@ const (
 	ScopeForever Scope = "Forever"
 )
 
+// AuditRecord is an immutable record of a single permission decision, suitable
+// for enterprise audit trails. ArgsSummary is the sanitized (secret-redacted,
+// length-bounded) rendering of the request arguments produced by sanitizeLogArgs;
+// raw secret values are never stored.
+type AuditRecord struct {
+	Timestamp   time.Time `json:"timestamp"`
+	Tool        string    `json:"tool"`
+	SessionID   string    `json:"session_id"`
+	ArgsSummary string    `json:"args_summary"`
+	Decision    Decision  `json:"decision"`
+	Scope       Scope     `json:"scope"`
+}
+
+// AuditLogger receives one AuditRecord per permission decision. Implementations
+// must be safe for concurrent use because Check may be called from many
+// goroutines. The default Checker logger is a no-op.
+type AuditLogger interface {
+	// Log records a single permission decision. It must not retain references to
+	// mutable caller state beyond the call.
+	Log(ctx context.Context, rec AuditRecord)
+}
+
+// noOpAuditLogger discards every record; it is the default so Check never has to
+// nil-check the logger.
+type noOpAuditLogger struct{}
+
+// Log discards the record.
+func (noOpAuditLogger) Log(context.Context, AuditRecord) {}
+
+// InMemoryAuditLogger captures every audit record in memory, guarded for
+// concurrent use. It is useful for tests and short-lived inspection.
+type InMemoryAuditLogger struct {
+	mu      sync.Mutex
+	records []AuditRecord
+}
+
+// Log appends the record under a mutex so concurrent Checks stay race-free.
+func (l *InMemoryAuditLogger) Log(_ context.Context, rec AuditRecord) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.records = append(l.records, rec)
+}
+
+// Records returns a copy of the captured records in arrival order.
+func (l *InMemoryAuditLogger) Records() []AuditRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]AuditRecord, len(l.records))
+	copy(out, l.records)
+	return out
+}
+
+// SlogAuditLogger writes each audit record to a slog.Logger at info level. It
+// emits the sanitized argument summary only, never raw secret values.
+type SlogAuditLogger struct {
+	logger *slog.Logger
+}
+
+// NewSlogAuditLogger builds a SlogAuditLogger; a nil logger falls back to
+// slog.Default so the result is always usable.
+func NewSlogAuditLogger(logger *slog.Logger) *SlogAuditLogger {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &SlogAuditLogger{logger: logger}
+}
+
+// Log writes the record to the underlying slog.Logger.
+func (l *SlogAuditLogger) Log(ctx context.Context, rec AuditRecord) {
+	l.logger.InfoContext(
+		ctx, "permission audit",
+		"timestamp", rec.Timestamp,
+		"tool", rec.Tool,
+		"session_id", rec.SessionID,
+		"args", rec.ArgsSummary,
+		"decision", rec.Decision,
+		"scope", rec.Scope,
+	)
+}
+
 // Request defines the context and arguments of a tool execution.
 type Request struct {
 	ToolName  string
@@ -92,6 +173,7 @@ type Checker struct {
 	bus           *pubsub.Topic[pubsub.PermissionRequest]
 	yolo          bool
 	approvalMode  ApprovalMode
+	auditLogger   AuditLogger
 	sessionMemory sync.Map
 	projectMemory sync.Map
 	globalMemory  sync.Map
@@ -103,6 +185,7 @@ func New(cfg *config.Config, bus *pubsub.Topic[pubsub.PermissionRequest]) *Check
 		cfg:          cfg,
 		bus:          bus,
 		approvalMode: ApprovalAuto,
+		auditLogger:  noOpAuditLogger{},
 	}
 
 	// Load project level remembered decisions.
@@ -159,17 +242,50 @@ func (c *Checker) GetApprovalMode() ApprovalMode {
 	return c.approvalMode
 }
 
+// SetAuditLogger installs the audit sink that records every permission decision.
+// A nil logger resets the Checker to the no-op default.
+func (c *Checker) SetAuditLogger(logger AuditLogger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if logger == nil {
+		logger = noOpAuditLogger{}
+	}
+	c.auditLogger = logger
+}
+
 // Check evaluates the permission request.
 //
 // Resolution order: yolo -> deny-wins across all scopes -> allow across
 // session/project/global -> config deny list -> config auto-approve list ->
 // approval mode -> interactive prompt. A stored Deny at any scope is sticky:
 // an AllowSession can never override a DenyProject.
-func (c *Checker) Check(ctx context.Context, req Request) (Decision, error) {
+func (c *Checker) Check(ctx context.Context, req Request) (decision Decision, err error) {
+	// scope records where the resolved decision came from. Memory-hit paths set
+	// the actual remembered scope (Session/Project/Forever); every scope-less
+	// path (yolo, config lists, approval mode, prompt-once, nil bus, cancel)
+	// stays ScopeOnce, meaning "not drawn from a broader remembered scope".
+	scope := ScopeOnce
+
 	c.mu.RLock()
+	logger := c.auditLogger
 	yolo := c.yolo || (c.cfg != nil && c.cfg.Permissions.AllowAll)
 	mode := c.approvalMode
 	c.mu.RUnlock()
+
+	// Emit exactly one audit record per Check from a single deferred site so no
+	// return path can escape the audit trail, including the early yolo bypass and
+	// the context-cancelled deny. The argument summary is sanitized so raw secret
+	// values never reach the audit sink.
+	defer func() {
+		logger.Log(ctx, AuditRecord{
+			Timestamp:   time.Now().UTC(),
+			Tool:        req.ToolName,
+			SessionID:   req.SessionID,
+			ArgsSummary: sanitizeLogArgs(req.Args),
+			Decision:    decision,
+			Scope:       scope,
+		})
+	}()
 
 	// 1. YOLO Check.
 	if yolo {
@@ -185,8 +301,10 @@ func (c *Checker) Check(ctx context.Context, req Request) (Decision, error) {
 
 	// 2. Deny-wins pass: a stored Deny at ANY scope is sticky and overrides
 	// any Allow stored at a narrower scope.
-	for _, mem := range []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory} {
+	memScopes := []Scope{ScopeSession, ScopeProject, ScopeForever}
+	for i, mem := range []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory} {
 		if val, ok := mem.Load(key); ok && val.(Decision) == DecisionDeny {
+			scope = memScopes[i]
 			return DecisionDeny, nil
 		}
 	}
@@ -194,8 +312,9 @@ func (c *Checker) Check(ctx context.Context, req Request) (Decision, error) {
 	// 3. Allow resolution in session -> project -> global order. Stored values
 	// are collapsed to Allow/Deny by RememberDecision, and Deny was already
 	// handled above, so any remaining stored value is an Allow.
-	for _, mem := range []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory} {
+	for i, mem := range []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory} {
 		if val, ok := mem.Load(key); ok {
+			scope = memScopes[i]
 			return val.(Decision), nil
 		}
 	}
@@ -251,6 +370,7 @@ func (c *Checker) Check(ctx context.Context, req Request) (Decision, error) {
 		if dec.Approved {
 			if dec.Remember {
 				finalDec = DecisionAllowSession
+				scope = ScopeSession
 				_ = c.RememberDecision(req, finalDec, ScopeSession)
 			} else {
 				finalDec = DecisionAllowOnce

@@ -41,7 +41,9 @@ func submitPrompt(t *testing.T, h *agentHarness, text string) {
 	t.Helper()
 	typeString(t, h.model, text)
 	_, cmd := h.model.Update(keySpecial("enter", tea.KeyEnter))
-	h.run(t, cmd)
+	// Use startBatch so the run goroutine's runDoneMsg is routed through
+	// h.msgCh instead of being lost on a timed-out execWithTimeout call.
+	h.startBatch(t, cmd)
 	h.drain(t, func() bool { return !h.model.running })
 }
 

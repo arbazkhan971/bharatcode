@@ -28,6 +28,10 @@ type Session struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	MessageCount int       `json:"message_count"`
+	// OriginSessionID is the ID of the session this one was forked from, or
+	// nil for sessions created directly. It is populated by Fork on the
+	// returned session and may be read back with OriginOf.
+	OriginSessionID *string `json:"origin_session_id,omitempty"`
 }
 
 // ListFilter narrows a Repo.List call.
@@ -358,6 +362,154 @@ func (r *Repo) Latest(ctx context.Context, projectPath string) (*Session, error)
 		MessageCount: int(row.MessageCount),
 	}
 	return s, nil
+}
+
+// ForkOptions configures a Fork call. The zero value forks the entire
+// source session, copying every message, and derives the title from the
+// source.
+type ForkOptions struct {
+	// CutoffMessageID, when non-nil, limits the copy to messages up to and
+	// including the message with this ID (in oldest-first order). Messages
+	// after it are not copied. If the ID is not found in the source session,
+	// Fork returns ErrNotFound. Nil copies every message.
+	CutoffMessageID *string
+	// Title overrides the forked session's title. When empty, the title is
+	// "<source title> (fork)".
+	Title string
+}
+
+// Fork creates a new session whose messages are copied from sourceSessionID
+// up to opts.CutoffMessageID (default: all messages), letting the user branch
+// an exploration without mutating the original. The new session receives a
+// fresh ID, a title like "<source title> (fork)", its own CreatedAt and
+// UpdatedAt, and an OriginSessionID pointing back at the source. Copied
+// messages get fresh IDs; intra-fork ParentID references are remapped to the
+// new IDs so the branch's message graph stays internally consistent. The
+// source session and its messages are left unchanged.
+func (r *Repo) Fork(ctx context.Context, sourceSessionID string, opts ForkOptions) (*Session, error) {
+	src, err := r.Get(ctx, sourceSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("forking session: %w", err)
+	}
+
+	msgs, err := r.Messages(ctx, sourceSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("forking session: %w", err)
+	}
+
+	// Apply the cutoff: keep messages up to and including the cutoff message.
+	if opts.CutoffMessageID != nil {
+		cutoff := *opts.CutoffMessageID
+		idx := -1
+		for i, m := range msgs {
+			if m.ID == cutoff {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			return nil, fmt.Errorf("forking session: cutoff message %s: %w", cutoff, ErrNotFound)
+		}
+		msgs = msgs[:idx+1]
+	}
+
+	title := opts.Title
+	if title == "" {
+		title = src.Title + " (fork)"
+	}
+
+	forkID, err := newUUID()
+	if err != nil {
+		return nil, fmt.Errorf("forking session: %w", err)
+	}
+
+	now := time.Now().UTC()
+	fork := &Session{
+		ID:              forkID,
+		ProjectPath:     src.ProjectPath,
+		Title:           title,
+		Model:           src.Model,
+		Agent:           src.Agent,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		MessageCount:    len(msgs),
+		OriginSessionID: &sourceSessionID,
+	}
+
+	createParams := sqlc.CreateSessionParams{
+		ID:           fork.ID,
+		ProjectPath:  fork.ProjectPath,
+		Title:        fork.Title,
+		Model:        fork.Model,
+		Agent:        fork.Agent,
+		CreatedAt:    fork.CreatedAt.Unix(),
+		UpdatedAt:    fork.UpdatedAt.Unix(),
+		MessageCount: int64(fork.MessageCount),
+	}
+	if _, err := r.database.Queries.CreateSession(ctx, createParams); err != nil {
+		return nil, fmt.Errorf("forking session: creating fork session: %w", err)
+	}
+
+	if err := r.database.Queries.SetSessionOrigin(ctx, sqlc.SetSessionOriginParams{
+		OriginSessionID: &sourceSessionID,
+		ID:              fork.ID,
+	}); err != nil {
+		return nil, fmt.Errorf("forking session: recording origin: %w", err)
+	}
+
+	// idRemap maps each source message ID to its freshly generated fork ID so
+	// that ParentID references between copied messages point within the fork.
+	idRemap := make(map[string]string, len(msgs))
+	for _, m := range msgs {
+		newID, err := newUUID()
+		if err != nil {
+			return nil, fmt.Errorf("forking session: %w", err)
+		}
+		idRemap[m.ID] = newID
+	}
+
+	for _, m := range msgs {
+		contentBytes, err := json.Marshal(m.Content)
+		if err != nil {
+			return nil, fmt.Errorf("forking session: marshalling message content: %w", err)
+		}
+
+		var parentID *string
+		if m.ParentID != nil {
+			if remapped, ok := idRemap[*m.ParentID]; ok {
+				parentID = &remapped
+			}
+			// A parent outside the copied range is dropped (left nil) so the
+			// fork never references a message it does not contain.
+		}
+
+		msgParams := sqlc.CreateMessageParams{
+			ID:          idRemap[m.ID],
+			SessionID:   fork.ID,
+			Role:        string(m.Role),
+			ContentJson: string(contentBytes),
+			ParentID:    parentID,
+			CreatedAt:   m.CreatedAt.UTC().Unix(),
+		}
+		if _, err := r.database.Queries.CreateMessage(ctx, msgParams); err != nil {
+			return nil, fmt.Errorf("forking session: copying message: %w", err)
+		}
+	}
+
+	return fork, nil
+}
+
+// OriginOf returns the ID of the session that id was forked from, or nil if
+// id was created directly. Returns ErrNotFound if id does not exist.
+func (r *Repo) OriginOf(ctx context.Context, id string) (*string, error) {
+	if _, err := r.Get(ctx, id); err != nil {
+		return nil, fmt.Errorf("getting origin: %w", err)
+	}
+	origin, err := r.database.Queries.GetSessionOrigin(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("getting origin of session %s: %w", id, err)
+	}
+	return origin, nil
 }
 
 // TitleFromFirstMessage extracts an at-most-60-char title from the

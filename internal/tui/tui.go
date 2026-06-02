@@ -50,6 +50,10 @@ type Dependencies struct {
 	FileTracker *filetracker.Tracker
 	// Logger is the slog logger the TUI uses for diagnostics.
 	Logger *slog.Logger
+	// Prompts is the optional custom-prompt registry backing registry-based
+	// slash commands. It may be nil; the TUI loads a registry from the
+	// configured prompt directories at startup when one is not supplied.
+	Prompts *config.PromptRegistry
 }
 
 // Run launches the TUI and blocks until the program exits.
@@ -145,6 +149,11 @@ type model struct {
 	// Autonomous goal-loop state (CHANGE 2).
 	goalActive    bool
 	goalIteration int
+
+	// Session picker state. sessionCandidates holds the listed sessions while
+	// the /sessions picker is open; sessionCursor is the highlighted row.
+	sessionCandidates []session.Session
+	sessionCursor     int
 }
 
 func newModel(ctx context.Context, deps Dependencies) *model {
@@ -178,6 +187,9 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	}
 	if deps.Permission != nil {
 		m.applyApprovalMode(deps.Permission.GetApprovalMode())
+	}
+	if m.deps.Prompts == nil {
+		m.deps.Prompts = loadPromptRegistry(deps.Cfg)
 	}
 	return m
 }
@@ -246,6 +258,14 @@ func (m *model) viewString() string {
 
 func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if top := m.dialogs.Top(); top != nil {
+		// The session picker carries selection state in the model, so it must
+		// intercept navigation and selection keys before the generic dialog
+		// handler (which only dismisses on enter/esc).
+		if top.ID() == "sessions" && len(m.sessionCandidates) > 0 {
+			if consumed, cmd := m.handleSessionPickerKey(msg); consumed {
+				return m, cmd
+			}
+		}
 		_, pop := top.HandleKey(msg)
 		if pop {
 			m.dialogs.Pop()
@@ -278,8 +298,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.dialogs.Push(&dialog.Text{DialogID: "settings", Title: "Settings", Body: "No editable settings in this first pass.", Theme: m.theme})
 		return m, nil
 	case "ctrl+d":
-		m.dialogs.Push(&dialog.Text{DialogID: "diff", Title: "Diff", Body: "No edit diff is available yet.", Theme: m.theme})
-		return m, nil
+		return m.handleDiff()
 	case "esc":
 		m.helpVisible = false
 		return m, nil
@@ -328,7 +347,13 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.chat.Clear()
 		m.helpVisible = false
 	case "/sessions":
-		m.dialogs.Push(&dialog.Text{DialogID: "sessions", Title: "Sessions", Body: "Session picker is ready for repository wiring.", Theme: m.theme})
+		return m.openSessionPicker()
+	case "/fork":
+		return m.handleFork()
+	case "/diff":
+		return m.handleDiff()
+	case "/status":
+		return m.handleStatus()
 	case "/model":
 		m.pushModelPicker()
 	case "/agent":
@@ -344,9 +369,32 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	default:
-		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Unknown command", Body: text, Theme: m.theme})
+		return m.handleUnknownSlash(text)
 	}
 	return m, nil
+}
+
+// handleUnknownSlash resolves a slash command that is not built in. It first
+// tries the prompt registry: a "/name rest" line whose name is registered is
+// rendered with rest spliced into {{input}} and submitted to the agent. A name
+// that is not in the registry falls back to the unknown-command dialog.
+func (m *model) handleUnknownSlash(text string) (tea.Model, tea.Cmd) {
+	name, args := splitSlash(text)
+	if handled, model, cmd := m.handleRegistryPrompt(name, args); handled {
+		return model, cmd
+	}
+	m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Unknown command", Body: text, Theme: m.theme})
+	return m, nil
+}
+
+// splitSlash splits a slash line "/name rest" into the command name (without
+// the leading slash) and the trimmed remaining arguments.
+func splitSlash(text string) (name string, args string) {
+	trimmed := strings.TrimPrefix(text, "/")
+	if i := strings.IndexAny(trimmed, " \t"); i >= 0 {
+		return trimmed[:i], strings.TrimSpace(trimmed[i+1:])
+	}
+	return trimmed, ""
 }
 
 func (m *model) handleGoalCommand(text string) (tea.Model, tea.Cmd) {
@@ -493,7 +541,10 @@ func slashHelp() string {
 	return strings.Join([]string{
 		"/help - list commands",
 		"/clear - clear visible chat",
-		"/sessions - open session picker",
+		"/sessions - restore a recent session",
+		"/fork - branch the current session",
+		"/diff - show the latest edit diff",
+		"/status - show model, session, and spend",
 		"/model - open model picker",
 		"/agent - open agent picker",
 		"/goal [text|run|stop|clear] - show, set, run, stop, or clear the goal",

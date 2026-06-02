@@ -31,6 +31,14 @@ import (
 
 const closeTimeout = 5 * time.Second
 
+// agentEventBufferSize is the per-subscriber buffer for the agent event
+// topic. pubsub.Publish is non-blocking and drops events for any
+// subscriber whose buffer is full, so a small buffer makes streaming
+// token deltas lossy under render load and yields missing chat output.
+// Sized to comfortably absorb a burst of token-delta events while the
+// TUI catches up.
+const agentEventBufferSize = 256
+
 // ErrAlreadyClosed is returned by a second Close call.
 var ErrAlreadyClosed = errors.New("app: already closed")
 
@@ -246,7 +254,7 @@ func newBus() *Bus {
 		FileChanges: pubsub.NewTopic[filetracker.Change]("app_file_changes", 128),
 		LSP:         pubsub.NewTopic[lsp.Diagnostic]("app_lsp_diagnostics", 256),
 		MCP:         pubsub.NewTopic[mcp.Event]("app_mcp", 64),
-		Agent:       pubsub.NewTopic[agent.Event]("app_agent", 128),
+		Agent:       pubsub.NewTopic[agent.Event]("app_agent", agentEventBufferSize),
 		Permission:  pubsub.NewTopic[pubsub.PermissionRequest]("app_permissions", 16),
 		Shell:       pubsub.NewTopic[pubsub.ShellJobPayload]("app_shell_jobs", 256),
 		ToolCalls:   pubsub.NewTopic[pubsub.ToolCallPayload]("app_tool_calls", 256),

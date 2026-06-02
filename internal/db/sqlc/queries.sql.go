@@ -151,6 +151,34 @@ func (q *Queries) DeleteSession(ctx context.Context, id string) error {
 	return err
 }
 
+const getSessionOrigin = `-- name: GetSessionOrigin :one
+SELECT origin_session_id FROM sessions
+WHERE id = ?
+`
+
+func (q *Queries) GetSessionOrigin(ctx context.Context, id string) (*string, error) {
+	row := q.db.QueryRowContext(ctx, getSessionOrigin, id)
+	var origin_session_id *string
+	err := row.Scan(&origin_session_id)
+	return origin_session_id, err
+}
+
+const setSessionOrigin = `-- name: SetSessionOrigin :exec
+UPDATE sessions
+SET origin_session_id = ?
+WHERE id = ?
+`
+
+type SetSessionOriginParams struct {
+	OriginSessionID *string `json:"origin_session_id"`
+	ID              string  `json:"id"`
+}
+
+func (q *Queries) SetSessionOrigin(ctx context.Context, arg SetSessionOriginParams) error {
+	_, err := q.db.ExecContext(ctx, setSessionOrigin, arg.OriginSessionID, arg.ID)
+	return err
+}
+
 const getConfigKV = `-- name: GetConfigKV :one
 SELECT "key", value, scope FROM config_kv
 WHERE scope = ? AND key = ?

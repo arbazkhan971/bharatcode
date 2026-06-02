@@ -160,6 +160,10 @@ func TestOpenAICompatibleConvertsToolResultHistory(t *testing.T) {
 }
 
 func TestProviderErrorsAreTyped(t *testing.T) {
+	// Retryable statuses (429/5xx) now flow through the backoff loop, so stub
+	// the sleep to keep the test offline-fast instead of waiting real seconds.
+	stubSleep(t)
+
 	tests := []struct {
 		name string
 		code int
@@ -250,14 +254,22 @@ func TestOllamaStreamsJSONLines(t *testing.T) {
 	require.Len(t, captured.Tools, 1)
 }
 
-func TestUnsupportedProviderReturnsSentinel(t *testing.T) {
-	reg, err := NewRegistry(testConfig("anthropic", config.ProviderAnthropic, ""))
+func TestAnthropicProviderIsRegistered(t *testing.T) {
+	cfg := testConfig("anthropic", config.ProviderAnthropic, "")
+	// Point at a missing API key env so Stream fails before any network call,
+	// keeping the test offline while still proving the registered provider is
+	// the real Anthropic client rather than the not-yet-supported stub.
+	cfg.Providers[0].APIKeyEnv = "MISSING_ANTHROPIC_API_KEY"
+	reg, err := NewRegistry(cfg)
 	require.NoError(t, err)
 	provider, err := reg.Get("anthropic")
 	require.NoError(t, err)
+	require.Equal(t, "anthropic", provider.Name())
+	require.True(t, provider.SupportsTools())
 
 	_, err = provider.Stream(context.Background(), Request{Model: "test-model"})
-	require.ErrorIs(t, err, ErrNotYetSupported)
+	require.ErrorIs(t, err, ErrAuth)
+	require.NotErrorIs(t, err, ErrNotYetSupported)
 }
 
 func TestStreamHonorsCancelledContext(t *testing.T) {

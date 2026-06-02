@@ -174,13 +174,18 @@ func newAgentHarness(t *testing.T, provider llm.Provider) *agentHarness {
 	loop, err := coord.Agent("coder")
 	require.NoError(t, err)
 
+	// A real ledger backed by the test database so the footer-refresh path
+	// (used by session restore) reads a genuine summary instead of panicking
+	// on a nil backing store.
+	ledgerBus := pubsub.NewTopic[rootledger.Summary]("tui_ledger_test", 16)
+	t.Cleanup(ledgerBus.Close)
 	deps := Dependencies{
 		Agent:       loop,
 		Sessions:    repo,
 		Cfg:         cfg,
 		Bus:         bus,
 		Permission:  perm,
-		Ledger:      &rootledger.Ledger{},
+		Ledger:      rootledger.New(database, &cfg.Ledger, cfg.Models, ledgerBus),
 		FileTracker: &filetracker.Tracker{},
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

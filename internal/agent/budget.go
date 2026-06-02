@@ -1,12 +1,150 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
 )
 
 const reservedResponseTokens = 4096
+
+// compactionSummaryMarker prefixes the synthetic message that the default
+// Compactor leaves in place of the dropped conversation history.
+const compactionSummaryMarker = "[compacted history]"
+
+// Compactor condenses a conversation history into a smaller equivalent that is
+// cheaper to send to a provider. Implementations must be pure: they receive a
+// copy of the history and return a new slice; they must not mutate the input.
+type Compactor interface {
+	// Compact returns a condensed form of history. The returned slice replaces
+	// the in-memory history sent to the provider; it does not affect on-disk
+	// session storage.
+	Compact(ctx context.Context, history []message.Message) ([]message.Message, error)
+}
+
+// dropAndMarkCompactor is the default Compactor. It drops the older portion of
+// the conversation and leaves a single synthetic marker message in its place,
+// retaining a tail of recent messages verbatim. The marker preserves a short
+// textual census of what was condensed so the model knows context was elided.
+type dropAndMarkCompactor struct {
+	// keepRecent is the number of trailing messages preserved verbatim.
+	keepRecent int
+}
+
+// newDropAndMarkCompactor returns the default Compactor, retaining keepRecent
+// trailing messages verbatim. A non-positive keepRecent is clamped to 1.
+func newDropAndMarkCompactor(keepRecent int) dropAndMarkCompactor {
+	if keepRecent < 1 {
+		keepRecent = 1
+	}
+	return dropAndMarkCompactor{keepRecent: keepRecent}
+}
+
+// Compact drops all but the most recent keepRecent messages, replacing the
+// dropped prefix with a single marker message summarizing the count. When the
+// history already fits within keepRecent, it is returned unchanged.
+func (c dropAndMarkCompactor) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	_ = ctx
+	if len(history) <= c.keepRecent {
+		return append([]message.Message(nil), history...), nil
+	}
+	dropped := history[:len(history)-c.keepRecent]
+	tail := history[len(history)-c.keepRecent:]
+
+	out := make([]message.Message, 0, len(tail)+1)
+	out = append(out, message.Message{
+		SessionID: sessionIDOf(history),
+		Role:      message.RoleUser,
+		Content: []message.ContentBlock{message.TextBlock{
+			Text: fmt.Sprintf("%s %s", compactionSummaryMarker, summarizeDropped(dropped)),
+		}},
+		CreatedAt: history[0].CreatedAt,
+	})
+	out = append(out, tail...)
+	return out, nil
+}
+
+// summarizeDropped renders a terse, deterministic census of the dropped
+// messages so the marker carries some signal about the elided context.
+func summarizeDropped(dropped []message.Message) string {
+	var users, assistants, tools int
+	for _, msg := range dropped {
+		switch msg.Role {
+		case message.RoleUser:
+			if hasToolResult(msg) {
+				tools++
+			} else {
+				users++
+			}
+		case message.RoleAssistant:
+			assistants++
+		}
+	}
+	return fmt.Sprintf(
+		"%d earlier messages condensed (%d user, %d assistant, %d tool result).",
+		len(dropped), users, assistants, tools,
+	)
+}
+
+func hasToolResult(msg message.Message) bool {
+	for _, block := range msg.Content {
+		if _, ok := block.(message.ToolResultBlock); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionIDOf(history []message.Message) string {
+	for _, msg := range history {
+		if msg.SessionID != "" {
+			return msg.SessionID
+		}
+	}
+	return ""
+}
+
+// latestUserIndex returns the index of the most recent message whose role is
+// user and that does not carry a tool result, or -1 when none exists. Tool
+// results are user-role on the wire but are not genuine user turns, so they are
+// excluded to find the real prompt.
+func latestUserIndex(history []message.Message) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == message.RoleUser && !hasToolResult(history[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// containsMessage reports whether want appears in history by value equality of
+// its serialized content and role. It is used to enforce the preserve-latest
+// invariant without relying on pointer identity.
+func containsMessage(history []message.Message, want message.Message) bool {
+	wantText := strings.TrimSpace(textContent(want))
+	for _, msg := range history {
+		if msg.Role != want.Role {
+			continue
+		}
+		if strings.TrimSpace(textContent(msg)) == wantText && wantText != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func textContent(msg message.Message) string {
+	var b strings.Builder
+	for _, block := range msg.Content {
+		if t, ok := block.(message.TextBlock); ok {
+			b.WriteString(t.Text)
+		}
+	}
+	return b.String()
+}
 
 func truncateForContext(messages []message.Message, contextWindow int) []message.Message {
 	if contextWindow <= 0 {

@@ -38,6 +38,10 @@ type Config struct {
 	SystemPrompt  string
 	ToolAllowList []string
 	MaxSteps      int
+	// Compactor condenses the conversation before it is sent to the provider
+	// when Compact is invoked. When nil, a default drop-and-mark Compactor is
+	// used.
+	Compactor Compactor
 }
 
 // Loop runs a single named agent for one session at a time.
@@ -48,6 +52,17 @@ type Loop struct {
 	cancelMu  sync.Mutex
 	cancelRun context.CancelFunc
 	allowed   map[string]struct{}
+
+	// compactMu guards the in-memory compaction snapshot below. Run reads it
+	// and Compact writes it, potentially from different goroutines.
+	compactMu sync.Mutex
+	// compacted holds the condensed history produced by the most recent
+	// Compact call. It is nil when no compaction has occurred. It lives only in
+	// memory and is never written to the on-disk session.
+	compacted []message.Message
+	// compactedLen records the on-disk message count at compaction time, so Run
+	// can graft messages that arrived after compaction onto the snapshot.
+	compactedLen int
 }
 
 // New constructs a Loop from cfg.
@@ -92,6 +107,68 @@ func (l *Loop) Interrupt() {
 	}
 }
 
+// Compact condenses the session's conversation in memory so the next provider
+// request sends a smaller history. It loads the current on-disk history, runs
+// it through the configured Compactor (or the default drop-and-mark Compactor),
+// and stores the condensed result as an in-memory snapshot. Compaction never
+// mutates the on-disk session: it only changes what Run sends to the provider
+// on subsequent turns, exactly like truncateForContext.
+//
+// The system prompt is preserved automatically because it is carried in the
+// Config and passed to the provider separately, never within the history. The
+// most recent genuine user message is preserved explicitly: if the Compactor
+// drops it, Compact re-appends it so the model always retains the live prompt.
+func (l *Loop) Compact(ctx context.Context, sessionID string) error {
+	history, err := l.cfg.Sessions.Messages(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("loading session messages: %w", err)
+	}
+
+	compactor := l.cfg.Compactor
+	if compactor == nil {
+		compactor = newDropAndMarkCompactor(2)
+	}
+
+	input := append([]message.Message(nil), history...)
+	condensed, err := compactor.Compact(ctx, input)
+	if err != nil {
+		return fmt.Errorf("compacting history: %w", err)
+	}
+	condensed = append([]message.Message(nil), condensed...)
+
+	// Preserve the most recent genuine user message: if the Compactor dropped
+	// it, re-append it so the live prompt is never lost.
+	if idx := latestUserIndex(history); idx >= 0 {
+		latest := history[idx]
+		if !containsMessage(condensed, latest) {
+			condensed = append(condensed, latest)
+		}
+	}
+
+	l.compactMu.Lock()
+	l.compacted = condensed
+	l.compactedLen = len(history)
+	l.compactMu.Unlock()
+
+	return nil
+}
+
+// applyCompaction grafts messages that arrived after the last Compact call onto
+// the condensed snapshot. When no compaction has occurred it returns history
+// unchanged, so the normal turn path is unaffected.
+func (l *Loop) applyCompaction(history []message.Message) []message.Message {
+	l.compactMu.Lock()
+	defer l.compactMu.Unlock()
+	if l.compacted == nil {
+		return history
+	}
+	out := append([]message.Message(nil), l.compacted...)
+	if l.compactedLen <= len(history) {
+		out = append(out, history[l.compactedLen:]...)
+	}
+	return out
+}
+
 // Run drives a single user turn.
 func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Message) error {
 	if !l.runMu.TryLock() {
@@ -126,6 +203,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	if err != nil {
 		return fmt.Errorf("loading session messages: %w", err)
 	}
+	history = l.applyCompaction(history)
 	history = truncateForContext(history, l.contextWindow())
 	detector := &loopDetector{}
 
@@ -310,7 +388,8 @@ func (l *Loop) runToolSafely(ctx context.Context, wrapped *hookedTool, call pend
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
-			slog.Error("tool panicked",
+			slog.Error(
+				"tool panicked",
 				slog.String("tool", call.Name),
 				slog.Any("panic", r),
 				slog.String("stack", string(stack)),

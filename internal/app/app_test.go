@@ -145,6 +145,20 @@ func TestCloseSteps_ReportsSubsystemDeadline(t *testing.T) {
 	require.True(t, errors.Is(err, context.DeadlineExceeded))
 }
 
+func TestNewBus_AgentTopicBuffer_NotLossy(t *testing.T) {
+	bus := newBus()
+	t.Cleanup(bus.Close)
+
+	events, cancel := bus.Agent.Subscribe()
+	t.Cleanup(cancel)
+
+	// A subscriber's channel is buffered to the topic's configured size,
+	// so cap reflects the real agent event buffer. It must be large enough
+	// that bursts of streaming token deltas are not dropped under load.
+	require.GreaterOrEqual(t, cap(events), 256)
+	require.GreaterOrEqual(t, agentEventBufferSize, 256)
+}
+
 func setAppEnv(t *testing.T, tempDir string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))

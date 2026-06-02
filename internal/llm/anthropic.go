@@ -1,0 +1,420 @@
+package llm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/arbazkhan971/bharatcode/internal/message"
+)
+
+// anthropicVersion is the required value of the anthropic-version header for
+// the Messages API.
+const anthropicVersion = "2023-06-01"
+
+// defaultAnthropicMaxTokens is used when a request does not set MaxTokens, as
+// the Anthropic Messages API rejects requests without a max_tokens field.
+const defaultAnthropicMaxTokens = 4096
+
+type anthropicProvider struct {
+	name      string
+	baseURL   string
+	apiKeyEnv string
+	models    []Model
+	client    *http.Client
+}
+
+func newAnthropicProvider(name string, baseURL string, apiKeyEnv string, models []Model, client *http.Client) Provider {
+	return &anthropicProvider{
+		name:      name,
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		apiKeyEnv: apiKeyEnv,
+		models:    append([]Model(nil), models...),
+		client:    client,
+	}
+}
+
+func (p *anthropicProvider) Name() string {
+	return p.name
+}
+
+func (p *anthropicProvider) Models() []Model {
+	models := make([]Model, len(p.models))
+	copy(models, p.models)
+	return models
+}
+
+func (p *anthropicProvider) SupportsTools() bool {
+	return supportsTools(p.models)
+}
+
+func (p *anthropicProvider) SupportsImages() bool {
+	return supportsImages(p.models)
+}
+
+func (p *anthropicProvider) Stream(ctx context.Context, req Request) (<-chan Event, error) {
+	if len(req.Tools) > 0 && !modelSupportsTools(p.models, req.Model) {
+		return nil, fmt.Errorf("model %q tools: %w", req.Model, ErrUnsupportedFeature)
+	}
+	if hasImages(req.Messages) && !modelSupportsImages(p.models, req.Model) {
+		return nil, fmt.Errorf("model %q images: %w", req.Model, ErrUnsupportedFeature)
+	}
+
+	apiKey := ""
+	if p.apiKeyEnv != "" {
+		apiKey = os.Getenv(p.apiKeyEnv)
+		if apiKey == "" {
+			return nil, fmt.Errorf("reading %s: %w", p.apiKeyEnv, ErrAuth)
+		}
+	}
+
+	body, err := buildAnthropicRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("building provider request: %w", err)
+	}
+
+	headers := map[string]string{
+		"Content-Type":      "application/json",
+		"Accept":            "text/event-stream",
+		"anthropic-version": anthropicVersion,
+	}
+	if apiKey != "" {
+		headers["x-api-key"] = apiKey
+	}
+
+	resp, err := postJSONWithHeaders(ctx, p.client, p.baseURL+"/messages", headers, body)
+	if err != nil {
+		return nil, err
+	}
+
+	events := make(chan Event, 16)
+	go p.readResponse(ctx, resp, req.Model, events)
+	return events, nil
+}
+
+func (p *anthropicProvider) readResponse(ctx context.Context, resp *http.Response, model string, events chan<- Event) {
+	defer close(events)
+	defer resp.Body.Close()
+
+	send(ctx, events, StartEvent{Provider: p.name, Model: model})
+
+	state := newAnthropicStreamState()
+	err := readSSE(ctx, resp.Body, func(ev sseEvent) error {
+		return state.handle(ctx, ev, events)
+	})
+	if err != nil {
+		send(ctx, events, ErrorEvent{Err: err})
+		return
+	}
+	state.finish(ctx, events)
+}
+
+// anthropicStreamState tracks usage accumulated across split SSE events and the
+// content block currently being streamed.
+type anthropicStreamState struct {
+	usage       Usage
+	blockType   string
+	blockID     string
+	blockName   string
+	blockInput  strings.Builder
+	blockActive bool
+	ended       bool
+}
+
+func newAnthropicStreamState() *anthropicStreamState {
+	return &anthropicStreamState{}
+}
+
+func (s *anthropicStreamState) handle(ctx context.Context, ev sseEvent, events chan<- Event) error {
+	name := ev.Name
+	if name == "" {
+		// Fall back to the embedded type field when no SSE event line is set.
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(ev.Data), &probe); err == nil {
+			name = probe.Type
+		}
+	}
+
+	switch name {
+	case "message_start":
+		var chunk anthropicMessageStart
+		if err := json.Unmarshal([]byte(ev.Data), &chunk); err != nil {
+			return fmt.Errorf("decoding provider message_start: %w", err)
+		}
+		s.usage.InputTokens = chunk.Message.Usage.InputTokens
+		s.usage.OutputTokens = chunk.Message.Usage.OutputTokens
+		s.usage.CacheReadTokens = chunk.Message.Usage.CacheReadInputTokens
+		s.usage.CacheWriteTokens = chunk.Message.Usage.CacheCreationInputTokens
+	case "content_block_start":
+		var chunk anthropicContentBlockStart
+		if err := json.Unmarshal([]byte(ev.Data), &chunk); err != nil {
+			return fmt.Errorf("decoding provider content_block_start: %w", err)
+		}
+		s.blockType = chunk.ContentBlock.Type
+		s.blockID = chunk.ContentBlock.ID
+		s.blockName = chunk.ContentBlock.Name
+		s.blockInput.Reset()
+		s.blockActive = true
+		if s.blockType == "tool_use" {
+			send(ctx, events, ToolUseStartEvent{ID: s.blockID, Name: s.blockName})
+		}
+	case "content_block_delta":
+		var chunk anthropicContentBlockDelta
+		if err := json.Unmarshal([]byte(ev.Data), &chunk); err != nil {
+			return fmt.Errorf("decoding provider content_block_delta: %w", err)
+		}
+		switch chunk.Delta.Type {
+		case "text_delta":
+			if chunk.Delta.Text != "" {
+				send(ctx, events, DeltaTextEvent{Text: chunk.Delta.Text})
+			}
+		case "thinking_delta":
+			if chunk.Delta.Thinking != "" {
+				send(ctx, events, ThinkingEvent{Text: chunk.Delta.Thinking})
+			}
+		case "input_json_delta":
+			if chunk.Delta.PartialJSON != "" {
+				s.blockInput.WriteString(chunk.Delta.PartialJSON)
+				send(ctx, events, ToolUseDeltaEvent{ID: s.blockID, Delta: chunk.Delta.PartialJSON})
+			}
+		}
+	case "content_block_stop":
+		if s.blockActive && s.blockType == "tool_use" {
+			input := json.RawMessage(s.blockInput.String())
+			if len(input) == 0 {
+				input = json.RawMessage(`{}`)
+			}
+			if !json.Valid(input) {
+				input = json.RawMessage(fmt.Sprintf("%q", s.blockInput.String()))
+			}
+			send(ctx, events, ToolUseEndEvent{
+				ID:    s.blockID,
+				Name:  s.blockName,
+				Input: input,
+			})
+		}
+		s.blockActive = false
+		s.blockType = ""
+		s.blockID = ""
+		s.blockName = ""
+		s.blockInput.Reset()
+	case "message_delta":
+		var chunk anthropicMessageDelta
+		if err := json.Unmarshal([]byte(ev.Data), &chunk); err != nil {
+			return fmt.Errorf("decoding provider message_delta: %w", err)
+		}
+		if chunk.Usage.OutputTokens > 0 {
+			s.usage.OutputTokens = chunk.Usage.OutputTokens
+		}
+		if chunk.Usage.InputTokens > 0 {
+			s.usage.InputTokens = chunk.Usage.InputTokens
+		}
+		if chunk.Usage.CacheReadInputTokens > 0 {
+			s.usage.CacheReadTokens = chunk.Usage.CacheReadInputTokens
+		}
+		if chunk.Usage.CacheCreationInputTokens > 0 {
+			s.usage.CacheWriteTokens = chunk.Usage.CacheCreationInputTokens
+		}
+	case "message_stop":
+		s.emitEnd(ctx, events)
+	case "error":
+		var chunk anthropicErrorEvent
+		if err := json.Unmarshal([]byte(ev.Data), &chunk); err == nil && chunk.Error.Message != "" {
+			return fmt.Errorf("provider stream error: %s", chunk.Error.Message)
+		}
+		return fmt.Errorf("provider stream error: %s", strings.TrimSpace(ev.Data))
+	}
+	return nil
+}
+
+// finish emits a terminal EndEvent if message_stop was not observed, so the
+// caller always receives final usage even when the stream closes early.
+func (s *anthropicStreamState) finish(ctx context.Context, events chan<- Event) {
+	s.emitEnd(ctx, events)
+}
+
+func (s *anthropicStreamState) emitEnd(ctx context.Context, events chan<- Event) {
+	if s.ended {
+		return
+	}
+	s.ended = true
+	send(ctx, events, EndEvent{Usage: s.usage})
+}
+
+func buildAnthropicRequest(req Request) (anthropicRequest, error) {
+	messages, err := buildAnthropicMessages(req.Messages)
+	if err != nil {
+		return anthropicRequest{}, err
+	}
+
+	tools := make([]anthropicTool, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		schema := tool.InputSchema
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		tools = append(tools, anthropicTool{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: schema,
+		})
+	}
+
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = defaultAnthropicMaxTokens
+	}
+
+	return anthropicRequest{
+		Model:       req.Model,
+		System:      req.SystemPrompt,
+		Messages:    messages,
+		Tools:       tools,
+		MaxTokens:   maxTokens,
+		Temperature: req.Temperature,
+		Stream:      true,
+	}, nil
+}
+
+func buildAnthropicMessages(history []message.Message) ([]anthropicMessage, error) {
+	out := make([]anthropicMessage, 0, len(history))
+	for _, msg := range message.Normalize(history) {
+		switch msg.Role {
+		case message.RoleSystem:
+			// System content is carried as the top-level system field; skip it
+			// in the messages array.
+			continue
+		case message.RoleUser, message.RoleAssistant, message.RoleTool:
+			blocks, err := convertAnthropicBlocks(msg.Content)
+			if err != nil {
+				return nil, err
+			}
+			if len(blocks) == 0 {
+				continue
+			}
+			role := "user"
+			if msg.Role == message.RoleAssistant {
+				role = "assistant"
+			}
+			out = append(out, anthropicMessage{Role: role, Content: blocks})
+		default:
+			return nil, fmt.Errorf("role %q conversion: %w", msg.Role, ErrUnsupportedFeature)
+		}
+	}
+	return out, nil
+}
+
+func convertAnthropicBlocks(blocks []message.ContentBlock) ([]anthropicContentBlock, error) {
+	out := make([]anthropicContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		switch b := block.(type) {
+		case message.TextBlock:
+			out = append(out, anthropicContentBlock{Type: "text", Text: b.Text})
+		case message.ThinkingBlock:
+			out = append(out, anthropicContentBlock{Type: "text", Text: b.Text})
+		case message.ToolUseBlock:
+			input := b.Input
+			if len(input) == 0 {
+				input = json.RawMessage(`{}`)
+			}
+			out = append(out, anthropicContentBlock{
+				Type:  "tool_use",
+				ID:    b.ID,
+				Name:  b.Name,
+				Input: input,
+			})
+		case message.ToolResultBlock:
+			out = append(out, anthropicContentBlock{
+				Type:      "tool_result",
+				ToolUseID: b.ToolUseID,
+				Content:   b.Content,
+				IsError:   b.IsError,
+			})
+		case message.ImageBlock:
+			return nil, fmt.Errorf("image block conversion: %w", ErrUnsupportedFeature)
+		default:
+			return nil, fmt.Errorf("unknown block conversion: %w", ErrUnsupportedFeature)
+		}
+	}
+	return out, nil
+}
+
+type anthropicRequest struct {
+	Model       string             `json:"model"`
+	System      string             `json:"system,omitempty"`
+	Messages    []anthropicMessage `json:"messages"`
+	Tools       []anthropicTool    `json:"tools,omitempty"`
+	MaxTokens   int                `json:"max_tokens"`
+	Temperature float64            `json:"temperature,omitempty"`
+	Stream      bool               `json:"stream"`
+}
+
+type anthropicMessage struct {
+	Role    string                  `json:"role"`
+	Content []anthropicContentBlock `json:"content"`
+}
+
+type anthropicContentBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+}
+
+type anthropicTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+type anthropicUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+}
+
+type anthropicMessageStart struct {
+	Message struct {
+		Usage anthropicUsage `json:"usage"`
+	} `json:"message"`
+}
+
+type anthropicContentBlockStart struct {
+	Index        int `json:"index"`
+	ContentBlock struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"content_block"`
+}
+
+type anthropicContentBlockDelta struct {
+	Index int `json:"index"`
+	Delta struct {
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
+		PartialJSON string `json:"partial_json"`
+	} `json:"delta"`
+}
+
+type anthropicMessageDelta struct {
+	Usage anthropicUsage `json:"usage"`
+}
+
+type anthropicErrorEvent struct {
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}

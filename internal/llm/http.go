@@ -11,33 +11,99 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
+// sleepFn waits for the given duration between retry attempts. Tests replace
+// it with a no-op so the backoff path runs offline without real delays.
+var sleepFn = time.Sleep
+
+// retryBackoff is the schedule used to space HTTP retries. NoJitter keeps the
+// production delays deterministic and the unexported clock defaults to
+// time.Now for Retry-After HTTP-date math.
+var retryBackoff = Backoff{NoJitter: true}
+
 func postJSON(ctx context.Context, client *http.Client, url string, apiKey string, body any) (*http.Response, error) {
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(body); err != nil {
+	headers := map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "text/event-stream",
+	}
+	if apiKey != "" {
+		headers["Authorization"] = "Bearer " + apiKey
+	}
+	return postJSONWithHeaders(ctx, client, url, headers, body)
+}
+
+// postJSONWithHeaders encodes body as JSON and POSTs it to url with the given
+// headers, retrying transient failures using retryBackoff. It honors a
+// Retry-After header when present, re-sends the body on each attempt, and
+// returns a classified error for the final response when retries are
+// exhausted.
+func postJSONWithHeaders(ctx context.Context, client *http.Client, url string, headers map[string]string, body any) (*http.Response, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
 		return nil, fmt.Errorf("encoding provider request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
-	if err != nil {
-		return nil, fmt.Errorf("creating provider request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	attempts := retryBackoff.Attempts()
+	for attempt := 1; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return nil, fmt.Errorf("creating provider request: %w", err)
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("sending provider request: %w", err)
+		resp, err := client.Do(req)
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+
+		if ShouldRetry(status, err) && attempt < attempts {
+			delay, retryAfter := retryAfterDelay(resp)
+			if !retryAfter {
+				delay = retryBackoff.Delay(attempt)
+			}
+			drainAndClose(resp)
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("sending provider request: %w", ctx.Err())
+			default:
+			}
+			sleepFn(delay)
+			continue
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("sending provider request: %w", err)
+		}
+		if resp.StatusCode >= 400 {
+			defer resp.Body.Close()
+			return nil, classifyHTTPError(resp)
+		}
+		return resp, nil
 	}
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		return nil, classifyHTTPError(resp)
+}
+
+// retryAfterDelay extracts the Retry-After delay from resp, capping it via the
+// backoff schedule. The boolean reports whether a usable header was present.
+func retryAfterDelay(resp *http.Response) (time.Duration, bool) {
+	if resp == nil {
+		return 0, false
 	}
-	return resp, nil
+	return retryBackoff.RetryAfter(resp.Header.Get("Retry-After"))
+}
+
+// drainAndClose consumes and closes resp.Body so the underlying connection can
+// be reused for the next retry attempt.
+func drainAndClose(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+	resp.Body.Close()
 }
 
 func classifyHTTPError(resp *http.Response) error {

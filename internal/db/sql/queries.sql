@@ -47,9 +47,12 @@ INSERT INTO messages (
 RETURNING *;
 
 -- name: ListMessagesBySession :many
+-- The secondary sort on rowid gives a stable total order when several rows
+-- share the same created_at second, matching ListMessagesBySessionPaged so
+-- that paged traversal reproduces this full ordering exactly.
 SELECT * FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC;
+ORDER BY created_at ASC, rowid ASC;
 
 -- name: ListMessagesBySessionPaged :many
 -- Returns a single window of a session's messages, oldest first. The

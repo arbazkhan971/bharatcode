@@ -314,7 +314,7 @@ func (q *Queries) ListFileChangesBySession(ctx context.Context, sessionID string
 const listMessagesBySession = `-- name: ListMessagesBySession :many
 SELECT id, session_id, role, content_json, parent_id, created_at FROM messages
 WHERE session_id = ?
-ORDER BY created_at ASC
+ORDER BY created_at ASC, rowid ASC
 `
 
 func (q *Queries) ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error) {

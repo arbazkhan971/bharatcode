@@ -397,6 +397,208 @@ func TestAnthropicCachingDisabledOmitsCacheControl(t *testing.T) {
 	require.NotContains(t, string(rawBody), `"cache_control"`)
 }
 
+// newAnthropicThinkingProvider wires a registry-backed Anthropic provider whose
+// model id is recognized as extended-thinking capable, so the request builder
+// emits the thinking field when a request opts in.
+func newAnthropicThinkingProvider(t *testing.T, serverURL string) Provider {
+	t.Helper()
+	t.Setenv("ANTHROPIC_TEST_KEY", "test-key")
+	cfg := testConfig("anthropic", config.ProviderAnthropic, serverURL+"/v1")
+	cfg.Providers[0].Models = []string{"claude-sonnet-4-20250514"}
+	cfg.Models[0].ID = "claude-sonnet-4-20250514"
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	provider, err := reg.Get("anthropic")
+	require.NoError(t, err)
+	return provider
+}
+
+// TestAnthropicStreamsThinkingThenText drives a canned SSE stream that emits
+// thinking_delta blocks before text_delta blocks and asserts the thinking text
+// surfaces as ThinkingEvents, the answer as DeltaTextEvents, and that the two
+// kinds arrive in source order with thinking strictly before text.
+func TestAnthropicStreamsThinkingThenText(t *testing.T) {
+	var captured anthropicRequest
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		rawBody = b
+		require.NoError(t, json.Unmarshal(b, &captured))
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\n"+
+			"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n")
+		// Thinking content block: two thinking deltas, then a signature delta the
+		// provider must ignore (it is not human-readable reasoning).
+		fmt.Fprint(w, "event: content_block_start\n"+
+			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\n"+
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me \"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\n"+
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reason.\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\n"+
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"abc123\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_stop\n"+
+			"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		// Answer text block.
+		fmt.Fprint(w, "event: content_block_start\n"+
+			"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\n"+
+			"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"The answer \"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\n"+
+			"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"is 42.\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_stop\n"+
+			"data: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+		fmt.Fprint(w, "event: message_delta\n"+
+			"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":8}}\n\n")
+		fmt.Fprint(w, "event: message_stop\n"+
+			"data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+
+	provider := newAnthropicThinkingProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "claude-sonnet-4-20250514",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "what is the answer"}},
+		}},
+		Thinking:  &ThinkingConfig{BudgetTokens: 1024},
+		MaxTokens: 2048,
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	// Thinking deltas became ThinkingEvents in order; the signature_delta is not
+	// surfaced as reasoning text.
+	var thinking []string
+	for _, ev := range got {
+		if te, ok := ev.(ThinkingEvent); ok {
+			thinking = append(thinking, te.Text)
+		}
+	}
+	require.Equal(t, []string{"Let me ", "reason."}, thinking)
+
+	// Answer text became DeltaTextEvents in order.
+	require.Equal(t, []string{"The answer ", "is 42."}, textDeltaSequence(got))
+
+	// Ordering across kinds: every ThinkingEvent precedes every DeltaTextEvent,
+	// matching the source stream (thinking block before text block).
+	lastThinkingIdx, firstTextIdx := -1, -1
+	for i, ev := range got {
+		switch ev.(type) {
+		case ThinkingEvent:
+			lastThinkingIdx = i
+		case DeltaTextEvent:
+			if firstTextIdx == -1 {
+				firstTextIdx = i
+			}
+		}
+	}
+	require.NotEqual(t, -1, lastThinkingIdx, "expected at least one ThinkingEvent")
+	require.NotEqual(t, -1, firstTextIdx, "expected at least one DeltaTextEvent")
+	require.Less(t, lastThinkingIdx, firstTextIdx, "all thinking events must precede the answer text")
+
+	// The thinking-enabled request carries the thinking field on the wire with
+	// type "enabled" and the requested budget. Assert both the parsed struct and
+	// the raw bytes so the documented shape is literally sent.
+	require.NotNil(t, captured.Thinking)
+	require.Equal(t, "enabled", captured.Thinking.Type)
+	require.Equal(t, 1024, captured.Thinking.BudgetTokens)
+	require.Contains(t, string(rawBody), `"thinking":{"type":"enabled","budget_tokens":1024}`)
+
+	// Start first, End last, with merged usage.
+	require.IsType(t, StartEvent{}, got[0])
+	require.IsType(t, EndEvent{}, got[len(got)-1])
+	require.Equal(t, 1, countEndEvents(got))
+	require.Contains(t, got, EndEvent{Usage: Usage{InputTokens: 10, OutputTokens: 8}})
+}
+
+// TestAnthropicSkipsRedactedThinking asserts a redacted_thinking content block
+// is dropped: it produces no ThinkingEvent (its payload is encrypted) while a
+// following text block still streams normally.
+func TestAnthropicSkipsRedactedThinking(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\n"+
+			"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":6,\"output_tokens\":1}}}\n\n")
+		// Redacted thinking block: encrypted data, no human-readable deltas.
+		fmt.Fprint(w, "event: content_block_start\n"+
+			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"EncRyPtEdBytes==\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_stop\n"+
+			"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		// Visible answer block follows.
+		fmt.Fprint(w, "event: content_block_start\n"+
+			"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\n"+
+			"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_stop\n"+
+			"data: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+		fmt.Fprint(w, "event: message_stop\n"+
+			"data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+
+	provider := newAnthropicThinkingProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "claude-sonnet-4-20250514",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+		Thinking:  &ThinkingConfig{BudgetTokens: 512},
+		MaxTokens: 1024,
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	// No ThinkingEvent: the encrypted block never surfaces as reasoning text.
+	for _, ev := range got {
+		_, isThinking := ev.(ThinkingEvent)
+		require.False(t, isThinking, "redacted_thinking must not produce a ThinkingEvent")
+	}
+
+	// The visible answer still streams normally after the redacted block.
+	require.Equal(t, []string{"hi"}, textDeltaSequence(got))
+	require.Equal(t, 1, countEndEvents(got))
+}
+
+// TestAnthropicOmitsThinkingForUnsupportedModel asserts the thinking field is
+// not sent when the configured model is not thinking-capable, even though the
+// caller opted in, so the request does not 400 on a non-thinking model.
+func TestAnthropicOmitsThinkingForUnsupportedModel(t *testing.T) {
+	var rawBody []byte
+	var captured anthropicRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		rawBody = b
+		require.NoError(t, json.Unmarshal(b, &captured))
+		writeMinimalAnthropicSSE(w, `{"input_tokens":3,"output_tokens":1}`)
+	}))
+	defer server.Close()
+
+	// newAnthropicTestProvider registers the model id "test-model", which the
+	// thinking-capability check does not recognize.
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+		Thinking:  &ThinkingConfig{BudgetTokens: 1024},
+		MaxTokens: 64,
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	require.Nil(t, captured.Thinking)
+	require.NotContains(t, string(rawBody), `"thinking"`)
+}
+
 func textDeltaSequence(events []Event) []string {
 	var out []string
 	for _, ev := range events {

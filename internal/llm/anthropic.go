@@ -314,8 +314,12 @@ func (p *anthropicProvider) buildAnthropicRequest(req Request) (anthropicRequest
 	}
 
 	// Extended thinking is opt-in per request and only emitted when the model
-	// supports it. Anthropic requires the default sampling temperature while
-	// thinking is enabled, so the temperature override is dropped to avoid a 400.
+	// supports it. Unlike tools and images (which error on an unsupported model),
+	// an unsupported thinking request is silently dropped: the support check is an
+	// approximate model-id heuristic, so degrading gracefully is safer than
+	// rejecting a valid request on a heuristic false negative. Anthropic requires
+	// the default sampling temperature while thinking is enabled, so the
+	// temperature override is dropped to avoid a 400.
 	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 && modelSupportsThinking(p.models, req.Model) {
 		out.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: req.Thinking.BudgetTokens}
 		out.Temperature = 0

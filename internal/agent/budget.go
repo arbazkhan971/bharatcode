@@ -197,10 +197,23 @@ func messageBudget(contextWindow int) int {
 // both the reserved response headroom and the system prompt (which the provider
 // sends alongside the messages but outside the history) are accounted for. It
 // is used by the automatic-compaction path to decide whether a history fits the
-// window. The returned budget may be non-positive when the system prompt alone
-// crowds out the window; callers treat a non-positive budget as "nothing fits".
+// window.
+//
+// It mirrors the escape hatch in messageBudget: when reserving response headroom
+// on top of the system prompt would leave an implausibly small budget (a sign
+// the prompt is large relative to a modest window, common with smaller models),
+// the response reservation is dropped so legitimately small turns are not
+// declared a permanent overflow. The returned budget is only non-positive when
+// the system prompt alone meets or exceeds the full context window.
 func fitBudget(contextWindow int, systemPrompt string) int {
-	return messageBudget(contextWindow) - estimateTextTokens(systemPrompt)
+	promptTokens := estimateTextTokens(systemPrompt)
+	limit := messageBudget(contextWindow) - promptTokens
+	if limit < 1024 {
+		// Dropping the response reservation recovers room the prompt would
+		// otherwise have eaten via the reserved headroom alone.
+		limit = contextWindow - promptTokens
+	}
+	return limit
 }
 
 // historyTokens estimates the total tokens a history occupies on the wire.

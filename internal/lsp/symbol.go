@@ -39,6 +39,94 @@ func (c *client) definition(ctx context.Context, path string, line, col int) ([]
 	return parseDefinition(result)
 }
 
+// references issues a textDocument/references request for the position and
+// returns every location the server reports referencing the symbol, including
+// its declaration.
+func (c *client) references(ctx context.Context, path string, line, col int) ([]Location, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/references", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"position":     map[string]any{"line": line, "character": col},
+		"context":      map[string]any{"includeDeclaration": true},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting references: %w", err)
+	}
+	return parseReferences(result)
+}
+
+// rename issues a textDocument/rename request for the position and returns the
+// edits the server would apply to rename the symbol to newName.
+func (c *client) rename(ctx context.Context, path string, line, col int, newName string) (WorkspaceEdit, error) {
+	if err := c.open(ctx, path); err != nil {
+		return WorkspaceEdit{}, err
+	}
+	result, err := c.request(ctx, "textDocument/rename", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"position":     map[string]any{"line": line, "character": col},
+		"newName":      newName,
+	})
+	if err != nil {
+		return WorkspaceEdit{}, fmt.Errorf("requesting rename: %w", err)
+	}
+	return parseRename(result)
+}
+
+// parseReferences extracts the locations of a textDocument/references response.
+// The result is an array of Locations or null, so it is normalized into
+// []Location, reusing the definition array parser.
+func parseReferences(raw json.RawMessage) ([]Location, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if raw[0] != '[' {
+		return nil, fmt.Errorf("parsing references response: unexpected value %q", string(raw))
+	}
+	return parseLocationArray(raw)
+}
+
+// parseRename extracts the file edits of a textDocument/rename response. Only
+// the WorkspaceEdit "changes" map ({uri: [{range, newText}]}) is parsed; the
+// keys are URIs and are converted to file paths.
+func parseRename(raw json.RawMessage) (WorkspaceEdit, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return WorkspaceEdit{}, nil
+	}
+	var result struct {
+		Changes map[string][]struct {
+			Range   wireRange `json:"range"`
+			NewText string    `json:"newText"`
+		} `json:"changes"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return WorkspaceEdit{}, fmt.Errorf("parsing rename response: %w", err)
+	}
+	if len(result.Changes) == 0 {
+		return WorkspaceEdit{}, nil
+	}
+	changes := make(map[string][]TextEdit, len(result.Changes))
+	for uri, wireEdits := range result.Changes {
+		path, err := uriToPath(uri)
+		if err != nil {
+			return WorkspaceEdit{}, fmt.Errorf("parsing rename edit uri: %w", err)
+		}
+		edits := make([]TextEdit, 0, len(wireEdits))
+		for _, edit := range wireEdits {
+			edits = append(edits, TextEdit{
+				Range: Range{
+					Start: Position{Line: edit.Range.Start.Line, Character: edit.Range.Start.Character},
+					End:   Position{Line: edit.Range.End.Line, Character: edit.Range.End.Character},
+				},
+				NewText: edit.NewText,
+			})
+		}
+		changes[path] = edits
+	}
+	return WorkspaceEdit{Changes: changes}, nil
+}
+
 // parseHover extracts the textual contents of a textDocument/hover response.
 // The contents field may be a MarkupContent object, a MarkedString (a bare
 // string or {language, value} object), or an array of MarkedStrings, so each

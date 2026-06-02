@@ -69,6 +69,14 @@ type PromptMessage struct {
 	Content string `json:"content"`
 }
 
+// ResourceUpdate identifies a subscribed resource the server reported as
+// changed via a notifications/resources/updated notification. The agent
+// typically re-reads the resource by URI in response.
+type ResourceUpdate struct {
+	Server string `json:"server"`
+	URI    string `json:"uri"`
+}
+
 // State reports the connection state of a single MCP server.
 type State int
 

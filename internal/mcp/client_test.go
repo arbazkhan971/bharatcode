@@ -18,23 +18,62 @@ import (
 )
 
 type fakeRemote struct {
-	tools       []mcpsdk.Tool
-	resources   []mcpsdk.Resource
-	prompts     []mcpsdk.Prompt
-	resourceOut *mcpsdk.ReadResourceResult
-	promptOut   *mcpsdk.GetPromptResult
-	promptArgs  map[string]string
-	callOut     *mcpsdk.CallToolResult
-	callCount   int
-	closeCount  int
-	lost        func(error)
-	sampling    mcpclient.SamplingHandler
+	tools        []mcpsdk.Tool
+	resources    []mcpsdk.Resource
+	prompts      []mcpsdk.Prompt
+	resourceOut  *mcpsdk.ReadResourceResult
+	promptOut    *mcpsdk.GetPromptResult
+	promptArgs   map[string]string
+	callOut      *mcpsdk.CallToolResult
+	callCount    int
+	closeCount   int
+	lost         func(error)
+	sampling     mcpclient.SamplingHandler
+	notify       func(mcpsdk.JSONRPCNotification)
+	subscribed   []string
+	unsubscribed []string
 }
 
 // setSamplingHandler records the handler the client installs, letting the test
 // drive a server-issued sampling/createMessage request through it.
 func (f *fakeRemote) setSamplingHandler(h mcpclient.SamplingHandler) {
 	f.sampling = h
+}
+
+// OnNotification records the notification handler the client installs, letting
+// the test drive a server-pushed notification through it.
+func (f *fakeRemote) OnNotification(fn func(mcpsdk.JSONRPCNotification)) {
+	f.notify = fn
+}
+
+// Subscribe records the subscribed URI as a real conn's resources/subscribe
+// request would register interest server-side.
+func (f *fakeRemote) Subscribe(_ context.Context, req mcpsdk.SubscribeRequest) error {
+	f.subscribed = append(f.subscribed, req.Params.URI)
+	return nil
+}
+
+// Unsubscribe records the unsubscribed URI.
+func (f *fakeRemote) Unsubscribe(_ context.Context, req mcpsdk.UnsubscribeRequest) error {
+	f.unsubscribed = append(f.unsubscribed, req.Params.URI)
+	return nil
+}
+
+// emitResourceUpdated drives a server-pushed resources/updated notification for
+// uri through the installed handler, as a real conn's read goroutine would on
+// receiving the notification off the wire.
+func (f *fakeRemote) emitResourceUpdated(uri string) {
+	if f.notify == nil {
+		return
+	}
+	f.notify(mcpsdk.JSONRPCNotification{
+		Notification: mcpsdk.Notification{
+			Method: mcpsdk.MethodNotificationResourceUpdated,
+			Params: mcpsdk.NotificationParams{
+				AdditionalFields: map[string]any{"uri": uri},
+			},
+		},
+	})
 }
 
 func (f *fakeRemote) Close() error {
@@ -236,6 +275,65 @@ func TestReadResource(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "hello", string(data))
 	require.Equal(t, "text/plain", mimeType)
+}
+
+func TestResourceSubscriptionDeliversUpdatesAndUnsubscribeStops(t *testing.T) {
+	const uri = "filesystem:///tmp/watched.txt"
+	remote := &fakeRemote{tools: []mcpsdk.Tool{}}
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return remote, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "filesystem", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+
+	var updates []ResourceUpdate
+	client.SetResourceUpdateHandler(func(u ResourceUpdate) {
+		updates = append(updates, u)
+	})
+	require.NoError(t, client.Start(context.Background()))
+
+	// An update that arrives with no active subscription is dropped, even though
+	// a handler is installed: delivery is gated on the client-side set.
+	remote.emitResourceUpdated(uri)
+	require.Empty(t, updates, "update delivered before any subscription")
+
+	// Subscribe registers interest: the request reaches the conn with the URI.
+	require.NoError(t, client.Subscribe(context.Background(), uri))
+	require.Equal(t, []string{uri}, remote.subscribed)
+
+	// A server-pushed update for the subscribed URI is delivered to the handler.
+	remote.emitResourceUpdated(uri)
+	require.Equal(t, []ResourceUpdate{{Server: "filesystem", URI: uri}}, updates)
+
+	// Updates for a different, unsubscribed URI on the same server are dropped.
+	remote.emitResourceUpdated("filesystem:///tmp/other.txt")
+	require.Len(t, updates, 1, "update delivered for an unsubscribed URI")
+
+	// Unsubscribe cancels the subscription on the conn and stops delivery.
+	require.NoError(t, client.Unsubscribe(context.Background(), uri))
+	require.Equal(t, []string{uri}, remote.unsubscribed)
+
+	// The server keeps pushing updates, but the client now drops them: delivery
+	// is gated on the subscription set, which Unsubscribe cleared.
+	remote.emitResourceUpdated(uri)
+	require.Len(t, updates, 1, "update delivered after Unsubscribe stopped the subscription")
+}
+
+func TestSubscribeUnknownServer(t *testing.T) {
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return &fakeRemote{}, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "filesystem", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	err := client.Subscribe(context.Background(), "missing:///tmp/a.txt")
+	require.Error(t, err)
+
+	err = client.Unsubscribe(context.Background(), "missing:///tmp/a.txt")
+	require.Error(t, err)
 }
 
 func TestClientDiscoversPrompts(t *testing.T) {

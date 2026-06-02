@@ -124,6 +124,7 @@ type model struct {
 	ctx              context.Context
 	deps             Dependencies
 	theme            styles.Theme
+	themeName        string
 	chat             *chat.List
 	dialogs          dialog.Stack
 	footer           tuiledger.Footer
@@ -188,13 +189,14 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 		MonthlyBudgetINR: deps.Cfg.Ledger.MaxInrPerMonth,
 	}
 	chatList := chat.New()
-	// Render assistant markdown with syntax-highlighted code blocks. The TUI
-	// ships a dark theme, so use glamour's dark style.
-	chatList.EnableMarkdown("dark")
+	// Render assistant markdown with syntax-highlighted code blocks. The glamour
+	// style follows the active theme so light/dark stay consistent.
+	chatList.EnableMarkdown(theme.Markdown)
 	m := &model{
 		ctx:           ctx,
 		deps:          deps,
 		theme:         theme,
+		themeName:     theme.Name,
 		chat:          chatList,
 		footer:        footer,
 		status:        statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
@@ -452,6 +454,9 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	if text == "/share" || strings.HasPrefix(text, "/share ") {
 		return m.handleExport(text)
 	}
+	if text == "/theme" || strings.HasPrefix(text, "/theme ") {
+		return m.handleTheme(text), nil
+	}
 
 	switch text {
 	case "/help":
@@ -541,6 +546,71 @@ func (m *model) handleGoalCommand(text string) (tea.Model, tea.Cmd) {
 		m.dialogs.Push(&dialog.Text{DialogID: "goal", Title: "Goal set", Body: m.goal, Theme: m.theme})
 		return m, nil
 	}
+}
+
+// handleTheme shows or switches the active TUI theme. With no argument it lists
+// the available themes and the current selection; with a known theme name it
+// switches live (chat, footer, status, and the glamour markdown style follow)
+// and persists the choice on the model. An unknown name surfaces an error
+// dialog without changing the theme.
+func (m *model) handleTheme(text string) tea.Model {
+	arg := strings.TrimSpace(strings.TrimPrefix(text, "/theme"))
+	if arg == "" {
+		m.dialogs.Push(&dialog.Text{DialogID: "theme", Title: "Theme", Body: m.themeListBody(), Theme: m.theme})
+		return m
+	}
+	name := strings.ToLower(arg)
+	if !m.applyTheme(name) {
+		m.dialogs.Push(&dialog.Text{
+			DialogID: "error",
+			Title:    "Unknown theme",
+			Body:     fmt.Sprintf("No theme named %q.\n\n%s", name, m.themeListBody()),
+			Theme:    m.theme,
+		})
+		return m
+	}
+	// Push the confirmation AFTER applyTheme so the dialog adopts the new theme.
+	m.dialogs.Push(&dialog.Text{
+		DialogID: "theme",
+		Title:    "Theme",
+		Body:     "Switched to the " + name + " theme.",
+		Theme:    m.theme,
+	})
+	return m
+}
+
+// themeListBody renders the selectable themes with a marker on the active one.
+func (m *model) themeListBody() string {
+	lines := make([]string, 0, len(styles.Names())+2)
+	for _, name := range styles.Names() {
+		marker := "  "
+		if name == m.themeName {
+			marker = "> "
+		}
+		lines = append(lines, marker+name)
+	}
+	lines = append(lines, "", "usage: /theme <name>")
+	return strings.Join(lines, "\n")
+}
+
+// applyTheme switches the active theme to the one named name and propagates it
+// to every component that holds its own theme copy: the footer, the status bar,
+// and the chat markdown renderer (whose glamour style follows light/dark). It
+// persists the selection on the model and reports whether name was a known
+// theme; an unknown name leaves the current theme untouched.
+func (m *model) applyTheme(name string) bool {
+	theme, ok := styles.ByName(name)
+	if !ok {
+		return false
+	}
+	m.theme = theme
+	m.themeName = theme.Name
+	m.footer.Theme = theme
+	m.status.Theme = theme
+	// The glamour markdown style follows the theme; EnableMarkdown also resets
+	// the chat render cache so already-shown messages re-render in the new style.
+	m.chat.EnableMarkdown(theme.Markdown)
+	return true
 }
 
 func (m *model) renderMain() string {
@@ -678,6 +748,7 @@ func slashHelp() string {
 		"/goal [text|run|stop|clear] - show, set, run, stop, or clear the goal",
 		"/permissions [read-only|auto|full] - show or set approval mode",
 		"/budget - show ledger and budget settings",
+		"/theme [dark|light|high-contrast] - show or switch the color theme",
 		"/yolo - toggle permission bypass",
 		"/save - persist session",
 		"/quit - exit",

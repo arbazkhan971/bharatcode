@@ -42,6 +42,17 @@ type Location struct {
 	Range Range
 }
 
+// WorkspaceEdit describes the file edits a rename produces, keyed by file path.
+type WorkspaceEdit struct {
+	Changes map[string][]TextEdit
+}
+
+// TextEdit replaces the text in Range with NewText.
+type TextEdit struct {
+	Range   Range
+	NewText string
+}
+
 type languageSpec struct {
 	name       string
 	extension  map[string]struct{}

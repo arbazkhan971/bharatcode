@@ -278,6 +278,11 @@ func (c *Config) merge(other *Config) {
 	if other.Options.RequestTimeout != 0 {
 		c.Options.RequestTimeout = other.Options.RequestTimeout
 	}
+
+	// SandboxConfig merge
+	if other.Sandbox.Mode != "" {
+		c.Sandbox.Mode = other.Sandbox.Mode
+	}
 }
 
 // interpolate performs environment variable expansion on specific fields.

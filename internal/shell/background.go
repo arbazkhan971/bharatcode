@@ -4,7 +4,6 @@ package shell
 import (
 	"fmt"
 	"log/slog"
-	"syscall"
 	"time"
 )
 
@@ -61,8 +60,8 @@ func (s *Shell) Kill(jobID string) error {
 	state.exitCode = -1
 
 	if state.process != nil {
-		// Use negative PID to target the whole process group.
-		_ = syscall.Kill(-state.process.Pid, syscall.SIGKILL)
+		// Kill the whole process group (negative pid on Unix).
+		killProcessGroup(state.process.Pid)
 	}
 
 	return nil

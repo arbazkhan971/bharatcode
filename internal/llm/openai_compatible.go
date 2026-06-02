@@ -108,7 +108,7 @@ func (p *openAICompatibleProvider) readResponse(ctx context.Context, resp *http.
 			return p.handleStreamChunk(ctx, ev.Data, state, &usage, events)
 		})
 		if err != nil {
-			send(ctx, events, ErrorEvent{Err: err})
+			emitTerminalError(ctx, events, err)
 			return
 		}
 		// Close any open tool calls first, then emit a single terminal EndEvent
@@ -322,5 +322,27 @@ func send(ctx context.Context, events chan<- Event, event Event) bool {
 		return false
 	case events <- event:
 		return true
+	}
+}
+
+// emitTerminalError delivers the final ErrorEvent for a stream that failed and
+// is about to close. It must not use send: on a cancelled context send's
+// ctx.Done() and the buffered channel write are both ready, so the runtime
+// picks between them at random and drops the terminal error -- precisely the
+// context.Canceled signal a caller needs -- roughly half the time. The events
+// channel is buffered and the consumer always drains it to close, so a
+// non-blocking buffered write is attempted first and almost always succeeds.
+// Only when the buffer is genuinely full does the function block, and then it
+// races the buffer freeing up against ctx.Done() so a cancelled stream can
+// still tear down without leaking the producer goroutine.
+func emitTerminalError(ctx context.Context, events chan<- Event, err error) {
+	select {
+	case events <- ErrorEvent{Err: err}:
+		return
+	default:
+	}
+	select {
+	case events <- ErrorEvent{Err: err}:
+	case <-ctx.Done():
 	}
 }

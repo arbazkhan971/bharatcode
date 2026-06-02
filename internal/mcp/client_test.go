@@ -32,6 +32,14 @@ type fakeRemote struct {
 	notify       func(mcpsdk.JSONRPCNotification)
 	subscribed   []string
 	unsubscribed []string
+	// gotToken records the progress token attached to the most recent CallTool
+	// request, as it arrived on the conn.
+	gotToken any
+	// progressUpdates, when set, are emitted synchronously mid-call by CallTool
+	// as notifications/progress, each echoing the request's progress token, just
+	// before the call returns its result. Emission is opt-in so other tests that
+	// share CallTool are unaffected.
+	progressUpdates []mcpsdk.ProgressNotificationParams
 }
 
 // setSamplingHandler records the handler the client installs, letting the test
@@ -81,14 +89,49 @@ func (f *fakeRemote) Close() error {
 	return nil
 }
 
-func (f *fakeRemote) CallTool(_ context.Context, _ mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+func (f *fakeRemote) CallTool(_ context.Context, req mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
 	f.callCount++
+	if req.Params.Meta != nil {
+		f.gotToken = req.Params.Meta.ProgressToken
+	}
+	// Emit any configured progress updates mid-call: synchronously, before the
+	// result returns, each echoing this request's progress token, exactly as a
+	// real server pushes notifications/progress during a long-running call. This
+	// makes "mid-call" deterministic without goroutines or sleeps.
+	for _, update := range f.progressUpdates {
+		update.ProgressToken = f.gotToken
+		f.emitProgress(update)
+	}
 	if f.callOut != nil {
 		return f.callOut, nil
 	}
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{mcpsdk.TextContent{Type: "text", Text: "ok"}},
 	}, nil
+}
+
+// emitProgress drives a server-pushed notifications/progress through the
+// installed handler. The params are JSON round-tripped so they arrive in the
+// handler's AdditionalFields with the same float64/string types the real wire
+// produces, not as already-typed Go values.
+func (f *fakeRemote) emitProgress(params mcpsdk.ProgressNotificationParams) {
+	if f.notify == nil {
+		return
+	}
+	raw, err := json.Marshal(params)
+	if err != nil {
+		panic(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		panic(err)
+	}
+	f.notify(mcpsdk.JSONRPCNotification{
+		Notification: mcpsdk.Notification{
+			Method: methodNotificationProgress,
+			Params: mcpsdk.NotificationParams{AdditionalFields: fields},
+		},
+	})
 }
 
 func (f *fakeRemote) ListTools(context.Context, mcpsdk.ListToolsRequest) (*mcpsdk.ListToolsResult, error) {
@@ -318,6 +361,81 @@ func TestResourceSubscriptionDeliversUpdatesAndUnsubscribeStops(t *testing.T) {
 	// is gated on the subscription set, which Unsubscribe cleared.
 	remote.emitResourceUpdated(uri)
 	require.Len(t, updates, 1, "update delivered after Unsubscribe stopped the subscription")
+}
+
+func TestToolCallDeliversProgressAndReturnsResult(t *testing.T) {
+	remote := &fakeRemote{
+		tools: []mcpsdk.Tool{{
+			Name:           "build",
+			RawInputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+		// The server reports progress mid-call: two updates, then completion.
+		progressUpdates: []mcpsdk.ProgressNotificationParams{
+			{Progress: 1.0, Total: 3.0, Message: "compiling"},
+			{Progress: 3.0, Total: 3.0, Message: "done"},
+		},
+	}
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return remote, nil
+	})
+	cfg := &config.Config{
+		MCP:         []config.MCPServer{{Name: "builder", Transport: "stdio", Command: "server"}},
+		Permissions: config.PermConfig{AllowAll: true},
+	}
+	client := NewClient(cfg, permission.New(cfg, nil), nil)
+
+	var updates []ToolProgress
+	client.SetToolProgressHandler(func(p ToolProgress) {
+		updates = append(updates, p)
+	})
+	require.NoError(t, client.Start(context.Background()))
+
+	// Run the tool. The fake emits progress synchronously mid-call, so by the
+	// time Run returns the handler has already received every update.
+	result, err := client.Tools()[0].Run(context.Background(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+
+	// The final tool result is still returned alongside the progress stream.
+	require.False(t, result.IsError)
+	require.Equal(t, "ok", result.Content)
+
+	// The client attached a non-empty progress token to the CallTool request,
+	// and that exact token threaded back out on every progress notification.
+	token, ok := remote.gotToken.(string)
+	require.True(t, ok, "progress token was not a string")
+	require.NotEmpty(t, token, "no progress token attached to the tool call")
+
+	// Both mid-call updates reached the handler, in order, each carrying the
+	// originating server, the round-tripped token, and the reported progress.
+	require.Equal(t, []ToolProgress{
+		{Server: "builder", Token: token, Progress: 1.0, Total: 3.0, Message: "compiling"},
+		{Server: "builder", Token: token, Progress: 3.0, Total: 3.0, Message: "done"},
+	}, updates)
+}
+
+func TestToolProgressDroppedWithoutHandler(t *testing.T) {
+	remote := &fakeRemote{
+		tools: []mcpsdk.Tool{{
+			Name:           "build",
+			RawInputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+		progressUpdates: []mcpsdk.ProgressNotificationParams{{Progress: 1.0}},
+	}
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return remote, nil
+	})
+	cfg := &config.Config{
+		MCP:         []config.MCPServer{{Name: "builder", Transport: "stdio", Command: "server"}},
+		Permissions: config.PermConfig{AllowAll: true},
+	}
+	client := NewClient(cfg, permission.New(cfg, nil), nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	// With no handler installed, a mid-call progress notification is dropped and
+	// the call still returns its result. The handler invocation must not panic.
+	result, err := client.Tools()[0].Run(context.Background(), json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Equal(t, "ok", result.Content)
 }
 
 func TestSubscribeUnknownServer(t *testing.T) {

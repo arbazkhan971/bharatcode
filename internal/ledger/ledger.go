@@ -134,6 +134,7 @@ type Ledger struct {
 	pricing map[string]modelPricing // keyed by "provider/model".
 	bus     *pubsub.Topic[Summary]
 	mu      sync.Mutex // guards Record → Publish atomicity.
+	alerts  alertState // monthly-budget alert thresholds and fired state.
 }
 
 // New constructs a Ledger. bus may be nil, in which case Record

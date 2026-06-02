@@ -180,6 +180,7 @@ type Client struct {
 	servers      []*Server
 	sampler      Sampler
 	onResUpdated func(ResourceUpdate)
+	onToolProg   func(ToolProgress)
 }
 
 // SetResourceUpdateHandler installs the callback invoked when a subscribed
@@ -197,6 +198,24 @@ func (c *Client) resourceUpdateHandler() func(ResourceUpdate) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.onResUpdated
+}
+
+// SetToolProgressHandler installs the callback invoked when a server reports
+// progress on an in-flight tool call via a notifications/progress notification.
+// The handler receives the originating server's name, the progress token the
+// client attached to the CallTool request, and the reported progress so a UI
+// can show advancement. Passing nil disables delivery. It may be called at any
+// time; it is shared by every configured server.
+func (c *Client) SetToolProgressHandler(fn func(ToolProgress)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onToolProg = fn
+}
+
+func (c *Client) toolProgressHandler() func(ToolProgress) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.onToolProg
 }
 
 // SetSampler installs the callback that handles server-requested LLM
@@ -627,29 +646,66 @@ func (c *Client) handleDisconnect(server *Server, lost error) {
 
 // installNotificationHandler routes the conn's server-pushed notifications to
 // the client. It handles notifications/resources/updated by delivering the
-// updated URI to the resource-update handler, but only when the client holds an
-// active subscription for that URI; updates for unsubscribed URIs are dropped.
-// Other notification methods are ignored. The handler runs on the conn's read
-// goroutine, so it touches the subscription set under the server lock.
+// updated URI to the resource-update handler (but only when the client holds an
+// active subscription for that URI; updates for unsubscribed URIs are dropped),
+// and notifications/progress by delivering the reported progress to the
+// tool-progress handler. Other notification methods are ignored. The handler
+// runs on the conn's read goroutine, so it touches the subscription set under
+// the server lock.
 func (c *Client) installNotificationHandler(server *Server, conn remoteClient) {
 	conn.OnNotification(func(notification mcpsdk.JSONRPCNotification) {
-		if notification.Method != mcpsdk.MethodNotificationResourceUpdated {
-			return
+		switch notification.Method {
+		case mcpsdk.MethodNotificationResourceUpdated:
+			c.handleResourceUpdated(server, notification)
+		case methodNotificationProgress:
+			c.handleToolProgress(server, notification)
 		}
-		uri, ok := notification.Params.AdditionalFields["uri"].(string)
-		if !ok || uri == "" {
-			return
-		}
-		// Gate delivery on the client-side subscription set so an Unsubscribe
-		// stops delivery even if the server keeps sending updates.
-		if !server.isSubscribed(uri) {
-			return
-		}
-		handler := c.resourceUpdateHandler()
-		if handler == nil {
-			return
-		}
-		handler(ResourceUpdate{Server: server.Name(), URI: uri})
+	})
+}
+
+// handleResourceUpdated delivers a notifications/resources/updated notification
+// to the resource-update handler, gated on an active client-side subscription
+// so an Unsubscribe stops delivery even if the server keeps sending updates.
+func (c *Client) handleResourceUpdated(server *Server, notification mcpsdk.JSONRPCNotification) {
+	uri, ok := notification.Params.AdditionalFields["uri"].(string)
+	if !ok || uri == "" {
+		return
+	}
+	if !server.isSubscribed(uri) {
+		return
+	}
+	handler := c.resourceUpdateHandler()
+	if handler == nil {
+		return
+	}
+	handler(ResourceUpdate{Server: server.Name(), URI: uri})
+}
+
+// handleToolProgress delivers a notifications/progress notification to the
+// tool-progress handler. The progress token the client attached to the
+// originating CallTool request rides in the notification's params, letting the
+// handler correlate the update with the specific in-flight call. A progress
+// update is dropped when it carries no token or no handler is installed; the
+// numeric fields arrive as float64 off the wire, and an absent total stays zero.
+func (c *Client) handleToolProgress(server *Server, notification mcpsdk.JSONRPCNotification) {
+	fields := notification.Params.AdditionalFields
+	token, ok := fields["progressToken"].(string)
+	if !ok || token == "" {
+		return
+	}
+	handler := c.toolProgressHandler()
+	if handler == nil {
+		return
+	}
+	progress, _ := fields["progress"].(float64)
+	total, _ := fields["total"].(float64)
+	message, _ := fields["message"].(string)
+	handler(ToolProgress{
+		Server:   server.Name(),
+		Token:    token,
+		Progress: progress,
+		Total:    total,
+		Message:  message,
 	})
 }
 

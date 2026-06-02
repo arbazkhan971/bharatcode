@@ -112,7 +112,7 @@ func (p *anthropicProvider) readResponse(ctx context.Context, resp *http.Respons
 		return state.handle(ctx, ev, events)
 	})
 	if err != nil {
-		send(ctx, events, ErrorEvent{Err: err})
+		emitTerminalError(ctx, events, err)
 		return
 	}
 	state.finish(ctx, events)

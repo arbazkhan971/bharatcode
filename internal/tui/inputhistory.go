@@ -24,6 +24,7 @@ var slashCommands = []string{
 	"/yolo",
 	"/save",
 	"/export",
+	"/copy",
 	"/compact",
 	"/quit",
 }

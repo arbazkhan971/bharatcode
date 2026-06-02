@@ -77,6 +77,27 @@ type ResourceUpdate struct {
 	URI    string `json:"uri"`
 }
 
+// methodNotificationProgress is the JSON-RPC method for out-of-band progress
+// updates a server sends during a long-running request (a tool call here). The
+// mcp-go SDK at this version exposes no constant for it, so it is defined here.
+const methodNotificationProgress = "notifications/progress"
+
+// ToolProgress reports a server's progress on an in-flight tool call, delivered
+// via a notifications/progress notification. Token is the progress token the
+// client attached to the originating CallTool request, so a UI can correlate an
+// update with the specific call (multiple calls may be in flight at once).
+// Progress increases over the life of the call; Total is the expected final
+// value when the server knows it (zero when unknown), so a percentage is
+// Progress/Total only when Total is positive. Message is an optional
+// human-readable status.
+type ToolProgress struct {
+	Server   string  `json:"server"`
+	Token    string  `json:"token"`
+	Progress float64 `json:"progress"`
+	Total    float64 `json:"total,omitempty"`
+	Message  string  `json:"message,omitempty"`
+}
+
 // State reports the connection state of a single MCP server.
 type State int
 

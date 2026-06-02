@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +26,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 )
+
+var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// plainText strips ANSI styling and collapses runs of whitespace so content
+// assertions hold regardless of glamour's markdown styling and reflow.
+func plainText(s string) string {
+	s = ansiEscape.ReplaceAllString(s, "")
+	return strings.Join(strings.Fields(s), " ")
+}
 
 // TestSubmitInput_DrivesAgentAndStreamsToChat is the CHANGE 1 contract test: a
 // plain prompt must reach the agent loop, and the scripted assistant text plus
@@ -47,7 +58,10 @@ func TestSubmitInput_DrivesAgentAndStreamsToChat(t *testing.T) {
 	h.submit(t, "please run echo")
 	h.drain(t, func() bool { return !m.running })
 
-	rendered := m.chat.Render(200)
+	// Strip ANSI styling and collapse whitespace: assistant prose is now
+	// markdown-rendered (glamour), so assert the content reached the chat
+	// regardless of styling/reflow.
+	rendered := plainText(m.chat.Render(200))
 	require.Contains(t, rendered, "please run echo", "user prompt must be echoed into the chat")
 	require.Contains(t, rendered, "Reading the file now.", "scripted assistant text must reach the chat")
 	require.Contains(t, rendered, "All done with the task.", "final scripted assistant text must reach the chat")

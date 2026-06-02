@@ -15,6 +15,7 @@ type List struct {
 	items         []item
 	index         map[string]int
 	renderRegions int
+	md            *markdownRenderer
 }
 
 type item struct {
@@ -29,6 +30,22 @@ type item struct {
 // New constructs an empty chat list.
 func New() *List {
 	return &List{index: make(map[string]int)}
+}
+
+// EnableMarkdown turns on glamour markdown rendering for finished assistant
+// messages using the named style (for example "dark" or "light"). Calling it
+// resets the render cache so existing messages re-render. Passing an empty
+// string disables markdown rendering.
+func (l *List) EnableMarkdown(style string) {
+	if style == "" {
+		l.md = nil
+	} else {
+		l.md = newMarkdownRenderer(style)
+	}
+	for i := range l.items {
+		l.items[i].cachedWidth = 0
+		l.items[i].cachedBody = ""
+	}
 }
 
 // Append adds a complete message to the visible list.
@@ -130,7 +147,22 @@ func (l *List) renderItem(idx int, width int) string {
 	if prefix == "" {
 		prefix = "message"
 	}
-	body := wrap(it.body, width-4)
+
+	var body string
+	// Render assistant prose as markdown once it is complete. While a message
+	// is still streaming we keep the fast plain wrap so each delta does not pay
+	// the cost of a full markdown re-render (and to avoid flicker on partial,
+	// not-yet-valid markdown).
+	if l.md != nil && it.role == message.RoleAssistant && !it.streaming && it.body != "" {
+		if rendered, ok := l.md.Render(it.body, width-2); ok {
+			body = strings.TrimRight(rendered, "\n")
+			it.cachedWidth = width
+			it.cachedBody = prefix + "\n" + body
+			return it.cachedBody
+		}
+	}
+
+	body = wrap(it.body, width-4)
 	if it.streaming {
 		body += " ▌"
 	}

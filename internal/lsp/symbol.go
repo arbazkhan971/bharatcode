@@ -102,6 +102,28 @@ func (c *client) rename(ctx context.Context, path string, line, col int, newName
 	return parseRename(result)
 }
 
+// codeAction issues a textDocument/codeAction request for the range and returns
+// the quick fixes and refactorings the server offers. The context.diagnostics
+// field is required by the LSP spec; an empty array asks for all available
+// actions rather than ones scoped to specific diagnostics.
+func (c *client) codeAction(ctx context.Context, path string, rng Range) ([]CodeAction, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/codeAction", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"range": map[string]any{
+			"start": map[string]any{"line": rng.Start.Line, "character": rng.Start.Character},
+			"end":   map[string]any{"line": rng.End.Line, "character": rng.End.Character},
+		},
+		"context": map[string]any{"diagnostics": []any{}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting code actions: %w", err)
+	}
+	return parseCodeActions(result)
+}
+
 // format issues a textDocument/formatting request for the document and returns
 // the edits the server would apply to reformat it. The options field is
 // required by the LSP spec; gopls and other servers override these with their
@@ -163,13 +185,24 @@ func parseReferences(raw json.RawMessage) ([]Location, error) {
 	return parseLocationArray(raw)
 }
 
-// parseRename extracts the file edits of a textDocument/rename response. Only
-// the WorkspaceEdit "changes" map ({uri: [{range, newText}]}) is parsed; the
-// keys are URIs and are converted to file paths.
+// parseRename extracts the file edits of a textDocument/rename response, which
+// is a WorkspaceEdit or null.
 func parseRename(raw json.RawMessage) (WorkspaceEdit, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return WorkspaceEdit{}, nil
 	}
+	edit, err := parseWorkspaceEdit(raw)
+	if err != nil {
+		return WorkspaceEdit{}, fmt.Errorf("parsing rename response: %w", err)
+	}
+	return edit, nil
+}
+
+// parseWorkspaceEdit parses a WorkspaceEdit object. Only the "changes" map
+// ({uri: [{range, newText}]}) is parsed; the keys are URIs and are converted to
+// file paths. The "documentChanges" form is not supported. An edit with no
+// changes yields a zero WorkspaceEdit.
+func parseWorkspaceEdit(raw json.RawMessage) (WorkspaceEdit, error) {
 	var result struct {
 		Changes map[string][]struct {
 			Range   wireRange `json:"range"`
@@ -177,7 +210,7 @@ func parseRename(raw json.RawMessage) (WorkspaceEdit, error) {
 		} `json:"changes"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return WorkspaceEdit{}, fmt.Errorf("parsing rename response: %w", err)
+		return WorkspaceEdit{}, fmt.Errorf("parsing workspace edit: %w", err)
 	}
 	if len(result.Changes) == 0 {
 		return WorkspaceEdit{}, nil
@@ -186,7 +219,7 @@ func parseRename(raw json.RawMessage) (WorkspaceEdit, error) {
 	for uri, wireEdits := range result.Changes {
 		path, err := uriToPath(uri)
 		if err != nil {
-			return WorkspaceEdit{}, fmt.Errorf("parsing rename edit uri: %w", err)
+			return WorkspaceEdit{}, fmt.Errorf("parsing workspace edit uri: %w", err)
 		}
 		edits := make([]TextEdit, 0, len(wireEdits))
 		for _, edit := range wireEdits {
@@ -201,6 +234,103 @@ func parseRename(raw json.RawMessage) (WorkspaceEdit, error) {
 		changes[path] = edits
 	}
 	return WorkspaceEdit{Changes: changes}, nil
+}
+
+// parseCodeActions extracts the actions of a textDocument/codeAction response.
+// The result is an array whose entries are each either a bare Command
+// ({title, command: "<string>", arguments?}) or a CodeAction
+// ({title, kind?, edit?, command?: Command}), or null. Each entry is normalized
+// into a CodeAction.
+func parseCodeActions(raw json.RawMessage) ([]CodeAction, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if raw[0] != '[' {
+		return nil, fmt.Errorf("parsing code actions response: unexpected value %q", string(raw))
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("parsing code actions response: %w", err)
+	}
+	out := make([]CodeAction, 0, len(items))
+	for _, item := range items {
+		action, err := parseCodeAction(item)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, action)
+	}
+	return out, nil
+}
+
+// parseCodeAction parses one entry of a code action response. A "command" field
+// holding a JSON string marks a bare Command; an object or absent "command"
+// marks a CodeAction, matching how the LSP spec multiplexes both shapes into
+// one array.
+func parseCodeAction(raw json.RawMessage) (CodeAction, error) {
+	if isCommandEntry(raw) {
+		command, err := parseCommand(raw)
+		if err != nil {
+			return CodeAction{}, err
+		}
+		return CodeAction{Title: command.Title, Command: command}, nil
+	}
+
+	var wire struct {
+		Title   string          `json:"title"`
+		Kind    string          `json:"kind"`
+		Edit    json.RawMessage `json:"edit"`
+		Command json.RawMessage `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return CodeAction{}, fmt.Errorf("parsing code action: %w", err)
+	}
+	action := CodeAction{Title: wire.Title, Kind: wire.Kind}
+	if len(wire.Edit) > 0 && string(wire.Edit) != "null" {
+		edit, err := parseWorkspaceEdit(wire.Edit)
+		if err != nil {
+			return CodeAction{}, fmt.Errorf("parsing code action edit: %w", err)
+		}
+		action.Edit = edit
+	}
+	if len(wire.Command) > 0 && string(wire.Command) != "null" {
+		command, err := parseCommand(wire.Command)
+		if err != nil {
+			return CodeAction{}, err
+		}
+		action.Command = command
+	}
+	return action, nil
+}
+
+// isCommandEntry reports whether a code action array entry is a bare Command,
+// distinguished from a CodeAction by a "command" field holding a JSON string
+// rather than an object.
+func isCommandEntry(raw json.RawMessage) bool {
+	var probe struct {
+		Command json.RawMessage `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return len(probe.Command) > 0 && probe.Command[0] == '"'
+}
+
+// parseCommand parses one LSP Command object ({title, command, arguments?}).
+func parseCommand(raw json.RawMessage) (*Command, error) {
+	var wire struct {
+		Title     string            `json:"title"`
+		Command   string            `json:"command"`
+		Arguments []json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, fmt.Errorf("parsing command: %w", err)
+	}
+	return &Command{
+		Title:     wire.Title,
+		Command:   wire.Command,
+		Arguments: wire.Arguments,
+	}, nil
 }
 
 // wireDocumentSymbol mirrors the LSP DocumentSymbol structure, a hierarchical

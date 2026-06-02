@@ -153,6 +153,19 @@ func appendBlock(b []byte, idx int, block ContentBlock) ([]byte, error) {
 		b = appendEscapedString(b, v.Text)
 		b = append(b, '}')
 
+	case AttachmentBlock:
+		b = append(b, `{"type":"attachment","filename":`...)
+		b = appendEscapedString(b, v.Filename)
+		b = append(b, `,"mime_type":`...)
+		b = appendEscapedString(b, v.MimeType)
+		b = append(b, `,"data":`...)
+		b = appendByteSlice(b, v.Data)
+		b = append(b, `,"path":`...)
+		b = appendEscapedString(b, v.Path)
+		b = append(b, `,"size":`...)
+		b = strconv.AppendInt(b, v.Size, 10)
+		b = append(b, '}')
+
 	default:
 		// Unknown ContentBlock implementation: defer to encoding/json so the
 		// block still serializes through its own MarshalJSON if it has one.

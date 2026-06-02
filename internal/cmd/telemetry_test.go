@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -96,6 +97,57 @@ func TestTelemetryOffPersistsFalse(t *testing.T) {
 	stdout, _, err = executeRoot(t, "--config", configPath, "telemetry", "status")
 	require.NoError(t, err)
 	require.Contains(t, stdout, "Telemetry: off")
+}
+
+func TestTelemetryStatusMissingFileIsOff(t *testing.T) {
+	// A fresh machine has no config file yet; status must report off
+	// without creating one, since the preference defaults to opt-out.
+	missing := filepath.Join(t.TempDir(), "nope", "config.json")
+	stdout, stderr, err := executeRoot(t, "--config", missing, "telemetry", "status")
+	require.NoError(t, err)
+	require.Empty(t, stderr)
+	require.Contains(t, stdout, "Telemetry: off")
+
+	_, statErr := os.Stat(missing)
+	require.True(t, os.IsNotExist(statErr), "status must not create the config file")
+}
+
+func TestTelemetryOnCreatesMissingFile(t *testing.T) {
+	// "on" must work even when no config file exists yet, creating a
+	// minimal overlay that records consent; defaults merge at load.
+	missing := filepath.Join(t.TempDir(), "nope", "config.json")
+	stdout, stderr, err := executeRoot(t, "--config", missing, "telemetry", "on")
+	require.NoError(t, err)
+	require.Empty(t, stderr)
+	require.Contains(t, stdout, "Telemetry: on")
+
+	present, value := readTelemetryPref(t, missing)
+	require.True(t, present, "on must persist the preference into a new file")
+	require.True(t, value)
+
+	stdout, _, err = executeRoot(t, "--config", missing, "telemetry", "status")
+	require.NoError(t, err)
+	require.Contains(t, stdout, "Telemetry: on")
+}
+
+func TestTelemetryPreservesOtherConfigKeys(t *testing.T) {
+	// Persisting the preference must not disturb any other config key,
+	// since storage is a surgical edit of options.telemetry only.
+	configPath := writeConfig(t, defaultTestConfig())
+	_, _, err := executeRoot(t, "--config", configPath, "telemetry", "on")
+	require.NoError(t, err)
+
+	raw, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(raw, &cfg))
+
+	providers, ok := cfg["providers"].([]any)
+	require.True(t, ok, "providers must survive the telemetry edit")
+	require.Len(t, providers, 1)
+	ledger, ok := cfg["ledger"].(map[string]any)
+	require.True(t, ok, "ledger must survive the telemetry edit")
+	require.Equal(t, "INR", ledger["currency"])
 }
 
 func TestTelemetryStatusReportsDisclaimer(t *testing.T) {

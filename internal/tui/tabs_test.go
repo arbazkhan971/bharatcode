@@ -77,6 +77,19 @@ func TestTabs_SwitchPreservesSessionAndChat(t *testing.T) {
 	require.NotContains(t, tab2Render, "first tab prompt",
 		"the second tab must not show the first tab's transcript")
 
+	// The tab bar must reflect the ACTIVE tab's freshly created session
+	// immediately, before any switch re-snapshots it. ensureSession mutates the
+	// live session fields without saving the tab, so the bar/list must read the
+	// live fields for the active tab rather than the stale snapshot.
+	bar := plainText(m.renderTabBar(m.width))
+	require.Contains(t, bar, shortSessionID(tab2Session),
+		"the tab bar must show the active tab's real session, not 'new'")
+	m.input.WriteString("/tabs")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+	require.Contains(t, m.dialogs.Render(120), shortSessionID(tab2Session),
+		"/tabs must list the active tab's real session, not 'new'")
+	m.dialogs.Pop()
+
 	// Switch back to tab 1: sessionID and chat content must be restored.
 	require.Nil(t, m.switchTab(1), "switching to the already-active tab is a no-op")
 	_ = m.switchTab(0)

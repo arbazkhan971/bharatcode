@@ -37,6 +37,8 @@ const (
 	BlockImage BlockType = "image"
 	// BlockThinking represents reasoning traces from the provider.
 	BlockThinking BlockType = "thinking"
+	// BlockAttachment represents a file attachment block.
+	BlockAttachment BlockType = "attachment"
 )
 
 // ContentBlock is one typed segment of a Message body.
@@ -137,6 +139,43 @@ func (b ImageBlock) MarshalJSON() ([]byte, error) {
 		Alias
 	}{
 		Type:  BlockImage,
+		Alias: Alias(b),
+	})
+}
+
+// AttachmentBlock carries a file attachment associated with a Message. Unlike
+// ImageBlock, it represents an arbitrary file: it records the original
+// filename, MIME type, and byte size, and may carry the file's bytes inline
+// (Data), a reference to it on disk (Path), or both. Data and Path are
+// independent and may coexist; callers decide which to populate.
+type AttachmentBlock struct {
+	Filename string `json:"filename"`
+	MimeType string `json:"mime_type"`
+	// Data holds the attachment bytes inline, or is nil when the attachment is
+	// referenced by Path alone.
+	Data []byte `json:"data"`
+	// Path references the attachment on disk, or is empty when the bytes are
+	// carried inline via Data alone.
+	Path string `json:"path"`
+	// Size is the attachment's byte size. It is recorded explicitly so the size
+	// survives even when Data is omitted in favor of Path. int64 accommodates
+	// files larger than 2 GiB.
+	Size int64 `json:"size"`
+}
+
+// Type returns BlockAttachment.
+func (b AttachmentBlock) Type() BlockType {
+	return BlockAttachment
+}
+
+// MarshalJSON serializes AttachmentBlock with its type discriminator.
+func (b AttachmentBlock) MarshalJSON() ([]byte, error) {
+	type Alias AttachmentBlock
+	return json.Marshal(&struct {
+		Type BlockType `json:"type"`
+		Alias
+	}{
+		Type:  BlockAttachment,
 		Alias: Alias(b),
 	})
 }
@@ -255,6 +294,12 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 				return fmt.Errorf("unmarshalling thinking block at index %d: %w", i, err)
 			}
 			block = b
+		case BlockAttachment:
+			var b AttachmentBlock
+			if err := json.Unmarshal(raw, &b); err != nil {
+				return fmt.Errorf("unmarshalling attachment block at index %d: %w", i, err)
+			}
+			block = b
 		default:
 			return fmt.Errorf("decoding block %q: %w", string(raw), ErrUnknownBlockType)
 		}
@@ -270,4 +315,24 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	m.Usage = aux.Usage
 
 	return nil
+}
+
+// AddAttachment appends an AttachmentBlock to the Message's content and returns
+// the appended block. It is a convenience over building the block literal and
+// appending it manually.
+func (m *Message) AddAttachment(a AttachmentBlock) AttachmentBlock {
+	m.Content = append(m.Content, a)
+	return a
+}
+
+// Attachments returns the AttachmentBlocks in the Message's content, in order.
+// It returns nil when the Message carries no attachments.
+func (m Message) Attachments() []AttachmentBlock {
+	var out []AttachmentBlock
+	for _, block := range m.Content {
+		if a, ok := block.(AttachmentBlock); ok {
+			out = append(out, a)
+		}
+	}
+	return out
 }

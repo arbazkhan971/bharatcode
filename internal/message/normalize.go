@@ -202,6 +202,8 @@ func Validate(messages []Message) error {
 				// No extra validation required.
 			case ThinkingBlock:
 				// No extra validation required.
+			case AttachmentBlock:
+				// No extra validation required.
 			default:
 				return fmt.Errorf("unrecognized type %T: %w", block, ErrUnknownBlockType)
 			}

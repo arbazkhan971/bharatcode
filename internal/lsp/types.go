@@ -1,6 +1,8 @@
 // Package lsp provides a small Language Server Protocol diagnostics client.
 package lsp
 
+import "encoding/json"
+
 // Severity is the diagnostic severity reported by a language server.
 type Severity int
 
@@ -116,6 +118,26 @@ type Symbol struct {
 // WorkspaceEdit describes the file edits a rename produces, keyed by file path.
 type WorkspaceEdit struct {
 	Changes map[string][]TextEdit
+}
+
+// CodeAction describes one quick fix or refactoring a language server offers for
+// a range, such as "remove unused import". An action may carry an Edit applied
+// directly, a Command the server runs on request, or both. A bare Command
+// response is normalized into a CodeAction with only its Command set.
+type CodeAction struct {
+	Title   string
+	Kind    string
+	Edit    WorkspaceEdit
+	Command *Command
+}
+
+// Command names a server-side command a code action runs, identified by the
+// Command field. Arguments are left opaque, since their shape is defined by the
+// individual command.
+type Command struct {
+	Title     string
+	Command   string
+	Arguments []json.RawMessage
 }
 
 // TextEdit replaces the text in Range with NewText.

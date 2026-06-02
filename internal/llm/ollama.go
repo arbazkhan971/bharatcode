@@ -114,7 +114,7 @@ func (p *ollamaProvider) readResponse(ctx context.Context, resp *http.Response, 
 }
 
 func buildOllamaRequest(req Request) (ollamaRequest, error) {
-	openReq, err := buildOpenAIRequest(req)
+	openReq, err := buildOpenAIRequest(req, imageStyleOllama)
 	if err != nil {
 		return ollamaRequest{}, err
 	}

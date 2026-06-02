@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,19 @@ import (
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
+)
+
+// imageStyle selects how an ImageBlock is serialized for a provider that
+// shares the OpenAI message-building path.
+type imageStyle int
+
+const (
+	// imageStyleOpenAI emits images as image_url content parts inside the
+	// message content array (OpenAI-compatible wire format).
+	imageStyleOpenAI imageStyle = iota
+	// imageStyleOllama emits images as bare base64 strings on the message's
+	// top-level images[] array (Ollama /api/chat wire format).
+	imageStyleOllama
 )
 
 type openAICompatibleProvider struct {
@@ -63,7 +77,7 @@ func (p *openAICompatibleProvider) Stream(ctx context.Context, req Request) (<-c
 		}
 	}
 
-	body, err := buildOpenAIRequest(req)
+	body, err := buildOpenAIRequest(req, imageStyleOpenAI)
 	if err != nil {
 		return nil, fmt.Errorf("building provider request: %w", err)
 	}
@@ -130,13 +144,13 @@ func (p *openAICompatibleProvider) handleStreamChunk(ctx context.Context, data s
 	return nil
 }
 
-func buildOpenAIRequest(req Request) (openAIChatRequest, error) {
+func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error) {
 	messages := make([]openAIMessage, 0, len(req.Messages)+1)
 	if req.SystemPrompt != "" {
 		messages = append(messages, openAIMessage{Role: "system", Content: req.SystemPrompt})
 	}
 	for _, msg := range message.Normalize(req.Messages) {
-		converted, err := convertMessage(msg)
+		converted, err := convertMessage(msg, style)
 		if err != nil {
 			return openAIChatRequest{}, err
 		}
@@ -170,11 +184,12 @@ func buildOpenAIRequest(req Request) (openAIChatRequest, error) {
 	return body, nil
 }
 
-func convertMessage(msg message.Message) ([]openAIMessage, error) {
+func convertMessage(msg message.Message, style imageStyle) ([]openAIMessage, error) {
 	switch msg.Role {
 	case message.RoleUser, message.RoleAssistant, message.RoleSystem:
 		out := openAIMessage{Role: string(msg.Role)}
 		var text strings.Builder
+		var imageParts []openAIContentPart
 		for _, block := range msg.Content {
 			switch b := block.(type) {
 			case message.TextBlock:
@@ -182,7 +197,18 @@ func convertMessage(msg message.Message) ([]openAIMessage, error) {
 			case message.ThinkingBlock:
 				text.WriteString(b.Text)
 			case message.ImageBlock:
-				return nil, fmt.Errorf("image block conversion: %w", ErrUnsupportedFeature)
+				encoded := base64.StdEncoding.EncodeToString(b.Data)
+				switch style {
+				case imageStyleOllama:
+					out.Images = append(out.Images, encoded)
+				default:
+					imageParts = append(imageParts, openAIContentPart{
+						Type: "image_url",
+						ImageURL: &openAIImageURL{
+							URL: fmt.Sprintf("data:%s;base64,%s", b.MimeType, encoded),
+						},
+					})
+				}
 			case message.ToolUseBlock:
 				out.ToolCalls = append(out.ToolCalls, openAIMessageToolCall{
 					ID:   b.ID,
@@ -202,9 +228,21 @@ func convertMessage(msg message.Message) ([]openAIMessage, error) {
 				return nil, fmt.Errorf("unknown block conversion: %w", ErrUnsupportedFeature)
 			}
 		}
-		out.Content = text.String()
-		if out.Role == "assistant" && len(out.ToolCalls) > 0 && out.Content == "" {
-			out.Content = ""
+		// When OpenAI-style image parts are present, the message content must be
+		// an array of typed parts (a leading text part plus each image part).
+		// Otherwise the content stays a plain string. Content is left nil when
+		// there is no text, so the omitempty field is omitted as before, e.g.
+		// for an assistant message carrying only tool calls.
+		switch {
+		case len(imageParts) > 0:
+			parts := make([]openAIContentPart, 0, len(imageParts)+1)
+			if text.Len() > 0 {
+				parts = append(parts, openAIContentPart{Type: "text", Text: text.String()})
+			}
+			parts = append(parts, imageParts...)
+			out.Content = parts
+		case text.Len() > 0:
+			out.Content = text.String()
 		}
 		return []openAIMessage{out}, nil
 	case message.RoleTool:

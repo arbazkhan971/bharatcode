@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -336,7 +337,14 @@ func convertAnthropicBlocks(blocks []message.ContentBlock) ([]anthropicContentBl
 				IsError:   b.IsError,
 			})
 		case message.ImageBlock:
-			return nil, fmt.Errorf("image block conversion: %w", ErrUnsupportedFeature)
+			out = append(out, anthropicContentBlock{
+				Type: "image",
+				Source: &anthropicImageSource{
+					Type:      "base64",
+					MediaType: b.MimeType,
+					Data:      base64.StdEncoding.EncodeToString(b.Data),
+				},
+			})
 		default:
 			return nil, fmt.Errorf("unknown block conversion: %w", ErrUnsupportedFeature)
 		}
@@ -360,14 +368,23 @@ type anthropicMessage struct {
 }
 
 type anthropicContentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
+	Type      string                `json:"type"`
+	Text      string                `json:"text,omitempty"`
+	ID        string                `json:"id,omitempty"`
+	Name      string                `json:"name,omitempty"`
+	Input     json.RawMessage       `json:"input,omitempty"`
+	ToolUseID string                `json:"tool_use_id,omitempty"`
+	Content   string                `json:"content,omitempty"`
+	IsError   bool                  `json:"is_error,omitempty"`
+	Source    *anthropicImageSource `json:"source,omitempty"`
+}
+
+// anthropicImageSource carries inline base64 image data for an image content
+// block in the Anthropic Messages API.
+type anthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 type anthropicTool struct {

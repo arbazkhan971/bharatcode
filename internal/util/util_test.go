@@ -93,6 +93,13 @@ func TestHumanBytes(t *testing.T) {
 		{1024 * 1024 * 1024 * 1024, "1.0 TB"},
 		{1024 * 1024 * 1024 * 1024 * 1024, "1.0 PB"},
 		{math.MinInt64, "-8192.0 PB"},
+		// Unit-boundary rollup: a value just below the next unit that
+		// rounds to 1024.0 of the current unit must roll up.
+		{1048575, "1.0 MB"},          // 1 MiB - 1, was "1024.0 KB".
+		{1073741823, "1.0 GB"},       // 1 GiB - 1, was "1024.0 MB".
+		{-1048575, "-1.0 MB"},        // Negative rollup.
+		{1099511627775, "1.0 TB"},    // 1 TiB - 1.
+		{1125899906842623, "1.0 PB"}, // 1 PiB - 1.
 	}
 
 	for _, tc := range tests {
@@ -133,6 +140,12 @@ func TestTruncate(t *testing.T) {
 	require.Equal(t, "hello", Truncate("hello", 5))
 	require.Equal(t, "hello", Truncate("hello", 10))
 	require.Equal(t, "hel…", Truncate("hello", 4))
+
+	// Multibyte: truncation is rune-safe and never splits a codepoint.
+	// "héllo" is 5 runes; max 4 keeps "hél" plus the ellipsis.
+	require.Equal(t, "hél…", Truncate("héllo", 4))
+	require.Equal(t, "héllo", Truncate("héllo", 5))
+	require.Equal(t, "h…", Truncate("héllo", 2))
 }
 
 func TestIndent(t *testing.T) {

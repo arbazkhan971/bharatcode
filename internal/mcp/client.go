@@ -59,6 +59,15 @@ type forceKiller interface {
 	forceKill() bool
 }
 
+// samplingReceiver is an optional interface a remote client may implement to
+// receive the sampling handler after connecting. The production *mcpclient.Client
+// has its handler wired at construction via WithSamplingHandler and does not
+// implement this; it exists so a conn (such as a test double) can capture and
+// drive the handler that fields a server's sampling/createMessage request.
+type samplingReceiver interface {
+	setSamplingHandler(mcpclient.SamplingHandler)
+}
+
 type connector func(context.Context, ServerConfig) (remoteClient, error)
 
 var newRemote connector = connectMCP
@@ -135,6 +144,46 @@ type Client struct {
 	bus     *pubsub.Topic[Event]
 	mu      sync.RWMutex
 	servers []*Server
+	sampler Sampler
+}
+
+// SetSampler installs the callback that handles server-requested LLM
+// completions (sampling/createMessage). It must be called before Start so the
+// sampling capability is advertised when each server connects. Passing nil
+// disables sampling. The sampler is shared by every configured server.
+func (c *Client) SetSampler(fn Sampler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sampler = fn
+}
+
+func (c *Client) currentSampler() Sampler {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.sampler
+}
+
+// connectConfig returns the server's config with the client's current sampler
+// injected, so the connector can advertise and handle sampling.
+func (c *Client) connectConfig(server *Server) ServerConfig {
+	cfg := server.cfg
+	cfg.Sampler = c.currentSampler()
+	return cfg
+}
+
+// installSampler hands the sampling handler to a conn that can receive one. The
+// production *mcpclient.Client has the handler wired at construction and does
+// not implement samplingReceiver, so this is a no-op for it. A conn that does
+// implement it (such as a test double) captures the handler and can drive a
+// server's sampling/createMessage request through it.
+func (c *Client) installSampler(conn remoteClient) {
+	sampler := c.currentSampler()
+	if sampler == nil {
+		return
+	}
+	if recv, ok := conn.(samplingReceiver); ok {
+		recv.setSamplingHandler(&samplingHandler{sample: sampler})
+	}
 }
 
 // NewClient constructs a Client without contacting MCP servers.
@@ -384,7 +433,7 @@ func (c *Client) connectServer(ctx context.Context, server *Server) {
 	c.publish(ctx, Event{Server: server.Name(), State: StateConnecting})
 	server.setState(StateConnecting, nil)
 
-	conn, err := newRemote(ctx, server.cfg)
+	conn, err := newRemote(ctx, c.connectConfig(server))
 	if err != nil {
 		server.logger.WarnContext(ctx, "MCP server connection failed", "err", err)
 		c.publish(ctx, Event{Server: server.Name(), State: StateFailed, Err: err})
@@ -392,6 +441,7 @@ func (c *Client) connectServer(ctx context.Context, server *Server) {
 		return
 	}
 
+	c.installSampler(conn)
 	conn.OnConnectionLost(func(err error) {
 		c.handleDisconnect(server, err)
 	})
@@ -420,8 +470,9 @@ func (c *Client) handleDisconnect(server *Server, lost error) {
 		<-timer.C
 		c.publish(ctx, Event{Server: server.Name(), State: StateConnecting})
 		server.setState(StateConnecting, nil)
-		conn, err := newRemote(ctx, server.cfg)
+		conn, err := newRemote(ctx, c.connectConfig(server))
 		if err == nil {
+			c.installSampler(conn)
 			conn.OnConnectionLost(func(err error) {
 				c.handleDisconnect(server, err)
 			})
@@ -548,6 +599,14 @@ func connectMCP(ctx context.Context, cfg ServerConfig) (remoteClient, error) {
 	ctx, cancel := withServerTimeout(ctx, cfg.Timeout)
 	defer cancel()
 
+	// clientOpts advertise the sampling capability and route a server's
+	// sampling/createMessage request to the injected sampler. They are empty when
+	// no sampler is configured, leaving the connection behavior unchanged.
+	var clientOpts []mcpclient.ClientOption
+	if cfg.Sampler != nil {
+		clientOpts = append(clientOpts, mcpclient.WithSamplingHandler(&samplingHandler{sample: cfg.Sampler}))
+	}
+
 	var cli *mcpclient.Client
 	var err error
 	// capturedCmd records the stdio child command so Stop can hard-kill it if a
@@ -563,17 +622,37 @@ func connectMCP(ctx context.Context, cfg ServerConfig) (remoteClient, error) {
 			capturedCmd = cmd
 			return cmd, nil
 		}
-		cli, err = mcpclient.NewStdioMCPClientWithOptions(
+		// The stdio transport is built explicitly so the sampling handler can be
+		// attached as a client option; the convenience constructor exposes no
+		// hook for it. mcpclient.Start skips starting an already-running stdio
+		// transport, so it must be started here (this also spawns the child via
+		// the captured command factory).
+		stdio := mcptransport.NewStdioWithOptions(
 			command, env, cfg.Command[1:],
 			mcptransport.WithCommandFunc(cmdFunc),
 		)
+		if err = stdio.Start(ctx); err != nil {
+			break
+		}
+		cli = mcpclient.NewClient(stdio, clientOpts...)
 	case TransportHTTP:
-		cli, err = mcpclient.NewStreamableHttpClient(cfg.URL)
+		var httpTransport *mcptransport.StreamableHTTP
+		httpTransport, err = mcptransport.NewStreamableHTTP(cfg.URL)
+		if err == nil {
+			cli = mcpclient.NewClient(httpTransport, clientOpts...)
+		}
 	case TransportSSE:
-		cli, err = mcpclient.NewSSEMCPClient(cfg.URL)
+		var sse *mcptransport.SSE
+		sse, err = mcptransport.NewSSE(cfg.URL)
+		if err == nil {
+			cli = mcpclient.NewClient(sse, clientOpts...)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("creating mcp client for %q: %w", cfg.Name, err)
+	}
+	if cli == nil {
+		return nil, fmt.Errorf("creating mcp client for %q: unsupported transport %q", cfg.Name, cfg.Transport)
 	}
 	if err := cli.Start(ctx); err != nil {
 		_ = cli.Close()

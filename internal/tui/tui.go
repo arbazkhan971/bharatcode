@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
+	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -161,6 +163,18 @@ type model struct {
 	// empty by default, in which case exports land in the current working
 	// directory (the workspace). Tests set it to a temp directory.
 	exportDir string
+
+	// filetree is the togglable file-tree + diff side panel. It is hidden by
+	// default, so the default render is unchanged.
+	filetree filetree
+	// workspaceRoot is the directory the file-tree panel enumerates. It defaults
+	// to the process working directory; tests set it to a temp workspace.
+	workspaceRoot string
+	// editDiffSource, when non-nil, supplies the messages the file-tree panel
+	// scans for per-file edit diffs. It defaults to nil, in which case the
+	// persisted session messages are loaded (the same source as /diff). Tests
+	// set it to return a fixed slice, mirroring the exportDir test seam.
+	editDiffSource func() []message.Message
 }
 
 func newModel(ctx context.Context, deps Dependencies) *model {
@@ -191,6 +205,7 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 		startedAt:     now,
 		now:           now,
 		sessionID:     sessionID,
+		workspaceRoot: workingDir(),
 	}
 	if deps.Permission != nil {
 		m.applyApprovalMode(deps.Permission.GetApprovalMode())
@@ -280,6 +295,15 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// When the file-tree panel holds focus, it intercepts navigation and
+	// selection keys before the input/chat handling below, so Up/Down move the
+	// panel cursor instead of walking input history.
+	if m.filetree.visible && m.filetree.focused {
+		if consumed, cmd := m.handleFiletreeKey(msg); consumed {
+			return m, cmd
+		}
+	}
+
 	switch msg.String() {
 	case "ctrl+c":
 		if m.input.Len() == 0 {
@@ -328,7 +352,15 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+d":
 		return m.handleDiff()
+	case "ctrl+f":
+		m.filetree.toggle(m.workspaceRoot)
+		return m, nil
 	case "esc":
+		if m.filetree.visible {
+			m.filetree.visible = false
+			m.filetree.focused = false
+			return m, nil
+		}
 		m.helpVisible = false
 		return m, nil
 	case "enter":
@@ -513,12 +545,23 @@ func (m *model) handleGoalCommand(text string) (tea.Model, tea.Cmd) {
 
 func (m *model) renderMain() string {
 	header := m.theme.Header.Render("BharatCode")
-	chatBody := m.chat.Render(max(1, m.layout.chat.W))
+	// When the side panel is visible, carve its column out of the chat width
+	// here in the render rather than in computeLayout, so the persistent layout
+	// rects still span the full width (keeping the resize invariant intact).
+	chatW := m.layout.chat.W
+	if m.filetree.visible {
+		chatW = max(1, chatW-filetreeWidth-1)
+	}
+	chatBody := m.chat.Render(max(1, chatW))
 	if m.helpVisible {
 		if chatBody != "" {
 			chatBody += "\n\n"
 		}
 		chatBody += slashHelp()
+	}
+	if m.filetree.visible {
+		panel := m.renderFiletree(filetreeWidth, m.layout.chat.H)
+		chatBody = joinPanels(panel, chatBody, filetreeWidth, m.layout.chat.H)
 	}
 	input := "> " + m.input.String()
 	if m.focus == focusInput {
@@ -657,6 +700,16 @@ func max(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+// workingDir returns the process working directory, or "" when it cannot be
+// determined. It is the default workspace root for the file-tree panel.
+func workingDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
 }
 
 // runHeadlessForTest executes the program without terminal input or renderer.

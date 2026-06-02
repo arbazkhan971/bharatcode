@@ -12,6 +12,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	mcpclient "github.com/mark3labs/mcp-go/client"
 	mcpsdk "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 )
@@ -27,6 +28,13 @@ type fakeRemote struct {
 	callCount   int
 	closeCount  int
 	lost        func(error)
+	sampling    mcpclient.SamplingHandler
+}
+
+// setSamplingHandler records the handler the client installs, letting the test
+// drive a server-issued sampling/createMessage request through it.
+func (f *fakeRemote) setSamplingHandler(h mcpclient.SamplingHandler) {
+	f.sampling = h
 }
 
 func (f *fakeRemote) Close() error {
@@ -333,6 +341,100 @@ func TestGetPromptUnknownServer(t *testing.T) {
 	require.NoError(t, client.Start(context.Background()))
 
 	_, err := client.GetPrompt(context.Background(), "missing", "summarize", nil)
+	require.Error(t, err)
+}
+
+func TestSamplingHandlesServerRequest(t *testing.T) {
+	remote := &fakeRemote{}
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return remote, nil
+	})
+
+	var gotReq SamplingRequest
+	var calls int
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "server", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	client.SetSampler(func(_ context.Context, req SamplingRequest) (SamplingResponse, error) {
+		calls++
+		gotReq = req
+		return SamplingResponse{
+			Content:    "sampled reply",
+			Model:      "test-model",
+			StopReason: "endTurn",
+		}, nil
+	})
+
+	require.NoError(t, client.Start(context.Background()))
+
+	// The client installed its sampling handler on the conn at connect time.
+	require.NotNil(t, remote.sampling, "client did not install a sampling handler on the conn")
+
+	// The server issues a sampling/createMessage request through that handler.
+	serverReq := mcpsdk.CreateMessageRequest{
+		Request: mcpsdk.Request{Method: string(mcpsdk.MethodSamplingCreateMessage)},
+		CreateMessageParams: mcpsdk.CreateMessageParams{
+			SystemPrompt: "be terse",
+			MaxTokens:    256,
+			Temperature:  0.5,
+			Messages: []mcpsdk.SamplingMessage{
+				{Role: mcpsdk.RoleUser, Content: mcpsdk.NewTextContent("hello from server")},
+				{Role: mcpsdk.RoleAssistant, Content: mcpsdk.NewTextContent("prior turn")},
+			},
+			ModelPreferences: &mcpsdk.ModelPreferences{
+				Hints: []mcpsdk.ModelHint{{Name: "sonnet"}, {Name: "haiku"}},
+			},
+		},
+	}
+	result, err := remote.sampling.CreateMessage(context.Background(), serverReq)
+	require.NoError(t, err)
+
+	// The sampler was invoked once with the server's messages and parameters.
+	require.Equal(t, 1, calls)
+	require.Equal(t, []SamplingMessage{
+		{Role: "user", Content: "hello from server"},
+		{Role: "assistant", Content: "prior turn"},
+	}, gotReq.Messages)
+	require.Equal(t, "be terse", gotReq.SystemPrompt)
+	require.Equal(t, 256, gotReq.MaxTokens)
+	require.InDelta(t, 0.5, gotReq.Temperature, 1e-9)
+	require.Equal(t, []string{"sonnet", "haiku"}, gotReq.ModelPreferences)
+
+	// The sampled response is returned to the server in the SDK result.
+	require.Equal(t, mcpsdk.RoleAssistant, result.Role)
+	text, ok := mcpsdk.AsTextContent(result.Content)
+	require.True(t, ok)
+	require.Equal(t, "sampled reply", text.Text)
+	require.Equal(t, "test-model", result.Model)
+	require.Equal(t, "endTurn", result.StopReason)
+}
+
+func TestSamplingNotInstalledWithoutSampler(t *testing.T) {
+	remote := &fakeRemote{}
+	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {
+		return remote, nil
+	})
+	client := NewClient(&config.Config{
+		MCP: []config.MCPServer{{Name: "server", Transport: "stdio", Command: "server"}},
+	}, nil, nil)
+	require.NoError(t, client.Start(context.Background()))
+
+	// Without a sampler, no handler is installed on the conn.
+	require.Nil(t, remote.sampling)
+}
+
+func TestSamplingHandlerPropagatesSamplerError(t *testing.T) {
+	h := &samplingHandler{sample: func(context.Context, SamplingRequest) (SamplingResponse, error) {
+		return SamplingResponse{}, errors.New("provider unavailable")
+	}}
+	_, err := h.CreateMessage(context.Background(), mcpsdk.CreateMessageRequest{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "provider unavailable")
+}
+
+func TestSamplingHandlerRequiresSampler(t *testing.T) {
+	h := &samplingHandler{}
+	_, err := h.CreateMessage(context.Background(), mcpsdk.CreateMessageRequest{})
 	require.Error(t, err)
 }
 

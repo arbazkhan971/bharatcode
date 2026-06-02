@@ -32,6 +32,11 @@ type ServerConfig struct {
 	URL       string            `json:"url,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	Timeout   time.Duration     `json:"timeout,omitempty"`
+
+	// Sampler, when non-nil, handles server-requested LLM completions
+	// (sampling/createMessage). It is injected at connect time rather than
+	// loaded from config, so it is excluded from JSON.
+	Sampler Sampler `json:"-"`
 }
 
 // Resource is a server-advertised resource the agent may read by URI.

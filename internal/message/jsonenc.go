@@ -3,12 +3,12 @@ package message
 
 import "unicode/utf8"
 
-// The escaping tables and appendEscapedString below are ported verbatim from
-// the Go standard library's encoding/json (encode.go appendString and
-// tables.go safeSet/htmlSafeSet) so that hand-rolled string encoding is
-// byte-for-byte identical to json.Marshal with HTML escaping enabled. The
-// byte-identity tests assert this against json.Marshal directly, so any
-// upstream behavior change is caught rather than silently diverging.
+// The escaping logic below is ported verbatim from the Go standard library's
+// encoding/json (encode.go appendString and tables.go htmlSafeSet) so that
+// hand-rolled string encoding is byte-for-byte identical to json.Marshal with
+// HTML escaping enabled. The byte-identity tests assert this against
+// json.Marshal directly, so any upstream behavior change is caught rather than
+// silently diverging.
 
 // hexDigits maps a nibble to its lowercase hexadecimal digit, matching
 // encoding/json's hex constant.
@@ -17,55 +17,35 @@ const hexDigits = "0123456789abcdef"
 // runeError is U+FFFD, the Unicode replacement character.
 const runeError = '�'
 
-// lineSeparator and paragraphSeparator are escaped unconditionally by
-// encoding/json because they are valid JSON but unsafe in JSONP.
+// lineSeparator (U+2028) and paragraphSeparator (U+2029) are escaped
+// unconditionally by encoding/json because they are valid JSON but unsafe in
+// JSONP.
 const (
 	lineSeparator      = ' '
 	paragraphSeparator = ' '
 )
 
-// safeSet holds the value true if the ASCII character with the given index can
-// appear inside a JSON string without escaping. All values are true except the
-// ASCII control characters (0-31), the double quote, and the backslash.
-var safeSet = [utf8.RuneSelf]bool{
-	' ': true, '!': true, '"': false, '#': true, '$': true, '%': true,
-	'&': true, '\'': true, '(': true, ')': true, '*': true, '+': true,
-	',': true, '-': true, '.': true, '/': true, '0': true, '1': true,
-	'2': true, '3': true, '4': true, '5': true, '6': true, '7': true,
-	'8': true, '9': true, ':': true, ';': true, '<': true, '=': true,
-	'>': true, '?': true, '@': true, 'A': true, 'B': true, 'C': true,
-	'D': true, 'E': true, 'F': true, 'G': true, 'H': true, 'I': true,
-	'J': true, 'K': true, 'L': true, 'M': true, 'N': true, 'O': true,
-	'P': true, 'Q': true, 'R': true, 'S': true, 'T': true, 'U': true,
-	'V': true, 'W': true, 'X': true, 'Y': true, 'Z': true, '[': true,
-	'\\': false, ']': true, '^': true, '_': true, '`': true, 'a': true,
-	'b': true, 'c': true, 'd': true, 'e': true, 'f': true, 'g': true,
-	'h': true, 'i': true, 'j': true, 'k': true, 'l': true, 'm': true,
-	'n': true, 'o': true, 'p': true, 'q': true, 'r': true, 's': true,
-	't': true, 'u': true, 'v': true, 'w': true, 'x': true, 'y': true,
-	'z': true, '{': true, '|': true, '}': true, '~': true, '': true,
-}
-
 // htmlSafeSet holds the value true if the ASCII character with the given index
-// can appear inside a JSON string embedded in HTML without escaping. It differs
-// from safeSet by also marking '<', '>', and '&' unsafe.
-var htmlSafeSet = [utf8.RuneSelf]bool{
-	' ': true, '!': true, '"': false, '#': true, '$': true, '%': true,
-	'&': false, '\'': true, '(': true, ')': true, '*': true, '+': true,
-	',': true, '-': true, '.': true, '/': true, '0': true, '1': true,
-	'2': true, '3': true, '4': true, '5': true, '6': true, '7': true,
-	'8': true, '9': true, ':': true, ';': true, '<': false, '=': true,
-	'>': false, '?': true, '@': true, 'A': true, 'B': true, 'C': true,
-	'D': true, 'E': true, 'F': true, 'G': true, 'H': true, 'I': true,
-	'J': true, 'K': true, 'L': true, 'M': true, 'N': true, 'O': true,
-	'P': true, 'Q': true, 'R': true, 'S': true, 'T': true, 'U': true,
-	'V': true, 'W': true, 'X': true, 'Y': true, 'Z': true, '[': true,
-	'\\': false, ']': true, '^': true, '_': true, '`': true, 'a': true,
-	'b': true, 'c': true, 'd': true, 'e': true, 'f': true, 'g': true,
-	'h': true, 'i': true, 'j': true, 'k': true, 'l': true, 'm': true,
-	'n': true, 'o': true, 'p': true, 'q': true, 'r': true, 's': true,
-	't': true, 'u': true, 'v': true, 'w': true, 'x': true, 'y': true,
-	'z': true, '{': true, '|': true, '}': true, '~': true, '': true,
+// can appear inside a JSON string embedded in HTML without escaping. All values
+// are true except the ASCII control characters (0x00-0x1F), the double quote,
+// the backslash, and the HTML-sensitive '<', '>', and '&'. DEL (0x7F) is safe.
+// Marshaling always escapes HTML, so this is the only table required.
+var htmlSafeSet = buildHTMLSafeSet()
+
+// buildHTMLSafeSet constructs the htmlSafeSet table programmatically so the
+// unsafe bytes are spelled out explicitly rather than relying on fragile
+// literal control or DEL glyphs in a composite literal.
+func buildHTMLSafeSet() [utf8.RuneSelf]bool {
+	var set [utf8.RuneSelf]bool
+	for b := 0x20; b < utf8.RuneSelf; b++ {
+		set[b] = true
+	}
+	set['"'] = false
+	set['\\'] = false
+	set['<'] = false
+	set['>'] = false
+	set['&'] = false
+	return set
 }
 
 // appendEscapedString appends src to dst as a quoted, HTML-escaped JSON string,

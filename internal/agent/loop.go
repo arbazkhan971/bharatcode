@@ -23,6 +23,23 @@ import (
 
 const defaultMaxSteps = 50
 
+// writeClassTools names the file-mutating tools whose successful runs fire a
+// FileEdit lifecycle hook. The agent loop detects mutations by tool name so it
+// stays decoupled from the tools package's concrete implementations.
+var writeClassTools = map[string]struct{}{
+	"write":     {},
+	"edit":      {},
+	"multiedit": {},
+}
+
+// hookFirer is the subset of *hooks.Engine the agent loop consumes to fire
+// lifecycle hooks. It is an interface so tests can inject a capturing fake via
+// the Config; *hooks.Engine satisfies it. A nil hookFirer means no hooks are
+// configured and every Fire call is skipped.
+type hookFirer interface {
+	Fire(ctx context.Context, event hooks.Event, payload any) (hooks.Decision, error)
+}
+
 // Config bundles the dependencies a Loop needs.
 type Config struct {
 	Name          string
@@ -34,7 +51,7 @@ type Config struct {
 	FileTracker   *filetracker.Tracker
 	Ledger        *ledger.Ledger
 	Bus           *pubsub.Topic[Event]
-	Hooks         *hooks.Engine
+	Hooks         hookFirer
 	SystemPrompt  string
 	ToolAllowList []string
 	MaxSteps      int
@@ -284,6 +301,13 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		l.steerMu.Unlock()
 	}()
 
+	// SessionEnd fires once when the run completes for any reason (normal
+	// finish, step limit, loop detection, provider/persistence error, or
+	// cancellation). It is deferred so every exit path is covered. The hook
+	// fires with context.WithoutCancel so a cancelled run still runs its
+	// SessionEnd command, since "cancels" is an explicit end-of-run case.
+	defer l.fireHook(context.WithoutCancel(ctx), hooks.SessionEnd, hooks.SessionPayload{SessionID: sessionID})
+
 	l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventTurnStarted})
 	userMsg.SessionID = sessionID
 	if userMsg.Role == "" {
@@ -300,6 +324,15 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	if err != nil {
 		return fmt.Errorf("loading session messages: %w", err)
 	}
+
+	// SessionStart fires when a session's first turn begins, not on every Run.
+	// The just-appended user message is the only message in history exactly when
+	// this is the session's first turn, so a later Run on the same session never
+	// refires it.
+	if len(history) == 1 {
+		l.fireHook(runCtx, hooks.SessionStart, hooks.SessionPayload{SessionID: sessionID})
+	}
+
 	history = l.applyCompaction(history)
 	history = truncateForContext(history, l.contextWindow())
 	detector := &loopDetector{}
@@ -366,6 +399,7 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			}
 
 			result := l.runTool(runCtx, sessionID, call)
+			l.fireFileEditHook(runCtx, sessionID, call, result)
 			toolMsg := message.Message{
 				SessionID: sessionID,
 				Role:      message.RoleUser,
@@ -560,6 +594,38 @@ func (l *Loop) publish(ctx context.Context, ev Event) {
 	if l.cfg.Bus != nil {
 		l.cfg.Bus.Publish(ctx, ev)
 	}
+}
+
+// fireHook fires a lifecycle hook, guarding on a nil hooks engine and logging
+// (rather than propagating) any error so a misconfigured hook never aborts the
+// agent run. Lifecycle hooks are best-effort observers: their failure must not
+// fail the turn the way a blocking PreToolUse decision does.
+func (l *Loop) fireHook(ctx context.Context, event hooks.Event, payload any) {
+	if l.cfg.Hooks == nil {
+		return
+	}
+	if _, err := l.cfg.Hooks.Fire(ctx, event, payload); err != nil {
+		slog.Warn("Lifecycle hook failed", "event", event, "error", err)
+	}
+}
+
+// fireFileEditHook fires a FileEdit hook after a successful write-class tool
+// run. It returns immediately for non-mutating tools, error results (which
+// covers hook-blocked and panicking tools), and inputs without a path.
+func (l *Loop) fireFileEditHook(ctx context.Context, sessionID string, call pendingToolCall, result tools.Result) {
+	if _, ok := writeClassTools[call.Name]; !ok {
+		return
+	}
+	if result.IsError {
+		return
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(call.Input, &args); err != nil || args.Path == "" {
+		return
+	}
+	l.fireHook(ctx, hooks.FileEdit, hooks.FileEditPayload{Path: args.Path, SessionID: sessionID})
 }
 
 func textMessage(sessionID string, role message.Role, text string) message.Message {

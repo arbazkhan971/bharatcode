@@ -56,6 +56,17 @@ func allControlBytes() string {
 	return sb.String()
 }
 
+// allBytes returns a string containing every byte value 0x00-0xFF, exercising
+// DEL (0x7F), the HTML-sensitive bytes, and the high bytes that decode to
+// U+FFFD, all in a single golden comparison against json.Marshal.
+func allBytes() string {
+	b := make([]byte, 256)
+	for i := range b {
+		b[i] = byte(i)
+	}
+	return string(b)
+}
+
 // representativeMessage exercises every block type, the omitempty fields
 // (parent_id and usage), HTML-sensitive characters, and a json.RawMessage that
 // contains insignificant whitespace so the byte-identity check covers the
@@ -156,6 +167,18 @@ func TestMarshalJSON_ByteIdenticalAcrossCases(t *testing.T) {
 			CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 			Content: []ContentBlock{
 				TextBlock{Text: allControlBytes()},
+			},
+		},
+		"all_256_bytes": {
+			ID:        "m",
+			SessionID: "s",
+			Role:      RoleUser,
+			CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			Content: []ContentBlock{
+				// Every byte 0x00-0xFF in one string: all control bytes, DEL
+				// (0x7F), the HTML-sensitive bytes, and the high bytes that
+				// decode to U+FFFD. This closes every escaping hole at once.
+				TextBlock{Text: allBytes()},
 			},
 		},
 		"invalid_utf8": {

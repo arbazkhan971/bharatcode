@@ -3,6 +3,7 @@
 package util
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -126,10 +127,20 @@ func HumanBytes(n int64) string {
 		}
 	}
 
-	div := divisors[idx]
+	f := float64(u) / float64(divisors[idx])
+
+	// Roll up at unit boundaries: a value that rounds to 1024.0 of a
+	// unit (at the one-decimal precision used below) must be shown as
+	// 1.0 of the next unit. Without this, e.g. 1048575 would render as
+	// "1024.0 KB" instead of "1.0 MB". The final unit (PB) has no
+	// higher unit, so it is left to overflow.
+	for idx < len(divisors)-1 && math.Round(f*10) >= 1024*10 {
+		f /= 1024
+		idx++
+	}
+
 	suffix := suffixes[idx]
 
-	f := float64(u) / float64(div)
 	out = strconv.AppendFloat(out, f, 'f', 1, 64)
 	out = append(out, ' ')
 	out = append(out, suffix...)

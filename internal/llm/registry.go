@@ -16,6 +16,14 @@ import (
 
 const defaultRequestTimeout = 2 * time.Minute
 
+// providerOpenAIResponses opts a provider into OpenAI's Responses API
+// (/v1/responses) instead of chat/completions. It is defined in-package as a
+// typed config.ProviderType so the registry can route to the Responses client
+// without the chat/completions path changing. Making it selectable from a
+// config file additionally requires adding the constant and allowing it in the
+// config package validator; that lives outside this package and is a followup.
+const providerOpenAIResponses = config.ProviderType("openai_responses")
+
 // Registry holds configured providers and is safe for concurrent callers.
 type Registry struct {
 	mu        sync.RWMutex
@@ -70,6 +78,12 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 				baseURL = "https://api.openai.com/v1"
 			}
 			provider = newOpenAICompatibleProvider(p.Name, baseURL, p.APIKeyEnv, models, client)
+		case providerOpenAIResponses:
+			baseURL := p.BaseURL
+			if baseURL == "" {
+				baseURL = "https://api.openai.com/v1"
+			}
+			provider = newOpenAIResponsesProvider(p.Name, baseURL, p.APIKeyEnv, models, client)
 		case config.ProviderOpenAICompatible, config.ProviderLMStudio:
 			provider = newOpenAICompatibleProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
 		case config.ProviderOllama:

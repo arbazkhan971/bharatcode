@@ -11,7 +11,7 @@ import (
 
 type hookedTool struct {
 	inner     tools.Tool
-	hooks     *hooks.Engine
+	hooks     hookFirer
 	sessionID string
 	agentName string
 	allowed   bool
@@ -42,23 +42,29 @@ func (t hookedTool) Run(ctx context.Context, args json.RawMessage) (tools.Result
 		Args:      decodeHookArgs(args),
 		SessionID: t.sessionID,
 	}
-	decision, err := t.hooks.Fire(ctx, hooks.PreToolUse, payload)
-	if err != nil {
-		return tools.Result{Content: "pre-tool hook failed: " + err.Error(), IsError: true}, nil
-	}
-	if decision.Block {
-		reason := decision.Reason
-		if reason == "" {
-			reason = "no reason provided"
+	// Guard on a nil firer: the field is an interface, so a Config without Hooks
+	// holds a nil interface for which the Engine's nil-receiver guard never runs.
+	if t.hooks != nil {
+		decision, err := t.hooks.Fire(ctx, hooks.PreToolUse, payload)
+		if err != nil {
+			return tools.Result{Content: "pre-tool hook failed: " + err.Error(), IsError: true}, nil
 		}
-		return tools.Result{Content: "blocked by hook: " + reason, IsError: true}, nil
+		if decision.Block {
+			reason := decision.Reason
+			if reason == "" {
+				reason = "no reason provided"
+			}
+			return tools.Result{Content: "blocked by hook: " + reason, IsError: true}, nil
+		}
 	}
 
 	res, runErr := t.inner.Run(ctx, args)
-	postPayload := payload
-	postPayload.Result = res
-	if _, err := t.hooks.Fire(ctx, hooks.PostToolUse, postPayload); err != nil && runErr == nil {
-		return tools.Result{Content: "post-tool hook failed: " + err.Error(), IsError: true}, nil
+	if t.hooks != nil {
+		postPayload := payload
+		postPayload.Result = res
+		if _, err := t.hooks.Fire(ctx, hooks.PostToolUse, postPayload); err != nil && runErr == nil {
+			return tools.Result{Content: "post-tool hook failed: " + err.Error(), IsError: true}, nil
+		}
 	}
 	if runErr != nil {
 		return tools.Result{Content: fmt.Sprintf("tool failed: %v", runErr), IsError: true}, nil

@@ -209,6 +209,41 @@ func (m *model) handleDiff() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// planEnabledBody and planDisabledBody are the dialog bodies shown when plan
+// mode is toggled, kept as constants so the wording stays consistent.
+const (
+	planEnabledBody = "Plan mode on. The agent is restricted to read-only tools and will propose a plan instead of editing. Use /approve to execute."
+	approveBody     = "Plan approved. Execution tools are enabled again; send your next prompt to proceed."
+	approveNoopBody = "Not in plan mode. Nothing to approve."
+)
+
+// handlePlan turns on plan mode on the live agent loop so the next turn is
+// restricted to read-only tools and the agent is prompted to produce a plan
+// rather than execute. It takes effect on the next provider call; the existing
+// session is preserved. /approve clears it.
+func (m *model) handlePlan() (tea.Model, tea.Cmd) {
+	if m.deps.Agent.PlanMode() {
+		m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Plan mode", Body: planEnabledBody, Theme: m.theme})
+		return m, nil
+	}
+	m.deps.Agent.SetPlanMode(true)
+	m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Plan mode", Body: planEnabledBody, Theme: m.theme})
+	return m, nil
+}
+
+// handleApprove exits plan mode on the live agent loop, re-enabling execution
+// tools. It is a no-op (with an explanatory dialog) when the loop is not in plan
+// mode.
+func (m *model) handleApprove() (tea.Model, tea.Cmd) {
+	if !m.deps.Agent.PlanMode() {
+		m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Approve", Body: approveNoopBody, Theme: m.theme})
+		return m, nil
+	}
+	m.deps.Agent.Approve()
+	m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Approve", Body: approveBody, Theme: m.theme})
+	return m, nil
+}
+
 // handleStatus pushes a panel summarizing the active model, agent, session,
 // message count, approval mode, and INR spend for this session.
 func (m *model) handleStatus() (tea.Model, tea.Cmd) {

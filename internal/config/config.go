@@ -24,6 +24,33 @@ type Config struct {
 	Ledger      LedgerConfig  `json:"ledger"`
 	Options     Options       `json:"options"`
 	Sandbox     SandboxConfig `json:"sandbox"`
+	Cache       CacheConfig   `json:"cache"`
+	Routing     RoutingConfig `json:"routing"`
+}
+
+// CacheConfig toggles the LLM response cache that serves repeated,
+// deterministic (temperature-0) requests from memory instead of re-calling the
+// provider. It is off by default, preserving current behavior. When Enabled is
+// true each configured provider is wrapped in a caching layer backed by an LRU
+// of at most MaxEntries entries; a non-positive MaxEntries selects the package
+// default.
+type CacheConfig struct {
+	Enabled    bool `json:"enabled,omitempty"`
+	MaxEntries int  `json:"max_entries,omitempty"`
+}
+
+// RoutingConfig toggles cost-aware model routing, which sends short, tool-free
+// turns to the cheapest configured model and long or tool-driven turns to the
+// strongest one. It is off by default, leaving each agent pinned to its
+// configured model. When Enabled is true a CostAwareRouter is installed on
+// every agent loop. PromptLenThreshold is the user-prompt character count at or
+// above which a turn is treated as complex (a non-positive value selects the
+// router default); ToolsImplyComplex, when true, treats any tool-enabled turn
+// as complex.
+type RoutingConfig struct {
+	Enabled            bool `json:"enabled,omitempty"`
+	PromptLenThreshold int  `json:"prompt_len_threshold,omitempty"`
+	ToolsImplyComplex  bool `json:"tools_imply_complex,omitempty"`
 }
 
 // SandboxConfig selects the OS-level confinement applied around shell command
@@ -68,6 +95,13 @@ type Provider struct {
 	APIKeyEnv string       `json:"api_key_env,omitempty"`
 	Models    []string     `json:"models"`
 	Disabled  bool         `json:"disabled,omitempty"`
+	// Fallbacks names other configured providers to try, in order, when this
+	// provider fails with a retryable availability error (rate limit, server
+	// error, transport failure). It is empty by default, so a provider with no
+	// fallbacks behaves exactly as before. Names are matched case-insensitively
+	// against other Provider.Name values; an unknown or disabled fallback is
+	// skipped at wiring time.
+	Fallbacks []string `json:"fallbacks,omitempty"`
 }
 
 // Model is one entry in a model pack. Prices are quoted per
@@ -82,6 +116,18 @@ type Model struct {
 	OutputPricePerMTokUSD float64 `json:"output_price_per_mtok_usd"`
 	SupportsImages        bool    `json:"supports_images"`
 	SupportsTools         bool    `json:"supports_tools"`
+	// ReasoningEffort, when non-empty, requests a fixed hidden-reasoning budget
+	// from an OpenAI reasoning model (o-series, gpt-5 reasoning) on every turn.
+	// Valid values are provider-defined ("low", "medium", "high"). It is ignored
+	// by non-reasoning models, which the provider gates by model id, so setting
+	// it on a classic model is harmless. Empty (the default) sends no field.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ThinkingBudget, when positive, opts an Anthropic extended-thinking model
+	// (Claude 3.7 Sonnet, Claude 4 families) into visible reasoning, capping the
+	// tokens it may spend per turn. It is ignored by models that do not support
+	// thinking, which the provider gates by model id. Zero (the default) leaves
+	// thinking off.
+	ThinkingBudget int `json:"thinking_budget,omitempty"`
 }
 
 // PermConfig declares default permission behaviour for tool calls.

@@ -48,6 +48,8 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 			OutputPricePerMTokUSD: m.OutputPricePerMTokUSD,
 			SupportsImages:        m.SupportsImages,
 			SupportsTools:         m.SupportsTools,
+			ReasoningEffort:       m.ReasoningEffort,
+			ThinkingBudget:        m.ThinkingBudget,
 		}
 		modelsByProvider[strings.ToLower(m.Provider)] = append(modelsByProvider[strings.ToLower(m.Provider)], model)
 		allModels = append(allModels, model)

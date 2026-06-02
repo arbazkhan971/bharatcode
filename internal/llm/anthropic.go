@@ -26,15 +26,20 @@ type anthropicProvider struct {
 	apiKeyEnv string
 	models    []Model
 	client    *http.Client
+	// promptCaching toggles emission of cache_control ephemeral markers on the
+	// system prompt and tools. It defaults to on; Anthropic ignores the markers
+	// gracefully when the selected model does not support prompt caching.
+	promptCaching bool
 }
 
 func newAnthropicProvider(name string, baseURL string, apiKeyEnv string, models []Model, client *http.Client) Provider {
 	return &anthropicProvider{
-		name:      name,
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		apiKeyEnv: apiKeyEnv,
-		models:    append([]Model(nil), models...),
-		client:    client,
+		name:          name,
+		baseURL:       strings.TrimRight(baseURL, "/"),
+		apiKeyEnv:     apiKeyEnv,
+		models:        append([]Model(nil), models...),
+		client:        client,
+		promptCaching: true,
 	}
 }
 
@@ -72,7 +77,7 @@ func (p *anthropicProvider) Stream(ctx context.Context, req Request) (<-chan Eve
 		}
 	}
 
-	body, err := buildAnthropicRequest(req)
+	body, err := p.buildAnthropicRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("building provider request: %w", err)
 	}
@@ -247,7 +252,7 @@ func (s *anthropicStreamState) emitEnd(ctx context.Context, events chan<- Event)
 	send(ctx, events, EndEvent{Usage: s.usage})
 }
 
-func buildAnthropicRequest(req Request) (anthropicRequest, error) {
+func (p *anthropicProvider) buildAnthropicRequest(req Request) (anthropicRequest, error) {
 	messages, err := buildAnthropicMessages(req.Messages)
 	if err != nil {
 		return anthropicRequest{}, err
@@ -266,6 +271,27 @@ func buildAnthropicRequest(req Request) (anthropicRequest, error) {
 		})
 	}
 
+	// System is carried as a structured text-block array so a cache_control
+	// marker can be attached. An empty prompt yields a nil slice, which is
+	// omitted from the request entirely.
+	var system []anthropicSystemBlock
+	if req.SystemPrompt != "" {
+		system = []anthropicSystemBlock{{Type: "text", Text: req.SystemPrompt}}
+	}
+
+	if p.promptCaching {
+		// Mark a single cache breakpoint on the last system block and a single
+		// breakpoint on the last tool. Each marker caches everything up to and
+		// including it, so one marker per prefix is enough and keeps us well
+		// under Anthropic's max of 4 cache breakpoints.
+		if n := len(system); n > 0 {
+			system[n-1].CacheControl = ephemeralCacheControl()
+		}
+		if n := len(tools); n > 0 {
+			tools[n-1].CacheControl = ephemeralCacheControl()
+		}
+	}
+
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = defaultAnthropicMaxTokens
@@ -273,13 +299,19 @@ func buildAnthropicRequest(req Request) (anthropicRequest, error) {
 
 	return anthropicRequest{
 		Model:       req.Model,
-		System:      req.SystemPrompt,
+		System:      system,
 		Messages:    messages,
 		Tools:       tools,
 		MaxTokens:   maxTokens,
 		Temperature: req.Temperature,
 		Stream:      true,
 	}, nil
+}
+
+// ephemeralCacheControl returns the cache_control marker Anthropic uses to open
+// an ephemeral prompt-cache breakpoint on the carrying content block.
+func ephemeralCacheControl() *anthropicCacheControl {
+	return &anthropicCacheControl{Type: "ephemeral"}
 }
 
 func buildAnthropicMessages(history []message.Message) ([]anthropicMessage, error) {

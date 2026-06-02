@@ -155,6 +155,11 @@ type model struct {
 	// the /sessions picker is open; sessionCursor is the highlighted row.
 	sessionCandidates []session.Session
 	sessionCursor     int
+
+	// exportDir is the directory /export writes transcript files into. It is
+	// empty by default, in which case exports land in the current working
+	// directory (the workspace). Tests set it to a temp directory.
+	exportDir string
 }
 
 func newModel(ctx context.Context, deps Dependencies) *model {
@@ -361,6 +366,12 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	}
 	if text == "/permissions" || strings.HasPrefix(text, "/permissions ") {
 		return m.handlePermissionsCommand(text), nil
+	}
+	if text == "/export" || strings.HasPrefix(text, "/export ") {
+		return m.handleExport(text)
+	}
+	if text == "/share" || strings.HasPrefix(text, "/share ") {
+		return m.handleExport(text)
 	}
 
 	switch text {
@@ -570,6 +581,7 @@ func slashHelp() string {
 		"/compact - summarize older turns to shrink context",
 		"/fork - branch the current session",
 		"/diff - show the latest edit diff",
+		"/export [md|html] - write the session transcript to a file",
 		"/status - show model, session, and spend",
 		"/model - open model picker",
 		"/agent - open agent picker",

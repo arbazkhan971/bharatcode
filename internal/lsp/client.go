@@ -10,10 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
-	"syscall"
 )
 
 type client struct {
@@ -43,9 +41,7 @@ func startClient(ctx context.Context, spec languageSpec, root string) (*client, 
 	procCtx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(procCtx, spec.command, spec.args...)
 	cmd.Dir = root
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
+	cmd.SysProcAttr = sysProcAttr()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -442,14 +438,8 @@ func (c *client) forceKill() error {
 	if c.cmd.Process == nil {
 		return nil
 	}
-	if runtime.GOOS != "windows" {
-		if err := syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL); err != nil && !isProcessDone(err) {
-			return fmt.Errorf("killing language server process group: %w", err)
-		}
-		return nil
-	}
-	if err := c.cmd.Process.Kill(); err != nil && !isProcessDone(err) {
-		return fmt.Errorf("killing language server process: %w", err)
+	if err := killProcessGroup(c.cmd.Process.Pid); err != nil && !isProcessDone(err) {
+		return fmt.Errorf("killing language server process group: %w", err)
 	}
 	return nil
 }

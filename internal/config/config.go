@@ -117,6 +117,12 @@ const (
 	HookOnError HookEvent = "OnError"
 	// HookOnSession fires when a session is created/started.
 	HookOnSession HookEvent = "OnSession"
+	// HookSessionStart fires when a session starts.
+	HookSessionStart HookEvent = "SessionStart"
+	// HookSessionEnd fires when a session ends.
+	HookSessionEnd HookEvent = "SessionEnd"
+	// HookFileEdit fires after a file is edited.
+	HookFileEdit HookEvent = "FileEdit"
 )
 
 // Hook is a user-defined shell command that fires on a HookEvent.

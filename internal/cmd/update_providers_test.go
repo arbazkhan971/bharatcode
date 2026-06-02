@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 
@@ -234,7 +235,7 @@ func TestUpdateProvidersCmdFailureLeavesConfigIntact(t *testing.T) {
 	// A failing fetch/parse must not rewrite the config on disk.
 	oldUpdate := updateProviders
 	updateProviders = func(_ context.Context, _ string, _ *config.Config) (providerUpdateSummary, error) {
-		return providerUpdateSummary{}, errFetchBoom
+		return providerUpdateSummary{}, errors.New("fetching provider registry: boom")
 	}
 	defer func() { updateProviders = oldUpdate }()
 
@@ -251,12 +252,6 @@ func TestUpdateProvidersCmdFailureLeavesConfigIntact(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(before), string(after), "config must be byte-identical after a failed update")
 }
-
-var errFetchBoom = fetchBoom{}
-
-type fetchBoom struct{}
-
-func (fetchBoom) Error() string { return "fetching provider registry: boom" }
 
 func modelKeys(cfg *config.Config) []string {
 	keys := make([]string, 0, len(cfg.Models))

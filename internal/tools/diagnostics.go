@@ -44,7 +44,15 @@ var schemaDiagnostics = json.RawMessage(`{
 var diagnosticsDescription string
 
 func newDiagnosticsTool(deps Dependencies) Tool {
-	return &diagnosticsTool{source: deps.LSP, workDir: deps.WorkDir}
+	t := &diagnosticsTool{workDir: deps.WorkDir}
+	// A nil *lsp.Manager assigned to the DiagnosticSource interface would
+	// produce a non-nil interface wrapping a nil pointer, defeating the
+	// t.source == nil guard in Run and panicking on the first method call.
+	// Only adopt the source when the manager is actually present.
+	if deps.LSP != nil {
+		t.source = deps.LSP
+	}
+	return t
 }
 
 func (t *diagnosticsTool) Name() string {

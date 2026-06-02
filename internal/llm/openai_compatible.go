@@ -98,17 +98,24 @@ func (p *openAICompatibleProvider) readResponse(ctx context.Context, resp *http.
 	send(ctx, events, StartEvent{Provider: p.name, Model: model})
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		state := newToolCallState()
+		var usage Usage
 		err := readSSE(ctx, resp.Body, func(ev sseEvent) error {
-			if ev.Data == "[DONE]" {
+			// The [DONE] sentinel terminates the stream; it carries no JSON and
+			// must not be decoded as a chunk.
+			if strings.TrimSpace(ev.Data) == "[DONE]" {
 				return nil
 			}
-			return p.handleStreamChunk(ctx, ev.Data, state, events)
+			return p.handleStreamChunk(ctx, ev.Data, state, &usage, events)
 		})
 		if err != nil {
 			send(ctx, events, ErrorEvent{Err: err})
 			return
 		}
+		// Close any open tool calls first, then emit a single terminal EndEvent
+		// carrying the usage from the provider's final stream chunk. Emitting
+		// usage inline would order EndEvent before the trailing ToolUseEndEvents.
 		state.endAll(ctx, events)
+		send(ctx, events, EndEvent{Usage: usage})
 		return
 	}
 
@@ -122,7 +129,7 @@ func (p *openAICompatibleProvider) readResponse(ctx context.Context, resp *http.
 	}
 }
 
-func (p *openAICompatibleProvider) handleStreamChunk(ctx context.Context, data string, state *toolCallState, events chan<- Event) error {
+func (p *openAICompatibleProvider) handleStreamChunk(ctx context.Context, data string, state *toolCallState, usage *Usage, events chan<- Event) error {
 	var chunk openAIStreamChunk
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 		return fmt.Errorf("decoding provider stream chunk: %w", err)
@@ -138,8 +145,11 @@ func (p *openAICompatibleProvider) handleStreamChunk(ctx context.Context, data s
 			state.applyDelta(ctx, events, call)
 		}
 	}
+	// With include_usage the provider sends a trailing chunk (empty choices)
+	// carrying the real token counts. Record it so readResponse can emit a
+	// single terminal EndEvent after the tool calls are closed out.
 	if chunk.Usage != nil {
-		send(ctx, events, EndEvent{Usage: chunk.Usage.toUsage()})
+		*usage = chunk.Usage.toUsage()
 	}
 	return nil
 }
@@ -174,11 +184,15 @@ func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error
 	}
 
 	body := openAIChatRequest{
-		Model:     req.Model,
-		Messages:  messages,
-		Tools:     tools,
-		Stream:    true,
-		MaxTokens: req.MaxTokens,
+		Model:    req.Model,
+		Messages: messages,
+		Tools:    tools,
+		Stream:   true,
+		// Ask the provider to emit a final usage chunk so the EndEvent can
+		// carry real prompt/completion token counts; without this OpenAI omits
+		// usage from streamed responses entirely.
+		StreamOptions: &openAIStreamOptions{IncludeUsage: true},
+		MaxTokens:     req.MaxTokens,
 	}
 	// Reasoning models (o-series, gpt-5 reasoning) reject temperature and
 	// instead accept reasoning_effort. Non-reasoning models keep the classic

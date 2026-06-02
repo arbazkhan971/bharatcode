@@ -194,6 +194,55 @@ func TestFire_MalformedDecisionIsPassThrough(t *testing.T) {
 	require.True(t, decision.Continue)
 }
 
+func TestFire_LifecycleEventsExecuteFromConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfgEvt  config.HookEvent
+		event   hooks.Event
+		payload any
+	}{
+		{
+			name:    "SessionStart",
+			cfgEvt:  config.HookSessionStart,
+			event:   hooks.SessionStart,
+			payload: hooks.SessionPayload{SessionID: "session-start-1"},
+		},
+		{
+			name:    "SessionEnd",
+			cfgEvt:  config.HookSessionEnd,
+			event:   hooks.SessionEnd,
+			payload: hooks.SessionPayload{SessionID: "session-end-1"},
+		},
+		{
+			name:    "FileEdit",
+			cfgEvt:  config.HookFileEdit,
+			event:   hooks.FileEdit,
+			payload: hooks.FileEditPayload{Path: "main.go", SessionID: "session-edit-1"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "ran")
+			// New() maps config.Hook.Event verbatim to hooks.Event, so a config
+			// hook declared with the lifecycle event must reach the engine and
+			// actually run its command when that event fires.
+			engine := newEngine(t, []config.Hook{
+				{
+					Event:   tc.cfgEvt,
+					Command: "touch " + shellArg(marker),
+				},
+			})
+
+			decision, err := engine.Fire(context.Background(), tc.event, tc.payload)
+			require.NoError(t, err)
+			require.True(t, decision.Continue)
+			require.FileExists(t, marker)
+		})
+	}
+}
+
 func newEngine(t *testing.T, hookDefs []config.Hook) *hooks.Engine {
 	t.Helper()
 

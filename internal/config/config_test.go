@@ -468,6 +468,21 @@ func TestValidationRulesDetailed(t *testing.T) {
 	}
 }
 
+// TestValidateAcceptsLifecycleHookEvents asserts the session and file-edit
+// lifecycle events validate. Before HookSessionStart/HookSessionEnd/HookFileEdit
+// were added to the validate.go case, these configs were rejected as invalid
+// hook events even though the hooks engine already handled them.
+func TestValidateAcceptsLifecycleHookEvents(t *testing.T) {
+	events := []HookEvent{HookSessionStart, HookSessionEnd, HookFileEdit}
+	for _, ev := range events {
+		t.Run(string(ev), func(t *testing.T) {
+			cfg := Default()
+			cfg.Hooks = []Hook{{Event: ev, Command: "echo"}}
+			require.NoError(t, Validate(cfg))
+		})
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	ctx := context.Background()
 	tmpDir := t.TempDir()

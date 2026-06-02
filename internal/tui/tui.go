@@ -128,6 +128,7 @@ type model struct {
 	status           statusbar.Bar
 	notifications    *notification.FocusAware
 	input            strings.Builder
+	inputHistory     inputState
 	focus            focusState
 	width            int
 	height           int
@@ -288,10 +289,32 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.deps.Agent.Interrupt()
 		return m, nil
 	case "tab":
+		// On the input line, Tab completes/cycles a slash command when the
+		// buffer is a slash prefix; otherwise it toggles focus to the chat.
+		if m.focus == focusInput && strings.HasPrefix(m.input.String(), "/") {
+			if completed, ok := m.inputHistory.completeSlash(m.input.String()); ok {
+				m.setInput(completed)
+			}
+			return m, nil
+		}
 		if m.focus == focusInput {
 			m.focus = focusChat
 		} else {
 			m.focus = focusInput
+		}
+		return m, nil
+	case "up":
+		if m.focus == focusInput {
+			if recalled, ok := m.inputHistory.recallPrev(m.input.String()); ok {
+				m.setInputForRecall(recalled)
+			}
+		}
+		return m, nil
+	case "down":
+		if m.focus == focusInput {
+			if recalled, ok := m.inputHistory.recallNext(m.input.String()); ok {
+				m.setInputForRecall(recalled)
+			}
 		}
 		return m, nil
 	case "ctrl+p":
@@ -317,18 +340,42 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.input.WriteString(string(r[:len(r)-1]))
 		}
+		// Editing the buffer cancels any recall walk and completion cycle.
+		m.inputHistory.resetRecall()
+		m.inputHistory.resetCompletion()
 		return m, nil
 	default:
 		if msg.Key().Text != "" {
 			m.input.WriteString(msg.Key().Text)
+			// Typing cancels any recall walk and completion cycle.
+			m.inputHistory.resetRecall()
+			m.inputHistory.resetCompletion()
 		}
 		return m, nil
 	}
 }
 
+// setInput replaces the input buffer with s. It is used by Tab completion,
+// which manages its own cycle state and so must not reset it here.
+func (m *model) setInput(s string) {
+	m.input.Reset()
+	m.input.WriteString(s)
+}
+
+// setInputForRecall replaces the input buffer with a recalled history entry.
+// Recall is a non-editing move, so it ends any in-progress completion cycle but
+// leaves the recall cursor (managed by the caller) untouched.
+func (m *model) setInputForRecall(s string) {
+	m.setInput(s)
+	m.inputHistory.resetCompletion()
+}
+
 func (m *model) submitInput() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.String())
 	m.input.Reset()
+	// Record the submission for Up/Down recall and reset navigation, even for
+	// slash commands, mirroring shell history. record ignores blank text.
+	m.inputHistory.record(text)
 	if text == "" {
 		return m, nil
 	}

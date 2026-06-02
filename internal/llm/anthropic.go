@@ -385,13 +385,28 @@ func convertAnthropicBlocks(blocks []message.ContentBlock) ([]anthropicContentBl
 }
 
 type anthropicRequest struct {
-	Model       string             `json:"model"`
-	System      string             `json:"system,omitempty"`
-	Messages    []anthropicMessage `json:"messages"`
-	Tools       []anthropicTool    `json:"tools,omitempty"`
-	MaxTokens   int                `json:"max_tokens"`
-	Temperature float64            `json:"temperature,omitempty"`
-	Stream      bool               `json:"stream"`
+	Model       string                 `json:"model"`
+	System      []anthropicSystemBlock `json:"system,omitempty"`
+	Messages    []anthropicMessage     `json:"messages"`
+	Tools       []anthropicTool        `json:"tools,omitempty"`
+	MaxTokens   int                    `json:"max_tokens"`
+	Temperature float64                `json:"temperature,omitempty"`
+	Stream      bool                   `json:"stream"`
+}
+
+// anthropicSystemBlock is one entry of the structured system-prompt array. The
+// array form (rather than a bare string) lets a cache_control marker attach to
+// the system prompt.
+type anthropicSystemBlock struct {
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+}
+
+// anthropicCacheControl marks a content block as a prompt-cache breakpoint. The
+// only supported type is "ephemeral".
+type anthropicCacheControl struct {
+	Type string `json:"type"`
 }
 
 type anthropicMessage struct {
@@ -420,9 +435,10 @@ type anthropicImageSource struct {
 }
 
 type anthropicTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description,omitempty"`
+	InputSchema  json.RawMessage        `json:"input_schema"`
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicUsage struct {

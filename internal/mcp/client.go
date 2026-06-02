@@ -46,6 +46,8 @@ type remoteClient interface {
 	ListTools(context.Context, mcpsdk.ListToolsRequest) (*mcpsdk.ListToolsResult, error)
 	ListResources(context.Context, mcpsdk.ListResourcesRequest) (*mcpsdk.ListResourcesResult, error)
 	ReadResource(context.Context, mcpsdk.ReadResourceRequest) (*mcpsdk.ReadResourceResult, error)
+	ListPrompts(context.Context, mcpsdk.ListPromptsRequest) (*mcpsdk.ListPromptsResult, error)
+	GetPrompt(context.Context, mcpsdk.GetPromptRequest) (*mcpsdk.GetPromptResult, error)
 	OnConnectionLost(func(error))
 }
 
@@ -98,6 +100,7 @@ type Server struct {
 	state     State
 	tools     []tools.Tool
 	resources []Resource
+	prompts   []Prompt
 }
 
 // Name returns the configured server name.
@@ -320,6 +323,54 @@ func (c *Client) ReadResource(ctx context.Context, uri string) ([]byte, string, 
 	return resourceBytes(result.Contents[0])
 }
 
+// Prompts returns a snapshot of prompt templates across every server.
+func (c *Client) Prompts() []Prompt {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var out []Prompt
+	for _, server := range c.servers {
+		server.mu.RLock()
+		out = append(out, server.prompts...)
+		server.mu.RUnlock()
+	}
+	return out
+}
+
+// GetPrompt renders a named prompt template on a server with the given
+// arguments and returns its messages.
+func (c *Client) GetPrompt(ctx context.Context, serverName, name string, args map[string]string) ([]PromptMessage, error) {
+	server := c.serverByName(serverName)
+	if server == nil {
+		return nil, fmt.Errorf("getting mcp prompt %q: unknown server %q", name, serverName)
+	}
+	state, conn := server.snapshot()
+	if state != StateConnected || conn == nil {
+		return nil, fmt.Errorf("getting mcp prompt %q: %w", name, ErrToolUnavailable)
+	}
+
+	ctx, cancel := withServerTimeout(ctx, server.cfg.Timeout)
+	defer cancel()
+
+	result, err := conn.GetPrompt(ctx, mcpsdk.GetPromptRequest{
+		Params: mcpsdk.GetPromptParams{
+			Name:      name,
+			Arguments: args,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("getting mcp prompt %q: %w", name, err)
+	}
+
+	messages := make([]PromptMessage, 0, len(result.Messages))
+	for _, msg := range result.Messages {
+		messages = append(messages, PromptMessage{
+			Role:    string(msg.Role),
+			Content: contentText([]mcpsdk.Content{msg.Content}),
+		})
+	}
+	return messages, nil
+}
+
 // Servers returns configured servers in config order.
 func (c *Client) Servers() []*Server {
 	c.mu.RLock()
@@ -410,6 +461,13 @@ func (c *Client) refresh(ctx context.Context, server *Server, conn remoteClient)
 	if err != nil {
 		resources = &mcpsdk.ListResourcesResult{}
 	}
+	// Prompts are an optional server capability; a server without them returns
+	// "method not found", so a list failure is treated as "no prompts" rather
+	// than a connect failure (mirroring resources, not tools).
+	prompts, err := conn.ListPrompts(ctx, mcpsdk.ListPromptsRequest{})
+	if err != nil {
+		prompts = &mcpsdk.ListPromptsResult{}
+	}
 
 	bridged := make([]tools.Tool, 0, len(list.Tools))
 	for _, remoteTool := range list.Tools {
@@ -441,9 +499,28 @@ func (c *Client) refresh(ctx context.Context, server *Server, conn remoteClient)
 		})
 	}
 
+	templates := make([]Prompt, 0, len(prompts.Prompts))
+	for _, prompt := range prompts.Prompts {
+		args := make([]PromptArgument, 0, len(prompt.Arguments))
+		for _, arg := range prompt.Arguments {
+			args = append(args, PromptArgument{
+				Name:        arg.Name,
+				Description: arg.Description,
+				Required:    arg.Required,
+			})
+		}
+		templates = append(templates, Prompt{
+			Server:      server.Name(),
+			Name:        prompt.Name,
+			Description: prompt.Description,
+			Arguments:   args,
+		})
+	}
+
 	server.mu.Lock()
 	server.tools = bridged
 	server.resources = advertised
+	server.prompts = templates
 	server.mu.Unlock()
 	return nil
 }

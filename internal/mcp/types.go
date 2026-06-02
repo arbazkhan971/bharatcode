@@ -43,6 +43,27 @@ type Resource struct {
 	MimeType    string `json:"mime_type"`
 }
 
+// Prompt is a server-advertised prompt template the agent may render by name.
+type Prompt struct {
+	Server      string           `json:"server"`
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
+}
+
+// PromptArgument describes one argument a prompt template accepts.
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+}
+
+// PromptMessage is one rendered message returned by GetPrompt.
+type PromptMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 // State reports the connection state of a single MCP server.
 type State int
 

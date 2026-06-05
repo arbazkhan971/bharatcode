@@ -60,6 +60,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseTAPFailures(output)
 	case runnerDeno:
 		return parseDenoTestFailures(output)
+	case runnerSwift:
+		return parseSwiftTestFailures(output)
 	default:
 		return nil
 	}
@@ -82,6 +84,7 @@ const (
 	runnerExUnit
 	runnerTAP
 	runnerDeno
+	runnerSwift
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -108,6 +111,10 @@ var (
 	// a single TAP parser covers them. \btape\b keeps prose like "tapestry" from
 	// matching while admitting "node tape.js" / "npx tape".
 	tapRe = regexp.MustCompile(`node\s+--test\b|node:test\b|\btape\b`)
+	// "swift test" drives SwiftPM's XCTest runner; \b after "test" keeps prose
+	// like "swift testing guide" from matching while admitting flags and paths
+	// ("swift test --filter FooTests").
+	swiftTestRe = regexp.MustCompile(`\bswift test\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -164,6 +171,13 @@ func classifyTestRunner(command string) testRunner {
 		// the JS runners since a "deno test" invocation carries none of their
 		// substrings, but keeping it explicit guards against future overlap.
 		return runnerDeno
+	case swiftTestRe.MatchString(c):
+		// `swift test` runs SwiftPM's XCTest runner, whose output marks each
+		// failure with a "Test Case '<id>' failed" line and prints the assertion
+		// on a "<file>.swift:<line>: error: <id> : <message>" line. Checked before
+		// the JS runners since a "swift test" invocation carries none of their
+		// substrings, but kept explicit to guard against future overlap.
+		return runnerSwift
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1028,6 +1042,58 @@ func parseDenoTestFailures(output string) []testFailure {
 			continue
 		}
 		m := denoFailRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: details[name]})
+	}
+	return failures
+}
+
+var (
+	// "Test Case '-[ModuleTests.MyTests testFoo]' failed (0.001 seconds)." (macOS)
+	// or "Test Case 'MyTests.testFoo' failed (0.001 seconds)." (Linux SwiftPM).
+	// The quoted text is the failing test's id and is identical to the id printed
+	// on the matching "error:" line, so it keys the detail lookup. The "started"
+	// and "passed" variants are not matched.
+	swiftFailRe = regexp.MustCompile(`^Test Case '(.+)' failed\b`)
+	// "/path/Tests/MyTests.swift:14: error: <id> : XCTAssertEqual failed: ..." —
+	// the assertion line XCTest prints for a failure, carrying the test id (the
+	// same one quoted in the "Test Case" line) and the one-line message.
+	swiftErrorRe = regexp.MustCompile(`\.swift:\d+: error: (.+?) : (.+)$`)
+)
+
+// parseSwiftTestFailures extracts failing tests from `swift test` (XCTest)
+// output. Each "Test Case '<id>' failed" line names a failed test, in run order.
+// The detail is the message from the first "<file>.swift:<line>: error: <id> :
+// <message>" assertion line carrying the same id, so assertion messages surface
+// alongside the names. The id format differs between macOS ("-[Class method]")
+// and Linux ("Class.method"), but is consistent within a run, so it pairs the
+// two lines regardless of platform.
+func parseSwiftTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+
+	// First pass: map each test id to the first assertion message printed for it,
+	// so the detail can be attached when the "failed" line is seen.
+	details := map[string]string{}
+	for _, ln := range lines {
+		if m := swiftErrorRe.FindStringSubmatch(ln); m != nil {
+			id := strings.TrimSpace(m[1])
+			if _, ok := details[id]; !ok {
+				details[id] = strings.TrimSpace(m[2])
+			}
+		}
+	}
+
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		m := swiftFailRe.FindStringSubmatch(ln)
 		if m == nil {
 			continue
 		}

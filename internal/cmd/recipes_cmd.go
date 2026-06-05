@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
@@ -35,16 +36,23 @@ func newRecipesCmd() *cobra.Command {
 
 // recipeDirs resolves the standard recipe directories in precedence
 // order: the global config directory's recipes/ subdirectory, then the
-// project's .bharatcode/recipes directory when a project directory is
-// set. Paths are expanded so ~ and environment references are resolved
-// the same way the rest of the CLI resolves them.
+// project's .bharatcode/recipes directory. The project directory is the
+// --project-dir value when set, falling back to the current working
+// directory so `bharatcode recipes` discovers project recipes from a repo
+// root without the flag (matching init and import-history). Paths are
+// expanded so ~ and environment references resolve the same way the rest
+// of the CLI resolves them.
 func recipeDirs(opts *rootOptions) []string {
-	dirs := recipe.DefaultDirs(config.GlobalPath(), func() string {
-		if opts != nil {
-			return opts.projectDir
+	project := ""
+	if opts != nil {
+		project = opts.projectDir
+	}
+	if project == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			project = cwd
 		}
-		return ""
-	}())
+	}
+	dirs := recipe.DefaultDirs(config.GlobalPath(), project)
 	expanded := make([]string, len(dirs))
 	for i, d := range dirs {
 		expanded[i] = util.ExpandPath(d)

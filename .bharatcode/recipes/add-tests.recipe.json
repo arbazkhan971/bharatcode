@@ -1,0 +1,21 @@
+{
+  "title": "Add tests for a package",
+  "description": "Write table-driven Go tests for a named package, matching the project's existing test style.",
+  "prompt": "Write table-driven tests for the package {{package}}. Read the existing tests in that package first and mirror their style, naming, and helpers. Target meaningful coverage of {{focus}} — assert real behavior, not just absence of error. Run `go test ./{{package}}/` and iterate until green.",
+  "parameters": [
+    {
+      "name": "package",
+      "type": "string",
+      "requirement": "required",
+      "description": "Workspace-relative package path to test, e.g. internal/recipe"
+    },
+    {
+      "name": "focus",
+      "type": "string",
+      "requirement": "optional",
+      "default": "the package's public functions and their error paths",
+      "description": "What the tests should focus on"
+    }
+  ],
+  "extensions": ["bash", "view", "edit", "grep"]
+}

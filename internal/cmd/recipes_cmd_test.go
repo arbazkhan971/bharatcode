@@ -95,6 +95,32 @@ func TestRunRecipesWithRecipes(t *testing.T) {
 	require.Contains(t, output, "A test recipe for listing.")
 }
 
+// TestRecipesDirsFallsBackToCwd verifies that, with no --project-dir set,
+// recipeDirs uses the current working directory as the project root so a
+// project recipe under ./.bharatcode/recipes is discoverable without the flag.
+func TestRecipesDirsFallsBackToCwd(t *testing.T) {
+	tempDir := t.TempDir()
+	orig, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	// macOS reports the temp dir through a /private symlink; resolve both
+	// sides so the substring assertion is stable.
+	resolved, err := filepath.EvalSymlinks(tempDir)
+	require.NoError(t, err)
+
+	dirs := recipeDirs(&rootOptions{projectDir: ""})
+	found := false
+	for _, d := range dirs {
+		rd, err := filepath.EvalSymlinks(filepath.Dir(filepath.Dir(d)))
+		if err == nil && rd == resolved {
+			found = true
+		}
+	}
+	require.True(t, found, "recipeDirs should include a project dir rooted at cwd; got %v", dirs)
+}
+
 // TestRecipesDirsLabel verifies the label formatting for empty and non-empty
 // directory lists.
 func TestRecipesDirsLabel(t *testing.T) {

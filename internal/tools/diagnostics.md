@@ -11,7 +11,9 @@ Arguments:
 
 What success looks like:
 
-The result is a sorted list of diagnostics formatted as
+The result opens with a one-line summary tallying the total, the files touched,
+and the per-severity counts, e.g. `3 diagnostics across 2 files (2 errors, 1
+warning):`. Beneath it is a sorted list of diagnostics formatted as
 `path:line:column: severity: message`. When the language server supplies them, a
 rule code follows in brackets and the reporting source in parentheses, e.g.
 `main.rs:3:9: error: cannot find value `x` [E0425] (rustc)`.

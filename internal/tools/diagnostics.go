@@ -119,7 +119,10 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		return Result{Content: "No diagnostics found."}, nil
 	}
 
+	counts := severityCounts(all)
 	var b strings.Builder
+	b.WriteString(diagnosticsSummary(all, counts))
+	b.WriteByte('\n')
 	for _, d := range all {
 		path := d.Path
 		if rel, err := filepath.Rel(root, d.Path); err == nil && !strings.HasPrefix(rel, "..") {
@@ -137,7 +140,77 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		b.WriteByte('\n')
 	}
 
-	return Result{Content: strings.TrimRight(b.String(), "\n")}, nil
+	return Result{
+		Content:  strings.TrimRight(b.String(), "\n"),
+		Metadata: diagnosticsMetadata(all, counts),
+	}, nil
+}
+
+// Metadata keys the diagnostics tool sets so downstream consumers (the agent
+// loop, the TUI) can react to severity tallies without re-parsing the rendered
+// list.
+const (
+	// MetadataDiagnosticCount holds the int total of reported diagnostics.
+	MetadataDiagnosticCount = "diagnostic_count"
+	// MetadataDiagnosticErrors holds the int count of error-severity diagnostics.
+	MetadataDiagnosticErrors = "diagnostic_errors"
+	// MetadataDiagnosticWarnings holds the int count of warning-severity diagnostics.
+	MetadataDiagnosticWarnings = "diagnostic_warnings"
+)
+
+// severityCounts tallies diagnostics by severity, indexed by the lsp.Severity
+// value (Error..Hint). Index 0 is unused so a severity can index directly.
+func severityCounts(diags []lsp.Diagnostic) [5]int {
+	var counts [5]int
+	for _, d := range diags {
+		if d.Severity >= lsp.Error && d.Severity <= lsp.Hint {
+			counts[d.Severity]++
+		}
+	}
+	return counts
+}
+
+// diagnosticsSummary renders the leading header line, e.g.
+// "3 diagnostics across 2 files (2 errors, 1 warning):". Only severities with a
+// nonzero count are listed, in error→hint order, so the breakdown stays compact.
+func diagnosticsSummary(diags []lsp.Diagnostic, counts [5]int) string {
+	files := map[string]struct{}{}
+	for _, d := range diags {
+		files[d.Path] = struct{}{}
+	}
+	var parts []string
+	for _, sev := range []lsp.Severity{lsp.Error, lsp.Warning, lsp.Information, lsp.Hint} {
+		if n := counts[sev]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, pluralize(severityString(sev), n)))
+		}
+	}
+	header := fmt.Sprintf("%d %s across %d %s",
+		len(diags), pluralize("diagnostic", len(diags)),
+		len(files), pluralize("file", len(files)),
+	)
+	if len(parts) > 0 {
+		header += " (" + strings.Join(parts, ", ") + ")"
+	}
+	return header + ":"
+}
+
+// diagnosticsMetadata exposes the total and the error/warning tallies so the TUI
+// and agent loop can surface counts without re-parsing the rendered list.
+func diagnosticsMetadata(diags []lsp.Diagnostic, counts [5]int) map[string]any {
+	return map[string]any{
+		MetadataDiagnosticCount:    len(diags),
+		MetadataDiagnosticErrors:   counts[lsp.Error],
+		MetadataDiagnosticWarnings: counts[lsp.Warning],
+	}
+}
+
+// pluralize appends an "s" to word when n is not 1. The severity labels and the
+// nouns used here ("diagnostic", "file") all pluralize regularly.
+func pluralize(word string, n int) string {
+	if n == 1 {
+		return word
+	}
+	return word + "s"
 }
 
 func diagnosticFiles(ctx context.Context, root string) ([]string, error) {

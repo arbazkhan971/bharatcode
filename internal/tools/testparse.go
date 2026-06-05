@@ -70,6 +70,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseCTestFailures(output)
 	case runnerPlaywright:
 		return parsePlaywrightFailures(output)
+	case runnerMinitest:
+		return parseMinitestFailures(output)
 	default:
 		return nil
 	}
@@ -97,6 +99,7 @@ const (
 	runnerMocha
 	runnerCTest
 	runnerPlaywright
+	runnerMinitest
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -137,6 +140,14 @@ var (
 	// ctesting" — and the unrelated "go test"/"cargo test" runners, which never
 	// contain the "ctest" substring at a word boundary — from matching.
 	ctestRe = regexp.MustCompile(`\bctest\b`)
+	// Minitest is Ruby's stdlib test framework and the Rails default. It has no
+	// single binary, so it is recognized by its idiomatic invocations: "rails
+	// test" / "rake test" (Rails/Rake task), a literal "minitest", or the classic
+	// "ruby -Itest ..." load-path runner. \b keeps prose ("rake testing notes")
+	// and the unrelated "go test"/"cargo test" runners — which never contain these
+	// substrings at a word boundary — from matching. Checked after rspecRe so a
+	// "bundle exec rspec" invocation (RSpec, not Minitest) is classified first.
+	minitestRe = regexp.MustCompile(`\brails test\b|\brake test\b|\bminitest\b|\bruby\b.*\s-itest\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -152,6 +163,14 @@ func classifyTestRunner(command string) testRunner {
 		return runnerGo
 	case rspecRe.MatchString(c):
 		return runnerRSpec
+	case minitestRe.MatchString(c):
+		// `rails test`/`rake test`/`ruby -Itest ...` drive Minitest, whose default
+		// reporter numbers each failure ("  1) Failure:"/"  1) Error:") and prints
+		// the "Class#method [file:line]:" id and assertion/exception message on the
+		// lines beneath. Checked after RSpec so a "bundle exec rspec" invocation is
+		// not misread, and before the JS/Python runners (a Ruby invocation carries
+		// none of their substrings) to guard against future overlap.
+		return runnerMinitest
 	case mavenRe.MatchString(c):
 		// `mvn test`/`mvn verify` (and the `mvnw` wrapper) drive the Surefire
 		// plugin, whose console output marks each failure with "<<< FAILURE!" or
@@ -1395,6 +1414,73 @@ func parsePlaywrightFailures(output string) []testFailure {
 				f.Detail = t
 				break
 			}
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "  1) Failure:" / "  1) Error:" — the numbered header that opens each entry
+	// in Minitest's failure report. Minitest numbers failures and errors together
+	// in a single sequence, and the kind ("Failure"/"Error") is captured so it can
+	// distinguish an assertion failure from an uncaught exception.
+	minitestHeaderRe = regexp.MustCompile(`^\s*\d+\) (Failure|Error):\s*$`)
+	// "CalculatorTest#test_addition [test/calculator_test.rb:8]:" — the test id
+	// line printed immediately beneath a header. The id is "Class#method" (the
+	// nesting "::" of a namespaced class is part of Class), optionally followed by
+	// a " [file:line]" source location; both end in a colon. The id is the
+	// re-runnable name; the bracketed location is captured as a detail fallback.
+	minitestIDRe = regexp.MustCompile(`^(\S+#\S+?)(?: \[([^\]]+)\])?:\s*$`)
+)
+
+// parseMinitestFailures extracts failing tests from Minitest output (`rails
+// test`/`rake test`/`ruby -Itest ...`). Each entry opens with a "  N) Failure:"
+// or "  N) Error:" header, followed by a "Class#method [file:line]:" id line and
+// then the assertion or exception message. Name is the "Class#method" id; Detail
+// is the first non-empty message line after the id (e.g. "Expected: 5" or
+// "ZeroDivisionError: divided by 0"), located before the next header so an entry
+// without a body does not borrow the following one's. When no message line is
+// present the bracketed source location is used as the detail instead.
+func parseMinitestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		if minitestHeaderRe.FindStringSubmatch(lines[i]) == nil {
+			continue
+		}
+		// The id sits on the next non-empty line beneath the header.
+		j := i + 1
+		for j < len(lines) && strings.TrimSpace(lines[j]) == "" {
+			j++
+		}
+		if j >= len(lines) {
+			break
+		}
+		idm := minitestIDRe.FindStringSubmatch(strings.TrimSpace(lines[j]))
+		if idm == nil {
+			continue
+		}
+		name := strings.TrimSpace(idm[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		// The assertion/exception message is the first non-empty line after the id,
+		// before the next numbered header. Fall back to the bracketed location.
+		for k := j + 1; k < len(lines); k++ {
+			if minitestHeaderRe.MatchString(lines[k]) {
+				break
+			}
+			if t := strings.TrimSpace(lines[k]); t != "" {
+				f.Detail = t
+				break
+			}
+		}
+		if f.Detail == "" {
+			f.Detail = idm[2]
 		}
 		failures = append(failures, f)
 	}

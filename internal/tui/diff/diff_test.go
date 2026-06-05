@@ -499,3 +499,44 @@ func TestUnifiedHeader_StyledDistinctly(t *testing.T) {
 	require.Contains(t, lines, theme.DiffAdd.Render("+new"))
 	require.Contains(t, lines, theme.DiffRemove.Render("-old"))
 }
+
+// TestUnifiedNumbered_NoNewlineMarkerNotNumbered checks that git's "\ No newline
+// at end of file" annotation gets a blank gutter and does not advance the
+// line-number counters, so the lines following it keep their correct numbers
+// instead of being shifted by one.
+func TestUnifiedNumbered_NoNewlineMarkerNotNumbered(t *testing.T) {
+	t.Parallel()
+
+	// The removed line ends the old file without a trailing newline; the marker
+	// trails it. A context line follows so we can check its number is intact.
+	patch := "@@ -1,3 +1,3 @@\n-old\n\\ No newline at end of file\n+new\n context\n more\n"
+	got := New(styles.Theme{}).RenderUnifiedNumbered(patch, 120)
+	lines := strings.Split(got, "\n")
+
+	want := []string{
+		"    @@ -1,3 +1,3 @@",
+		"1   -old",
+		"    \\ No newline at end of file",
+		"  1 +new",
+		"2 2  context",
+		"3 3  more",
+	}
+	require.Equal(t, want, lines)
+}
+
+// TestUnified_NoNewlineMarkerMuted checks that the "\ No newline at end of file"
+// annotation is dimmed rather than styled as added or removed content, so it
+// reads as a quiet note in the diff.
+func TestUnified_NoNewlineMarkerMuted(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n"
+	out := New(theme).RenderUnified(patch, 120)
+	lines := strings.Split(out, "\n")
+
+	marker := "\\ No newline at end of file"
+	require.Contains(t, lines, theme.Muted.Render(marker))
+	require.NotContains(t, lines, theme.DiffRemove.Render(marker))
+	require.NotContains(t, lines, theme.DiffAdd.Render(marker))
+}

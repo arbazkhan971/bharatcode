@@ -192,6 +192,15 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 	}
 }
 
+// navigateLocationCap bounds how many location entries renderLocations emits.
+// A references or call-hierarchy lookup on a widely-used symbol can resolve to
+// hundreds of sites; rendering them all floods the context with little marginal
+// value. Capping mirrors the grep tool's grepMatchCap bounded-output philosophy.
+// The summary header that referencesResult/callsResult prefix still reports the
+// true total, and a trailing "... and N more" notice records what was elided so
+// the model knows the list was truncated rather than complete.
+const navigateLocationCap = 200
+
 // locationsResult renders LSP locations as a sorted, deduplicated list of
 // `path:line:column: <source line>` entries, paths made workspace-relative
 // where possible. The trailing source line is the trimmed text at the location
@@ -202,7 +211,7 @@ func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
 	if len(locs) == 0 {
 		return Result{Content: emptyMsg}
 	}
-	body, _ := renderLocations(root, locs)
+	body, _, _ := renderLocations(root, locs)
 	return Result{Content: body}
 }
 
@@ -214,10 +223,9 @@ func referencesResult(root string, locs []lsp.Location) Result {
 	if len(locs) == 0 {
 		return Result{Content: "No references found."}
 	}
-	body, files := renderLocations(root, locs)
-	refs := strings.Count(body, "\n") + 1
+	body, total, files := renderLocations(root, locs)
 	header := fmt.Sprintf("%d %s across %d %s:",
-		refs, plural(refs, "reference", "references"),
+		total, plural(total, "reference", "references"),
 		files, plural(files, "file", "files"))
 	return Result{Content: header + "\n" + body}
 }
@@ -231,10 +239,9 @@ func callsResult(root string, locs []lsp.Location, singular, plural2, emptyMsg s
 	if len(locs) == 0 {
 		return Result{Content: emptyMsg}
 	}
-	body, files := renderLocations(root, locs)
-	count := strings.Count(body, "\n") + 1
+	body, total, files := renderLocations(root, locs)
 	header := fmt.Sprintf("%d %s across %d %s:",
-		count, plural(count, singular, plural2),
+		total, plural(total, singular, plural2),
 		files, plural(files, "file", "files"))
 	return Result{Content: header + "\n" + body}
 }
@@ -248,10 +255,13 @@ func plural(n int, singular, plural string) string {
 }
 
 // renderLocations sorts and deduplicates locs, returning the formatted entry
-// list (one `path:line:column[: source]` per line, no trailing newline) and the
-// number of distinct files those entries span. Callers guarantee locs is
-// non-empty.
-func renderLocations(root string, locs []lsp.Location) (string, int) {
+// list (one `path:line:column[: source]` per line, no trailing newline), the
+// total number of distinct entries, and the number of distinct files those
+// entries span. The body is capped at navigateLocationCap entries — beyond that
+// a trailing "... and N more (M total) not shown" line is appended — but the
+// returned total counts every distinct entry so callers' summary headers report
+// the real scope. Callers guarantee locs is non-empty.
+func renderLocations(root string, locs []lsp.Location) (string, int, int) {
 	sort.Slice(locs, func(i, j int) bool {
 		if locs[i].Path != locs[j].Path {
 			return locs[i].Path < locs[j].Path
@@ -262,30 +272,50 @@ func renderLocations(root string, locs []lsp.Location) (string, int) {
 		return locs[i].Range.Start.Character < locs[j].Range.Start.Character
 	})
 
-	lineCache := map[string][]string{}
+	// Deduplicate by rendered coordinate first so the total count and the cap
+	// both operate on distinct sites. Locations are sorted, so duplicates are
+	// adjacent and a single look-back suffices.
+	type entry struct {
+		coord string
+		path  string // absolute path, for source-line lookup
+		line  int
+	}
 	files := map[string]struct{}{}
-	var b strings.Builder
+	var entries []entry
 	var last string
 	for _, l := range locs {
 		path := l.Path
 		if rel, err := filepath.Rel(root, l.Path); err == nil && !strings.HasPrefix(rel, "..") {
 			path = filepath.ToSlash(rel)
 		}
-		entry := fmt.Sprintf("%s:%d:%d", path, l.Range.Start.Line+1, l.Range.Start.Character+1)
-		if entry == last {
+		coord := fmt.Sprintf("%s:%d:%d", path, l.Range.Start.Line+1, l.Range.Start.Character+1)
+		if coord == last {
 			continue
 		}
-		last = entry
+		last = coord
 		files[l.Path] = struct{}{}
-		b.WriteString(entry)
-		if snippet := sourceLine(lineCache, l.Path, l.Range.Start.Line); snippet != "" {
+		entries = append(entries, entry{coord: coord, path: l.Path, line: l.Range.Start.Line})
+	}
+
+	shown := len(entries)
+	if shown > navigateLocationCap {
+		shown = navigateLocationCap
+	}
+	lineCache := map[string][]string{}
+	var b strings.Builder
+	for _, e := range entries[:shown] {
+		b.WriteString(e.coord)
+		if snippet := sourceLine(lineCache, e.path, e.line); snippet != "" {
 			b.WriteString(": ")
 			b.WriteString(snippet)
 		}
 		b.WriteByte('\n')
 	}
+	if len(entries) > navigateLocationCap {
+		fmt.Fprintf(&b, "... and %d more (%d total) not shown\n", len(entries)-navigateLocationCap, len(entries))
+	}
 
-	return strings.TrimRight(b.String(), "\n"), len(files)
+	return strings.TrimRight(b.String(), "\n"), len(entries), len(files)
 }
 
 // sourceLine returns the trimmed text of the zero-based line in path, reading

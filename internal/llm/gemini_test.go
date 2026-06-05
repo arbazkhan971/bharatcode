@@ -702,6 +702,45 @@ func TestGeminiThinkingBudgetForEffort(t *testing.T) {
 	require.Equal(t, 4096, geminiThinkingBudgetForEffort("low"))
 	require.Equal(t, 8192, geminiThinkingBudgetForEffort("medium"))
 	require.Equal(t, 16384, geminiThinkingBudgetForEffort("HIGH"), "match must be case-insensitive")
+	require.Equal(t, -1, geminiThinkingBudgetForEffort("auto"), "auto must select dynamic thinking")
+	require.Equal(t, -1, geminiThinkingBudgetForEffort("Dynamic"), "dynamic must select dynamic thinking, case-insensitive")
+}
+
+func TestGeminiDynamicThinkingBudgetFromReasoningEffort(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-2.5-flash", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	// "auto" maps to Gemini's dynamic-thinking sentinel (-1): thinkingConfig must
+	// be emitted with a -1 budget so the model sizes its own reasoning, and the
+	// caller's maxOutputTokens cap must be left untouched (there is no fixed
+	// budget to reserve room beyond).
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-2.5-flash",
+		Messages:        []message.Message{textMsg("think")},
+		ReasoningEffort: "auto",
+		MaxTokens:       1000,
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig, "auto effort must produce a generationConfig")
+	tc := captured.GenerationConfig.ThinkingConfig
+	require.NotNil(t, tc, "auto effort must produce a thinkingConfig on a supported model")
+	require.True(t, tc.IncludeThoughts)
+	require.NotNil(t, tc.ThinkingBudget)
+	require.Equal(t, -1, *tc.ThinkingBudget, "auto must send the dynamic-thinking sentinel")
+	require.Equal(t, 1000, captured.GenerationConfig.MaxOutputTokens,
+		"dynamic thinking must not lift the maxOutputTokens cap")
 }
 
 func TestGeminiLiftsMaxOutputTokensAboveThinkingBudget(t *testing.T) {

@@ -441,6 +441,22 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+f":
 		m.filetree.toggle(m.workspaceRoot)
 		return m, nil
+	case "pgup":
+		// Page through the scrollback from the keyboard, mirroring the mouse
+		// wheel. PageUp reveals an older page; the offset is clamped at render.
+		m.scrollChatPageUp()
+		return m, nil
+	case "pgdown":
+		m.scrollChatPageDown()
+		return m, nil
+	case "home":
+		// Jump to the very top (oldest content) and bottom (newest), the way a
+		// pager binds Home/End, so a long transcript is reachable without paging.
+		m.scrollChatTop()
+		return m, nil
+	case "end":
+		m.scrollChatBottom()
+		return m, nil
 	case "ctrl+/":
 		// Advance to the next scrollback-search match. With no active search it
 		// is inert, so the binding never disturbs an un-searched view.
@@ -1018,6 +1034,8 @@ func keybindingHelpBody() string {
 	return strings.Join([]string{
 		"Tab        switch focus, or complete a /command or @file",
 		"Up/Down    recall previous prompts",
+		"PgUp/PgDn  scroll the chat a page at a time",
+		"Home/End   jump to the oldest/newest message",
 		"Ctrl+C     interrupt the agent, or quit on an empty prompt",
 		"Ctrl+T     new tab",
 		"Ctrl+W     close tab",

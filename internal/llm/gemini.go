@@ -31,6 +31,35 @@ const defaultGeminiMaxTokens = 8192
 // accept, so the same effort is valid across the 2.5 family. An empty or
 // unrecognized label returns 0, which leaves thinking unconfigured (the model's
 // own default applies).
+// geminiSafetyCategories lists the harm categories Gemini scores on both the
+// prompt and the response. The agent relaxes every category to BLOCK_NONE (see
+// geminiSafetySettings) so that legitimate software-engineering content — shell
+// commands, security tooling, exploit write-ups in a CTF context — is not
+// silently dropped with a SAFETY finishReason. HARM_CATEGORY_CIVIC_INTEGRITY is
+// intentionally omitted: it is not accepted on all Gemini model versions and a
+// rejected category would 400 the whole request.
+var geminiSafetyCategories = []string{
+	"HARM_CATEGORY_HARASSMENT",
+	"HARM_CATEGORY_HATE_SPEECH",
+	"HARM_CATEGORY_SEXUALLY_EXPLICIT",
+	"HARM_CATEGORY_DANGEROUS_CONTENT",
+}
+
+// geminiSafetySettings relaxes every scored harm category to BLOCK_NONE. The
+// threshold BLOCK_NONE (rather than the newer OFF) is used because it is
+// accepted across the whole Gemini 1.5/2.x/3 line, whereas OFF is rejected by
+// older versions. Set once at init since it never varies per request.
+var geminiSafetySettings = func() []geminiSafetySetting {
+	settings := make([]geminiSafetySetting, 0, len(geminiSafetyCategories))
+	for _, category := range geminiSafetyCategories {
+		settings = append(settings, geminiSafetySetting{
+			Category:  category,
+			Threshold: "BLOCK_NONE",
+		})
+	}
+	return settings
+}()
+
 func geminiThinkingBudgetForEffort(effort string) int {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "low":
@@ -338,7 +367,7 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 		return geminiRequest{}, err
 	}
 
-	out := geminiRequest{Contents: contents}
+	out := geminiRequest{Contents: contents, SafetySettings: geminiSafetySettings}
 
 	if req.SystemPrompt != "" {
 		out.SystemInstruction = &geminiContent{
@@ -521,6 +550,14 @@ type geminiRequest struct {
 	SystemInstruction *geminiContent          `json:"system_instruction,omitempty"`
 	Tools             []geminiTool            `json:"tools,omitempty"`
 	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
+	SafetySettings    []geminiSafetySetting   `json:"safetySettings,omitempty"`
+}
+
+// geminiSafetySetting overrides the block threshold for one harm category. See
+// geminiSafetySettings for why the agent sends BLOCK_NONE across the board.
+type geminiSafetySetting struct {
+	Category  string `json:"category"`
+	Threshold string `json:"threshold"`
 }
 
 // geminiCountTokensRequest is the body of a models/{model}:countTokens call.

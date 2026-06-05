@@ -14,6 +14,10 @@ Call `multiedit` when BharatCode needs to apply several exact text replacements 
 - `edits[].new` string, required: replacement text for that step.
 - `edits[].replace_all` boolean, optional: replace every match for that step (use sparingly).
 
+## Matching
+
+Each `old` is matched exactly first. If an exact match is not found and `old` spans two or more lines, BharatCode falls back to the same whitespace-tolerant matching used by `edit` (line-trimmed, internal-whitespace-normalized, then block anchors) so indentation drift does not defeat a correct edit; flexible matches must still be unambiguous, and the result notes how many edits used the fallback. `new` is written verbatim, so include the file's indentation in it.
+
 ## Success
 
 BharatCode rewrites the file once, records the write in the file tracker, and returns replacement counts plus before and after hashes in metadata.

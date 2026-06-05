@@ -83,6 +83,32 @@ func (m *Manager) Diagnostics(ctx context.Context, path string) ([]Diagnostic, e
 	return diagnostics, nil
 }
 
+// NotifyChange informs the language server for path that its on-disk contents
+// changed (e.g. after an edit) so a subsequent Diagnostics call reflects the new
+// text instead of the version the server first opened. It is a no-op (nil error)
+// for files with no configured language server.
+func (m *Manager) NotifyChange(ctx context.Context, path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolving change path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+
+	return c.change(ctx, abs)
+}
+
 // Hover returns the hover text the language server reports for the position in
 // path, starting a server if needed. An empty string with a nil error means no
 // server is configured for the file or the server reported no hover.

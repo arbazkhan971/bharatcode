@@ -27,6 +27,7 @@ type client struct {
 	writeMu         sync.Mutex
 	pending         map[int64]chan responseMessage
 	opened          map[string]struct{}
+	versions        map[string]int
 	diagnosticCache map[string][]Diagnostic
 	diagnosticWait  map[string][]chan struct{}
 	pullDiagnostic  bool
@@ -69,6 +70,7 @@ func startClient(ctx context.Context, spec languageSpec, root string) (*client, 
 		done:            make(chan struct{}),
 		pending:         make(map[int64]chan responseMessage),
 		opened:          make(map[string]struct{}),
+		versions:        make(map[string]int),
 		diagnosticCache: make(map[string][]Diagnostic),
 		diagnosticWait:  make(map[string][]chan struct{}),
 	}
@@ -187,6 +189,7 @@ func (c *client) open(ctx context.Context, path string) error {
 		return nil
 	}
 	c.opened[abs] = struct{}{}
+	c.versions[abs] = 1
 	c.mu.Unlock()
 
 	data, err := os.ReadFile(abs)
@@ -206,6 +209,58 @@ func (c *client) open(ctx context.Context, path string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("sending didOpen notification: %w", err)
+	}
+	return nil
+}
+
+// change re-syncs an already-open document with its current on-disk contents
+// and drops any cached diagnostics for it, so the next diagnostics request
+// blocks for the server's analysis of the new text rather than returning the
+// version the server first saw. If the document was never opened it is opened
+// instead (open performs the initial sync). This is used after the agent edits
+// a file so the language server reports problems against the edit.
+func (c *client) change(ctx context.Context, path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolving document path: %w", err)
+	}
+
+	c.mu.Lock()
+	_, isOpen := c.opened[abs]
+	c.mu.Unlock()
+	if !isOpen {
+		return c.open(ctx, abs)
+	}
+
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return fmt.Errorf("reading document: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("changing document: %w", err)
+	}
+
+	c.mu.Lock()
+	c.versions[abs]++
+	version := c.versions[abs]
+	// Invalidate the cache so push-model servers' next diagnostics request waits
+	// for the publish triggered by this change instead of the stale analysis.
+	delete(c.diagnosticCache, abs)
+	c.mu.Unlock()
+
+	err = c.notify("textDocument/didChange", map[string]any{
+		"textDocument": map[string]any{
+			"uri":     pathToURI(abs),
+			"version": version,
+		},
+		// Full-document sync: send the whole file as a single change with no
+		// range. Every server that declares text sync support accepts this form.
+		"contentChanges": []map[string]any{
+			{"text": string(data)},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("sending didChange notification: %w", err)
 	}
 	return nil
 }

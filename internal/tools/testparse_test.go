@@ -22,6 +22,8 @@ func TestClassifyTestRunner(t *testing.T) {
 		"npx jest src/":                         runnerJest,
 		"cargo test":                            runnerCargo,
 		"cargo test --release foo":              runnerCargo,
+		"cargo nextest run":                     runnerNextest,
+		"cargo nextest run --no-fail-fast":      runnerNextest,
 		"rspec":                                 runnerRSpec,
 		"bundle exec rspec spec/foo_spec.rb":    runnerRSpec,
 		"bin/rspec":                             runnerRSpec,
@@ -373,6 +375,37 @@ func TestParseCargoTestFailures_BuildFailedNoTarget(t *testing.T) {
 	got := parseTestFailures("cargo test", out)
 	want := []testFailure{
 		{Name: "demo [build failed]"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseNextestFailures(t *testing.T) {
+	out := `    Starting 2 tests across 1 binary
+        PASS [   0.004s] demo tests::ok
+        FAIL [   0.005s] demo tests::it_works
+
+--- STDERR:              demo tests::it_works ---
+thread 'tests::it_works' panicked at src/lib.rs:10:5:
+assertion failed: left == right
+
+------------
+     Summary [   0.006s] 2 tests run: 1 passed, 1 failed, 0 skipped
+        FAIL [   0.005s] demo tests::it_works`
+	got := parseTestFailures("cargo nextest run", out)
+	want := []testFailure{
+		{Name: "demo tests::it_works", Detail: "src/lib.rs:10:5:"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseNextestFailures_BuildFailed(t *testing.T) {
+	out := `   Compiling demo v0.1.0 (/tmp/demo)
+error[E0425]: cannot find value ` + "`x`" + ` in this scope
+
+error: could not compile ` + "`demo`" + ` (lib test) due to 1 previous error`
+	got := parseTestFailures("cargo nextest run", out)
+	want := []testFailure{
+		{Name: "demo (lib test) [build failed]", Detail: "error[E0425]: cannot find value `x` in this scope"},
 	}
 	assertFailures(t, got, want)
 }

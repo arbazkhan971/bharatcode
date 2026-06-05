@@ -107,17 +107,31 @@ var contextWindowRules = []struct {
 	{"o1", 200_000},
 	{"o3", 200_000},
 	{"o4", 200_000},
+	// OpenAI open-weight gpt-oss models ship a 128k window. None of the broader
+	// "gpt" markers is a prefix of "gpt-oss", so placement here is for grouping.
+	{"gpt-oss", 128_000},
 	// Anthropic — every shipping Claude model exposes a 200k window.
 	{"claude", 200_000},
 	// Google Gemini — 1.5 Pro is 2M, the rest of the 1.5/2.x line is 1M.
 	{"gemini-1.5-pro", 2_097_152},
 	{"gemini-1.5", 1_048_576},
 	{"gemini-2", 1_048_576},
+	// xAI Grok — the grok-2/3/4 line exposes a 131k window.
+	{"grok", 131_072},
+	// Perplexity Sonar — the pro tier is 200k, the rest 128k, so the more
+	// specific "sonar-pro" marker must precede the bare "sonar".
+	{"sonar-pro", 200_000},
+	{"sonar", 128_000},
 	// Common open-weight families served via openai_compatible/ollama.
 	{"llama", 128_000},
 	{"mixtral", 32_768},
+	// Mistral's Codestral exposes a 256k window, far larger than the rest of the
+	// Mistral line, so its specific marker precedes the family one.
+	{"codestral", 256_000},
 	{"mistral", 32_768},
 	{"qwen", 32_768},
+	// Moonshot Kimi K2 exposes a 200k window.
+	{"kimi", 200_000},
 	{"deepseek", 65_536},
 }
 

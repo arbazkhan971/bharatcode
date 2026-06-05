@@ -384,7 +384,7 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 	if len(req.Tools) > 0 {
 		decls := make([]geminiFunctionDecl, 0, len(req.Tools))
 		for _, tool := range req.Tools {
-			schema := tool.InputSchema
+			schema := sanitizeGeminiSchema(tool.InputSchema)
 			if len(schema) == 0 {
 				schema = json.RawMessage(`{"type":"object"}`)
 			}
@@ -445,6 +445,72 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 	}
 
 	return out, nil
+}
+
+// geminiUnsupportedSchemaKeys names JSON Schema keywords that the Gemini
+// generateContent function-declaration parameters field rejects with a 400
+// ("Unknown name ..."). Gemini accepts only an OpenAPI 3.0 Schema subset, so a
+// tool whose InputSchema carries any of these — as schemas emitted by common
+// JSON Schema generators routinely do (a top-level "$schema", an
+// "additionalProperties": false on every object) — fails the whole request.
+// Each key here is metadata or a constraint Gemini ignores anyway, so dropping
+// it is safe and changes no accepted-request semantics; keys whose removal would
+// leave a dangling reference (notably "$ref"/"$defs") are deliberately not
+// listed, since those need resolution rather than deletion.
+var geminiUnsupportedSchemaKeys = map[string]struct{}{
+	"$schema":               {},
+	"$id":                   {},
+	"$comment":              {},
+	"additionalProperties":  {},
+	"patternProperties":     {},
+	"unevaluatedProperties": {},
+}
+
+// sanitizeGeminiSchema returns raw with every Gemini-unsupported JSON Schema
+// keyword (see geminiUnsupportedSchemaKeys) recursively removed, so a tool
+// schema written for the OpenAI/Anthropic dialects is accepted by Gemini's
+// stricter parameters field instead of 400-ing the request. It recurses
+// generically into every nested value, so keywords buried in "properties",
+// "items", or an "anyOf" branch are stripped too. A schema that does not parse
+// as JSON is returned unchanged: the sanitizer never makes a request worse than
+// the raw passthrough it replaced.
+func sanitizeGeminiSchema(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return raw
+	}
+	cleaned, err := json.Marshal(stripGeminiSchemaKeys(decoded))
+	if err != nil {
+		return raw
+	}
+	return cleaned
+}
+
+// stripGeminiSchemaKeys walks an already-decoded JSON value, deleting
+// unsupported keys from every object it contains and recursing into the
+// remaining values and into array elements.
+func stripGeminiSchemaKeys(node any) any {
+	switch v := node.(type) {
+	case map[string]any:
+		for key := range v {
+			if _, bad := geminiUnsupportedSchemaKeys[key]; bad {
+				delete(v, key)
+				continue
+			}
+			v[key] = stripGeminiSchemaKeys(v[key])
+		}
+		return v
+	case []any:
+		for i := range v {
+			v[i] = stripGeminiSchemaKeys(v[i])
+		}
+		return v
+	default:
+		return node
+	}
 }
 
 func buildGeminiContents(history []message.Message) ([]geminiContent, error) {

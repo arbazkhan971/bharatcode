@@ -133,6 +133,12 @@ var contextWindowRules = []struct {
 	{"gpt-4", 8_192},
 	{"gpt-3.5", 16_385},
 	{"gpt-5", 400_000},
+	// OpenAI o-series. The released o1 (and o3/o4-mini) expose a 200k window, but
+	// the earlier o1-preview and o1-mini shipped only 128k. Both carry the "o1"
+	// marker, so their specific rules must precede the family one to avoid falling
+	// through to 200k.
+	{"o1-preview", 128_000},
+	{"o1-mini", 128_000},
 	{"o1", 200_000},
 	{"o3", 200_000},
 	{"o4", 200_000},

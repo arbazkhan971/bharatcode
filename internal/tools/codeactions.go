@@ -243,6 +243,15 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, path string, orde
 		}
 	}
 	if len(action.Edit.Changes) == 0 {
+		// An action may consist solely of file create/rename/delete operations (e.g.
+		// a "move file" refactor). There are no text edits to apply, but the model
+		// must still learn what the server wanted to do.
+		if note := resourceOpsNote(action.Edit.ResourceOps, t.workDir); note != "" {
+			return Result{
+				Content:  fmt.Sprintf("No text edits were applied for %q.\n\n%s", title, note),
+				Metadata: map[string]any{"resource_ops": len(action.Edit.ResourceOps)},
+			}, nil
+		}
 		if action.Command != nil && action.Command.Command != "" {
 			return errorResult(fmt.Sprintf("cannot apply %q: it is a server-side command (%s), not an inline edit", title, action.Command.Command)), nil
 		}
@@ -337,6 +346,14 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, path string, orde
 	}
 	if len(diffs) > 0 {
 		metadata["diffs"] = diffs
+	}
+	// A refactor may bundle file create/rename/delete operations with its text
+	// edits (gopls "extract to new file", rust-analyzer "move to module"). Those
+	// are not applied, so warn rather than letting the model assume the refactor
+	// is complete.
+	if note := resourceOpsNote(action.Edit.ResourceOps, t.workDir); note != "" {
+		fmt.Fprintf(&b, "\n%s\n", note)
+		metadata["resource_ops"] = len(action.Edit.ResourceOps)
 	}
 
 	// Applying a quick fix or refactor can introduce errors (a now-unused import,

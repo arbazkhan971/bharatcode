@@ -89,6 +89,64 @@ func TestRenameAppliesEditsAcrossFiles(t *testing.T) {
 	require.Contains(t, diffs["a.go"], "+bar()")
 }
 
+func TestRenameWarnsAboutUnappliedResourceOps(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("foo()\n"), 0o644))
+
+	// A server can bundle a file rename alongside the text edits. The text edit is
+	// applied, but the file operation is not, so the result must warn rather than
+	// imply the rename is complete.
+	src := &fakeRename{edit: lsp.WorkspaceEdit{
+		Changes:     map[string][]lsp.TextEdit{a: {replaceWord(0, 3, "bar")}},
+		ResourceOps: []lsp.ResourceOperation{{Kind: "rename", OldPath: a, NewPath: filepath.Join(dir, "bar.go")}},
+	}}
+	tool := &renameTool{source: src, deps: Dependencies{WorkDir: dir}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "column": 1, "new_name": "bar",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The text edit still landed on disk.
+	got, err := os.ReadFile(a)
+	require.NoError(t, err)
+	require.Equal(t, "bar()\n", string(got))
+
+	// The skipped file operation is surfaced, with workspace-relative paths.
+	require.Contains(t, result.Content, "file operation(s) the server requested were NOT applied")
+	require.Contains(t, result.Content, "rename a.go -> bar.go")
+	require.Equal(t, 1, result.Metadata["resource_ops"])
+}
+
+func TestRenameReportsResourceOpsWhenNoTextEdits(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("foo()\n"), 0o644))
+
+	// A rename that resolves to only a file operation (no text edits) must still
+	// tell the model what the server wanted to do rather than report nothing.
+	src := &fakeRename{edit: lsp.WorkspaceEdit{
+		ResourceOps: []lsp.ResourceOperation{{Kind: "rename", OldPath: a, NewPath: filepath.Join(dir, "bar.go")}},
+	}}
+	tool := &renameTool{source: src, deps: Dependencies{WorkDir: dir}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "column": 1, "new_name": "bar",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "No text edits were applied")
+	require.Contains(t, result.Content, "rename a.go -> bar.go")
+	require.Equal(t, 1, result.Metadata["resource_ops"])
+
+	// The original file is untouched.
+	got, err := os.ReadFile(a)
+	require.NoError(t, err)
+	require.Equal(t, "foo()\n", string(got))
+}
+
 func TestRenamePreviewShowsDiffWithoutWriting(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.go")

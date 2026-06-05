@@ -151,6 +151,28 @@ func TestDiagnosticsPushFallback(t *testing.T) {
 	require.NoError(t, manager.Shutdown(ctx))
 }
 
+func TestDefaultExtensionsCoversBuiltinSpecs(t *testing.T) {
+	got := DefaultExtensions()
+	want := []string{
+		".c", ".cc", ".cpp", ".cxx", ".go", ".h", ".hh", ".hpp",
+		".js", ".jsx", ".py", ".rs", ".ts", ".tsx",
+	}
+	require.Equal(t, want, got, "DefaultExtensions must be the sorted union of the built-in language specs")
+}
+
+func TestSupportedExtensionsMatchesDefaultsWithoutConfig(t *testing.T) {
+	manager := NewManager(config.Default(), nil)
+	require.Equal(t, DefaultExtensions(), manager.SupportedExtensions(),
+		"with no configured servers the manager exposes exactly the built-in extensions")
+}
+
+func TestSupportedExtensionsHonorsConfiguredLanguage(t *testing.T) {
+	// A config server bound to a known language reuses that spec's extensions, so
+	// overriding the Go server's command must not drop ".go" from the scan set.
+	manager := NewManager(testConfig("go", "custom-gopls"), nil)
+	require.Contains(t, manager.SupportedExtensions(), ".go")
+}
+
 func TestHoverReturnsServerText(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))

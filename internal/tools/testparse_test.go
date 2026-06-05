@@ -44,6 +44,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"deno test --allow-read mod_test.ts":  runnerDeno,
 		"swift test":                          runnerSwift,
 		"swift test --filter CalculatorTests": runnerSwift,
+		"bun test":                            runnerBun,
+		"bun test ./math.test.ts":             runnerBun,
+		"bun run test":                        runnerNone,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
@@ -774,6 +777,39 @@ func TestParseSwiftTestFailures_NoFailures(t *testing.T) {
 Test Case 'CalculatorTests.testAddition' passed (0.001 seconds).
 Test Suite 'All tests' passed at 2026-06-05 10:00:01.000`
 	if got := parseTestFailures("swift test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseBunTestFailures(t *testing.T) {
+	out := `bun test v1.1.0
+
+math.test.ts:
+✓ adds two numbers [0.42ms]
+✗ subtracts two numbers [0.31ms]
+✗ math > divides two numbers [1.20s]
+
+ 5 |   expect(subtract(5, 3)).toBe(1);
+                              ^
+error: expect(received).toBe(expected)
+
+ 2 pass
+ 2 fail`
+	got := parseTestFailures("bun test", out)
+	want := []testFailure{
+		{Name: "subtracts two numbers"},
+		{Name: "math > divides two numbers"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseBunTestFailures_NoFailures(t *testing.T) {
+	out := `math.test.ts:
+✓ adds two numbers [0.42ms]
+
+ 1 pass
+ 0 fail`
+	if got := parseTestFailures("bun test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

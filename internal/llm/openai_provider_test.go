@@ -346,6 +346,16 @@ func TestIsReasoningModel(t *testing.T) {
 		{"deepseek-chat", false},
 		{"o1mini", false},
 		{"", false},
+		// OpenRouter and other aggregators namespace ids as "vendor/model"; the
+		// vendor prefix must be stripped before classifying so prefixed reasoning
+		// models still gate out temperature/max_tokens.
+		{"openai/o3-mini", true},
+		{"openai/gpt-5", true},
+		{"openai/gpt-5-mini", true},
+		{"openai/gpt-5-chat", false},
+		{"openai/gpt-4o", false},
+		{"openrouter/openai/o3", true},
+		{"google/gemini-2.5-pro", false},
 	}
 	for _, tc := range cases {
 		require.Equalf(t, tc.want, isReasoningModel(tc.id), "isReasoningModel(%q)", tc.id)

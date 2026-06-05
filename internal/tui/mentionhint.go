@@ -95,9 +95,17 @@ func mentionMatches(token, root string) []string {
 		if matched[i].score != matched[j].score {
 			return matched[i].score < matched[j].score
 		}
-		// Within a score band, prefer shallower paths, then shorter ones, so a
-		// top-level file outranks a deeply-nested namesake. The stable sort then
-		// leaves the original lexical order for remaining ties.
+		// Within a score band, prefer the candidate whose matched runes sit closer
+		// together: a tighter span reads as a more deliberate match, the way fzf and
+		// opencode reward contiguity over a token threaded across a long name. Bands
+		// that already match contiguously (prefix/substring) report an equal span,
+		// so this only reorders the looser acronym and subsequence bands.
+		if si, sj := matchSpan(lower, matched[i].path), matchSpan(lower, matched[j].path); si != sj {
+			return si < sj
+		}
+		// Then prefer shallower paths, then shorter ones, so a top-level file
+		// outranks a deeply-nested namesake. The stable sort then leaves the
+		// original lexical order for remaining ties.
 		return shallowerFirst(matched[i].path, matched[j].path)
 	})
 	out := make([]string, 0, len(matched))
@@ -283,6 +291,21 @@ func mentionHintFiles(buffer, root string, st *inputState) (files []string, acti
 		return nil, -1
 	}
 	return files, -1
+}
+
+// matchSpan measures how tightly token matched path: the number of runes from
+// the first matched rune through the last, inclusive, as reported by
+// matchPositions. A contiguous match spans exactly len(token); a subsequence
+// threaded across the name spans wider. It returns 0 when there is no match (or
+// an empty token), so an unmatched candidate never sorts ahead of a matched one
+// on span alone. Used as a relevance tie-break so the picker prefers the
+// candidate whose matched characters sit closer together.
+func matchSpan(token, path string) int {
+	pos := matchPositions(token, path)
+	if len(pos) == 0 {
+		return 0
+	}
+	return pos[len(pos)-1] - pos[0] + 1
 }
 
 // matchPositions returns the rune indices of path that matched token, so the

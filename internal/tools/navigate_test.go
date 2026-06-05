@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
@@ -189,7 +190,46 @@ func TestNavigateReferencesSortsAndDeduplicates(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.False(t, result.IsError)
-	require.Equal(t, "main.go:3:1\nmain.go:9:5", result.Content)
+	// References carry a scope summary header ahead of the deduplicated list.
+	require.Equal(t, "2 references across 1 file:\nmain.go:3:1\nmain.go:9:5", result.Content)
+}
+
+func TestNavigateReferencesCountsDistinctFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	other := filepath.Join(dir, "other.go")
+	require.NoError(t, os.WriteFile(other, []byte("package main\n"), 0o644))
+	src := &fakeNavigate{references: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: other, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: other, Range: lsp.Range{Start: lsp.Position{Line: 3, Character: 2}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "references",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Three references spanning two files; the header reflects both counts.
+	require.True(t, strings.HasPrefix(result.Content, "3 references across 2 files:\n"), result.Content)
+}
+
+func TestNavigateReferencesSingularHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{references: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "references",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// A lone reference uses singular nouns in the header.
+	require.Equal(t, "1 reference across 1 file:\nmain.go:1:1: package main", result.Content)
 }
 
 func TestNavigateReferencesAppendsSourceLines(t *testing.T) {
@@ -207,8 +247,9 @@ func TestNavigateReferencesAppendsSourceLines(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.False(t, result.IsError)
-	// Each entry carries the trimmed source line after its coordinates.
-	require.Equal(t, "main.go:3:6: func Run() {}\nmain.go:5:14: func main() { Run() }", result.Content)
+	// Each entry carries the trimmed source line after its coordinates, below
+	// the scope summary header.
+	require.Equal(t, "2 references across 1 file:\nmain.go:3:6: func Run() {}\nmain.go:5:14: func main() { Run() }", result.Content)
 }
 
 func TestNavigateOmitsSnippetForOutOfRangeLine(t *testing.T) {

@@ -595,24 +595,69 @@ var (
 	// Jest/vitest mark a failed test with "✕" or "×"; trim a trailing "(N ms)".
 	jestFailRe = regexp.MustCompile(`^\s*[✕×] (.+?)(?:\s*\(\d+\s*ms\))?$`)
 	jestTimeRe = regexp.MustCompile(`\s*\(\d+\s*ms\)\s*$`)
+	// "  ● Calculator › subtracts correctly" — the header opening a detailed
+	// failure block. jest/vitest print the full "<suite> › <test>" path here; its
+	// leaf segment (after the last " › ") matches the bare test name printed on
+	// the "✕ <test>" summary line, so it keys the detail lookup.
+	jestDetailHeaderRe = regexp.MustCompile(`^\s*●\s+(.+\S)\s*$`)
 )
 
-// parseJestFailures collects the "✕ <name>" lines emitted by jest and vitest.
-// Detailed assertion blocks ("● <suite> › <name>") are not matched up here;
-// reliably pairing them across reporters is brittle, and the failing names are
-// the actionable signal.
+// parseJestFailures collects the "✕ <name>" lines emitted by jest and vitest and
+// attaches the assertion message from the matching "● <suite> › <name>" detail
+// block when present. The summary line carries only the leaf test name, so the
+// detail blocks are keyed by their last " › " segment to pair the two; the first
+// non-empty line beneath a header (the "expect(...)"/thrown-exception line) is
+// the detail. A leaf name shared by two tests in different suites resolves to the
+// first block seen — a rare ambiguity worth the message for the common case.
 func parseJestFailures(output string) []testFailure {
 	lines := splitLines(output)
+	details := jestFailureDetails(lines)
 	var failures []testFailure
 	for _, ln := range lines {
 		if m := jestFailRe.FindStringSubmatch(ln); m != nil {
 			name := strings.TrimSpace(jestTimeRe.ReplaceAllString(m[1], ""))
 			if name != "" {
-				failures = append(failures, testFailure{Name: name})
+				failures = append(failures, testFailure{Name: name, Detail: details[name]})
 			}
 		}
 	}
 	return failures
+}
+
+// jestFailureDetails maps each failing test's leaf name to the first assertion or
+// exception line in its "● <suite> › <name>" block, before the next "●" header.
+// The leaf name (the segment after the last " › ") is used because the inline
+// "✕ <name>" summary line prints only that segment. Whole-file "● Test suite
+// failed to run" blocks produce an entry with no matching summary line, which is
+// harmless.
+func jestFailureDetails(lines []string) map[string]string {
+	details := map[string]string{}
+	for i := 0; i < len(lines); i++ {
+		m := jestDetailHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if idx := strings.LastIndex(name, "›"); idx >= 0 {
+			name = strings.TrimSpace(name[idx+len("›"):])
+		}
+		if name == "" {
+			continue
+		}
+		if _, ok := details[name]; ok {
+			continue // keep the first detail per leaf name
+		}
+		for j := i + 1; j < len(lines); j++ {
+			if jestDetailHeaderRe.MatchString(lines[j]) {
+				break
+			}
+			if t := strings.TrimSpace(lines[j]); t != "" {
+				details[name] = t
+				break
+			}
+		}
+	}
+	return details
 }
 
 var (

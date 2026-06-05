@@ -74,6 +74,10 @@ func TestClassifyTestRunner(t *testing.T) {
 		"dart test test/calc_test.dart":         runnerDart,
 		"flutter test":                          runnerDart,
 		"flutter test test/widget_test.dart":    runnerDart,
+		"julia test/runtests.jl":                runnerJulia,
+		"julia --project=. test/runtests.jl":    runnerJulia,
+		"julia -e 'using Pkg; Pkg.test()'":      runnerJulia,
+		"julia script.jl":                       runnerNone,
 		"echo rake testing notes":               runnerNone,
 		"ls -la":                                runnerNone,
 		"echo go testing the waters":            runnerNone,
@@ -1003,6 +1007,52 @@ func TestParseDartTestFailures_NoFailures(t *testing.T) {
 	out := `00:00 +0: adds two numbers
 00:01 +2: All tests passed!`
 	if got := parseTestFailures("dart test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseJuliaTestFailures(t *testing.T) {
+	out := `Test Summary: | Pass  Fail  Error  Total
+Arithmetic    |    1     1      1      3
+add: Test Failed at /home/u/proj/test/runtests.jl:7
+  Expression: add(2, 2) == 5
+   Evaluated: 4 == 5
+Stacktrace:
+ [1] macro expansion
+   @ /usr/share/julia/stdlib/Test/src/Test.jl:679 [inlined]
+Error During Test at /home/u/proj/test/runtests.jl:12
+  Test threw exception
+  Expression: divide(1, 0)
+  DivideError: integer division error
+ERROR: LoadError: Some tests did not pass: 1 passed, 1 failed, 1 errored.`
+	got := parseTestFailures("julia test/runtests.jl", out)
+	want := []testFailure{
+		{Name: "/home/u/proj/test/runtests.jl:7", Detail: "add(2, 2) == 5"},
+		{Name: "/home/u/proj/test/runtests.jl:12", Detail: "divide(1, 0)"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseJuliaTestFailures_PkgTest(t *testing.T) {
+	// The `Pkg.test()` invocation routes to the same parser, and a failure block
+	// without an "Expression:" line surfaces with no detail rather than borrowing
+	// the next block's.
+	out := `Test Failed at /pkg/test/runtests.jl:3
+   Evaluated: false
+Test Failed at /pkg/test/runtests.jl:9
+  Expression: occursin("x", "y")`
+	got := parseTestFailures("julia -e 'using Pkg; Pkg.test()'", out)
+	want := []testFailure{
+		{Name: "/pkg/test/runtests.jl:3"},
+		{Name: "/pkg/test/runtests.jl:9", Detail: `occursin("x", "y")`},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseJuliaTestFailures_NoFailures(t *testing.T) {
+	out := `Test Summary: | Pass  Total
+Arithmetic    |    3      3`
+	if got := parseTestFailures("julia test/runtests.jl", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

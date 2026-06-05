@@ -40,6 +40,65 @@ func TestParsePullDiagnosticsCodeStringAndInteger(t *testing.T) {
 	}
 }
 
+func TestParsePullDiagnosticsRelatedInformation(t *testing.T) {
+	raw := json.RawMessage(`{
+	  "items": [
+	    {
+	      "range": {"start": {"line": 4, "character": 5}, "end": {"line": 4, "character": 8}},
+	      "severity": 1,
+	      "message": "x redeclared in this block",
+	      "source": "gopls",
+	      "relatedInformation": [
+	        {
+	          "location": {
+	            "uri": "file:///work/main.go",
+	            "range": {"start": {"line": 2, "character": 5}, "end": {"line": 2, "character": 6}}
+	          },
+	          "message": "other declaration of x"
+	        },
+	        {
+	          "location": {"uri": "not a uri", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}},
+	          "message": "dropped: unparseable uri"
+	        }
+	      ]
+	    }
+	  ]
+	}`)
+
+	diags, err := parsePullDiagnostics("main.go", raw)
+	if err != nil {
+		t.Fatalf("parsePullDiagnostics: %v", err)
+	}
+	if len(diags) != 1 {
+		t.Fatalf("got %d diagnostics, want 1", len(diags))
+	}
+	// The non-file URI entry is dropped; only the resolvable one survives.
+	if len(diags[0].Related) != 1 {
+		t.Fatalf("got %d related entries, want 1", len(diags[0].Related))
+	}
+	rel := diags[0].Related[0]
+	if rel.Message != "other declaration of x" {
+		t.Errorf("related message = %q, want %q", rel.Message, "other declaration of x")
+	}
+	if rel.Location.Path != "/work/main.go" {
+		t.Errorf("related path = %q, want %q", rel.Location.Path, "/work/main.go")
+	}
+	if rel.Location.Range.Start.Line != 2 || rel.Location.Range.Start.Character != 5 {
+		t.Errorf("related start = %d:%d, want 2:5", rel.Location.Range.Start.Line, rel.Location.Range.Start.Character)
+	}
+}
+
+func TestRelatedFromWireEmpty(t *testing.T) {
+	if got := relatedFromWire(nil); got != nil {
+		t.Errorf("relatedFromWire(nil) = %v, want nil", got)
+	}
+	// An entry with an undecodable URI is the only one, so nothing survives.
+	items := []wireRelatedInformation{{Location: wireLocation{URI: "http://example.com"}, Message: "x"}}
+	if got := relatedFromWire(items); got != nil {
+		t.Errorf("relatedFromWire(non-file) = %v, want nil", got)
+	}
+}
+
 func TestCodeFromWire(t *testing.T) {
 	cases := []struct {
 		name string

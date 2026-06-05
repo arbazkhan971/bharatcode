@@ -17,6 +17,14 @@ type wireDiagnostic struct {
 	// Code is the rule identifier. The LSP spec allows a string or an integer
 	// here, so it is decoded as raw JSON and normalized by codeFromWire.
 	Code json.RawMessage `json:"code,omitempty"`
+	// RelatedInformation links other source locations to this diagnostic, such as
+	// the conflicting prior declaration behind a redeclaration error.
+	RelatedInformation []wireRelatedInformation `json:"relatedInformation,omitempty"`
+}
+
+type wireRelatedInformation struct {
+	Location wireLocation `json:"location"`
+	Message  string       `json:"message"`
 }
 
 type wireRange struct {
@@ -61,7 +69,46 @@ func convertDiagnostics(path string, items []wireDiagnostic) []Diagnostic {
 			Message:  item.Message,
 			Source:   item.Source,
 			Code:     codeFromWire(item.Code),
+			Related:  relatedFromWire(item.RelatedInformation),
 		})
+	}
+	return out
+}
+
+// relatedFromWire converts a diagnostic's relatedInformation entries, resolving
+// each entry's file URI to a local path. Entries whose URI cannot be parsed
+// (e.g. a non-file scheme) are dropped rather than failing the whole
+// diagnostic, since they are supplementary context. It returns nil when no
+// entries survive so a server that sends none leaves Related empty.
+func relatedFromWire(items []wireRelatedInformation) []RelatedInformation {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]RelatedInformation, 0, len(items))
+	for _, item := range items {
+		path, err := uriToPath(item.Location.URI)
+		if err != nil {
+			continue
+		}
+		out = append(out, RelatedInformation{
+			Location: Location{
+				Path: path,
+				Range: Range{
+					Start: Position{
+						Line:      item.Location.Range.Start.Line,
+						Character: item.Location.Range.Start.Character,
+					},
+					End: Position{
+						Line:      item.Location.Range.End.Line,
+						Character: item.Location.Range.End.Character,
+					},
+				},
+			},
+			Message: item.Message,
+		})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

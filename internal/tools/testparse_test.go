@@ -16,8 +16,12 @@ func TestClassifyTestRunner(t *testing.T) {
 		"npx jest src/":                       runnerJest,
 		"cargo test":                          runnerCargo,
 		"cargo test --release foo":            runnerCargo,
+		"rspec":                               runnerRSpec,
+		"bundle exec rspec spec/foo_spec.rb":  runnerRSpec,
+		"bin/rspec":                           runnerRSpec,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
+		"echo rspecs are great":               runnerNone,
 	}
 	for cmd, want := range cases {
 		if got := classifyTestRunner(cmd); got != want {
@@ -240,6 +244,53 @@ func TestParseCargoTestFailures_BuildFailedNoTarget(t *testing.T) {
 	got := parseTestFailures("cargo test", out)
 	want := []testFailure{
 		{Name: "demo [build failed]"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseRSpecFailures(t *testing.T) {
+	out := `..F..F
+
+Failures:
+
+  1) Array#index_of returns -1 when the value is absent
+     Failure/Error: expect(arr.index_of(5)).to eq(-1)
+
+       expected: -1
+            got: nil
+
+  2) Calculator adds two numbers
+     Failure/Error: expect(calc.add(1, 2)).to eq(4)
+
+Finished in 0.01 seconds
+6 examples, 2 failures
+
+Failed examples:
+
+rspec ./spec/array_spec.rb:10 # Array#index_of returns -1 when the value is absent
+rspec ./spec/calc_spec.rb:7 # Calculator adds two numbers`
+	got := parseTestFailures("bundle exec rspec", out)
+	want := []testFailure{
+		{Name: "Array#index_of returns -1 when the value is absent", Detail: "./spec/array_spec.rb:10"},
+		{Name: "Calculator adds two numbers", Detail: "./spec/calc_spec.rb:7"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseRSpecFailures_NoSummaryFallback(t *testing.T) {
+	// No "Failed examples:" section (e.g. an aborted run): fall back to the
+	// numbered "Failures:" block, pairing each header with its Failure/Error line.
+	out := `Failures:
+
+  1) Array#index_of returns -1 when the value is absent
+     Failure/Error: expect(arr.index_of(5)).to eq(-1)
+
+  2) Calculator adds two numbers
+     Failure/Error: expect(calc.add(1, 2)).to eq(4)`
+	got := parseTestFailures("rspec", out)
+	want := []testFailure{
+		{Name: "Array#index_of returns -1 when the value is absent", Detail: "expect(arr.index_of(5)).to eq(-1)"},
+		{Name: "Calculator adds two numbers", Detail: "expect(calc.add(1, 2)).to eq(4)"},
 	}
 	assertFailures(t, got, want)
 }

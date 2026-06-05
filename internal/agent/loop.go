@@ -605,8 +605,18 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 				CacheReadTokens:  usage.CacheReadTokens,
 				CacheWriteTokens: usage.CacheWriteTokens,
 			}
+			// Ledger recording is best-effort: a billing write failure (e.g.
+			// unknown model in the pricing table, transient DB lock) must never
+			// discard a completed, already-paid-for provider response. Log the
+			// failure at Warn so it is visible for reconciliation and continue.
 			if err := l.recordUsage(runCtx, sessionID, *usage); err != nil {
-				return fmt.Errorf("recording ledger usage: %w", err)
+				slog.Warn("ledger record failed — usage not billed locally",
+					slog.String("session", sessionID),
+					slog.String("model", l.activeModel),
+					slog.Int("input_tokens", usage.InputTokens),
+					slog.Int("output_tokens", usage.OutputTokens),
+					slog.String("error", err.Error()),
+				)
 			}
 		}
 		if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, assistant); err != nil {
@@ -635,7 +645,8 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			return nil
 		}
 
-		for _, call := range pendingToolCalls {
+		var stopTurnAfterBatch bool
+		for i, call := range pendingToolCalls {
 			callHash, err := toolCallHash(call.Name, call.Input)
 			if err != nil {
 				return fmt.Errorf("checking tool loop: %w", err)
@@ -645,7 +656,11 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			// it would only reproduce the same futile result, so trip now rather than
 			// execute the K-th identical call.
 			if detector.wouldRepeat(callHash) {
-				return l.tripLoopGuard(runCtx, sessionID)
+				// Synthesize placeholder results for this call and all remaining
+				// unexecuted calls so the conversation history stays well-formed
+				// (every tool_use must have a matching tool_result before the next
+				// provider request, or the provider rejects with a 400).
+				return l.tripLoopGuard(runCtx, sessionID, pendingToolCalls[i:])
 			}
 
 			result := l.runTool(runCtx, sessionID, call)
@@ -655,7 +670,26 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			// history oscillates A,B,A,B — a distinct futile pattern the predictive
 			// check cannot see because the calls differ each step.
 			if detector.record(callHash, resultHash(result.Content), result.IsError) {
-				return l.tripLoopGuard(runCtx, sessionID)
+				// The current call ran and produced a result, but we are aborting
+				// the batch. Append this call's real result, then synthesize
+				// placeholders for all remaining unexecuted calls.
+				content := truncateToolResult(result.Content, l.toolResultMaxBytes(), result.IsError)
+				toolMsg := message.Message{
+					SessionID: sessionID,
+					Role:      message.RoleUser,
+					Content: []message.ContentBlock{message.ToolResultBlock{
+						ToolUseID: call.ID,
+						Content:   content,
+						IsError:   result.IsError,
+					}},
+					CreatedAt: time.Now().UTC(),
+				}
+				if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, toolMsg); err != nil {
+					return fmt.Errorf("appending tool result: %w", err)
+				}
+				history = append(history, toolMsg)
+				// Synthesize placeholders for calls that did not run.
+				return l.tripLoopGuard(runCtx, sessionID, pendingToolCalls[i+1:])
 			}
 
 			// Bound oversized tool output before it enters the conversation
@@ -676,6 +710,21 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 				return fmt.Errorf("appending tool result: %w", err)
 			}
 			history = append(history, toolMsg)
+
+			// When a tool signals that its result ends the turn, record the
+			// remaining unexecuted calls as aborted so history stays well-formed,
+			// then finish the turn cleanly after the batch.
+			if result.StopTurn {
+				if err := l.appendOrphanResults(runCtx, sessionID, pendingToolCalls[i+1:], "tool not executed: preceding tool requested turn stop"); err != nil {
+					return err
+				}
+				stopTurnAfterBatch = true
+				break
+			}
+		}
+		if stopTurnAfterBatch {
+			l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventTurnFinished})
+			return nil
 		}
 	}
 
@@ -691,12 +740,46 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 // then returns nil so Run ends gracefully without surfacing an error. Both
 // detector signals (predictive identical-run and A,B,A,B cycle) funnel through
 // here so the trip is reported identically regardless of which pattern fired.
-func (l *Loop) tripLoopGuard(ctx context.Context, sessionID string) error {
+//
+// unexecuted holds the tool calls from the current batch that did not run
+// before the guard tripped. A synthetic error tool_result is appended for
+// each one so the conversation history never contains an assistant tool_use
+// block without a matching tool_result, which providers reject with a 400.
+func (l *Loop) tripLoopGuard(ctx context.Context, sessionID string, unexecuted []pendingToolCall) error {
+	if err := l.appendOrphanResults(ctx, sessionID, unexecuted, "tool not executed: loop detected"); err != nil {
+		return err
+	}
 	msg := textMessage(sessionID, message.RoleAssistant, ErrLoopDetected.Error())
 	if err := l.cfg.Sessions.AppendMessage(ctx, sessionID, msg); err != nil {
 		return fmt.Errorf("appending loop-detection message: %w", err)
 	}
 	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventLoopDetected, Message: &msg})
+	return nil
+}
+
+// appendOrphanResults synthesizes a placeholder error tool_result for each
+// call in orphans and persists it to the session. This keeps the conversation
+// history well-formed after any early batch exit (loop detection, StopTurn,
+// or interruption): providers require every tool_use block to have a matching
+// tool_result before the next turn's request, and reject a 400 otherwise.
+// The reason string is included in each synthetic result's content so it is
+// visible in the recorded session for debugging.
+func (l *Loop) appendOrphanResults(ctx context.Context, sessionID string, orphans []pendingToolCall, reason string) error {
+	for _, call := range orphans {
+		toolMsg := message.Message{
+			SessionID: sessionID,
+			Role:      message.RoleUser,
+			Content: []message.ContentBlock{message.ToolResultBlock{
+				ToolUseID: call.ID,
+				Content:   reason,
+				IsError:   true,
+			}},
+			CreatedAt: time.Now().UTC(),
+		}
+		if err := l.cfg.Sessions.AppendMessage(ctx, sessionID, toolMsg); err != nil {
+			return fmt.Errorf("appending orphan tool result for %s: %w", call.Name, err)
+		}
+	}
 	return nil
 }
 

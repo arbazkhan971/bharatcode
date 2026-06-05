@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/util/fsext"
@@ -78,6 +79,21 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 		return errorResult(err.Error()), nil
 	}
 
+	// Guard against stale reads: if the file changed on disk since the model
+	// last read it, refuse the edit and ask for a re-read.
+	if t.deps.FileTracker != nil && t.deps.SessionID != "" {
+		changed, conflictErr := t.deps.FileTracker.HasConflict(ctx, t.deps.SessionID, path)
+		if conflictErr != nil {
+			return errorResult(fmt.Sprintf("checking file freshness for %s: %v", path, conflictErr)), nil
+		}
+		if changed {
+			return errorResult(fmt.Sprintf(
+				"file %s has been modified on disk since it was last read in this session — view the file again before editing to avoid clobbering changes",
+				path,
+			)), nil
+		}
+	}
+
 	oldContent, err := os.ReadFile(path)
 	if err != nil {
 		return Result{}, fmt.Errorf("reading file %s: %w", path, err)
@@ -85,7 +101,12 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 	text := string(oldContent)
 	count := strings.Count(text, in.OldString)
 	if count == 0 {
-		return errorResult("old_string was not found in " + path + ". old_string must match exactly, including all whitespace and newlines."), nil
+		hint := nearestMatchHint(text, in.OldString)
+		msg := "old_string was not found in " + path + ". old_string must match exactly, including all whitespace and newlines."
+		if hint != "" {
+			msg += "\n" + hint
+		}
+		return errorResult(msg), nil
 	}
 	if count > 1 && !in.ReplaceAll {
 		return errorResult(fmt.Sprintf(
@@ -156,4 +177,88 @@ func countForReport(count int, replaceAll bool) int {
 		return count
 	}
 	return 1
+}
+
+// nearestMatchHint examines text for content that resembles target and returns
+// a concise, actionable hint the model can use to correct its next attempt.
+// Three cases are handled, in priority order:
+//
+//  1. Whitespace-only difference: the stripped forms match — report the actual
+//     on-disk text so the model can copy the correct indentation.
+//  2. Close substring: a trimmed line in the file contains the first trimmed
+//     line of target (or vice-versa) — show a few lines of context with line
+//     numbers so the model can widen its anchor.
+//  3. No near match found: return the empty string (the caller omits the hint).
+func nearestMatchHint(text, target string) string {
+	// Case 1: whitespace-normalised match.
+	normalised := strings.Join(strings.Fields(text), " ")
+	normTarget := strings.Join(strings.Fields(target), " ")
+	if normTarget != "" && strings.Contains(normalised, normTarget) {
+		// Find the byte region in the original text that matches when stripped.
+		// Walk lines to locate the block that collapses to the target.
+		lines := strings.Split(text, "\n")
+		tLines := strings.Split(strings.TrimSpace(target), "\n")
+		firstTrimmed := strings.TrimSpace(tLines[0])
+		for i, l := range lines {
+			if strings.TrimSpace(l) == firstTrimmed {
+				lo := i
+				hi := i + len(tLines)
+				if hi > len(lines) {
+					hi = len(lines)
+				}
+				snippet := buildSnippet(lines, lo, hi, 0)
+				return "Near-match found — the on-disk text differs only in whitespace/indentation. Actual text:\n" + snippet
+			}
+		}
+		return "Near-match found — the on-disk text differs only in whitespace/indentation. Re-view the file to copy the exact text."
+	}
+
+	// Case 2: a trimmed line of the file contains the first trimmed line of target.
+	lines := strings.Split(text, "\n")
+	tLines := strings.Split(strings.TrimSpace(target), "\n")
+	if len(tLines) == 0 {
+		return ""
+	}
+	firstTrimmed := strings.TrimSpace(tLines[0])
+	if firstTrimmed == "" {
+		return ""
+	}
+	for i, l := range lines {
+		if strings.Contains(strings.TrimSpace(l), firstTrimmed) ||
+			strings.Contains(firstTrimmed, strings.TrimSpace(l)) {
+			snippet := buildSnippet(lines, i, i+1, 3)
+			return "Closest region found at line " + itoa(i+1) + " (context shown):\n" + snippet
+		}
+	}
+
+	return ""
+}
+
+// buildSnippet renders lines[lo:hi] with a context of ctx lines on each side,
+// prefixed with 1-based line numbers, suitable for terminal display.
+func buildSnippet(lines []string, lo, hi, ctx int) string {
+	start := lo - ctx
+	if start < 0 {
+		start = 0
+	}
+	end := hi + ctx
+	if end > len(lines) {
+		end = len(lines)
+	}
+	width := len(itoa(end))
+	var b strings.Builder
+	for i := start; i < end; i++ {
+		line := lines[i]
+		// Guard against non-printable / binary content that would confuse the model.
+		if !utf8.ValidString(line) {
+			line = "<binary data>"
+		}
+		b.WriteString(fmt.Sprintf("%*d | %s\n", width, i+1, line))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// itoa is a small helper to avoid importing strconv throughout this file.
+func itoa(n int) string {
+	return fmt.Sprintf("%d", n)
 }

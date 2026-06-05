@@ -27,6 +27,7 @@ var (
 		}
 		return tui.Run(ctx, tui.Dependencies{
 			Agent:       loop,
+			Coordinator: application.Agent,
 			Sessions:    application.Sessions,
 			Cfg:         application.Cfg,
 			Bus:         application.Bus.Agent,

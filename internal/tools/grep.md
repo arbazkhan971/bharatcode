@@ -16,11 +16,31 @@ What success looks like:
 The result is a stable text list. Content mode returns `path:line:content`;
 file mode returns one matching path per line; count mode returns `path:count`.
 
-Truncation: grep does not cap its own output, so a broad pattern can return a
-very large list that later gets truncated by the surrounding context budget. To
-keep results small and useful, narrow with `include`, scope `path` to a
-subtree, or switch `output_mode` to `count` or `files_with_matches` before
-falling back to full `content`.
+Smart-case matching:
+
+When the pattern is entirely lowercase the search is case-insensitive, so
+`myfunction` matches `MyFunction`, `MYFUNCTION`, and `myfunction` alike. When
+the pattern contains any uppercase letter the search is case-sensitive and
+exact. This mirrors ripgrep's `--smart-case` behaviour and applies on both
+the rg path and the Go fallback.
+
+Match cap:
+
+Results are capped at 1000 matching lines (content mode) or 1000 matching
+files (files_with_matches / count mode). When the cap is reached the output
+ends with a `[results capped: showing first N matches]` notice. To stay under
+the cap, narrow with `include`, scope `path` to a subtree, or switch
+`output_mode` to `count` or `files_with_matches` before requesting full
+content.
+
+Binary and ignored files:
+
+Binary files (those containing NUL bytes) are never included in results. The
+following directories are always skipped: `.git`, `node_modules`, `vendor`,
+`dist`, `.svn`, `.hg`. Additionally, plain directory names in a `.gitignore`
+at the workspace root (e.g. `build/`) are skipped by the Go fallback. These
+exclusions apply regardless of whether ripgrep is installed, so results are
+consistent on any machine.
 
 Failure cases:
 

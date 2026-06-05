@@ -210,6 +210,11 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 			m.chat.Stream(streamID, text)
 		}
 		m.chat.FinishStream(streamID)
+		// Capture the plan when the plan turn ends.
+		if m.deps.Agent.PlanMode() && ev.Message != nil {
+			planText := agent.ExtractPlanText(*ev.Message)
+			m.deps.Coordinator.StorePlan(m.sessionID, planText)
+		}
 	}
 	return m, m.listenAgent()
 }

@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
 	"github.com/arbazkhan971/bharatcode/internal/tui/diff"
@@ -233,15 +235,38 @@ func (m *model) handlePlan() (tea.Model, tea.Cmd) {
 
 // handleApprove exits plan mode on the live agent loop, re-enabling execution
 // tools. It is a no-op (with an explanatory dialog) when the loop is not in plan
-// mode.
+// mode. When a plan is stored, it shows the plan for final review before
+// auto-continuing execution with the approved plan.
 func (m *model) handleApprove() (tea.Model, tea.Cmd) {
 	if !m.deps.Agent.PlanMode() {
 		m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Approve", Body: approveNoopBody, Theme: m.theme})
 		return m, nil
 	}
-	m.deps.Agent.Approve()
-	m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Approve", Body: approveBody, Theme: m.theme})
-	return m, nil
+
+	// Retrieve the stored plan for display in the approval dialog.
+	planText := m.deps.Coordinator.PlanFor(m.sessionID)
+
+	// Show the plan in the approval dialog so the user can review it before execution.
+	if planText != "" {
+		m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Approve Plan", Body: planText, Theme: m.theme})
+	} else {
+		m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Approve", Body: approveBody, Theme: m.theme})
+	}
+
+	// Approve the plan: transitions the loop out of plan mode and retrieves the plan.
+	planText = m.deps.Coordinator.ApprovePlan(m.sessionID, m.deps.Agent)
+
+	// Auto-continue execution: seed the next turn with the approved plan.
+	// Extract the prompt text from the seed message so continueRun can render it.
+	seed := agent.SeedMessageFromPlan(m.sessionID, planText)
+	var seedText string
+	for _, block := range seed.Content {
+		if tb, ok := block.(message.TextBlock); ok {
+			seedText = tb.Text
+			break
+		}
+	}
+	return m, m.continueRun(seedText)
 }
 
 // handleStatus pushes a panel summarizing the active model, agent, session,

@@ -93,6 +93,21 @@ func (t *MultiEditTool) Run(ctx context.Context, args json.RawMessage) (res Resu
 		return errorResult(err.Error()), nil
 	}
 
+	// Guard against stale reads: if the file changed on disk since the model
+	// last read it, refuse the edit and ask for a re-read.
+	if t.deps.FileTracker != nil && t.deps.SessionID != "" {
+		changed, conflictErr := t.deps.FileTracker.HasConflict(ctx, t.deps.SessionID, path)
+		if conflictErr != nil {
+			return errorResult(fmt.Sprintf("checking file freshness for %s: %v", path, conflictErr)), nil
+		}
+		if changed {
+			return errorResult(fmt.Sprintf(
+				"file %s has been modified on disk since it was last read in this session — view the file again before editing to avoid clobbering changes",
+				path,
+			)), nil
+		}
+	}
+
 	oldContent, err := os.ReadFile(path)
 	if err != nil {
 		return Result{}, fmt.Errorf("reading file %s: %w", path, err)
@@ -105,10 +120,15 @@ func (t *MultiEditTool) Run(ctx context.Context, args json.RawMessage) (res Resu
 		}
 		count := strings.Count(next, edit.Old)
 		if count == 0 {
-			return errorResult(fmt.Sprintf(
+			hint := nearestMatchHint(next, edit.Old)
+			msg := fmt.Sprintf(
 				"edits[%d].old was not found in %s. old must match exactly, including all whitespace and newlines.",
 				i, path,
-			)), nil
+			)
+			if hint != "" {
+				msg += "\n" + hint
+			}
+			return errorResult(msg), nil
 		}
 		if count > 1 && !edit.ReplaceAll {
 			return errorResult(fmt.Sprintf(

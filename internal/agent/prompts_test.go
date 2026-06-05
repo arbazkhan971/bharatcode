@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -117,6 +118,17 @@ func TestRenderPromptInjectsSkillsWhenPresent(t *testing.T) {
 func TestRenderPromptNoSkillsLeavesPromptUnchanged(t *testing.T) {
 	workdir := t.TempDir()
 	empty := filepath.Join(workdir, ".bharatcode", "skills") // does not exist
+
+	// Freeze the clock so both renders embed the same "Current date" in the
+	// environment block. The environment block is rendered second-granular
+	// from the wall clock, so without this the two renders can straddle a
+	// second boundary and differ on the timestamp alone — making the
+	// equality assertion flaky. With the clock pinned, the skills section is
+	// the only real difference between the two prompts, which is exactly
+	// what this test means to assert.
+	restoreNow := nowFunc
+	nowFunc = func() time.Time { return time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { nowFunc = restoreNow })
 
 	restore := skillSearchDirs
 	t.Cleanup(func() { skillSearchDirs = restore })

@@ -94,3 +94,116 @@ func TestEditMalformedArgs(t *testing.T) {
 	require.True(t, result.IsError)
 	require.Contains(t, result.Content, "invalid JSON arguments")
 }
+
+// TestEditNotFoundShowsNearMatchHint verifies that when old_string is absent but
+// a whitespace-normalised version of it exists in the file, the error message
+// includes a near-match hint describing the whitespace/indentation mismatch so
+// the model can correct its next attempt.
+func TestEditNotFoundShowsNearMatchHint(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "indent.txt")
+	// File uses four-space indentation; the model provides a tab-indented version.
+	// Neither is a substring of the other, but they normalise to the same tokens.
+	require.NoError(t, os.WriteFile(path, []byte("    func hello() {}\n"), 0o644))
+
+	tool := newEditTool(Dependencies{WorkDir: workDir, SessionID: "edit-hint"})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path":       "indent.txt",
+		"old_string": "\tfunc hello() {}", // tab-indented — not a substring of the spaces version
+		"new_string": "\tfunc namaste() {}",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	// Must report the primary not-found message.
+	require.Contains(t, result.Content, "old_string was not found")
+	// Must include a near-match / whitespace hint so the model can recover.
+	require.Contains(t, result.Content, "whitespace")
+	// File must be untouched.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "    func hello() {}\n", string(got))
+}
+
+// TestEditNotFoundShowsClosestRegionHint verifies that when old_string is absent
+// but the file contains a line that closely matches the first line of old_string,
+// the error message surfaces a numbered context snippet so the model can correct
+// its anchor.
+func TestEditNotFoundShowsClosestRegionHint(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "ctx.txt")
+	require.NoError(t, os.WriteFile(path, []byte("line one\nfunc greet(name string)\nline three\n"), 0o644))
+
+	tool := newEditTool(Dependencies{WorkDir: workDir, SessionID: "edit-ctx"})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path":       "ctx.txt",
+		"old_string": "func greet(name string) {}", // slightly different from on-disk
+		"new_string": "func greet(name string) { fmt.Println(name) }",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "old_string was not found")
+	// The hint must show the actual on-disk line (or nearby region).
+	require.Contains(t, result.Content, "func greet")
+}
+
+// TestEditRejectsStaleRead verifies that an edit is rejected when the file has
+// been modified on disk after the session last recorded a read, instructing the
+// model to re-view the file before editing.
+func TestEditRejectsStaleRead(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "stale.txt")
+	require.NoError(t, os.WriteFile(path, []byte("original content\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, "edit-stale")
+	// Record the read so HasConflict has a baseline.
+	require.NoError(t, tracker.RecordRead(ctx, "edit-stale", path))
+
+	// Simulate an external modification: overwrite the file on disk.
+	require.NoError(t, os.WriteFile(path, []byte("externally modified content\n"), 0o644))
+
+	tool := newEditTool(Dependencies{
+		FileTracker: tracker,
+		WorkDir:     workDir,
+		SessionID:   "edit-stale",
+	})
+	result, err := tool.Run(ctx, mustJSON(t, map[string]any{
+		"path":       "stale.txt",
+		"old_string": "externally modified content",
+		"new_string": "replaced",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	// The error must tell the model the file changed and it must re-view.
+	require.Contains(t, result.Content, "modified on disk")
+	require.Contains(t, result.Content, "view")
+
+	// File must remain exactly as the external edit left it.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "externally modified content\n", string(got))
+}
+
+// TestEditStaleReadSkippedWhenNoTracker verifies that the stale-read guard is
+// skipped gracefully when FileTracker is nil (tools constructed without one, as
+// in simpler tests).
+func TestEditStaleReadSkippedWhenNoTracker(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "notrace.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello\n"), 0o644))
+
+	// No tracker supplied — the guard must not panic or error.
+	tool := newEditTool(Dependencies{WorkDir: workDir, SessionID: "edit-notrace"})
+	result, err := tool.Run(ctx, mustJSON(t, map[string]any{
+		"path":       "notrace.txt",
+		"old_string": "hello",
+		"new_string": "namaste",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "namaste\n", string(got))
+}

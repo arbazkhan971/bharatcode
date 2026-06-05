@@ -81,6 +81,13 @@ func TestClassifyTestRunner(t *testing.T) {
 		"sbt test":                              runnerScala,
 		"sbt 'testOnly *CalculatorSpec'":        runnerScala,
 		"./sbt test":                            runnerScala,
+		"lein test":                             runnerClojure,
+		"lein test :only myapp.core-test":       runnerClojure,
+		"clojure -M:test":                       runnerClojure,
+		"clj -X:test":                           runnerClojure,
+		"kaocha":                                runnerClojure,
+		"lein kaocha --focus foo":               runnerClojure,
+		"clojure script.clj":                    runnerNone,
 		"echo subtle differences":               runnerNone,
 		"echo rake testing notes":               runnerNone,
 		"ls -la":                                runnerNone,
@@ -1345,6 +1352,53 @@ func TestParseScalaTestFailures_NoFailures(t *testing.T) {
 [info] Run completed in 1 second.
 [info] All tests passed.`
 	if got := parseTestFailures("sbt test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseClojureTestFailures(t *testing.T) {
+	out := `
+lein test myapp.core-test
+
+FAIL in (add-test) (core_test.clj:7)
+adds two numbers
+expected: (= 4 (add 2 2))
+  actual: (not (= 4 5))
+
+ERROR in (div-test) (core_test.clj:12)
+Uncaught exception, not in assertion.
+expected: nil
+  actual: java.lang.ArithmeticException: Divide by zero
+
+Ran 2 tests containing 2 assertions.
+2 failures, 0 errors.`
+	got := parseTestFailures("lein test", out)
+	want := []testFailure{
+		{Name: "add-test (core_test.clj:7)", Detail: "(not (= 4 5))"},
+		{Name: "div-test (core_test.clj:12)", Detail: "java.lang.ArithmeticException: Divide by zero"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseClojureTestFailures_NoActualDetail(t *testing.T) {
+	out := `FAIL in (lonely-test) (core_test.clj:3)
+
+FAIL in (next-test) (core_test.clj:9)
+  actual: (not (= 1 2))`
+	got := parseTestFailures("clojure -M:test", out)
+	want := []testFailure{
+		{Name: "lonely-test (core_test.clj:3)"},
+		{Name: "next-test (core_test.clj:9)", Detail: "(not (= 1 2))"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseClojureTestFailures_NoFailures(t *testing.T) {
+	out := `lein test myapp.core-test
+
+Ran 2 tests containing 2 assertions.
+0 failures, 0 errors.`
+	if got := parseTestFailures("lein test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

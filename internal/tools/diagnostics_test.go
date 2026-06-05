@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/arbazkhan971/bharatcode/internal/lsp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -51,6 +52,65 @@ func TestDiagnosticFilesHonorsRootGitignore(t *testing.T) {
 	got, err := diagnosticFiles(context.Background(), root)
 	require.NoError(t, err)
 	require.Equal(t, []string{want}, got)
+}
+
+// TestDiagnosticsSummaryHeaderTalliesSeverities asserts the rendered result
+// opens with a one-line summary counting the total, the distinct files, and the
+// per-severity breakdown (errors and warnings here), in severity order.
+func TestDiagnosticsSummaryHeaderTalliesSeverities(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	b := filepath.Join(dir, "b.go")
+	require.NoError(t, os.WriteFile(a, []byte("package main\n"), 0o644))
+	require.NoError(t, os.WriteFile(b, []byte("package main\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{Path: a, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "boom"},
+			{Path: a, Range: lsp.Range{Start: lsp.Position{Line: 1}}, Severity: lsp.Warning, Message: "meh"},
+			{Path: b, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "bang"},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "a.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// The fake returns the same set for every queried path; a single-path query
+	// therefore reports the full three-diagnostic tally across both files.
+	require.Contains(t, result.Content, "3 diagnostics across 2 files (2 errors, 1 warning):")
+	require.Equal(t, 3, result.Metadata[MetadataDiagnosticCount])
+	require.Equal(t, 2, result.Metadata[MetadataDiagnosticErrors])
+	require.Equal(t, 1, result.Metadata[MetadataDiagnosticWarnings])
+}
+
+// TestDiagnosticsSummarySingularGrammar checks the header uses singular nouns
+// for a lone diagnostic in a single file.
+func TestDiagnosticsSummarySingularGrammar(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "boom"},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.Contains(t, result.Content, "1 diagnostic across 1 file (1 error):")
+}
+
+// TestDiagnosticsSummaryHeaderHelper exercises diagnosticsSummary directly so the
+// severity ordering and the omission of zero-count categories are pinned without
+// routing through the language-server plumbing.
+func TestDiagnosticsSummaryHeaderHelper(t *testing.T) {
+	diags := []lsp.Diagnostic{
+		{Path: "x.go", Severity: lsp.Hint, Message: "h"},
+		{Path: "x.go", Severity: lsp.Error, Message: "e"},
+	}
+	got := diagnosticsSummary(diags, severityCounts(diags))
+	require.Equal(t, "2 diagnostics across 1 file (1 error, 1 hint):", got)
 }
 
 // TestDiagnosticFilesScansRootNamedLikeIgnored guards the path != root exception:

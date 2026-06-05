@@ -338,9 +338,15 @@ func TestIsReasoningModel(t *testing.T) {
 		{"gpt-5-reasoning-alpha", true},
 		{"GPT-5-MINI", true},
 		{"gpt-5.5", true},
-		// gpt-5-chat is the one non-reasoning member of the family.
+		// The chat-tuned variants are the non-reasoning members of the family.
 		{"gpt-5-chat", false},
 		{"gpt-5-chat-latest", false},
+		// Point-release chat variants must also be carved out. gpt-5.1-chat-latest
+		// does not begin with "gpt-5-chat", so a prefix-only check would wrongly
+		// classify it as a reasoning model and strip its temperature.
+		{"gpt-5.1-chat-latest", false},
+		{"gpt-5.1-chat", false},
+		{"openai/gpt-5.1-chat-latest", false},
 		{"gpt-4o", false},
 		{"gpt-4o-mini", false},
 		{"deepseek-chat", false},

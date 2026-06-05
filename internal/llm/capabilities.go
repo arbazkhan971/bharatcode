@@ -18,12 +18,16 @@ var reasoningModelPrefixes = []string{
 	"o4",
 }
 
-// gpt5ChatPrefix names the chat-tuned gpt-5 variant (gpt-5-chat-latest), the
-// one member of the gpt-5 family that is NOT a reasoning model: it keeps the
-// classic temperature and max_tokens params. isReasoningModel treats every
-// other gpt-5 model (gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-codex, ...) as a
-// reasoning model and excludes ids carrying this prefix.
-const gpt5ChatPrefix = "gpt-5-chat"
+// gpt5ChatMarker identifies the chat-tuned members of the gpt-5 family
+// (gpt-5-chat-latest, and point releases such as gpt-5.1-chat-latest), the ones
+// that are NOT reasoning models: they keep the classic temperature and
+// max_tokens params. isReasoningModel treats every other gpt-5 model (gpt-5,
+// gpt-5-mini, gpt-5-nano, gpt-5-codex, ...) as a reasoning model and excludes
+// ids carrying this marker. A substring (rather than a fixed "gpt-5-chat"
+// prefix) is used so a versioned chat variant like "gpt-5.1-chat-latest" — whose
+// id does not begin with "gpt-5-chat" — is still carved out instead of having
+// its temperature silently dropped.
+const gpt5ChatMarker = "chat"
 
 // isReasoningModel reports whether id names an OpenAI reasoning model (the
 // o-series, or a gpt-5 model other than gpt-5-chat). Reasoning models reject
@@ -41,10 +45,11 @@ func isReasoningModel(id string) bool {
 	if idx := strings.LastIndex(lid, "/"); idx >= 0 {
 		lid = lid[idx+1:]
 	}
-	// The whole gpt-5 family runs a hidden reasoning pass except gpt-5-chat, so
-	// match the family by prefix and carve out the chat variant. This also
-	// covers point releases such as gpt-5.5 that share the prefix.
-	if strings.HasPrefix(lid, "gpt-5") && !strings.HasPrefix(lid, gpt5ChatPrefix) {
+	// The whole gpt-5 family runs a hidden reasoning pass except the chat-tuned
+	// variants, so match the family by prefix and carve out any chat variant.
+	// This also covers point releases such as gpt-5.5 (reasoning) and
+	// gpt-5.1-chat-latest (chat) that share the family prefix.
+	if strings.HasPrefix(lid, "gpt-5") && !strings.Contains(lid, gpt5ChatMarker) {
 		return true
 	}
 	for _, prefix := range reasoningModelPrefixes {

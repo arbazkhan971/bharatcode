@@ -76,6 +76,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseMinitestFailures(output)
 	case runnerDart:
 		return parseDartTestFailures(output)
+	case runnerJulia:
+		return parseJuliaTestFailures(output)
 	default:
 		return nil
 	}
@@ -106,6 +108,7 @@ const (
 	runnerMinitest
 	runnerNextest
 	runnerDart
+	runnerJulia
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -169,6 +172,12 @@ var (
 	// The bare package name "nose" is intentionally not matched, since it appears
 	// as an ordinary word far more often than as a runner invocation.
 	noseRe = regexp.MustCompile(`\bnose2\b|\bnosetests\b`)
+	// Julia's stdlib Test.jl has no dedicated binary; it is driven either by
+	// running a test script ("julia test/runtests.jl") or via the package manager
+	// ("julia -e 'using Pkg; Pkg.test()'"). Both carry "julia" plus a distinctive
+	// "runtests.jl" or "pkg.test" token, which keeps ordinary "julia script.jl"
+	// invocations (not test runs) from matching.
+	juliaRe = regexp.MustCompile(`\bjulia\b.*\bruntests\.jl\b|\bjulia\b.*\bpkg\.test\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -289,6 +298,14 @@ func classifyTestRunner(command string) testRunner {
 		// invocation carries none of their substrings, but kept explicit to guard
 		// against future overlap.
 		return runnerDart
+	case juliaRe.MatchString(c):
+		// `julia test/runtests.jl` / `julia -e 'using Pkg; Pkg.test()'` drive
+		// Julia's stdlib Test.jl, whose report opens each failure with a "Test
+		// Failed at <file>:<line>" / "Error During Test at <file>:<line>" header and
+		// prints the tested expression on the indented "Expression:" line beneath.
+		// Checked before the JS runners since a Julia invocation carries none of
+		// their substrings, but kept explicit to guard against future overlap.
+		return runnerJulia
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1677,6 +1694,54 @@ func parseDartTestFailures(output string) []testFailure {
 			}
 			if t := strings.TrimSpace(lines[j]); t != "" {
 				f.Detail = t
+				break
+			}
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "Test Failed at /path/runtests.jl:7" / "Error During Test at /path:12" — the
+	// header opening a Julia Test.jl failure block. @test assertions carry no
+	// names, so the source location identifies the failure. An optional
+	// "<testset>: " label may precede it; the matcher keys on the header itself so
+	// the label is ignored.
+	juliaFailRe = regexp.MustCompile(`(?:Test Failed|Error During Test) at (\S+:\d+)`)
+	// "  Expression: add(2, 2) == 5" — the tested expression, printed on the first
+	// indented line of the block. It is the most useful one-line detail.
+	juliaExprRe = regexp.MustCompile(`^\s+Expression:\s*(.*\S)\s*$`)
+)
+
+// parseJuliaTestFailures extracts failing tests from Julia's stdlib Test.jl
+// output (`julia test/runtests.jl`, `julia -e 'using Pkg; Pkg.test()'`). Each
+// failure block opens with a "Test Failed at <file>:<line>" or "Error During
+// Test at <file>:<line>" header; since @test assertions carry no names, the
+// source location names the failure. The detail is the block's "Expression:"
+// line — the actual assertion — located before the next header. Failures are
+// returned in run order and deduplicated by location.
+func parseJuliaTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := juliaFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if juliaFailRe.MatchString(lines[j]) {
+				break
+			}
+			if d := juliaExprRe.FindStringSubmatch(lines[j]); d != nil {
+				f.Detail = strings.TrimSpace(d[1])
 				break
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
+	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -257,4 +258,109 @@ func TestSlashSearch_Bare_NoActiveSearch_PromptsForTerm(t *testing.T) {
 	require.True(t, m.dialogs.Contains("search"))
 	require.Contains(t, plainText(m.dialogs.Render(200)), "Usage",
 		"a bare /search with no active search must prompt for a term")
+}
+
+// TestHighlightTerm asserts the pure term-highlighting helper wraps every
+// case-insensitive occurrence of the term and leaves non-matching text — and
+// the no-match and empty-term cases — byte-for-byte unchanged.
+func TestHighlightTerm(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	style := theme.Match
+
+	require.Equal(t, "abc", highlightTerm("abc", "", style),
+		"an empty term must leave the line unchanged")
+	require.Equal(t, "abc", highlightTerm("abc", "xyz", style),
+		"a term with no occurrence must leave the line unchanged")
+
+	// A single occurrence is wrapped in the match style; the original case is
+	// preserved even though matching is case-insensitive.
+	got := highlightTerm("a Foo b", "foo", style)
+	require.Equal(t, "a "+style.Render("Foo")+" b", got,
+		"the matched run must be wrapped in the match style, preserving its case")
+
+	// Every occurrence is wrapped, including ones separated only by a single rune
+	// and matched across case.
+	got = highlightTerm("xixIx", "i", style)
+	want := "x" + style.Render("i") + "x" + style.Render("I") + "x"
+	require.Equal(t, want, got,
+		"each occurrence must be wrapped, case-insensitively")
+}
+
+// TestHighlightCurrentMatch_PlainLine asserts highlightCurrentMatch emphasizes
+// the active term only on the current match line, leaving the rest untouched,
+// and is a no-op when no search is active.
+func TestHighlightCurrentMatch_PlainLine(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	body := "line0\nhere is a foo hit\nline2"
+
+	require.Equal(t, body, m.highlightCurrentMatch(body),
+		"with no active search the body must be unchanged")
+
+	m.search = searchState{term: "foo", matches: []int{1}, current: 0}
+	got := m.highlightCurrentMatch(body)
+	require.Contains(t, got, m.theme.Match.Render("foo"),
+		"the current match line must carry the styled term")
+	lines := strings.Split(got, "\n")
+	require.Equal(t, "line0", lines[0], "non-match lines must be left untouched")
+	require.Equal(t, "line2", lines[2], "non-match lines must be left untouched")
+}
+
+// TestHighlightCurrentMatch_SkipsStyledLine asserts a match line that already
+// carries ANSI styling (a markdown-rendered line) is left byte-for-byte
+// unchanged, so splicing a highlight span never corrupts existing escapes.
+func TestHighlightCurrentMatch_SkipsStyledLine(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	styledLine := "\x1b[31mhere is a foo hit\x1b[0m"
+	body := "line0\n" + styledLine + "\nline2"
+
+	m.search = searchState{term: "foo", matches: []int{1}, current: 0}
+	require.Equal(t, body, m.highlightCurrentMatch(body),
+		"a line with existing ANSI styling must be left unchanged")
+}
+
+// TestHighlightCurrentMatch_OutOfRange asserts a stale match index (past the end
+// of the current body, e.g. after the transcript shrank) is ignored rather than
+// panicking, and the body is returned unchanged.
+func TestHighlightCurrentMatch_OutOfRange(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	body := "only\ntwo lines"
+
+	m.search = searchState{term: "x", matches: []int{99}, current: 0}
+	require.Equal(t, body, m.highlightCurrentMatch(body),
+		"an out-of-range match index must be ignored")
+}
+
+// TestSearchHighlightsVisibleMatch asserts that after /search the centered match
+// line is rendered with the match style in the real view, and that advancing to
+// the next match moves the highlight off the first line.
+func TestSearchHighlightsVisibleMatch(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	chatH := m.layout.chat.H
+
+	hits := []int{3, chatH + 5, 3*chatH + 2}
+	seedScrollableTranscript(m, chatH*4, hits)
+
+	// The needle prefix is what /search matches; the highlight wraps that exact
+	// run within each tagged match line.
+	highlighted := m.theme.Match.Render("ZZNEEDLE")
+	require.NotContains(t, m.renderMain(), highlighted,
+		"nothing is highlighted before a search runs")
+
+	m.input.WriteString("/search ZZNEEDLE")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+	m.dialogs.Pop()
+
+	require.Contains(t, m.renderMain(), highlighted,
+		"the centered match line must carry the search-match style")
 }

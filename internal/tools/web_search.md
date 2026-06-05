@@ -7,6 +7,11 @@ than full page bodies.
 Arguments:
 
 - `query` string, required: natural-language or keyword search query.
+- `allowed_domains` string array, optional: keep only results whose host is (or
+  is a subdomain of) one of these domains, e.g. `["go.dev", "pkg.go.dev"]`.
+- `blocked_domains` string array, optional: drop results whose host is (or is a
+  subdomain of) one of these domains. A blocked domain always wins over an
+  allowed one. Domains may be given with or without a scheme or leading `www.`.
 
 What success looks like:
 

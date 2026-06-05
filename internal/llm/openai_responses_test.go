@@ -274,6 +274,31 @@ func TestResponsesProviderReasoningGating(t *testing.T) {
 		require.Equal(t, "auto", probe.Reasoning.Summary)
 	})
 
+	t.Run("auto effort is dropped but the summary request remains", func(t *testing.T) {
+		provider, _, gotBody := responsesProvider(t, "o3-mini", cannedResponsesReply)
+
+		_, err := provider.Stream(context.Background(), Request{
+			Model:           "o3-mini",
+			ReasoningEffort: "auto",
+			Messages:        []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+		})
+		require.NoError(t, err)
+
+		// "auto" is a provider-independent label OpenAI does not accept, so it must
+		// not reach the effort field; the reasoning object still carries the summary.
+		require.NotContains(t, string(*gotBody), `"effort"`)
+		var probe struct {
+			Reasoning *struct {
+				Effort  string `json:"effort"`
+				Summary string `json:"summary"`
+			} `json:"reasoning"`
+		}
+		require.NoError(t, json.Unmarshal(*gotBody, &probe))
+		require.NotNil(t, probe.Reasoning)
+		require.Empty(t, probe.Reasoning.Effort)
+		require.Equal(t, "auto", probe.Reasoning.Summary)
+	})
+
 	t.Run("normal model sends temperature and omits the reasoning object", func(t *testing.T) {
 		provider, _, gotBody := responsesProvider(t, "gpt-4o", cannedResponsesReply)
 

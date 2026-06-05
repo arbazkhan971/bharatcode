@@ -208,6 +208,32 @@ func openRouterReasoning(req Request) *openAIReasoning {
 	}
 }
 
+// openAIReasoningEfforts is the set of reasoning_effort labels OpenAI's reasoning
+// models accept ("minimal" was added with the gpt-5 family). The provider-
+// independent ReasoningEffort knob also carries "auto"/"dynamic" — meaning "let
+// the model size its own reasoning" — which OpenAI does not accept and would 400
+// on, so normalizeOpenAIReasoningEffort drops anything outside this set.
+var openAIReasoningEfforts = map[string]struct{}{
+	"minimal": {},
+	"low":     {},
+	"medium":  {},
+	"high":    {},
+}
+
+// normalizeOpenAIReasoningEffort maps the provider-independent ReasoningEffort
+// onto a value OpenAI's reasoning models accept. A recognized label is returned
+// lowercased; an empty, "auto"/"dynamic", or otherwise unrecognized label returns
+// "" so the effort field is omitted and the model applies its own default rather
+// than the request 400-ing. This mirrors the graceful degradation the OpenRouter
+// and Gemini/Anthropic thinking paths already apply to the same knob.
+func normalizeOpenAIReasoningEffort(effort string) string {
+	e := strings.ToLower(strings.TrimSpace(effort))
+	if _, ok := openAIReasoningEfforts[e]; ok {
+		return e
+	}
+	return ""
+}
+
 func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error) {
 	messages := make([]openAIMessage, 0, len(req.Messages)+1)
 	if req.SystemPrompt != "" {
@@ -254,9 +280,11 @@ func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error
 	// of them by model id so we never send a param the API would 400 on.
 	// Temperature stays unset (and thus omitted) for reasoning models,
 	// preserving the prior omitempty behavior for every other model: a zero
-	// temperature is omitted so the provider applies its own default.
+	// temperature is omitted so the provider applies its own default. The effort
+	// is normalized so the provider-independent "auto"/"dynamic" labels collapse
+	// to "" (omitted) rather than reaching OpenAI, which 400s on them.
 	if isReasoningModel(req.Model) {
-		body.ReasoningEffort = req.ReasoningEffort
+		body.ReasoningEffort = normalizeOpenAIReasoningEffort(req.ReasoningEffort)
 		body.MaxCompletionTokens = req.MaxTokens
 	} else {
 		body.Temperature = req.Temperature

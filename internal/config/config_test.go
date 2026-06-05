@@ -117,12 +117,14 @@ func TestEnvVarInterpolationInBaseURL(t *testing.T) {
 	t.Setenv("LSP_CMD", "gopls")
 	t.Setenv("LSP_ARG", "-v")
 	t.Setenv("DATA_DIR", "/var/lib/bharatcode")
+	t.Setenv("OPENROUTER_REFERER", "https://bharatcode.dev")
 
 	tmpDir := t.TempDir()
 	projFile := filepath.Join(tmpDir, "project.json")
 	projData := []byte(`{
 		"providers": [
-			{"name": "ollama", "type": "ollama", "base_url": "${OLLAMA_HOST}"}
+			{"name": "ollama", "type": "ollama", "base_url": "${OLLAMA_HOST}"},
+			{"name": "openrouter", "type": "openai_compatible", "base_url": "https://openrouter.ai/api/v1", "headers": {"HTTP-Referer": "${OPENROUTER_REFERER}", "X-Title": "BharatCode"}}
 		],
 		"mcp": [
 			{
@@ -157,6 +159,8 @@ func TestEnvVarInterpolationInBaseURL(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, "http://10.0.0.1:11434", cfg.Providers[0].BaseURL)
+	require.Equal(t, "https://bharatcode.dev", cfg.Providers[1].Headers["HTTP-Referer"])
+	require.Equal(t, "BharatCode", cfg.Providers[1].Headers["X-Title"])
 	require.Equal(t, "npx", cfg.MCP[0].Command)
 	require.Equal(t, []string{"mcp-server", "extra"}, cfg.MCP[0].Args)
 	require.Equal(t, "prod", cfg.MCP[0].Env["ENV_VAR"])

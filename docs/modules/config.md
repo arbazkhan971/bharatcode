@@ -64,6 +64,12 @@ type Provider struct {
     APIKeyEnv string       `json:"api_key_env,omitempty"`
     Models    []string     `json:"models"`
     Disabled  bool         `json:"disabled,omitempty"`
+    // Headers are extra HTTP headers attached to every request (OpenRouter
+    // HTTP-Referer / X-Title attribution, Azure api-key, proxy tokens). They are
+    // injected at the transport layer and never override the auth / content-type
+    // headers the client sets, so a custom header cannot break authentication.
+    // Values support ${ENV} interpolation. Empty by default.
+    Headers map[string]string `json:"headers,omitempty"`
 }
 
 // Model is one entry in a model pack. Prices are quoted per
@@ -256,7 +262,7 @@ Prices and the FX rate are accurate as of 2026-05-01. Implementers should not ch
 7. A test `TestProjectOverridesGlobal` writes a global file with `Currency: "USD"` and a project file with `Currency: "INR"`, calls `LoadFrom`, and asserts the loaded `Ledger.Currency == "INR"`.
 8. A test `TestProjectArrayReplacesGlobal` writes a global `providers: [A, B]` and project `providers: [C]`, asserts the merged result is `[C]` (slices replace, they do not append; document this on `Config.merge`).
 9. A test `TestEnvVarInterpolation` sets `DEEPSEEK_API_KEY=sk-test` in `t.Setenv`, loads a config where `providers[0].api_key_env: "DEEPSEEK_API_KEY"` (the *name* of the env var, resolved by the LLM client at request time, not by Load), and verifies the loaded value is the literal `"DEEPSEEK_API_KEY"` — env-var values never enter the config struct.
-10. A test `TestEnvVarInterpolationInBaseURL` sets `OLLAMA_HOST=http://10.0.0.1:11434`, loads a config with `providers[ollama].base_url: "${OLLAMA_HOST}"`, asserts the resolved struct has `BaseURL == "http://10.0.0.1:11434"`. `${VAR}` and `$VAR` forms both work, applied to string fields of `Provider.BaseURL`, `MCPServer.URL`, `MCPServer.Command`, and any `Env` map values.
+10. A test `TestEnvVarInterpolationInBaseURL` sets `OLLAMA_HOST=http://10.0.0.1:11434`, loads a config with `providers[ollama].base_url: "${OLLAMA_HOST}"`, asserts the resolved struct has `BaseURL == "http://10.0.0.1:11434"`. `${VAR}` and `$VAR` forms both work, applied to string fields of `Provider.BaseURL`, all values in `Provider.Headers`, `MCPServer.URL`, `MCPServer.Command`, and any `Env` map values.
 11. A test `TestValidateRejectsDuplicateProviderNames` returns an error containing the duplicate name and the JSON pointer path (`/providers/1/name`).
 12. A test `TestValidateRejectsModelReferencingMissingProvider` returns an error naming both the model ID and the missing provider.
 13. A test `TestSaveRoundtrip` saves, reloads, and asserts the round-tripped config equals the input. Verify the on-disk file mode is `0o600` (skip on Windows).
@@ -268,7 +274,7 @@ Prices and the FX rate are accurate as of 2026-05-01. Implementers should not ch
 
 - **viper vs. custom merge.** AGENTS.md §2 locks the stack to `github.com/spf13/viper`. The user's spec for this module explicitly recommends a custom merge instead of viper. Both directives come from the same author; this module follows the user's per-module guidance (custom merge) because viper's auto-bind and case-insensitive matching produce surprising results on snake_case JSON and on nested arrays. Write the decision down in `docs/decisions/<today>-config-merge-strategy.md` so the deviation is auditable. Do not import `viper` from this package.
 - The custom merge is a straightforward struct walk: for scalars project-wins, for slices project replaces global, for maps project values override per-key. Define `func (c *Config) merge(other *Config)` and unit-test it with table-driven cases.
-- Env-var interpolation is regex-based: `\$\{?([A-Z_][A-Z0-9_]*)\}?` against any string field tagged `interpolate:"true"` *or* listed in a small allowlist (`Provider.BaseURL`, `MCPServer.URL`, `MCPServer.Command`, `MCPServer.Args[*]`, `LSPServer.Command`, `LSPServer.Args[*]`, `Options.DataDir`, all map values in `MCPServer.Env`). A missing variable resolves to the empty string and the field is recorded in a `warnings` slice returned alongside the config. Do NOT call `os.ExpandEnv` on the entire JSON blob; it eats `$schema` references and similar.
+- Env-var interpolation is regex-based: `\$\{?([A-Z_][A-Z0-9_]*)\}?` against any string field tagged `interpolate:"true"` *or* listed in a small allowlist (`Provider.BaseURL`, all map values in `Provider.Headers`, `MCPServer.URL`, `MCPServer.Command`, `MCPServer.Args[*]`, `LSPServer.Command`, `LSPServer.Args[*]`, `Options.DataDir`, all map values in `MCPServer.Env`). A missing variable resolves to the empty string and the field is recorded in a `warnings` slice returned alongside the config. Do NOT call `os.ExpandEnv` on the entire JSON blob; it eats `$schema` references and similar.
 - API keys themselves are NEVER stored in the config struct. The struct stores the *name* of the env var (`APIKeyEnv`). The LLM client reads `os.Getenv(provider.APIKeyEnv)` at request time. This makes the config file safe to commit, share, or copy between machines.
 - Embed defaults via `//go:embed defaults/config.json`. Parse on first call and cache in a package-level `sync.Once`-guarded variable. `Default()` returns a deep copy of the cached value (JSON marshal + unmarshal is acceptable; this is not a hot path).
 - Validation rules:

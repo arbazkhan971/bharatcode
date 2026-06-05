@@ -104,6 +104,15 @@ type Provider struct {
 	APIKeyEnv string       `json:"api_key_env,omitempty"`
 	Models    []string     `json:"models"`
 	Disabled  bool         `json:"disabled,omitempty"`
+	// Headers are extra HTTP headers attached to every request this provider
+	// sends, on top of the auth and content-type headers the client sets itself.
+	// They enable provider-specific attribution and routing — e.g. OpenRouter's
+	// HTTP-Referer / X-Title headers, an Azure deployment's api-key, or a
+	// corporate proxy token. A custom header never overrides one the provider
+	// already set (auth, content type), so it cannot break authentication. Values
+	// support ${ENV} interpolation, mirroring base_url and MCP env. Empty by
+	// default, in which case the provider behaves exactly as before.
+	Headers map[string]string `json:"headers,omitempty"`
 	// Fallbacks names other configured providers to try, in order, when this
 	// provider fails with a retryable availability error (rate limit, server
 	// error, transport failure). It is empty by default, so a provider with no

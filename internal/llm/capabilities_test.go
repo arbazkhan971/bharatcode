@@ -49,6 +49,12 @@ func TestInferContextWindow(t *testing.T) {
 		// gemini rules, so it needs its own rule rather than falling through to 0.
 		{"gemini-3-pro-preview", 1_048_576},
 		{"gemini-3-flash", 1_048_576},
+		// Google's rolling "-latest" aliases track the current Gemini 2.5
+		// generation (1M window); they carry no version digit, so without their
+		// own rules they would fall through to "unknown" (0).
+		{"gemini-flash-latest", 1_048_576},
+		{"gemini-flash-lite-latest", 1_048_576},
+		{"gemini-pro-latest", 1_048_576},
 		{"llama-3.1-70b", 128_000},
 		// Llama 4 Scout (10M) and Maverick (1M) ship far larger windows than the
 		// 128k Llama 3.x default; their ids contain "llama", so the specific
@@ -175,6 +181,8 @@ func TestModelSupportsGeminiThinking(t *testing.T) {
 		{ID: "gemini-2.5-flash"},
 		{ID: "gemini-3-pro-preview"},
 		{ID: "gemini-2.0-flash"},
+		{ID: "gemini-flash-latest"},
+		{ID: "gemini-pro-latest"},
 	}
 
 	cases := []struct {
@@ -183,6 +191,10 @@ func TestModelSupportsGeminiThinking(t *testing.T) {
 	}{
 		{"gemini-2.5-flash", true},
 		{"gemini-3-pro-preview", true},
+		// Rolling "-latest" aliases resolve to the thinking-capable Gemini 2.5
+		// generation.
+		{"gemini-flash-latest", true},
+		{"gemini-pro-latest", true},
 		// Pre-2.5 models do not support the native thinkingConfig.
 		{"gemini-2.0-flash", false},
 		// An id absent from the catalog is never thinking-capable, even if its

@@ -776,3 +776,86 @@ func countEndEvents(events []Event) int {
 	}
 	return n
 }
+
+func TestAnthropicCountTokensUsesNativeEndpoint(t *testing.T) {
+	t.Setenv("ANTHROPIC_TEST_KEY", "secret")
+
+	var gotPath, gotKey, gotVersion string
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"input_tokens":57}`)
+	}))
+	defer server.Close()
+
+	cfg := testConfig("anthropic", config.ProviderAnthropic, server.URL+"/v1")
+	cfg.Providers[0].APIKeyEnv = "ANTHROPIC_TEST_KEY"
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	provider, err := reg.Get("anthropic")
+	require.NoError(t, err)
+
+	counter, ok := provider.(TokenCounter)
+	require.True(t, ok, "anthropic provider must satisfy TokenCounter")
+
+	n, err := counter.CountTokens(context.Background(), Request{
+		Model:        "test-model",
+		Messages:     []message.Message{textMsg("count me")},
+		SystemPrompt: "be brief",
+		Tools:        []Tool{{Name: "get_weather", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		// MaxTokens and Temperature are inference-only and must be dropped.
+		MaxTokens:   4096,
+		Temperature: 0.7,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 57, n)
+
+	// The native count_tokens method and auth headers ride through.
+	require.Equal(t, "/v1/messages/count_tokens", gotPath)
+	require.Equal(t, "secret", gotKey)
+	require.Equal(t, anthropicVersion, gotVersion)
+
+	// The body carries the same system, messages, and tools the stream path would
+	// send, but none of the inference-only fields the endpoint rejects.
+	var captured map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.Contains(t, captured, "system")
+	require.Contains(t, captured, "messages")
+	require.Contains(t, captured, "tools")
+	require.NotContains(t, captured, "max_tokens")
+	require.NotContains(t, captured, "stream")
+	require.NotContains(t, captured, "temperature")
+
+	var req anthropicCountTokensRequest
+	require.NoError(t, json.Unmarshal(rawBody, &req))
+	require.Equal(t, "test-model", req.Model)
+	require.Len(t, req.System, 1)
+	require.Equal(t, "be brief", req.System[0].Text)
+	require.Len(t, req.Messages, 1)
+	require.Len(t, req.Tools, 1)
+	require.Equal(t, "get_weather", req.Tools[0].Name)
+}
+
+func TestAnthropicCountTokensRequiresAPIKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_TEST_KEY", "")
+
+	cfg := testConfig("anthropic", config.ProviderAnthropic, "http://example.invalid/v1")
+	cfg.Providers[0].APIKeyEnv = "ANTHROPIC_TEST_KEY"
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	provider, err := reg.Get("anthropic")
+	require.NoError(t, err)
+
+	counter, ok := provider.(TokenCounter)
+	require.True(t, ok)
+
+	_, err = counter.CountTokens(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.ErrorIs(t, err, ErrAuth)
+}

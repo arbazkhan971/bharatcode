@@ -8,6 +8,8 @@ func TestClassifyTestRunner(t *testing.T) {
 		"GOFLAGS=-count=1 go test -run X ./p": runnerGo,
 		"pytest -q tests/":                    runnerPytest,
 		"python -m py.test":                   runnerPytest,
+		"python -m unittest test_mod":         runnerUnittest,
+		"python -m unittest discover":         runnerUnittest,
 		"npm test":                            runnerJest,
 		"npm run test -- --ci":                runnerJest,
 		"yarn test":                           runnerJest,
@@ -187,6 +189,58 @@ tests/test_a.py::test_err ERROR`
 	want := []testFailure{
 		{Name: "tests/test_a.py::test_two"},
 		{Name: "tests/test_a.py::test_err"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseUnittestFailures(t *testing.T) {
+	out := `..FE
+======================================================================
+FAIL: test_upper (test_module.TestStringMethods)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "test_module.py", line 5, in test_upper
+    self.assertEqual('foo'.upper(), 'FOOO')
+AssertionError: 'FOO' != 'FOOO'
+
+======================================================================
+ERROR: test_boom (test_module.TestStringMethods)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "test_module.py", line 9, in test_boom
+    raise ValueError("nope")
+ValueError: nope
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.001s
+
+FAILED (failures=1, errors=1)`
+	got := parseTestFailures("python -m unittest test_module", out)
+	want := []testFailure{
+		{Name: "test_upper (test_module.TestStringMethods)", Detail: "AssertionError: 'FOO' != 'FOOO'"},
+		{Name: "test_boom (test_module.TestStringMethods)", Detail: "ValueError: nope"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseUnittestFailures_NoDetail(t *testing.T) {
+	// A bare assertion with no message still surfaces the test id even when the
+	// traceback carries no recognizable exception line.
+	out := `======================================================================
+FAIL: test_x (mod.T)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "mod.py", line 2, in test_x
+    assert False
+AssertionError
+
+----------------------------------------------------------------------
+Ran 1 test in 0.000s
+
+FAILED (failures=1)`
+	got := parseTestFailures("python -m unittest discover", out)
+	want := []testFailure{
+		{Name: "test_x (mod.T)", Detail: "AssertionError"},
 	}
 	assertFailures(t, got, want)
 }

@@ -111,6 +111,11 @@ var (
 	// a single TAP parser covers them. \btape\b keeps prose like "tapestry" from
 	// matching while admitting "node tape.js" / "npx tape".
 	tapRe = regexp.MustCompile(`node\s+--test\b|node:test\b|\btape\b`)
+	// "bats" (Bash Automated Testing System) emits TAP by default ("not ok N
+	// <desc>" with the assertion on following "# ..." comment lines), so it shares
+	// the TAP parser. \bbats\b admits "bats", "bats test.bats", and "npx bats"
+	// while keeping prose like "acrobats perform" from matching.
+	batsRe = regexp.MustCompile(`\bbats\b`)
 	// "swift test" drives SwiftPM's XCTest runner; \b after "test" keeps prose
 	// like "swift testing guide" from matching while admitting flags and paths
 	// ("swift test --filter FooTests").
@@ -162,7 +167,7 @@ func classifyTestRunner(command string) testRunner {
 	// summary distinct from pytest's, so they get their own parser.
 	case strings.Contains(c, "unittest"):
 		return runnerUnittest
-	case tapRe.MatchString(c):
+	case tapRe.MatchString(c), batsRe.MatchString(c):
 		return runnerTAP
 	case strings.Contains(c, "deno test"):
 		// `deno test` runs Deno's built-in test runner, whose console output marks
@@ -932,15 +937,21 @@ var (
 	// failing assertion. Surrounding quotes on the value are stripped by the
 	// caller so single- and double-quoted YAML scalars render the same.
 	tapMessageRe = regexp.MustCompile(`^\s+message:\s*(.*\S)\s*$`)
+	// "#   `[ "$x" -eq 4 ]' failed" — a TAP diagnostic comment line beneath a
+	// failing assertion. bats (and other shell-style emitters) report the failed
+	// expression and its location this way rather than in a YAML block, so the
+	// first such comment is used as the detail when no "message:" field is found.
+	tapCommentRe = regexp.MustCompile(`^\s*#\s?(.*\S)\s*$`)
 )
 
 // parseTAPFailures extracts failing tests from TAP (Test Anything Protocol)
-// output, as produced by `node --test` in CI, `tape`, and other TAP emitters.
-// Each "not ok N - <description>" line is a failure; the detail is the "message:"
-// field of the indented YAML diagnostic block beneath it, located before the next
-// "ok"/"not ok" result or the closing "..." of the block. A "not ok" carrying a
-// "# TODO"/"# SKIP" directive is an expected result, not a failure, so it is
-// skipped.
+// output, as produced by `node --test` in CI, `tape`, `bats`, and other TAP
+// emitters. Each "not ok N - <description>" line is a failure; the detail is the
+// "message:" field of the indented YAML diagnostic block beneath it, or — when no
+// such field is present — the first "# ..." diagnostic comment (the form bats
+// uses to report the failed expression), located before the next "ok"/"not ok"
+// result or the closing "..." of the block. A "not ok" carrying a "# TODO"/"#
+// SKIP" directive is an expected result, not a failure, so it is skipped.
 func parseTAPFailures(output string) []testFailure {
 	lines := splitLines(output)
 	var failures []testFailure
@@ -963,6 +974,9 @@ func parseTAPFailures(output string) []testFailure {
 			}
 		}
 		f := testFailure{Name: name}
+		// A "#"-comment diagnostic (bats' assertion/location report) is the
+		// fallback detail when no YAML "message:" field is found in the block.
+		comment := ""
 		for j := i + 1; j < len(lines); j++ {
 			// The YAML block ends at "..." and never spans past the next result.
 			if strings.TrimSpace(lines[j]) == "..." || tapNotOkRe.MatchString(lines[j]) || tapOkRe.MatchString(lines[j]) {
@@ -972,6 +986,14 @@ func parseTAPFailures(output string) []testFailure {
 				f.Detail = strings.Trim(strings.TrimSpace(d[1]), `'"`)
 				break
 			}
+			if comment == "" {
+				if d := tapCommentRe.FindStringSubmatch(lines[j]); d != nil {
+					comment = strings.TrimSpace(d[1])
+				}
+			}
+		}
+		if f.Detail == "" {
+			f.Detail = comment
 		}
 		failures = append(failures, f)
 	}

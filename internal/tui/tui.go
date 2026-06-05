@@ -1162,6 +1162,7 @@ var keybindingGroups = []keyGroup{
 		{"Ctrl+S", "open settings"},
 		{"Ctrl+D", "show the latest edit diff"},
 		{"Ctrl+F", "toggle the file-tree panel"},
+		{"/ (in panel)", "filter the file-tree listing"},
 	}},
 	{title: "Search", bindings: []keyBinding{
 		{"Ctrl+/", "jump to the next search match"},

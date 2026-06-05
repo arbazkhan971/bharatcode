@@ -315,8 +315,8 @@ func TestOpenAIMaxTokensFieldSelection(t *testing.T) {
 }
 
 // TestIsReasoningModel pins the model-id classification so the gating prefixes
-// stay intentional: o-series and gpt-5 reasoning variants are reasoning models;
-// gpt-4o and a bare gpt-5 chat id are not.
+// stay intentional: the o-series and the whole gpt-5 family are reasoning
+// models; gpt-4o and the chat-tuned gpt-5-chat variant are not.
 func TestIsReasoningModel(t *testing.T) {
 	cases := []struct {
 		id   string
@@ -328,12 +328,21 @@ func TestIsReasoningModel(t *testing.T) {
 		{"o3-mini", true},
 		{"o4-mini", true},
 		{"O3-MINI", true},
+		// The gpt-5 family runs a hidden reasoning pass and rejects temperature,
+		// so every member except gpt-5-chat must classify as reasoning.
+		{"gpt-5", true},
+		{"gpt-5-mini", true},
+		{"gpt-5-nano", true},
+		{"gpt-5-codex", true},
 		{"gpt-5-reasoning", true},
 		{"gpt-5-reasoning-alpha", true},
+		{"GPT-5-MINI", true},
+		{"gpt-5.5", true},
+		// gpt-5-chat is the one non-reasoning member of the family.
+		{"gpt-5-chat", false},
+		{"gpt-5-chat-latest", false},
 		{"gpt-4o", false},
 		{"gpt-4o-mini", false},
-		{"gpt-5", false},
-		{"gpt-5-chat", false},
 		{"deepseek-chat", false},
 		{"o1mini", false},
 		{"", false},

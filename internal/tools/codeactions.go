@@ -5,10 +5,15 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/arbazkhan971/bharatcode/internal/diffutil"
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
+	"github.com/arbazkhan971/bharatcode/internal/permission"
+	"github.com/arbazkhan971/bharatcode/internal/util/fsext"
 )
 
 // CodeActionSource is the LSP capability consumed by the codeactions tool. The
@@ -20,6 +25,7 @@ type CodeActionSource interface {
 type codeActionsTool struct {
 	source  CodeActionSource
 	workDir string
+	deps    Dependencies
 }
 
 type codeActionsArgs struct {
@@ -28,6 +34,7 @@ type codeActionsArgs struct {
 	Column    int    `json:"column,omitempty"`
 	EndLine   int    `json:"end_line,omitempty"`
 	EndColumn int    `json:"end_column,omitempty"`
+	Apply     int    `json:"apply,omitempty"`
 }
 
 var schemaCodeActions = json.RawMessage(`{
@@ -59,6 +66,11 @@ var schemaCodeActions = json.RawMessage(`{
       "type": "integer",
       "minimum": 1,
       "description": "1-based end column. Defaults to column (a cursor position rather than a span)."
+    },
+    "apply": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based index of an action from a prior listing to apply. Only edit-based actions (organize imports, quick fixes) can be applied; server-side commands cannot. Omit to just list the available actions."
     }
   }
 }`)
@@ -67,7 +79,7 @@ var schemaCodeActions = json.RawMessage(`{
 var codeActionsDescription string
 
 func newCodeActionsTool(deps Dependencies) Tool {
-	t := &codeActionsTool{workDir: deps.WorkDir}
+	t := &codeActionsTool{workDir: deps.WorkDir, deps: deps}
 	// A nil *lsp.Manager assigned to the CodeActionSource interface would produce
 	// a non-nil interface wrapping a nil pointer, defeating the t.source == nil
 	// guard in Run and panicking on the first method call. Only adopt the source
@@ -140,52 +152,202 @@ func (t *codeActionsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 	if err != nil {
 		return Result{}, fmt.Errorf("getting code actions at %s:%d:%d: %w", args.Path, args.Line, col, err)
 	}
-	return codeActionsResult(actions), nil
+
+	ordered := orderedCodeActions(actions)
+	if args.Apply > 0 {
+		return t.applyCodeAction(ctx, ordered, args.Apply, raw)
+	}
+	return codeActionsResult(ordered), nil
 }
 
-// codeActionsResult renders code actions as a sorted, numbered list. Each entry
-// shows the title, the action kind in brackets when present, and a note of how
-// the action would be applied (an inline edit, a server command, or both).
-// Duplicate titles are collapsed. An empty input reports directly.
-func codeActionsResult(actions []lsp.CodeAction) Result {
-	if len(actions) == 0 {
-		return Result{Content: "No code actions available."}
+// applyCodeAction applies the workspace edit of the action at the given 1-based
+// index in ordered (the same numbering codeActionsResult renders). Only
+// edit-bearing actions can be applied locally; server-side commands are
+// rejected with guidance. Each touched file is written atomically and recorded,
+// and the result carries a unified diff per file like the rename/edit tools.
+func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.CodeAction, idx int, raw json.RawMessage) (Result, error) {
+	if idx > len(ordered) {
+		if len(ordered) == 0 {
+			return errorResult("cannot apply: no code actions available for this range"), nil
+		}
+		return errorResult(fmt.Sprintf("cannot apply action %d: only %d action(s) available", idx, len(ordered))), nil
+	}
+	action := ordered[idx-1]
+	title := strings.TrimSpace(action.Title)
+	if title == "" {
+		title = "(untitled action)"
+	}
+	if len(action.Edit.Changes) == 0 {
+		if action.Command != nil && action.Command.Command != "" {
+			return errorResult(fmt.Sprintf("cannot apply %q: it is a server-side command (%s), not an inline edit", title, action.Command.Command)), nil
+		}
+		return errorResult(fmt.Sprintf("cannot apply %q: the action carries no edits", title)), nil
 	}
 
-	sort.SliceStable(actions, func(i, j int) bool {
-		if actions[i].Kind != actions[j].Kind {
-			return actions[i].Kind < actions[j].Kind
+	paths := make([]string, 0, len(action.Edit.Changes))
+	for p := range action.Edit.Changes {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		if !isInsideWorkDir(p, t.workDir) {
+			return errorResult("cannot apply: action would edit a file outside the workspace: " + p), nil
 		}
-		return actions[i].Title < actions[j].Title
-	})
+	}
+
+	if err := t.checkPermission(ctx, raw); err != nil {
+		return errorResult(err.Error()), nil
+	}
+
+	type pending struct {
+		path       string
+		oldContent []byte
+		newContent []byte
+		edits      int
+	}
+	updates := make([]pending, 0, len(paths))
+	totalEdits := 0
+	for _, p := range paths {
+		edits := action.Edit.Changes[p]
+		if len(edits) == 0 {
+			continue
+		}
+		oldContent, err := os.ReadFile(p)
+		if err != nil {
+			return Result{}, fmt.Errorf("reading file %s: %w", p, err)
+		}
+		newText, err := applyTextEdits(string(oldContent), edits)
+		if err != nil {
+			return errorResult(fmt.Sprintf("applying code action edits to %s: %v", p, err)), nil
+		}
+		if newText == string(oldContent) {
+			continue
+		}
+		updates = append(updates, pending{path: p, oldContent: oldContent, newContent: []byte(newText), edits: len(edits)})
+		totalEdits += len(edits)
+	}
+	if len(updates) == 0 {
+		return Result{Content: fmt.Sprintf("Applied %q: the edits left every file unchanged.", title)}, nil
+	}
+
+	for _, u := range updates {
+		if err := fsext.AtomicWrite(u.path, u.newContent, 0o644); err != nil {
+			return Result{}, fmt.Errorf("writing file %s: %w", u.path, err)
+		}
+		if err := t.recordWrite(ctx, u.path, u.oldContent, u.newContent); err != nil {
+			return Result{}, err
+		}
+	}
 
 	var b strings.Builder
+	fmt.Fprintf(&b, "applied %q: %d edit(s) across %d file(s)\n", title, totalEdits, len(updates))
+	diffs := make(map[string]string, len(updates))
+	for _, u := range updates {
+		rel := u.path
+		if r, err := filepath.Rel(t.workDir, u.path); err == nil && !strings.HasPrefix(r, "..") {
+			rel = filepath.ToSlash(r)
+		}
+		fmt.Fprintf(&b, "  %s (%d edit(s))\n", rel, u.edits)
+		if d := diffutil.Unified(string(u.oldContent), string(u.newContent)); d != "" {
+			fmt.Fprintf(&b, "%s\n\n", d)
+			diffs[rel] = d
+		}
+	}
+
+	metadata := map[string]any{"applied": title, "files": len(updates), "edits": totalEdits}
+	if len(diffs) > 0 {
+		metadata["diffs"] = diffs
+	}
+	return Result{Content: strings.TrimRight(b.String(), "\n"), Metadata: metadata}, nil
+}
+
+func (t *codeActionsTool) checkPermission(ctx context.Context, raw json.RawMessage) error {
+	if t.deps.Permission == nil {
+		return nil
+	}
+	args := map[string]any{}
+	_ = json.Unmarshal(raw, &args)
+	decision, err := t.deps.Permission.Check(ctx, permission.Request{
+		ToolName:  t.Name(),
+		Args:      args,
+		SessionID: t.deps.SessionID,
+	})
+	if err != nil {
+		return fmt.Errorf("checking permission: %w", err)
+	}
+	if decision == permission.DecisionDeny {
+		return fmt.Errorf("permission denied")
+	}
+	return nil
+}
+
+func (t *codeActionsTool) recordWrite(ctx context.Context, path string, oldContent, newContent []byte) error {
+	if t.deps.FileTracker == nil || t.deps.SessionID == "" {
+		return nil
+	}
+	if _, err := t.deps.FileTracker.RecordWrite(ctx, t.deps.SessionID, path, oldContent, newContent); err != nil {
+		return fmt.Errorf("recording write for %s: %w", path, err)
+	}
+	markViewed(t.deps.SessionID, path)
+	return nil
+}
+
+// orderedCodeActions sorts actions by kind then title and drops adjacent
+// duplicates (by rendered entry), yielding the stable order that both the
+// listing and `apply` index into.
+func orderedCodeActions(actions []lsp.CodeAction) []lsp.CodeAction {
+	sorted := make([]lsp.CodeAction, len(actions))
+	copy(sorted, actions)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Kind != sorted[j].Kind {
+			return sorted[i].Kind < sorted[j].Kind
+		}
+		return sorted[i].Title < sorted[j].Title
+	})
+
+	out := make([]lsp.CodeAction, 0, len(sorted))
 	var last string
-	n := 0
-	for _, a := range actions {
-		title := strings.TrimSpace(a.Title)
-		if title == "" {
-			title = "(untitled action)"
-		}
-		var line strings.Builder
-		line.WriteString(title)
-		if a.Kind != "" {
-			fmt.Fprintf(&line, " [%s]", a.Kind)
-		}
-		switch note := codeActionApplyNote(a); note {
-		case "":
-		default:
-			fmt.Fprintf(&line, " (%s)", note)
-		}
-		entry := line.String()
+	for _, a := range sorted {
+		entry := codeActionEntry(a)
 		if entry == last {
 			continue
 		}
 		last = entry
-		n++
-		fmt.Fprintf(&b, "%d. %s\n", n, entry)
+		out = append(out, a)
+	}
+	return out
+}
+
+// codeActionEntry renders one action as its title, kind in brackets when
+// present, and a note of how it would take effect.
+func codeActionEntry(a lsp.CodeAction) string {
+	title := strings.TrimSpace(a.Title)
+	if title == "" {
+		title = "(untitled action)"
+	}
+	var line strings.Builder
+	line.WriteString(title)
+	if a.Kind != "" {
+		fmt.Fprintf(&line, " [%s]", a.Kind)
+	}
+	if note := codeActionApplyNote(a); note != "" {
+		fmt.Fprintf(&line, " (%s)", note)
+	}
+	return line.String()
+}
+
+// codeActionsResult renders an already-ordered action list as a numbered list.
+// The numbering matches the index `apply` expects. An empty input reports
+// directly.
+func codeActionsResult(ordered []lsp.CodeAction) Result {
+	if len(ordered) == 0 {
+		return Result{Content: "No code actions available."}
 	}
 
+	var b strings.Builder
+	for i, a := range ordered {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, codeActionEntry(a))
+	}
 	return Result{Content: strings.TrimRight(b.String(), "\n")}
 }
 

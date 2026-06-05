@@ -143,6 +143,58 @@ func TestMentionMatches_BaseNameSubsequenceOutranksPathSubsequence(t *testing.T)
 	require.Equal(t, []string{"handler.go", "http/logger.go"}, got)
 }
 
+// TestMentionMatches_AcronymOutranksScatteredSubsequence asserts that a token
+// landing on word starts (an acronym of the path's segments) ranks ahead of one
+// that only threads scattered letters, the way fzf and opencode reward
+// word-start hits.
+func TestMentionMatches_AcronymOutranksScatteredSubsequence(t *testing.T) {
+	t.Parallel()
+
+	// "sb" spells the initials of "status_bar.go" (s + b at word starts), but in
+	// "subscribe.go" it only matches the leading "s...b" as a scattered run.
+	root := mentionWorkspace(t,
+		"subscribe.go",
+		"status_bar.go",
+	)
+	got := mentionMatches("sb", root)
+	require.Equal(t, []string{"status_bar.go", "subscribe.go"}, got)
+}
+
+// TestMentionMatches_AcronymAcrossPathSegments asserts an acronym can hop across
+// directory segments, so "its" reaches "internal/tui/statusbar.go".
+func TestMentionMatches_AcronymAcrossPathSegments(t *testing.T) {
+	t.Parallel()
+
+	root := mentionWorkspace(t, "internal/tui/statusbar.go")
+	require.Contains(t, mentionMatches("its", root), "internal/tui/statusbar.go")
+}
+
+// TestInitialsPositions_LightsWordStarts asserts the acronym matcher reports the
+// rune indices of the word-start anchors it jumped between, and rejects a token
+// whose letters are not all word starts.
+func TestInitialsPositions_LightsWordStarts(t *testing.T) {
+	t.Parallel()
+
+	// "sb" anchors on the s of "status" (index 0) and the b of "bar" (index 7).
+	require.Equal(t, []int{0, 7}, initialsPositions("sb", "status_bar.go"))
+	// Case-insensitive against the path's runes.
+	require.Equal(t, []int{0, 7}, initialsPositions("SB", "Status_Bar.go"))
+	// "sa" is a scattered subsequence of "status_bar.go" but "a" is not a word
+	// start, so the acronym matcher declines it.
+	require.Nil(t, initialsPositions("sa", "status_bar.go"))
+	require.Nil(t, initialsPositions("", "status_bar.go"))
+}
+
+// TestMatchPositions_AcronymHighlightsAnchors asserts highlighting lands on the
+// word-start anchors for an acronym match rather than the first scattered run.
+func TestMatchPositions_AcronymHighlightsAnchors(t *testing.T) {
+	t.Parallel()
+
+	// "sb" is not a contiguous substring of "status_bar.go", so the acronym band
+	// lights the s (0) and the b (7) at the word starts.
+	require.Equal(t, []int{0, 7}, matchPositions("sb", "status_bar.go"))
+}
+
 // TestCompleteMention_CyclesMatches asserts the first Tab replaces the token with
 // the best match and subsequent Tabs cycle, mirroring slash completion.
 func TestCompleteMention_CyclesMatches(t *testing.T) {

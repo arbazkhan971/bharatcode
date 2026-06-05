@@ -160,6 +160,33 @@ func TestDefaultExtensionsCoversBuiltinSpecs(t *testing.T) {
 	require.Equal(t, want, got, "DefaultExtensions must be the sorted union of the built-in language specs")
 }
 
+func TestBuiltinSpecsInvokeLSPServers(t *testing.T) {
+	// Every built-in spec must name a binary that speaks LSP over stdio. The bare
+	// "tsserver" binary (shipped with the typescript npm package) speaks its own
+	// protocol, not LSP, so a spec pointing at it would silently fail every LSP
+	// request for that language — guard against regressing back to it.
+	for _, spec := range defaultLanguageSpecs {
+		require.NotEqual(t, "tsserver", spec.command,
+			"%s spec must use an LSP server, not the proprietary tsserver protocol", spec.name)
+	}
+
+	ts, ok := builtinSpec("typescript")
+	require.True(t, ok, "typescript must be a built-in spec")
+	require.Equal(t, "typescript-language-server", ts.command,
+		"TypeScript/JavaScript LSP support requires the typescript-language-server binary")
+	require.Contains(t, ts.args, "--stdio",
+		"typescript-language-server must be launched in stdio mode to speak LSP")
+}
+
+func builtinSpec(name string) (languageSpec, bool) {
+	for _, spec := range defaultLanguageSpecs {
+		if spec.name == name {
+			return spec, true
+		}
+	}
+	return languageSpec{}, false
+}
+
 func TestSupportedExtensionsMatchesDefaultsWithoutConfig(t *testing.T) {
 	manager := NewManager(config.Default(), nil)
 	require.Equal(t, DefaultExtensions(), manager.SupportedExtensions(),

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/arbazkhan971/bharatcode/internal/diffutil"
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/util/fsext"
@@ -196,17 +197,28 @@ func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceE
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "renamed to %q: %d edit(s) across %d file(s)\n", newName, totalEdits, len(updates))
+	diffs := make(map[string]string, len(updates))
 	for _, u := range updates {
 		rel := u.path
 		if r, err := filepath.Rel(t.deps.WorkDir, u.path); err == nil && !strings.HasPrefix(r, "..") {
 			rel = filepath.ToSlash(r)
 		}
 		fmt.Fprintf(&b, "  %s (%d edit(s))\n", rel, u.edits)
+		// Show a compact unified diff per file so the model sees exactly which
+		// lines the rename touched, matching the edit/multiedit/write tools.
+		if d := diffutil.Unified(string(u.oldContent), string(u.newContent)); d != "" {
+			fmt.Fprintf(&b, "%s\n\n", d)
+			diffs[rel] = d
+		}
 	}
 
+	metadata := map[string]any{"files": len(updates), "edits": totalEdits}
+	if len(diffs) > 0 {
+		metadata["diffs"] = diffs
+	}
 	return Result{
 		Content:  strings.TrimRight(b.String(), "\n"),
-		Metadata: map[string]any{"files": len(updates), "edits": totalEdits},
+		Metadata: metadata,
 	}, nil
 }
 

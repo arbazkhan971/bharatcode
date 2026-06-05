@@ -18,6 +18,44 @@ func TestOverflowSuffix(t *testing.T) {
 	require.Equal(t, " …", overflowSuffix(-3))
 }
 
+// TestCyclePositionSuffix asserts the Tab-cycle counter reports the 1-based
+// position only while a cycle is active, and stays empty for a non-cycling menu
+// (active < 0) or a degenerate index, so a menu merely previewing matches shows
+// no counter.
+func TestCyclePositionSuffix(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", cyclePositionSuffix(-1, 5), "no active cycle shows no counter")
+	require.Equal(t, " (1/3)", cyclePositionSuffix(0, 3), "the first cycle entry is 1/N")
+	require.Equal(t, " (3/3)", cyclePositionSuffix(2, 3), "the last cycle entry is N/N")
+	require.Equal(t, "", cyclePositionSuffix(5, 3), "an out-of-range index shows no counter")
+	require.Equal(t, "", cyclePositionSuffix(0, 0), "an empty match set shows no counter")
+}
+
+// TestRenderSlashHint_ShowsCyclePosition asserts that while the user Tabs through
+// the slash-command menu the rendered hint reports the selected position within
+// the cycle, so the user can see how far the cycle has walked without counting
+// entries.
+func TestRenderSlashHint_ShowsCyclePosition(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+
+	// "/s" matches several built-ins; seed the cycle, then Tab once more so the
+	// selection sits on the second match.
+	m.setInput("/s")
+	c1, ok := m.inputHistory.completeSlash(m.input.String())
+	require.True(t, ok, "the first Tab must seed the cycle")
+	m.setInput(c1)
+	c2, ok := m.inputHistory.completeSlash(m.input.String())
+	require.True(t, ok, "the second Tab must advance the cycle")
+	m.setInput(c2)
+
+	hint := stripANSI(m.renderSlashHint(400))
+	require.NotEmpty(t, hint)
+	require.Contains(t, hint, "(2/", "the menu reports the second cycle position")
+}
+
 // TestSlashHintCommands_NonSlashBufferShowsNothing asserts the menu is inert
 // for ordinary prose, so a normal prompt never grows a completion row.
 func TestSlashHintCommands_NonSlashBufferShowsNothing(t *testing.T) {

@@ -339,6 +339,30 @@ func TestRenderMentionHint_OverflowReportsTrueTotal(t *testing.T) {
 	require.Contains(t, hint, "+5", "overflow must count matches beyond the displayed cap")
 }
 
+// TestRenderMentionHint_ShowsCyclePosition asserts that while the user Tabs
+// through the @-file picker the rendered hint reports the selected position
+// within the cycle, mirroring the slash-command menu so both pickers expose how
+// far a Tab cycle has walked.
+func TestRenderMentionHint_ShowsCyclePosition(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.workspaceRoot = mentionWorkspace(t, "alpha.go", "alphabet.go", "alphasort.go")
+
+	// Seed the Tab cycle on "@alpha", then advance to the second match.
+	m.setInput("@alpha")
+	c1, ok := m.inputHistory.completeMention(m.input.String(), m.workspaceRoot)
+	require.True(t, ok, "the first Tab must seed the cycle")
+	m.setInput(c1)
+	c2, ok := m.inputHistory.completeMention(m.input.String(), m.workspaceRoot)
+	require.True(t, ok, "the second Tab must advance the cycle")
+	m.setInput(c2)
+
+	hint := stripANSI(m.renderMentionHint(400))
+	require.NotEmpty(t, hint)
+	require.Contains(t, hint, "(2/3)", "the picker reports the selected position within the cycle")
+}
+
 // TestRenderMentionHint_NoMatchingFiles asserts that an in-progress @-token with
 // no matching file surfaces a "no matching files" note, so the picker reports an
 // empty search instead of silently rendering nothing.

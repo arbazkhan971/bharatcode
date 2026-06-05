@@ -19,6 +19,22 @@ func overflowSuffix(hidden int) string {
 	return " … +" + strconv.Itoa(hidden)
 }
 
+// cyclePositionSuffix formats the "(i/N)" indicator a one-row completion menu
+// appends while the user is Tab-cycling through matches, reporting the 1-based
+// position of the selected entry within the cycle. It returns "" when no cycle
+// is active (active < 0) or the index is out of range, so a menu merely
+// previewing matches before the first Tab shows no counter. Surfacing the
+// position lets the user see how far through the matches a Tab cycle has walked
+// without counting the entries themselves, the way Claude Code and opencode mark
+// the selected completion. It is shared by the slash-command and @-file menus so
+// both report a cycle the same way.
+func cyclePositionSuffix(active, total int) string {
+	if active < 0 || total <= 0 || active >= total {
+		return ""
+	}
+	return " (" + strconv.Itoa(active+1) + "/" + strconv.Itoa(total) + ")"
+}
+
 // slashCommandDescriptions maps a built-in slash command to a terse one-line
 // summary surfaced in the completion menu once the selection narrows to a
 // single command. Keeping the gloss next to the command — rather than only in
@@ -192,6 +208,16 @@ func (m *model) renderSlashHint(width int) string {
 	}
 
 	line := indent + strings.Join(parts, sep)
+
+	// While Tab-cycling, append the position within the cycle so the user can see
+	// how far through the matches they have walked. It is added before the
+	// overflow/description suffixes and width-guarded so the menu still never
+	// spills past one row.
+	if suffix := cyclePositionSuffix(active, len(cmds)); suffix != "" && used+len([]rune(suffix)) <= width {
+		line += m.theme.Muted.Render(suffix)
+		used += len([]rune(suffix))
+	}
+
 	if truncated {
 		line += m.theme.Muted.Render(overflowSuffix(len(cmds) - len(parts)))
 		return line

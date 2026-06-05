@@ -10,6 +10,7 @@ var builtinFilters = []*Filter{
 	filterGoBuild,
 	filterGoTest,
 	filterGoVet,
+	filterGoMod,
 	filterGofmt,
 	filterMake,
 	filterCargo,
@@ -32,6 +33,12 @@ var filterGoBuild = &Filter{
 	MatchCommand: re(`^go\s+(build|run|install)\b`),
 	StripLinesMatching: []*regexp.Regexp{
 		re(`^\s*$`),
+		// A cold build resolves the module cache first, flooding the output with
+		// one "go: downloading ..." line per transitive dependency. They are pure
+		// progress noise; real build errors are kept.
+		re(`^go: downloading\s+`),
+		re(`^go: extracting\s+`),
+		re(`^go: finding\s+`),
 	},
 	MaxLines: 60,
 	OnEmpty:  "go build: ok",
@@ -47,6 +54,10 @@ var filterGoTest = &Filter{
 		re(`^=== RUN\s+`),
 		re(`^--- PASS:`),
 		re(`^\s+--- PASS:`),
+		// Cold-cache module download progress (see filterGoBuild).
+		re(`^go: downloading\s+`),
+		re(`^go: extracting\s+`),
+		re(`^go: finding\s+`),
 	},
 	MaxLines: 80,
 	OnEmpty:  "go test: all pass",
@@ -58,9 +69,32 @@ var filterGoVet = &Filter{
 	MatchCommand: re(`^go\s+vet\b`),
 	StripLinesMatching: []*regexp.Regexp{
 		re(`^\s*$`),
+		// Cold-cache module download progress (see filterGoBuild).
+		re(`^go: downloading\s+`),
+		re(`^go: extracting\s+`),
+		re(`^go: finding\s+`),
 	},
 	MaxLines: 50,
 	OnEmpty:  "go vet: ok",
+}
+
+// filterGoMod tames module-management commands (go mod tidy/download/verify,
+// go get, go work). On a cold cache these emit one "go: downloading ..." line
+// per dependency — sometimes dozens — which is pure progress noise. The
+// meaningful lines (go: added/upgraded/downgraded/removed dependency changes,
+// and any error) do not match the strip patterns and are preserved.
+var filterGoMod = &Filter{
+	Name:         "go-mod",
+	Description:  "Compact go mod/get/work output — strip downloading noise, keep dependency changes and errors",
+	MatchCommand: re(`^go\s+(mod|get|work)\b`),
+	StripLinesMatching: []*regexp.Regexp{
+		re(`^\s*$`),
+		re(`^go: downloading\s+`),
+		re(`^go: extracting\s+`),
+		re(`^go: finding\s+`),
+	},
+	MaxLines: 60,
+	OnEmpty:  "go mod: ok",
 }
 
 var filterGofmt = &Filter{

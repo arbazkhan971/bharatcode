@@ -70,7 +70,8 @@ var nowFunc = time.Now
 const environmentTemplate = environmentHeader + `
 - Working directory: {{.Workdir}}
 - Platform: {{.OS}}/{{.Arch}}
-- Git branch: {{.GitBranch}}
+- Git branch: {{.GitBranch}}{{if .GitStatus}}
+- Git status: {{.GitStatus}}{{end}}
 - File tracker: {{.FileTrackerSummary}}
 - Current date: {{now}}`
 
@@ -113,6 +114,7 @@ type PromptData struct {
 	OS                 string
 	Arch               string
 	GitBranch          string
+	GitStatus          string
 	AgentName          string
 	Tools              []ToolInfo
 	FileTrackerSummary string
@@ -148,6 +150,7 @@ func renderPrompt(ctx context.Context, agentName, promptOverride string, registr
 		OS:                 runtime.GOOS,
 		Arch:               runtime.GOARCH,
 		GitBranch:          gitBranch(ctx, workdir),
+		GitStatus:          gitStatus(ctx, workdir),
 		AgentName:          agentName,
 		Tools:              promptTools(registry.List()),
 		FileTrackerSummary: fileSummary(tracker),
@@ -440,6 +443,57 @@ func gitBranch(ctx context.Context, workdir string) string {
 		return "(detached head)"
 	}
 	return branch
+}
+
+// gitStatusFileCap bounds how many changed paths the environment block lists
+// before collapsing the remainder into an "and N more" tail, so a large
+// working tree cannot flood the system prompt.
+const gitStatusFileCap = 10
+
+// gitStatus summarizes the working tree for the environment block so the model
+// starts each session aware of uncommitted changes instead of having to run a
+// bash command to discover them. It returns "clean" for a tracked tree with no
+// changes, a compact "N uncommitted change(s): <porcelain entries>" line
+// otherwise, and the empty string when workdir is not a git repository (the
+// caller then omits the status line entirely). Like the rest of the
+// environment block this is a snapshot taken when the prompt is built, not a
+// live view.
+func gitStatus(ctx context.Context, workdir string) string {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	cmd.Dir = workdir
+	out, err := cmd.Output()
+	if err != nil {
+		// Not a git repository, or git is unavailable: omit the line.
+		return ""
+	}
+
+	var entries []string
+	for _, line := range strings.Split(string(out), "\n") {
+		// Porcelain v1 lines are "XY path"; trim the leading status padding
+		// so " M file" reads as "M file" while "?? file" is preserved.
+		entry := strings.TrimSpace(line)
+		if entry == "" {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		return "clean"
+	}
+
+	shown := entries
+	if len(shown) > gitStatusFileCap {
+		shown = shown[:gitStatusFileCap]
+	}
+	noun := "change"
+	if len(entries) != 1 {
+		noun = "changes"
+	}
+	summary := fmt.Sprintf("%d uncommitted %s: %s", len(entries), noun, strings.Join(shown, ", "))
+	if len(entries) > gitStatusFileCap {
+		summary += fmt.Sprintf(", and %d more", len(entries)-gitStatusFileCap)
+	}
+	return summary
 }
 
 func fileSummary(tracker *filetracker.Tracker) string {

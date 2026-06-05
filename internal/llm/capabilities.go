@@ -75,12 +75,14 @@ func modelSupportsThinking(models []Model, id string) bool {
 }
 
 // geminiThinkingModelSubstrings lists case-insensitive markers in Gemini model
-// ids whose models support the native thinkingConfig (the Gemini 2.5 family).
-// The Gemini provider only emits the thinkingConfig field for a configured model
-// whose id matches one of these markers, so opting into a thinking budget on an
-// older model (gemini-1.5, gemini-2.0) does not trigger a 400.
+// ids whose models support the native thinkingConfig (the Gemini 2.5 family and
+// the Gemini 3 line, which reasons by default). The Gemini provider only emits
+// the thinkingConfig field for a configured model whose id matches one of these
+// markers, so opting into a thinking budget on an older model (gemini-1.5,
+// gemini-2.0) does not trigger a 400.
 var geminiThinkingModelSubstrings = []string{
 	"gemini-2.5",
+	"gemini-3",
 }
 
 // modelSupportsGeminiThinking reports whether the configured model named by id is
@@ -129,10 +131,13 @@ var contextWindowRules = []struct {
 	{"gpt-oss", 128_000},
 	// Anthropic — every shipping Claude model exposes a 200k window.
 	{"claude", 200_000},
-	// Google Gemini — 1.5 Pro is 2M, the rest of the 1.5/2.x line is 1M.
+	// Google Gemini — 1.5 Pro is 2M, the rest of the 1.5/2.x line is 1M, and the
+	// Gemini 3 line keeps the 1M window. "gemini-3" shares no substring with the
+	// older rules, so without its own rule it would fall through to "unknown" (0).
 	{"gemini-1.5-pro", 2_097_152},
 	{"gemini-1.5", 1_048_576},
 	{"gemini-2", 1_048_576},
+	{"gemini-3", 1_048_576},
 	// xAI Grok — the grok-2/3/4 line exposes a 131k window.
 	{"grok", 131_072},
 	// Perplexity Sonar — the pro tier is 200k, the rest 128k, so the more

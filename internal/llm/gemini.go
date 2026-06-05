@@ -79,6 +79,61 @@ func geminiThinkingBudgetForEffort(effort string) int {
 	}
 }
 
+// geminiThinkingLevelBudgetThreshold splits a numeric thinking budget into the
+// two thinkingLevel buckets Gemini 3 universally accepts: a budget at or below it
+// maps to "low", a larger one to "high". It sits at the "medium" 2.5-era effort
+// budget so the low/medium/high effort budgets bucket as low/high/high.
+const geminiThinkingLevelBudgetThreshold = 8192
+
+// geminiThinkingLevelForEffort maps the provider-independent reasoning_effort
+// label onto a Gemini 3 thinkingLevel. Gemini 3 replaced the 2.5-era numeric
+// thinkingBudget with a coarse level knob, and only "low" and "high" are accepted
+// across the whole Gemini 3 line (the base Gemini 3 Pro does not accept the
+// "minimal"/"medium" levels some later variants added). The four effort labels
+// are therefore clamped to those two to avoid a 400 on any Gemini 3 model:
+// "low"/"minimal" -> "low", "medium"/"high" -> "high". An empty, "auto"/"dynamic",
+// or unrecognized label returns "" so thinkingLevel is omitted and the model's
+// own default level applies.
+func geminiThinkingLevelForEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "minimal":
+		return "low"
+	case "medium", "high":
+		return "high"
+	default:
+		return ""
+	}
+}
+
+// geminiThinkingLevel selects the Gemini 3 thinkingLevel for a request. An
+// explicit numeric ThinkingConfig budget (the 2.5-era knob) takes precedence and
+// is bucketed by geminiThinkingLevelBudgetThreshold, mirroring the budget path's
+// precedence over reasoning_effort; a negative budget means dynamic thinking,
+// which has no level equivalent, so it returns "" to leave the model's default.
+// Otherwise the configured reasoning_effort drives the level. It returns "" when
+// neither is configured.
+func geminiThinkingLevel(req Request) string {
+	if req.Thinking != nil && req.Thinking.BudgetTokens != 0 {
+		if req.Thinking.BudgetTokens < 0 {
+			return ""
+		}
+		if req.Thinking.BudgetTokens <= geminiThinkingLevelBudgetThreshold {
+			return "low"
+		}
+		return "high"
+	}
+	return geminiThinkingLevelForEffort(req.ReasoningEffort)
+}
+
+// isGemini3Model reports whether id names a Gemini 3 model, which controls
+// reasoning with thinkingLevel rather than the 2.5-era thinkingBudget. The match
+// is the same case-insensitive substring scan used elsewhere; the rolling
+// "-latest" aliases are deliberately not matched here because they currently
+// resolve to the Gemini 2.5 generation (see geminiThinkingModelSubstrings).
+func isGemini3Model(id string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(id)), "gemini-3")
+}
+
 // geminiProvider speaks Google's native Generative Language API
 // (generateContent / streamGenerateContent) rather than the OpenAI-compatible
 // shim. It maps BharatCode's provider-independent Request onto Gemini's
@@ -404,43 +459,65 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 		}
 	}
 
-	// Native extended thinking is opt-in per request and only emitted for a
-	// Gemini 2.5 model that supports thinkingConfig. The budget comes from an
-	// explicit ThinkingConfig when set, otherwise from the configured
-	// reasoning_effort (the uniform knob OpenAI reasoning models use), so a Gemini
-	// user gets parity without having to hand-tune a token count. Like Anthropic's
-	// path, an unsupported thinking request is silently dropped rather than
-	// rejected: the support check is an approximate model-id heuristic, so
-	// degrading gracefully beats 400-ing a valid request on a false negative.
-	// IncludeThoughts asks the API for thought summaries, which the stream
-	// surfaces as ThinkingEvents.
-	budget := 0
-	if req.Thinking != nil && req.Thinking.BudgetTokens != 0 {
-		budget = req.Thinking.BudgetTokens
-	} else {
-		budget = geminiThinkingBudgetForEffort(req.ReasoningEffort)
-	}
-	// A positive budget pins reasoning to a token cap; -1 selects dynamic
-	// thinking (the model sizes its own reasoning). Both configure thinkingConfig;
-	// only an unset (0) budget leaves it off.
-	if budget != 0 && modelSupportsGeminiThinking(p.models, req.Model) {
-		if out.GenerationConfig == nil {
-			out.GenerationConfig = &geminiGenerationConfig{}
-		}
-		out.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
-			IncludeThoughts: true,
-			ThinkingBudget:  &budget,
-		}
-		// On Gemini 2.5 the thinking tokens are carved out of the same
-		// maxOutputTokens allowance and billed as output, so a positive cap at or
-		// below the budget leaves no room for a visible answer (the model spends
-		// the whole allowance reasoning and the candidate comes back empty or
-		// truncated). Lift the cap to the budget plus a full default allowance,
-		// mirroring the Anthropic path. A zero cap is left untouched so the model's
-		// own (much larger) default applies. Dynamic thinking (-1) has no fixed
-		// budget to reserve room beyond, so the cap is left as configured.
-		if budget > 0 && out.GenerationConfig.MaxOutputTokens > 0 && out.GenerationConfig.MaxOutputTokens <= budget {
-			out.GenerationConfig.MaxOutputTokens = budget + defaultGeminiMaxTokens
+	// Native extended thinking is opt-in per request and only emitted for a model
+	// that supports thinkingConfig. The budget/level comes from an explicit
+	// ThinkingConfig when set, otherwise from the configured reasoning_effort (the
+	// uniform knob OpenAI reasoning models use), so a Gemini user gets parity
+	// without having to hand-tune a token count. Like Anthropic's path, an
+	// unsupported thinking request is silently dropped rather than rejected: the
+	// support check is an approximate model-id heuristic, so degrading gracefully
+	// beats 400-ing a valid request on a false negative. IncludeThoughts asks the
+	// API for thought summaries, which the stream surfaces as ThinkingEvents.
+	//
+	// The Gemini 3 line replaced the 2.5-era numeric thinkingBudget with a coarse
+	// thinkingLevel knob, and sending a thinkingBudget to a Gemini 3 model is a
+	// 400 — so the two generations take different fields, gated by the model id.
+	if modelSupportsGeminiThinking(p.models, req.Model) {
+		if isGemini3Model(req.Model) {
+			// Gemini 3: select a thinkingLevel. An empty level (nothing configured,
+			// or a dynamic request that has no level equivalent) leaves thinkingConfig
+			// off so the model's own default level applies. There is no maxOutputTokens
+			// reservation: Gemini 3 manages its own reasoning allowance.
+			if level := geminiThinkingLevel(req); level != "" {
+				if out.GenerationConfig == nil {
+					out.GenerationConfig = &geminiGenerationConfig{}
+				}
+				out.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
+					IncludeThoughts: true,
+					ThinkingLevel:   level,
+				}
+			}
+		} else {
+			// Gemini 2.5: a positive budget pins reasoning to a token cap; -1 selects
+			// dynamic thinking (the model sizes its own reasoning). Both configure
+			// thinkingConfig; only an unset (0) budget leaves it off.
+			budget := 0
+			if req.Thinking != nil && req.Thinking.BudgetTokens != 0 {
+				budget = req.Thinking.BudgetTokens
+			} else {
+				budget = geminiThinkingBudgetForEffort(req.ReasoningEffort)
+			}
+			if budget != 0 {
+				if out.GenerationConfig == nil {
+					out.GenerationConfig = &geminiGenerationConfig{}
+				}
+				out.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
+					IncludeThoughts: true,
+					ThinkingBudget:  &budget,
+				}
+				// On Gemini 2.5 the thinking tokens are carved out of the same
+				// maxOutputTokens allowance and billed as output, so a positive cap at
+				// or below the budget leaves no room for a visible answer (the model
+				// spends the whole allowance reasoning and the candidate comes back
+				// empty or truncated). Lift the cap to the budget plus a full default
+				// allowance, mirroring the Anthropic path. A zero cap is left untouched
+				// so the model's own (much larger) default applies. Dynamic thinking
+				// (-1) has no fixed budget to reserve room beyond, so the cap is left
+				// as configured.
+				if budget > 0 && out.GenerationConfig.MaxOutputTokens > 0 && out.GenerationConfig.MaxOutputTokens <= budget {
+					out.GenerationConfig.MaxOutputTokens = budget + defaultGeminiMaxTokens
+				}
+			}
 		}
 	}
 
@@ -710,6 +787,12 @@ type geminiGenerationConfig struct {
 type geminiThinkingConfig struct {
 	IncludeThoughts bool `json:"includeThoughts,omitempty"`
 	ThinkingBudget  *int `json:"thinkingBudget,omitempty"`
+	// ThinkingLevel is the Gemini 3 reasoning knob ("low"/"high"), set instead of
+	// ThinkingBudget for the Gemini 3 line, which rejects thinkingBudget. Exactly
+	// one of ThinkingLevel / ThinkingBudget is populated per request, gated by the
+	// model generation; both are omitempty so the unused one drops out of the body
+	// (sending both is itself a 400).
+	ThinkingLevel string `json:"thinkingLevel,omitempty"`
 }
 
 type geminiStreamChunk struct {

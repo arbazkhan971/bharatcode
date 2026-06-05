@@ -109,6 +109,23 @@ func TestMentionMatches_SubsequenceFallback(t *testing.T) {
 	require.Empty(t, mentionMatches("zzz", root))
 }
 
+// TestMentionMatches_BaseNameSubsequenceOutranksPathSubsequence asserts that a
+// file whose base name contains the token as a subsequence ranks ahead of one
+// where the subsequence only holds when directory segments are included, so the
+// picker favours file-name relevance over path location.
+func TestMentionMatches_BaseNameSubsequenceOutranksPathSubsequence(t *testing.T) {
+	t.Parallel()
+
+	// "hlr" is a subsequence of the base name "handler.go", but for
+	// "http/logger.go" it only matches by borrowing from the directory.
+	root := mentionWorkspace(t,
+		"http/logger.go",
+		"handler.go",
+	)
+	got := mentionMatches("hlr", root)
+	require.Equal(t, []string{"handler.go", "http/logger.go"}, got)
+}
+
 // TestCompleteMention_CyclesMatches asserts the first Tab replaces the token with
 // the best match and subsequent Tabs cycle, mirroring slash completion.
 func TestCompleteMention_CyclesMatches(t *testing.T) {

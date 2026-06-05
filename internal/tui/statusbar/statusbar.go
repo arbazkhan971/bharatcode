@@ -18,6 +18,10 @@ type Bar struct {
 	StartedAt time.Time
 	Now       time.Time
 	Yolo      bool
+	// Working shows live turn progress while the agent is running (e.g.
+	// "⠙ working 3s"). Empty hides the segment, so the bar is unchanged once
+	// the turn finishes and the prompt is idle.
+	Working string
 	// Mode is the live permission approval mode (e.g. "read-only", "auto",
 	// "full"). Empty hides the segment.
 	Mode string
@@ -47,6 +51,10 @@ func (b Bar) Render(width int) string {
 	if b.Yolo {
 		yolo = " · yolo"
 	}
+	working := ""
+	if b.Working != "" {
+		working = " · " + b.Working
+	}
 	mode := ""
 	if b.Mode != "" {
 		mode = " · " + b.Mode
@@ -63,7 +71,7 @@ func (b Bar) Render(width int) string {
 	if b.Scroll != "" {
 		scroll = " · " + b.Scroll
 	}
-	line := fmt.Sprintf("%s · %s · session %s · up %s%s%s%s%s%s", b.Model, b.Agent, shortID(b.SessionID), util.HumanDuration(now.Sub(started)), mode, yolo, goal, search, scroll)
+	line := fmt.Sprintf("%s · %s · session %s · up %s%s%s%s%s%s%s", b.Model, b.Agent, shortID(b.SessionID), util.HumanDuration(now.Sub(started)), working, mode, yolo, goal, search, scroll)
 	if len([]rune(line)) > width && width > 0 {
 		line = string([]rune(line)[:width])
 	}

@@ -21,8 +21,32 @@ const goalContinuePrompt = "Continue toward the goal. If the goal is already ful
 // which stops the autonomous loop before the iteration cap.
 const goalDoneMarker = "GOAL_COMPLETE"
 
-// startGoal begins bounded autonomous iteration toward the active goal. It
-// seeds the first run with the goal text and returns its command.
+// goalFrame renders the active-goal frame that launchTurn prepends to every
+// agent-facing prompt while a goal is set, so the model keeps the user's goal
+// in view across turns even after older messages are compacted away. It returns
+// "" when no goal is set.
+func (m *model) goalFrame() string {
+	goal := strings.TrimSpace(m.goal)
+	if goal == "" {
+		return ""
+	}
+	return fmt.Sprintf("<active-goal>\n%s\n</active-goal>", goal)
+}
+
+// frameForAgent prepends the active-goal frame (when a goal is set) to the
+// agent-facing prompt. The chat bubble keeps the user's original text; only the
+// model sees the frame, mirroring how @-file mentions are expanded.
+func (m *model) frameForAgent(prompt string) string {
+	frame := m.goalFrame()
+	if frame == "" {
+		return prompt
+	}
+	return frame + "\n\n" + prompt
+}
+
+// startGoal begins bounded autonomous iteration toward the active goal. The
+// goal text reaches the model via the active-goal frame (see frameForAgent), so
+// the kickoff prompt only needs to drive the loop and define its stop signal.
 func (m *model) startGoal() (tea.Model, tea.Cmd) {
 	if m.goal == "" {
 		m.dialogs.Push(&dialog.Text{DialogID: "goal", Title: "Goal", Body: "No active goal. Set one with /goal <text>.", Theme: m.theme})
@@ -35,7 +59,7 @@ func (m *model) startGoal() (tea.Model, tea.Cmd) {
 	m.goalActive = true
 	m.goalIteration = 1
 	m.status.Goal = m.goalStatus()
-	prompt := fmt.Sprintf("Goal: %s\n\nWork toward this goal. When it is fully met, reply with exactly %s.", m.goal, goalDoneMarker)
+	prompt := fmt.Sprintf("Work toward the active goal above. When it is fully met, reply with exactly %s.", goalDoneMarker)
 	return m.startRun(prompt)
 }
 

@@ -49,6 +49,7 @@ const (
     ProviderOpenAICompatible ProviderType = "openai_compatible"
     ProviderOllama           ProviderType = "ollama"
     ProviderLMStudio         ProviderType = "lmstudio"
+    ProviderGemini           ProviderType = "gemini"
 )
 
 // Provider describes one LLM endpoint. APIKeyEnv names an

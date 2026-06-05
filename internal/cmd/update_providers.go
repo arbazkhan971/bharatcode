@@ -197,6 +197,8 @@ func providerTypeFor(p modelsDevProvider) config.ProviderType {
 		return config.ProviderAnthropic
 	case "openai":
 		return config.ProviderOpenAI
+	case "google", "google-generative-ai", "gemini":
+		return config.ProviderGemini
 	case "ollama":
 		return config.ProviderOllama
 	case "lmstudio", "lm-studio":

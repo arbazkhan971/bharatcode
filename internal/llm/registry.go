@@ -104,6 +104,10 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 				baseURL = "https://api.anthropic.com/v1"
 			}
 			provider = newAnthropicProvider(p.Name, baseURL, p.APIKeyEnv, models, client)
+		case config.ProviderGemini:
+			// An empty BaseURL falls through to the Google API default inside the
+			// provider constructor.
+			provider = newGeminiProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
 		default:
 			return nil, fmt.Errorf("constructing provider %q: %w", p.Name, ErrUnsupportedFeature)
 		}

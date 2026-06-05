@@ -255,6 +255,14 @@ var contextWindowRules = []struct {
 	// (thinking) models served by the official API both expose a 128k window,
 	// up from the 64k the earlier releases shipped.
 	{"deepseek", 131_072},
+	// MiniMax — the MiniMax-01 and MiniMax-M1 lines ship a 1M native context
+	// window (one of the largest among open-weight models). Their ids carry no
+	// broader family marker above, so without this rule they fall through to
+	// "unknown" (0) when a user adds them without an explicit context_window.
+	{"minimax", 1_000_000},
+	// Baidu ERNIE — the ERNIE 4.5 family exposes a 128k window. Its id carries no
+	// broader marker above, so this rule keeps it from falling through to 0.
+	{"ernie", 131_072},
 	// Amazon Nova (commonly served via Bedrock) — Nova Pro and Nova Lite both
 	// expose a 300k window while Nova Micro is 128k, so the specific "nova-micro"
 	// marker must precede the family one.

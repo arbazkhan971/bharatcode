@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
+	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/stretchr/testify/require"
 )
 
@@ -188,6 +190,91 @@ func TestCodeActionsApplyWritesEditAndDiffs(t *testing.T) {
 	require.Contains(t, result.Content, "-package main")
 	require.Contains(t, result.Content, "+package widget")
 	require.Equal(t, "Organize Imports", result.Metadata["applied"])
+}
+
+func TestCodeActionsPreviewShowsDiffWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range: lsp.Range{
+					Start: lsp.Position{Line: 0, Character: 0},
+					End:   lsp.Position{Line: 0, Character: 12},
+				},
+				NewText: "package widget",
+			}}},
+		}},
+	}}
+	// A diagnoser is wired but must not run for a preview: nothing was written.
+	tool := &codeActionsTool{
+		source:  src,
+		workDir: dir,
+		diag: &fakeDiagnoser{diags: []lsp.Diagnostic{
+			diag(path, 0, 0, lsp.Error, "package name mismatch"),
+		}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1, "preview": true,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The file on disk is untouched.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package main\n", string(got))
+
+	// The diff is still surfaced, marked as a preview, with no diagnostics re-check.
+	require.Contains(t, result.Content, `preview of "Organize Imports"`)
+	require.Contains(t, result.Content, "nothing written")
+	require.Contains(t, result.Content, "-package main")
+	require.Contains(t, result.Content, "+package widget")
+	require.NotContains(t, result.Content, "package name mismatch")
+	require.Equal(t, true, result.Metadata["preview"])
+	require.Nil(t, result.Metadata["diagnostics"])
+}
+
+func TestCodeActionsPreviewSkipsPermissionCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range:   lsp.Range{Start: lsp.Position{Line: 0, Character: 0}, End: lsp.Position{Line: 0, Character: 12}},
+				NewText: "package widget",
+			}}},
+		}},
+	}}
+	// A permission policy that denies the codeactions tool outright: an applying
+	// action would be blocked, but a preview writes nothing and so never consults
+	// it.
+	cfg := &config.Config{}
+	cfg.Permissions.Deny = []string{"codeactions"}
+	tool := &codeActionsTool{source: src, workDir: dir, deps: Dependencies{WorkDir: dir, Permission: permission.New(cfg, nil)}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1, "preview": true,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, `preview of "Organize Imports"`)
+
+	// Disk is untouched despite no permission grant.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package main\n", string(got))
+
+	// The same action without preview is denied, confirming the policy is live.
+	denied, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.True(t, denied.IsError)
+	require.Contains(t, denied.Content, "permission denied")
 }
 
 func TestCodeActionsApplySurfacesPostWriteDiagnostics(t *testing.T) {

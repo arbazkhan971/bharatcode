@@ -135,6 +135,12 @@ var contextWindowRules = []struct {
 	// Mistral's Pixtral vision variant exposes a 128k window and does not contain
 	// the "mistral" marker, so it needs its own rule above the family one.
 	{"pixtral", 128_000},
+	// Mistral's Ministral edge line (3B/8B) and Devstral coding line both ship a
+	// 128k window. Neither id contains the "mistral" marker ("ministral",
+	// "devstral"), so without these rules they fall through to "unknown" (0)
+	// instead of the family default.
+	{"ministral", 128_000},
+	{"devstral", 128_000},
 	{"mistral", 32_768},
 	{"qwen", 32_768},
 	// Google Gemma open-weight line — Gemma 3 lifted the window to 128k while

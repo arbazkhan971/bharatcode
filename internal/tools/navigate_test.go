@@ -13,13 +13,17 @@ import (
 )
 
 type fakeNavigate struct {
-	definition []lsp.Location
-	references []lsp.Location
-	hover      string
+	definition     []lsp.Location
+	typeDefinition []lsp.Location
+	implementation []lsp.Location
+	references     []lsp.Location
+	hover          string
 
-	defErr error
-	refErr error
-	hovErr error
+	defErr  error
+	typeErr error
+	implErr error
+	refErr  error
+	hovErr  error
 
 	lastPath string
 	lastLine int
@@ -29,6 +33,16 @@ type fakeNavigate struct {
 func (f *fakeNavigate) Definition(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
 	f.lastPath, f.lastLine, f.lastCol = path, line, col
 	return f.definition, f.defErr
+}
+
+func (f *fakeNavigate) TypeDefinition(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
+	f.lastPath, f.lastLine, f.lastCol = path, line, col
+	return f.typeDefinition, f.typeErr
+}
+
+func (f *fakeNavigate) Implementation(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
+	f.lastPath, f.lastLine, f.lastCol = path, line, col
+	return f.implementation, f.implErr
 }
 
 func (f *fakeNavigate) References(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
@@ -74,6 +88,71 @@ func TestNavigateDefinitionConvertsPositionAndFormats(t *testing.T) {
 	require.Equal(t, 2, src.lastCol)
 	// Output is workspace-relative and back to 1-based.
 	require.Equal(t, "main.go:42:8", result.Content)
+}
+
+func TestNavigateTypeDefinition(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{typeDefinition: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 3, Character: 5}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 10, "column": 3, "action": "type_definition",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Position is converted 1-based -> 0-based and routed to TypeDefinition.
+	require.Equal(t, 9, src.lastLine)
+	require.Equal(t, 2, src.lastCol)
+	require.Equal(t, "main.go:4:6", result.Content)
+}
+
+func TestNavigateTypeDefinitionEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "type_definition",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "No type definition found.", result.Content)
+}
+
+func TestNavigateImplementation(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{implementation: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8, Character: 4}}},
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 5, "action": "implementation",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Results are sorted by position, workspace-relative, and 1-based.
+	require.Equal(t, "main.go:3:1\nmain.go:9:5", result.Content)
+}
+
+func TestNavigateImplementationEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "implementation",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "No implementations found.", result.Content)
 }
 
 func TestNavigateDefaultsToDefinitionAndColumnOne(t *testing.T) {

@@ -90,6 +90,15 @@
       ]
     },
     {
+      "name": "gemini",
+      "type": "gemini",
+      "api_key_env": "GEMINI_API_KEY",
+      "models": [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro"
+      ]
+    },
+    {
       "name": "xai",
       "type": "openai_compatible",
       "base_url": "https://api.x.ai/v1",
@@ -297,6 +306,26 @@
       "output_price_per_mtok_usd": 5.00,
       "supports_images": true,
       "supports_tools": true
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "provider": "gemini",
+      "context_window": 1000000,
+      "input_price_per_mtok_usd": 0.30,
+      "output_price_per_mtok_usd": 2.50,
+      "supports_images": true,
+      "supports_tools": true,
+      "thinking_budget": 8192
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "provider": "gemini",
+      "context_window": 1000000,
+      "input_price_per_mtok_usd": 1.25,
+      "output_price_per_mtok_usd": 10.00,
+      "supports_images": true,
+      "supports_tools": true,
+      "thinking_budget": 16384
     },
     {
       "id": "grok-2-latest",

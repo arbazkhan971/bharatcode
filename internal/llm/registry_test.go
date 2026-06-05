@@ -272,6 +272,51 @@ func TestAnthropicProviderIsRegistered(t *testing.T) {
 	require.NotErrorIs(t, err, ErrNotYetSupported)
 }
 
+// TestNativeGeminiProviderIsRegistered proves a provider configured with the
+// native "gemini" type resolves to the geminiProvider client (Google's
+// generateContent dialect) rather than the openai_compatible shim, and that the
+// configured Gemini 2.5 model is recognized as thinking-capable. Stream is
+// pointed at a missing API-key env so it fails offline with ErrAuth before any
+// network call, which also confirms the native path enforces the key.
+func TestNativeGeminiProviderIsRegistered(t *testing.T) {
+	cfg := &config.Config{
+		Providers: []config.Provider{{
+			Name:      "gemini",
+			Type:      config.ProviderGemini,
+			APIKeyEnv: "MISSING_GEMINI_API_KEY",
+			Models:    []string{"gemini-2.5-flash"},
+		}},
+		Models: []config.Model{{
+			ID:             "gemini-2.5-flash",
+			Provider:       "gemini",
+			ContextWindow:  1000000,
+			SupportsImages: true,
+			SupportsTools:  true,
+			ThinkingBudget: 8192,
+		}},
+		Ledger: config.LedgerConfig{Currency: "INR", UsdInrRate: 83.5},
+	}
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	provider, err := reg.Get("gemini")
+	require.NoError(t, err)
+	_, ok := provider.(*geminiProvider)
+	require.True(t, ok, "native gemini type should resolve to the geminiProvider client")
+	require.Equal(t, "gemini", provider.Name())
+	require.True(t, provider.SupportsTools())
+	require.True(t, provider.SupportsImages())
+
+	// The configured 2.5 model must be recognized as thinking-capable so the
+	// native thinkingConfig is emitted for it.
+	require.True(t, modelSupportsGeminiThinking(provider.Models(), "gemini-2.5-flash"))
+
+	_, err = provider.Stream(context.Background(), Request{Model: "gemini-2.5-flash"})
+	require.ErrorIs(t, err, ErrAuth)
+	require.NotErrorIs(t, err, ErrNotYetSupported)
+}
+
 func TestStreamHonorsCancelledContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

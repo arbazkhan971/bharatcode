@@ -310,6 +310,9 @@ func (c *Config) interpolate() []string {
 
 	for i := range c.Providers {
 		c.Providers[i].BaseURL = interpolateString(c.Providers[i].BaseURL, &warnings, fmt.Sprintf("providers[%d].base_url", i))
+		for k, v := range c.Providers[i].Headers {
+			c.Providers[i].Headers[k] = interpolateString(v, &warnings, fmt.Sprintf("providers[%d].headers[%s]", i, k))
+		}
 	}
 
 	for i := range c.MCP {

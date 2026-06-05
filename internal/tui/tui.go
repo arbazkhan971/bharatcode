@@ -779,6 +779,11 @@ func (m *model) renderMain() string {
 		chatW = max(1, chatW-filetreeWidth-1)
 	}
 	chatBody := m.chat.Render(max(1, chatW))
+	// Mark the active search hit on its centered line so the reader sees what
+	// matched. This addresses the same line space as the rendered body above
+	// (chatW matches renderedChatBody), so it must run before the help dump and
+	// file-tree join shift or wrap the lines.
+	chatBody = m.highlightCurrentMatch(chatBody)
 	if m.helpVisible {
 		if chatBody != "" {
 			chatBody += "\n\n"

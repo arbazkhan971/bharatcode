@@ -75,7 +75,9 @@ func TestRenderSlashHint_VisibleAfterTyping(t *testing.T) {
 
 	m := newSizedModel(t)
 	typeString(t, m, "/s")
-	view := m.viewString()
+	// The menu highlights the matched runes, so command names are split by ANSI
+	// styling spans; strip them to assert the visible text.
+	view := stripANSI(m.viewString())
 	require.Contains(t, view, "sessions")
 	require.Contains(t, view, "status")
 	require.Contains(t, view, "save")
@@ -83,7 +85,7 @@ func TestRenderSlashHint_VisibleAfterTyping(t *testing.T) {
 	// A non-slash buffer must not surface command names.
 	m2 := newSizedModel(t)
 	typeString(t, m2, "hello")
-	require.NotContains(t, m2.viewString(), "sessions")
+	require.NotContains(t, stripANSI(m2.viewString()), "sessions")
 }
 
 // TestSlashHintDescIndex selects the command whose gloss is shown: the active
@@ -129,7 +131,7 @@ func TestRenderSlashHint_AmbiguousHasNoDescription(t *testing.T) {
 
 	m := newSizedModel(t)
 	typeString(t, m, "/s")
-	view := m.viewString()
+	view := stripANSI(m.viewString())
 	require.Contains(t, view, "sessions")
 	require.NotContains(t, view, "restore a recent session",
 		"an ambiguous prefix shows names only, no gloss")
@@ -163,4 +165,40 @@ func TestRenderSlashHint_FitsOneRow(t *testing.T) {
 	require.NotEmpty(t, hint)
 	require.NotContains(t, hint, "\n", "the menu must stay on one row")
 	require.Contains(t, hint, "…", "an over-long match set is truncated")
+}
+
+// TestRenderSlashHint_HighlightsPrefixMatch asserts the runes a prefix matched
+// are accented while the rest of each command name stays muted, so the menu
+// shows why every entry qualified — the same emphasis the @-file picker applies.
+func TestRenderSlashHint_HighlightsPrefixMatch(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/se")
+	hint := m.renderSlashHint(m.width)
+	require.NotEmpty(t, hint)
+	// The visible text is unchanged: highlighting only re-styles, never edits.
+	require.Contains(t, stripANSI(hint), "search")
+	// The matched "se" prefix is accented, and the name is no longer one muted
+	// span the way an unmatched entry would be.
+	require.Contains(t, hint, m.theme.Accent.Render("se"))
+	require.NotContains(t, hint, m.theme.Muted.Render("search"),
+		"a matched name must not render as a single muted span")
+}
+
+// TestRenderSlashHint_HighlightsSubsequenceFallback asserts that when no command
+// shares the typed prefix, the fuzzy subsequence fallback still accents the
+// scattered runes it matched, revealing why an off-prefix token reached a
+// command (here "/srch" → "search").
+func TestRenderSlashHint_HighlightsSubsequenceFallback(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/srch")
+	hint := m.renderSlashHint(m.width)
+	require.NotEmpty(t, hint)
+	require.Contains(t, stripANSI(hint), "search",
+		"the subsequence fallback still surfaces the command")
+	require.NotContains(t, hint, m.theme.Muted.Render("search"),
+		"the matched runes are accented, so the name is not one muted span")
 }

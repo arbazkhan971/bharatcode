@@ -73,6 +73,9 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 		return nil, err
 	}
 	m.turn++
+	if m.tabFirstPrompt == "" {
+		m.tabFirstPrompt = prompt
+	}
 	m.chat.Stream(userStreamID, prompt)
 	m.chat.FinishStream(userStreamID)
 	m.chat.Reindex(userStreamID)

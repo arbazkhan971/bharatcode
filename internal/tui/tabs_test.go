@@ -225,6 +225,63 @@ func TestTabs_BarRendersActiveAndOverflow(t *testing.T) {
 	}
 }
 
+// TestTabs_ListTitleFromFirstPrompt proves the /tabs listing labels a tab by the
+// first line of its opening user prompt — so tabs are distinguishable by what
+// they are about — while still surfacing the short session id of a persisted tab.
+func TestTabs_ListTitleFromFirstPrompt(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "On it."},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 5, OutputTokens: 3}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// A multi-line prompt collapses to its first non-blank line in the title.
+	h.submit(t, "Refactor the parser\nand add tests")
+	h.drain(t, func() bool { return !m.running })
+	require.True(t, m.sessionPersisted)
+	sessID := m.sessionID
+
+	body := m.tabTitle(0)
+	require.Contains(t, body, "Refactor the parser",
+		"the tab title must come from the first line of the opening prompt")
+	require.NotContains(t, body, "add tests",
+		"only the first line of a multi-line prompt is used")
+	require.Contains(t, body, shortSessionID(sessID),
+		"a persisted tab still shows its short session id alongside the title")
+
+	// A fresh, prompt-less tab falls back to the plain "new session" label.
+	_, cmd := m.Update(keyCtrl('t'))
+	h.run(t, cmd)
+	require.Equal(t, "new session", m.tabTitle(m.activeTab),
+		"an unpersisted tab with no prompt yet is labelled 'new session'")
+
+	// The /tabs dialog reflects the derived title for the first tab.
+	m.input.WriteString("/tabs")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+	require.Contains(t, m.dialogs.Render(120), "Refactor the parser",
+		"/tabs lists each tab by its content-derived title")
+}
+
+// TestFirstLineSnippet covers the title reduction: first non-blank line, inner
+// whitespace collapsed, and rune-safe truncation with an ellipsis.
+func TestFirstLineSnippet(t *testing.T) {
+	require.Equal(t, "", firstLineSnippet("", 40))
+	require.Equal(t, "", firstLineSnippet("   \n\t\n", 40))
+	require.Equal(t, "hello world", firstLineSnippet("\n\n  hello   world  \nsecond", 40))
+	require.Equal(t, "keep it", firstLineSnippet("keep it", 40))
+
+	// Truncation cuts to maxLen runes, replacing the final rune with an ellipsis.
+	got := firstLineSnippet("abcdefghij", 5)
+	require.Equal(t, "abcd…", got)
+	require.Equal(t, 5, len([]rune(got)), "truncation is measured in runes")
+
+	// Multi-byte runes are never split mid-character.
+	require.Equal(t, "héllo…", firstLineSnippet("héllo wörld", 6))
+}
+
 // newTabForTest opens a tab and fails the test if the limit blocks it. It keeps
 // the overflow test readable.
 func (m *model) newTabForTest(t *testing.T) tea.Cmd {

@@ -34,6 +34,24 @@ func TestLastAssistantText(t *testing.T) {
 		"must return the most recent assistant body, not an earlier one or a user message")
 }
 
+// TestFirstUserText returns the earliest user body verbatim and is empty when no
+// user message is present.
+func TestFirstUserText(t *testing.T) {
+	t.Parallel()
+
+	list := New()
+	require.Empty(t, list.FirstUserText(), "empty list has no user text")
+
+	list.Append(msg("a1", message.RoleAssistant, "greeting"))
+	require.Empty(t, list.FirstUserText(), "an assistant-only list has no user text")
+
+	list.Append(msg("u1", message.RoleUser, "first question"))
+	list.Append(msg("u2", message.RoleUser, "second question"))
+
+	require.Equal(t, "first question", list.FirstUserText(),
+		"must return the earliest user body, not a later one or an assistant message")
+}
+
 // TestTranscriptText renders every message as role-prefixed plain text in order.
 func TestTranscriptText(t *testing.T) {
 	t.Parallel()

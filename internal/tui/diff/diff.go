@@ -131,6 +131,13 @@ func (v *Viewer) Stat(patch string) string {
 // this width, matching how git's "--stat" bar stays bounded on wide diffs.
 const statBarWidth = 32
 
+// maxStatFiles caps how many per-file rows StatLines lists before collapsing the
+// remainder into a single "… and N more files" summary, so a sprawling
+// many-file review stays scannable instead of pushing the diff itself off
+// screen. It mirrors git's "--stat-count" truncation; the aggregate header above
+// the list still reflects every file.
+const maxStatFiles = 20
+
 // StatLines renders a multi-line diffstat: the aggregate Stat header followed,
 // when more than one file changed, by one indented row per file showing its path,
 // its own "+A -B" counts, and a git-style "+++---" histogram bar visualizing the
@@ -148,6 +155,14 @@ func (v *Viewer) StatLines(patch string) string {
 	files := fileStats(patch)
 	if len(files) <= 1 {
 		return header
+	}
+
+	// Collapse the tail of a sprawling review into a single summary row, keeping
+	// the listing bounded. The aggregate header above still reflects every file.
+	overflow := 0
+	if len(files) > maxStatFiles {
+		overflow = len(files) - maxStatFiles
+		files = files[:maxStatFiles]
 	}
 
 	// Size the path column to the widest name and the count column to the widest
@@ -184,6 +199,13 @@ func (v *Viewer) StatLines(patch string) string {
 			row += v.theme.DiffRemove.Render(strings.Repeat("-", minus))
 		}
 		out += "\n" + row
+	}
+	if overflow > 0 {
+		noun := "files"
+		if overflow == 1 {
+			noun = "file"
+		}
+		out += "\n" + v.theme.Muted.Render(fmt.Sprintf("  … and %d more %s", overflow, noun))
 	}
 	return out
 }

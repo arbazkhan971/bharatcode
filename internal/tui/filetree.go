@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -166,25 +168,50 @@ func normalizeToolPath(root, path string) string {
 // with the cursor marked, and the selected file's before/after diff (or a
 // placeholder when the selection has no recorded edits). The diff is rendered
 // with the shared diff.Viewer so the panel reuses the same machinery as /diff.
+//
+// The listing is windowed to keep the cursor on screen no matter how long the
+// workspace is: a long listing would otherwise be sliced off the top by the
+// final height clamp, hiding the selected file. Files hidden above or below the
+// window are summarised by "↑ N more" / "↓ N more" markers, and the diff
+// section is clamped to whatever height remains so the listing is never lost.
 func (m *model) renderFiletree(width, height int) string {
 	f := m.filetree
+	if height < 1 {
+		height = 1
+	}
+
 	var b strings.Builder
-	b.WriteString(m.theme.Accent.Render("Files"))
+	b.WriteString(m.theme.Accent.Render(filetreeTitle(f.cursor, len(f.files))))
 	b.WriteByte('\n')
 
 	if len(f.files) == 0 {
 		b.WriteString(m.theme.Muted.Render("(no files)"))
-	}
-	for i, name := range f.files {
-		// Clamp the raw text before styling so ANSI codes are not counted or
-		// sliced through.
-		row := clampLine("  "+name, width)
-		if i == f.cursor {
-			row = clampLine("> "+name, width)
-			row = m.theme.Accent.Render(row)
+	} else {
+		rows := filetreeListingRows(height, len(f.files))
+		start := filetreeScrollStart(f.cursor, len(f.files), rows)
+		end := start + rows
+		if end > len(f.files) {
+			end = len(f.files)
 		}
-		b.WriteString(row)
-		b.WriteByte('\n')
+		if start > 0 {
+			b.WriteString(m.theme.Muted.Render(clampLine(fmt.Sprintf("  ↑ %d more", start), width)))
+			b.WriteByte('\n')
+		}
+		for i := start; i < end; i++ {
+			name := f.files[i]
+			// Clamp the raw text before styling so ANSI codes are not counted or
+			// sliced through.
+			row := clampLine("  "+name, width)
+			if i == f.cursor {
+				row = m.theme.Accent.Render(clampLine("> "+name, width))
+			}
+			b.WriteString(row)
+			b.WriteByte('\n')
+		}
+		if end < len(f.files) {
+			b.WriteString(m.theme.Muted.Render(clampLine(fmt.Sprintf("  ↓ %d more", len(f.files)-end), width)))
+			b.WriteByte('\n')
+		}
 	}
 
 	b.WriteByte('\n')
@@ -196,14 +223,70 @@ func (m *model) renderFiletree(width, height int) string {
 	b.WriteString(m.theme.Accent.Render("Diff: " + sel))
 	b.WriteByte('\n')
 
+	// Reserve the lines already used by the listing and labels so the diff body
+	// is clamped to the remaining height rather than the whole panel; this keeps
+	// the windowed listing visible even when the diff is long.
+	used := strings.Count(b.String(), "\n")
+	diffHeight := height - used
+	if diffHeight < 1 {
+		diffHeight = 1
+	}
+
 	diffs := m.filetreeDiffs(sel)
 	if len(diffs) == 0 {
 		b.WriteString(m.theme.Muted.Render("No recorded edits for this file."))
 		return clampHeight(b.String(), height)
 	}
 	patch := unifiedPatch(diffs)
-	b.WriteString(diff.New(m.theme).RenderUnifiedNumbered(patch, max(1, width)))
+	body := diff.New(m.theme).RenderUnifiedNumbered(patch, max(1, width))
+	b.WriteString(clampHeight(body, diffHeight))
 	return clampHeight(b.String(), height)
+}
+
+// filetreeTitle renders the panel heading, appending a "cursor/total" position
+// indicator once the workspace has files so the user can tell where the cursor
+// sits in a long listing.
+func filetreeTitle(cursor, count int) string {
+	if count == 0 {
+		return "Files"
+	}
+	return "Files (" + strconv.Itoa(cursor+1) + "/" + strconv.Itoa(count) + ")"
+}
+
+// filetreeListingRows returns how many file rows the listing may occupy in a
+// panel of the given height. It reserves the header and a roughly equal share
+// for the diff section below, so neither half starves the other, and never
+// returns more rows than there are files (so a short listing wastes no space).
+func filetreeListingRows(height, count int) int {
+	avail := height - 1 // header row
+	if avail < 1 {
+		avail = 1
+	}
+	rows := avail / 2
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > count {
+		rows = count
+	}
+	return rows
+}
+
+// filetreeScrollStart returns the first listing index to render so a window of
+// rows entries keeps cursor visible and roughly centred, clamped so the window
+// never runs past either end of the listing.
+func filetreeScrollStart(cursor, count, rows int) int {
+	if rows <= 0 || count <= rows {
+		return 0
+	}
+	start := cursor - rows/2
+	if start < 0 {
+		start = 0
+	}
+	if start > count-rows {
+		start = count - rows
+	}
+	return start
 }
 
 // filetreeDiffs returns the recorded edit diffs for the selected workspace-

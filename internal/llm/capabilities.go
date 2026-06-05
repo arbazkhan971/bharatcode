@@ -84,6 +84,50 @@ func modelSupportsThinking(models []Model, id string) bool {
 	return false
 }
 
+// anthropicMaxOutputRules maps a case-insensitive Anthropic model-id substring to
+// the model's maximum output-token allowance. inferAnthropicMaxOutput walks the
+// rules in order and returns the first match, so more specific markers must
+// precede the broader ones that would also match them (e.g. "claude-opus-4-5"
+// before "claude-opus-4"). The values track each model's published max output as
+// of the catalog in defaults/config.json; an unrecognized id returns 0, letting
+// the caller fall back to the conservative defaultAnthropicMaxTokens.
+//
+// This drives the default max_tokens the Anthropic provider sends when a caller
+// leaves it unset: the flat 4096 fallback truncated long answers from the modern
+// Claude line, which serves 32k–64k output tokens.
+var anthropicMaxOutputRules = []struct {
+	substring string
+	maxOutput int
+}{
+	// Claude 4 family. Opus 4 and 4.1 cap at 32k output; Opus 4.5 lifted that to
+	// 64k, so its specific marker must precede the broader "claude-opus-4" rule.
+	{"claude-opus-4-5", 64_000},
+	{"claude-opus-4", 32_000},
+	{"claude-sonnet-4", 64_000},
+	{"claude-haiku-4", 64_000},
+	// Claude 3.7 Sonnet serves up to 64k output tokens.
+	{"claude-3-7-sonnet", 64_000},
+	// The Claude 3.5 line (Sonnet and Haiku) caps at 8k output tokens. The
+	// "claude-3-5" marker covers both without a per-variant rule.
+	{"claude-3-5", 8_192},
+}
+
+// inferAnthropicMaxOutput returns the maximum output-token allowance for the
+// Anthropic model named by id, or 0 when the id matches no known family. The
+// match is a case-insensitive substring scan over anthropicMaxOutputRules,
+// mirroring inferContextWindow. The Anthropic provider uses this to pick a
+// sensible default max_tokens so a request that leaves MaxTokens unset is not
+// silently capped at the conservative 4096 fallback.
+func inferAnthropicMaxOutput(id string) int {
+	lid := strings.ToLower(strings.TrimSpace(id))
+	for _, rule := range anthropicMaxOutputRules {
+		if strings.Contains(lid, rule.substring) {
+			return rule.maxOutput
+		}
+	}
+	return 0
+}
+
 // anthropic1MContextSubstrings lists case-insensitive markers in Anthropic
 // model ids whose models can serve the 1M-token context window behind the
 // context-1m beta. Only the Claude Sonnet 4 line (claude-sonnet-4 and

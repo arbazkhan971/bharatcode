@@ -17,6 +17,9 @@ func TestInferContextWindow(t *testing.T) {
 		{"gpt-4o-mini", 128_000},
 		{"gpt-4-turbo", 128_000},
 		{"gpt-4.1", 1_047_576},
+		// GPT-4.5's id contains "gpt-4" but it must not fall through to the 8k
+		// family rule.
+		{"gpt-4.5-preview", 128_000},
 		{"gpt-4", 8_192},
 		{"gpt-3.5-turbo", 16_385},
 		{"gpt-5", 400_000},

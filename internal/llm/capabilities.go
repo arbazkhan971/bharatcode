@@ -99,6 +99,10 @@ var contextWindowRules = []struct {
 }{
 	// OpenAI
 	{"gpt-4.1", 1_047_576},
+	// GPT-4.5 ships a 128k window. Its id contains the "gpt-4" marker, so its
+	// specific rule must precede the bare "gpt-4" family rule (8k) below, just
+	// as "gpt-4.1" does.
+	{"gpt-4.5", 128_000},
 	{"gpt-4o", 128_000},
 	{"gpt-4-turbo", 128_000},
 	{"gpt-4", 8_192},

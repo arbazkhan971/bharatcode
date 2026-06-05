@@ -43,3 +43,16 @@ func TestSearchSegment(t *testing.T) {
 	bar.Search = "search 2/7"
 	require.Contains(t, bar.Render(160), "search 2/7", "a set Search must surface its segment")
 }
+
+// TestScrollSegment asserts the scrollback-position segment appears only when
+// set, so the bar is unchanged while the chat view is anchored to the bottom.
+func TestScrollSegment(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+	require.NotContains(t, bar.Render(160), "below", "an empty Scroll must add no segment")
+
+	bar.Scroll = "↓ 12 below"
+	require.Contains(t, bar.Render(160), "↓ 12 below", "a set Scroll must surface its segment")
+}

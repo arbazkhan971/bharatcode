@@ -40,6 +40,10 @@ func TestClassifyTestRunner(t *testing.T) {
 		"node --test":                         runnerTAP,
 		"node --test test/*.js":               runnerTAP,
 		"npx tape test/*.js":                  runnerTAP,
+		"bats test/":                          runnerTAP,
+		"bats test.bats":                      runnerTAP,
+		"npx bats tests/":                     runnerTAP,
+		"echo acrobats perform":               runnerNone,
 		"deno test":                           runnerDeno,
 		"deno test --allow-read mod_test.ts":  runnerDeno,
 		"swift test":                          runnerSwift,
@@ -666,6 +670,42 @@ not ok 2 - bare failure
 	want := []testFailure{
 		{Name: "TAP test 1"},
 		{Name: "bare failure"},
+	}
+	if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+		t.Errorf("parseTAPFailures mismatch:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestParseBatsFailures(t *testing.T) {
+	// bats emits TAP but reports the failed expression and its location in "#"
+	// comment lines rather than a YAML block, so the first comment is the detail.
+	out := `1..2
+ok 1 addition using bc
+not ok 2 addition using dc
+# (in test file test.bats, line 9)
+#   ` + "`[ \"$result\" -eq 4 ]'" + ` failed
+1..2`
+	got := parseTestFailures("bats test.bats", out)
+	want := []testFailure{
+		{Name: "addition using dc", Detail: "(in test file test.bats, line 9)"},
+	}
+	if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+		t.Errorf("parseBatsFailures mismatch:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestParseTAPFailures_YAMLMessagePreferredOverComment(t *testing.T) {
+	// When both a YAML "message:" field and "#" comments are present, the
+	// structured message wins; the comment is only a fallback.
+	out := `not ok 1 - subtracts numbers
+# a stray diagnostic comment
+  ---
+  message: 'expected 1 to equal 2'
+  ...
+1..1`
+	got := parseTestFailures("node --test", out)
+	want := []testFailure{
+		{Name: "subtracts numbers", Detail: "expected 1 to equal 2"},
 	}
 	if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
 		t.Errorf("parseTAPFailures mismatch:\n got %v\nwant %v", got, want)

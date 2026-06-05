@@ -16,6 +16,14 @@ import (
 // once at startup. The Engine is goroutine-safe (read-only after init).
 var filterEngine = outputfilter.NewEngine()
 
+// maxBashLineLength caps how many characters of a single output line survive in
+// the rendered result. The line-count cap (capOutput) bounds how many lines are
+// kept, but a single pathological line — a minified bundle cat'd to stdout, a
+// one-line JSON curl, a build emitting one enormous line — passes that cap
+// untouched and can dominate the context budget on its own. Truncating per line
+// mirrors the view tool's maxViewLineLength and Claude Code's Read.
+const maxBashLineLength = 2000
+
 type bashTool struct {
 	permission *permission.Checker
 	shell      *shell.Shell
@@ -203,7 +211,34 @@ func formatJob(job shell.Job) string {
 		body = capOutput(combined, 500)
 	}
 
+	// Cap the width of every surviving line last, after filtering and the
+	// line-count cap, so a single very wide line can't blow the budget. Applied
+	// uniformly across the filtered, capped-success, and capped-failure branches.
+	body = truncateBashLines(body, maxBashLineLength)
+
 	return header + "\n" + body
+}
+
+// truncateBashLines caps each line of body at max characters, reusing the view
+// tool's per-line truncation. Short lines (headers, notices) pass through
+// unchanged; an over-long line is cut on a rune boundary with a marker noting
+// how many characters were elided.
+func truncateBashLines(body string, max int) string {
+	if max <= 0 {
+		return body
+	}
+	lines := splitLines(body)
+	truncated := false
+	for i, line := range lines {
+		if t := truncateLine(line, max); t != line {
+			lines[i] = t
+			truncated = true
+		}
+	}
+	if !truncated {
+		return body
+	}
+	return joinLines(lines)
 }
 
 // capOutput caps output to maxLines lines, eliding the middle when truncation

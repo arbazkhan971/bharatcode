@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -316,6 +317,53 @@ func TestBashTailOutputSurvivesLineCap(t *testing.T) {
 	require.Contains(t, result.Content, "FINAL-SUMMARY-MARKER",
 		"the terminal summary line must survive the bash line cap")
 	require.Contains(t, result.Content, "lines truncated")
+}
+
+// TestTruncateBashLinesCapsWideLine asserts that a single pathological line wider
+// than the cap is truncated with a marker, while short lines pass through.
+func TestTruncateBashLinesCapsWideLine(t *testing.T) {
+	wide := strings.Repeat("x", maxBashLineLength+500)
+	body := "short head line\n" + wide + "\nshort tail line"
+	out := truncateBashLines(body, maxBashLineLength)
+
+	// Short lines are untouched.
+	require.Contains(t, out, "short head line")
+	require.Contains(t, out, "short tail line")
+	// The wide line is cut with a marker noting the elided count.
+	require.NotContains(t, out, wide)
+	require.Contains(t, out, "[500 characters truncated]")
+	// Line count is preserved — truncation is per line, not line-dropping.
+	require.Len(t, splitLines(out), 3)
+}
+
+// TestTruncateBashLinesShortInputUnchanged asserts the body is returned verbatim
+// (same bytes) when no line exceeds the cap, so well-behaved output is untouched.
+func TestTruncateBashLinesShortInputUnchanged(t *testing.T) {
+	in := "alpha\nbeta\ngamma"
+	require.Equal(t, in, truncateBashLines(in, maxBashLineLength))
+	require.Equal(t, in, truncateBashLines(in, 0))
+}
+
+// TestBashWideLineTruncatedEndToEnd drives the bash tool and asserts a single
+// enormous output line is width-capped in the rendered result, not just the
+// line-count cap, so it cannot dominate the context budget on its own.
+func TestBashWideLineTruncatedEndToEnd(t *testing.T) {
+	tool, ok := NewRegistry(shellDeps(t, &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+	})).Get("bash")
+	require.True(t, ok)
+
+	// Print one line of (maxBashLineLength + 1000) characters via a repeated 'x'.
+	width := maxBashLineLength + 1000
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": fmt.Sprintf(`printf 'x%%.0s' $(seq 1 %d); echo`, width),
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "characters truncated",
+		"a single very wide output line must be width-capped")
+	require.NotContains(t, result.Content, strings.Repeat("x", width),
+		"the full untruncated wide line must not survive")
 }
 
 func TestRegistryOfflineWithholdsEgressTools(t *testing.T) {

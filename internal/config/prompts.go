@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // promptExtension is the file extension, including the leading dot,
@@ -23,6 +25,13 @@ const promptInputVar = "input"
 // surrounding braces or stray text do not greedily match across
 // multiple placeholders.
 var placeholderPattern = regexp.MustCompile(`\{\{(\w+)\}\}`)
+
+// dollarArgPattern matches the pi-style positional argument placeholders a
+// slash prompt may use. In one alternation it captures: $$ (a literal dollar
+// sign), $@ and $ARGUMENTS (the entire argument line), and $1, $2, ... (an
+// individual, 1-indexed field of the argument line). Digits are matched
+// greedily so $12 references the twelfth field rather than the first.
+var dollarArgPattern = regexp.MustCompile(`\$(\$|@|ARGUMENTS|[0-9]+)`)
 
 // Prompt is a single reusable Markdown prompt loaded from a registry
 // directory. Its Name is the source filename with the .md extension
@@ -138,6 +147,94 @@ func (r *PromptRegistry) Render(name string, args map[string]string) (string, er
 // ErrPromptNotFound is returned by Render when the requested prompt
 // name is not registered.
 var ErrPromptNotFound = fmt.Errorf("prompt not found")
+
+// RenderSlash renders the named prompt the way a slash invocation supplies
+// arguments: a single argLine following the prompt name (e.g. the
+// "flaky test in CI" in "/triage flaky test in CI"). Before the {{var}}
+// placeholders are interpolated, the template's pi-style positional
+// placeholders are expanded from argLine:
+//
+//	$1, $2, ...     individual fields of argLine, split on whitespace while
+//	               honoring single and double quotes (1-indexed; an
+//	               out-of-range index expands to the empty string)
+//	$@, $ARGUMENTS the entire argLine, verbatim
+//	$$             a literal dollar sign
+//
+// For backward compatibility the {{input}} placeholder is also populated with
+// the full argLine, so templates may freely mix the two styles. RenderSlash
+// returns ErrPromptNotFound when name is unregistered, mirroring Render.
+func (r *PromptRegistry) RenderSlash(name, argLine string) (string, error) {
+	prompt, ok := r.prompts[name]
+	if !ok {
+		return "", fmt.Errorf("rendering prompt %q: %w", name, ErrPromptNotFound)
+	}
+	expanded := expandDollarArgs(prompt.Template, argLine)
+	return renderTemplate(expanded, map[string]string{promptInputVar: argLine})
+}
+
+// expandDollarArgs substitutes the pi-style positional placeholders in
+// template using argLine. See RenderSlash for the placeholder grammar. The
+// argument line is split into fields once and shared across all positional
+// references; unmatched indices expand to the empty string so a template that
+// optimistically references $3 degrades cleanly when fewer args are supplied.
+func expandDollarArgs(template, argLine string) string {
+	fields := splitFields(argLine)
+	return dollarArgPattern.ReplaceAllStringFunc(template, func(match string) string {
+		// match always begins with '$'; the remainder selects the placeholder.
+		switch token := match[1:]; token {
+		case "$":
+			return "$"
+		case "@", "ARGUMENTS":
+			return argLine
+		default:
+			// token is one or more digits per the pattern, so Atoi cannot fail.
+			n, _ := strconv.Atoi(token)
+			if n >= 1 && n <= len(fields) {
+				return fields[n-1]
+			}
+			return ""
+		}
+	})
+}
+
+// splitFields splits s into fields on unquoted whitespace, honoring single
+// (') and double (") quotes so a quoted run containing spaces stays one
+// field. Quote characters are removed from the result, and an unterminated
+// quote extends to the end of the input. It is intentionally a small parser:
+// it does not interpret backslash escapes, keeping positional-argument
+// splitting predictable for slash prompts.
+func splitFields(s string) []string {
+	var fields []string
+	var cur strings.Builder
+	inField := false
+	var quote rune // the active quote rune, or 0 when outside a quoted run
+	for _, r := range s {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			inField = true
+		case unicode.IsSpace(r):
+			if inField {
+				fields = append(fields, cur.String())
+				cur.Reset()
+				inField = false
+			}
+		default:
+			cur.WriteRune(r)
+			inField = true
+		}
+	}
+	if inField {
+		fields = append(fields, cur.String())
+	}
+	return fields
+}
 
 // renderTemplate replaces every {{var}} placeholder in template with
 // the corresponding value from args. A placeholder whose variable is

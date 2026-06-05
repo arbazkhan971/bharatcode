@@ -330,6 +330,37 @@ func TestSlashRegistryPrompt_RendersAndSubmits(t *testing.T) {
 		"the rendered prompt (with args spliced into {{input}}) must reach the agent loop")
 }
 
+// TestSlashRegistryPrompt_ExpandsPositionalArgs asserts that pi-style
+// positional placeholders ($1, $2, $@) in a registered prompt are expanded
+// from the slash argument line and the result reaches the agent loop.
+func TestSlashRegistryPrompt_ExpandsPositionalArgs(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "on it"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "review.md"),
+		[]byte("Review $1 for $2 (all: $@)"), 0o644))
+	reg, err := config.LoadPromptRegistry(dir)
+	require.NoError(t, err)
+	m.deps.Prompts = reg
+
+	h.submitSlash(t, "/review main.go races")
+	h.drain(t, func() bool { return !m.running })
+
+	require.False(t, m.dialogs.Contains("error"), "a registered prompt must not raise the unknown-command dialog")
+
+	msgs, err := h.repo.Messages(context.Background(), m.sessionID)
+	require.NoError(t, err)
+	require.Equal(t, "Review main.go for races (all: main.go races)", firstUserText(msgs),
+		"positional placeholders must be expanded from the slash argument line before reaching the agent loop")
+}
+
 // TestSlashRegistryPrompt_UnknownFallsBackToErrorDialog asserts an unknown
 // command that is neither built in nor registered raises the unknown-command
 // dialog.

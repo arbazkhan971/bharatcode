@@ -105,10 +105,16 @@ func (t *MultiEditTool) Run(ctx context.Context, args json.RawMessage) (res Resu
 		}
 		count := strings.Count(next, edit.Old)
 		if count == 0 {
-			return errorResult(fmt.Sprintf("edits[%d].old was not found", i)), nil
+			return errorResult(fmt.Sprintf(
+				"edits[%d].old was not found in %s. old must match exactly, including all whitespace and newlines.",
+				i, path,
+			)), nil
 		}
 		if count > 1 && !edit.ReplaceAll {
-			return errorResult(fmt.Sprintf("edits[%d].old is not unique; set replace_all to true", i)), nil
+			return errorResult(fmt.Sprintf(
+				"Found %d occurrences of edits[%d].old in %s. Each old must be unique — provide more surrounding context to make it unique (or set replace_all to true to replace every match).",
+				count, i, path,
+			)), nil
 		}
 		n := 1
 		if edit.ReplaceAll {

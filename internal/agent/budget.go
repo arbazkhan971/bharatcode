@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 )
 
@@ -14,6 +15,68 @@ const reservedResponseTokens = 4096
 // compactionSummaryMarker prefixes the synthetic message that the default
 // Compactor leaves in place of the dropped conversation history.
 const compactionSummaryMarker = "[compacted history]"
+
+// toolResultSummaryLimit caps how many characters of a single tool result are
+// serialized into the prefix the summarizer sees. Long tool outputs (file
+// reads, verbose command logs) dominate the prefix while contributing little
+// summary signal, so each one is truncated to keep the summarization request
+// focused and bounded.
+const toolResultSummaryLimit = 2000
+
+// compactionSystemPrompt instructs the summarizing model to act as a context
+// checkpoint writer rather than continue the conversation. It is BharatCode's
+// own wording: produce only the structured checkpoint, never an answer.
+const compactionSystemPrompt = `You are an anchored context-summarization assistant for a coding agent.
+
+Your only job is to distill an in-progress engineering session into a compact,
+durable checkpoint so the work can resume after older turns are dropped.
+
+Strict rules:
+- Do NOT continue the conversation, answer the user, or call any tool.
+- Do NOT invent facts; record only what the transcript actually establishes.
+- Prefer concrete specifics (file paths, identifiers, decisions, error text)
+  over vague paraphrase.
+- Be terse. Omit a section's bullets when nothing applies, but always keep the
+  section headings so the structure stays stable.
+- ONLY output the structured summary in exactly the requested Markdown format,
+  with no preamble, no closing remarks, and nothing outside the template.`
+
+// compactionTemplate is the exact Markdown checkpoint skeleton the summarizer
+// must fill in. Keeping the heading set fixed lets downstream turns (and the
+// iterative-update path) rely on a stable shape.
+const compactionTemplate = `Summarize the session so far using EXACTLY this Markdown structure, keeping
+every heading even when a section is empty:
+
+## Goal
+<the user's overall objective for this session>
+
+## Constraints & Preferences
+<requirements, conventions, and preferences the agent must honor>
+
+## Progress
+- Done: <what is finished and verified>
+- In Progress: <what is partially done>
+- Blocked: <what is stuck and why>
+
+## Key Decisions
+<important choices made and the reasoning behind them>
+
+## Next Steps
+<the concrete actions to take next, in order>
+
+## Critical Context
+<facts that must survive: invariants, gotchas, environment details>
+
+## Relevant Files
+<paths touched or central to the task, each with a one-line note>`
+
+// compactionUpdateInstruction is prepended (with the prior summary) when an
+// earlier checkpoint already exists, so the model refreshes it instead of
+// starting from scratch.
+const compactionUpdateInstruction = `A previous checkpoint already exists, shown below in <previous-summary> tags.
+Produce an UPDATED checkpoint that supersedes it: preserve facts that are still
+true, remove anything now stale or superseded, and merge in everything new from
+the transcript. Output the full updated checkpoint, not a diff.`
 
 // Compactor condenses a conversation history into a smaller equivalent that is
 // cheaper to send to a provider. Implementations must be pure: they receive a
@@ -65,6 +128,205 @@ func (c dropAndMarkCompactor) Compact(ctx context.Context, history []message.Mes
 	})
 	out = append(out, tail...)
 	return out, nil
+}
+
+// summaryProvider is the narrow slice of llm.Provider the llmSummaryCompactor
+// needs: a single streaming call. It is an interface so tests can inject a fake
+// provider that returns a fixed structured summary without a network round-trip.
+type summaryProvider interface {
+	Stream(ctx context.Context, req llm.Request) (<-chan llm.Event, error)
+}
+
+// llmSummaryCompactor condenses the dropped prefix of a conversation into a
+// single structured checkpoint message produced by the provider, then keeps the
+// recent tail verbatim. Unlike dropAndMarkCompactor, which leaves only a terse
+// census, this Compactor asks the model to write a durable Markdown checkpoint
+// so the agent retains the goal, decisions, and next steps across compaction.
+//
+// It supports iterative update: when the dropped prefix already contains a prior
+// checkpoint (recognized by its marker), that checkpoint is passed back to the
+// model in <previous-summary> tags with an instruction to refresh rather than
+// rewrite it, so successive compactions accrete rather than forget.
+type llmSummaryCompactor struct {
+	// provider performs the single summarization call.
+	provider summaryProvider
+	// model is the model id used for the summarization call.
+	model string
+	// keepRecent is the number of trailing messages preserved verbatim.
+	keepRecent int
+}
+
+// newLLMSummaryCompactor returns an llmSummaryCompactor that summarizes via
+// provider using model, retaining keepRecent trailing messages verbatim. A
+// non-positive keepRecent is clamped to 1.
+func newLLMSummaryCompactor(provider summaryProvider, model string, keepRecent int) llmSummaryCompactor {
+	if keepRecent < 1 {
+		keepRecent = 1
+	}
+	return llmSummaryCompactor{provider: provider, model: model, keepRecent: keepRecent}
+}
+
+// Compact summarizes everything but the most recent keepRecent messages into a
+// single structured checkpoint message, then appends the recent tail verbatim.
+// When the history already fits within keepRecent there is nothing to drop and
+// it is returned unchanged. The returned slice is always a fresh copy; the input
+// is never mutated.
+func (c llmSummaryCompactor) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	if len(history) <= c.keepRecent {
+		return append([]message.Message(nil), history...), nil
+	}
+	dropped := history[:len(history)-c.keepRecent]
+	tail := history[len(history)-c.keepRecent:]
+
+	prior := extractPriorSummary(dropped)
+	transcript := serializeForSummary(dropped)
+
+	summary, err := c.summarize(ctx, transcript, prior)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]message.Message, 0, len(tail)+1)
+	out = append(out, message.Message{
+		SessionID: sessionIDOf(history),
+		Role:      message.RoleUser,
+		Content: []message.ContentBlock{message.TextBlock{
+			Text: fmt.Sprintf("%s\n\n%s", compactionSummaryMarker, summary),
+		}},
+		CreatedAt: history[0].CreatedAt,
+	})
+	out = append(out, tail...)
+	return out, nil
+}
+
+// summarize calls the provider once with the compaction system prompt and the
+// checkpoint template, returning the model's structured summary text. When prior
+// is non-empty it is threaded through as a <previous-summary> block with the
+// preserve/remove/merge instruction so the model updates the existing checkpoint
+// rather than starting over.
+func (c llmSummaryCompactor) summarize(ctx context.Context, transcript, prior string) (string, error) {
+	var b strings.Builder
+	if strings.TrimSpace(prior) != "" {
+		b.WriteString(compactionUpdateInstruction)
+		b.WriteString("\n\n<previous-summary>\n")
+		b.WriteString(prior)
+		b.WriteString("\n</previous-summary>\n\n")
+	}
+	b.WriteString(compactionTemplate)
+	b.WriteString("\n\nHere is the conversation to summarize:\n\n")
+	b.WriteString(transcript)
+
+	req := llm.Request{
+		Model:        c.model,
+		SystemPrompt: compactionSystemPrompt,
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: b.String()}},
+		}},
+	}
+
+	events, err := c.provider.Stream(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("requesting compaction summary: %w", err)
+	}
+
+	var text strings.Builder
+	for {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("reading compaction summary: %w", ctx.Err())
+		case ev, ok := <-events:
+			if !ok {
+				out := strings.TrimSpace(text.String())
+				if out == "" {
+					return "", fmt.Errorf("compaction summary was empty")
+				}
+				return out, nil
+			}
+			switch e := ev.(type) {
+			case llm.DeltaTextEvent:
+				text.WriteString(e.Text)
+			case llm.ErrorEvent:
+				return "", fmt.Errorf("streaming compaction summary: %w", e.Err)
+			}
+		}
+	}
+}
+
+// serializeForSummary renders dropped messages as role-tagged plain text so the
+// summarizing model sees a readable transcript. Each tool result is truncated to
+// toolResultSummaryLimit characters so a few large outputs cannot dominate the
+// prefix. Empty messages are skipped.
+func serializeForSummary(dropped []message.Message) string {
+	var b strings.Builder
+	for _, msg := range dropped {
+		rendered := renderForSummary(msg)
+		if rendered == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(rendered)
+	}
+	return b.String()
+}
+
+// renderForSummary renders a single message as a role-tagged block. Tool results
+// (carried on user-role messages on the wire) are tagged [Tool result] and
+// truncated; genuine user turns are tagged [User] and assistant turns
+// [Assistant]. It returns an empty string when the message carries no
+// summarizable text.
+func renderForSummary(msg message.Message) string {
+	var parts []string
+	tag := "[User]"
+	switch msg.Role {
+	case message.RoleAssistant:
+		tag = "[Assistant]"
+	case message.RoleTool:
+		tag = "[Tool result]"
+	}
+	for _, block := range msg.Content {
+		switch b := block.(type) {
+		case message.TextBlock:
+			if strings.TrimSpace(b.Text) != "" {
+				parts = append(parts, b.Text)
+			}
+		case message.ToolResultBlock:
+			tag = "[Tool result]"
+			parts = append(parts, truncateString(b.Content, toolResultSummaryLimit))
+		case message.ToolUseBlock:
+			parts = append(parts, fmt.Sprintf("(called tool %q with %s)", b.Name, string(b.Input)))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return tag + " " + strings.Join(parts, "\n")
+}
+
+// truncateString returns s capped at limit characters, appending an elision
+// marker when it was shortened. A non-positive limit returns s unchanged.
+func truncateString(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "... [truncated]"
+}
+
+// extractPriorSummary returns the text of the most recent prior checkpoint found
+// in dropped, identified by the compaction marker, with the marker stripped. It
+// returns an empty string when no prior checkpoint is present, which signals the
+// first (non-iterative) compaction.
+func extractPriorSummary(dropped []message.Message) string {
+	for i := len(dropped) - 1; i >= 0; i-- {
+		text := textContent(dropped[i])
+		if strings.Contains(text, compactionSummaryMarker) {
+			stripped := strings.TrimSpace(strings.Replace(text, compactionSummaryMarker, "", 1))
+			return stripped
+		}
+	}
+	return ""
 }
 
 // summarizeDropped renders a terse, deterministic census of the dropped

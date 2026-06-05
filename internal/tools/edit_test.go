@@ -56,11 +56,35 @@ func TestEditRejectsNonUniqueOldString(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.True(t, result.IsError)
-	require.Contains(t, result.Content, "not unique")
+	require.Contains(t, result.Content, "Found 2 occurrences of old_string")
+	require.Contains(t, result.Content, "must be unique")
+	require.Contains(t, result.Content, "more surrounding context")
+	require.Contains(t, result.Content, "replace_all")
 
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "x x\n", string(got))
+}
+
+func TestEditNotFoundReportsWhitespaceGuidance(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "miss.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello world\n"), 0o644))
+
+	tool := newEditTool(Dependencies{WorkDir: workDir, SessionID: "edit-miss"})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path":       "miss.txt",
+		"old_string": "absent",
+		"new_string": "y",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "old_string was not found")
+	require.Contains(t, result.Content, "whitespace and newlines")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "hello world\n", string(got))
 }
 
 func TestEditMalformedArgs(t *testing.T) {

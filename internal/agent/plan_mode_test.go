@@ -89,7 +89,7 @@ func TestPlanModeRefusesWritesThenExecutesAfterApproval(t *testing.T) {
 		"refusal must explain the tool is not allowed (read-only)")
 
 	// The plan-mode instruction reached the provider via the system prompt.
-	require.Contains(t, provider.reqs[0].SystemPrompt, "PLAN MODE",
+	require.Contains(t, provider.reqs[0].SystemPrompt, "Plan mode is active",
 		"plan turn must prompt the agent to produce a plan")
 
 	// In plan mode, the offered tool list excludes write-class tools.
@@ -114,7 +114,7 @@ func TestPlanModeRefusesWritesThenExecutesAfterApproval(t *testing.T) {
 
 	// The post-approval provider request no longer carries the plan-mode prompt.
 	require.Len(t, provider.reqs, 4, "approved turn should run two more provider turns")
-	require.NotContains(t, provider.reqs[2].SystemPrompt, "PLAN MODE",
+	require.NotContains(t, provider.reqs[2].SystemPrompt, "Plan mode is active",
 		"approved turn must not prompt for a plan")
 	require.Equal(t, "base prompt", provider.reqs[2].SystemPrompt,
 		"approved turn uses the unmodified base system prompt")
@@ -195,5 +195,76 @@ func TestPlanModeOffPreservesDefaultBehavior(t *testing.T) {
 	require.True(t, loop.toolAllowed("edit"))
 	require.True(t, loop.toolAllowed("bash"))
 	require.Equal(t, "base prompt", loop.systemPrompt())
-	require.False(t, strings.Contains(loop.systemPrompt(), "PLAN MODE"))
+	require.False(t, strings.Contains(loop.systemPrompt(), "Plan mode is active"))
+}
+
+// TestPlanModePromptPhasedWorkflow proves the plan-mode system prompt carries
+// the verbatim hard read-only rule and the full phased read-only workflow when
+// plan mode is set, and that none of those phrases leak into the base prompt
+// once plan mode is cleared. This pins the prompt content the loop appends in
+// systemPrompt() so a regression in the const is caught deterministically.
+func TestPlanModePromptPhasedWorkflow(t *testing.T) {
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     &scriptProvider{},
+		Tools:        newFakeRegistry(),
+		Sessions:     testRepo(t),
+		SystemPrompt: "base prompt",
+		PlanMode:     true,
+	})
+
+	prompt := loop.systemPrompt()
+
+	// The base prompt is still present, with the plan-mode reminder appended.
+	require.True(t, strings.HasPrefix(prompt, "base prompt"),
+		"plan-mode prompt must extend, not replace, the base system prompt")
+	// Framed as a system reminder.
+	require.Contains(t, prompt, "<system-reminder>")
+	require.Contains(t, prompt, "</system-reminder>")
+
+	// The verbatim hard read-only rule, including the supersede clause.
+	wantVerbatim := []string{
+		"Plan mode is active",
+		"you MUST NOT make any edits",
+		"non-readonly tools (including changing configs or making commits)",
+		"This supersedes any other instructions you have received",
+	}
+	for _, phrase := range wantVerbatim {
+		require.Contains(t, prompt, phrase,
+			"plan-mode prompt must carry the verbatim hard rule: %q", phrase)
+	}
+
+	// Every phase of the read-only workflow, in the right shape: investigate,
+	// clarify before designing, design, review, then write the plan and stop.
+	wantPhases := []string{
+		"Phase 1 - Investigate",
+		"Do focused exploration yourself",
+		"Phase 2 - Clarify",
+		"BEFORE you start designing",
+		"Phase 3 - Design",
+		"Phase 4 - Review",
+		"Phase 5 - Write the plan, then STOP",
+		"Verification section",
+		"wait for approval",
+	}
+	for _, phrase := range wantPhases {
+		require.Contains(t, prompt, phrase,
+			"plan-mode prompt must describe the phased workflow: %q", phrase)
+	}
+
+	// BharatCode has no subagent spawning, so the prompt must keep exploration
+	// in-process and must not promise a delegate.
+	require.Contains(t, prompt, "There is no subagent to delegate to")
+
+	// With plan mode cleared, none of the plan-mode phrases survive.
+	loop.Approve()
+	require.False(t, loop.PlanMode())
+	cleared := loop.systemPrompt()
+	require.Equal(t, "base prompt", cleared,
+		"approved prompt must equal the unmodified base prompt")
+	for _, phrase := range append(append([]string{}, wantVerbatim...), wantPhases...) {
+		require.NotContains(t, cleared, phrase,
+			"cleared prompt must not contain plan-mode phrase: %q", phrase)
+	}
 }

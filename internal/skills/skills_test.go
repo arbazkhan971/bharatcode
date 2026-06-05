@@ -49,15 +49,45 @@ func TestLoadSkillsTwoSkills(t *testing.T) {
 	_, ok = set.Get("missing")
 	require.False(t, ok)
 
-	// Summaries lists both skills, one per line, in name order.
+	// Summaries renders an <available_skills> XML block, one <skill> per
+	// skill in name order, each carrying its absolute <location>.
 	summaries := set.Summaries()
 	require.Contains(t, summaries, "Fill and read PDF forms")
 	require.Contains(t, summaries, "Manage branches and releases")
 	require.Equal(
 		t,
-		"git-flow — Manage branches and releases\npdf — Fill and read PDF forms",
+		"<available_skills>\n"+
+			"  <skill>\n"+
+			"    <name>git-flow</name>\n"+
+			"    <description>Manage branches and releases</description>\n"+
+			"    <location>"+filepath.Join(root, "git-flow")+"</location>\n"+
+			"  </skill>\n"+
+			"  <skill>\n"+
+			"    <name>pdf</name>\n"+
+			"    <description>Fill and read PDF forms</description>\n"+
+			"    <location>"+filepath.Join(root, "pdf")+"</location>\n"+
+			"  </skill>\n"+
+			"</available_skills>",
 		summaries,
 	)
+}
+
+func TestSummariesXMLEscapesAndIncludesLocation(t *testing.T) {
+	root := t.TempDir()
+	dir := writeSkill(t, root, "review", "---\nname: review\ndescription: Diff < and > & report\n---\nbody\n")
+
+	set, err := LoadSkills(root)
+	require.NoError(t, err)
+
+	out := set.Summaries()
+	require.Contains(t, out, "<available_skills>")
+	require.Contains(t, out, "</available_skills>")
+	// The absolute skill directory is advertised as a <location> so the
+	// model can load the manifest and resolve relative paths against it.
+	require.Contains(t, out, "<location>"+dir+"</location>")
+	// XML metacharacters in the description are escaped.
+	require.Contains(t, out, "Diff &lt; and &gt; &amp; report")
+	require.NotContains(t, out, "Diff < and >")
 }
 
 func TestLoadSkillsSkipsMalformed(t *testing.T) {

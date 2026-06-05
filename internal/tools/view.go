@@ -139,8 +139,8 @@ func (t *ViewTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 		return Result{}, err
 	}
 
-	content := numberedLines(string(data), in.Offset, in.Limit)
-	content = truncateContent(content, maxToolOutputBytes(t.deps.Config))
+	content, span := numberedLines(string(data), in.Offset, in.Limit)
+	content = truncateContent(content, span, maxToolOutputBytes(t.deps.Config))
 	return Result{
 		Content: content,
 		Metadata: map[string]any{
@@ -324,19 +324,29 @@ func valueAsStringSlice(v reflect.Value) []string {
 	return out
 }
 
-func numberedLines(content string, offset, limit int) string {
+// lineSpan describes which file lines a rendered view covers. All values are
+// one-based and total reflects the file's full line count, so a truncation
+// marker can advertise an accurate continuation offset.
+type lineSpan struct {
+	firstLine int
+	lastLine  int
+	total     int
+}
+
+func numberedLines(content string, offset, limit int) (string, lineSpan) {
 	lines := strings.Split(content, "\n")
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
+	total := len(lines)
 	if offset <= 0 {
 		offset = 1
 	}
-	if offset > len(lines) {
-		return ""
+	if offset > total {
+		return "", lineSpan{firstLine: offset, lastLine: offset - 1, total: total}
 	}
 	start := offset - 1
-	end := len(lines)
+	end := total
 	if limit > 0 && start+limit < end {
 		end = start + limit
 	}
@@ -349,21 +359,58 @@ func numberedLines(content string, offset, limit int) string {
 			b.WriteByte('\n')
 		}
 	}
-	return b.String()
+	return b.String(), lineSpan{firstLine: start + 1, lastLine: end, total: total}
 }
 
-func truncateContent(content string, maxBytes int) string {
+// truncateContent caps numbered output at maxBytes and replaces the dead-end
+// byte count with an actionable marker: it tells the model which lines were
+// shown and the offset to pass to view to continue paging. When a single line
+// is itself larger than the budget it cannot be paged with offset, so a
+// concrete shell fallback is suggested instead. The rune-boundary safety of the
+// cut is preserved.
+func truncateContent(content string, span lineSpan, maxBytes int) string {
 	if maxBytes <= 0 || len(content) <= maxBytes {
 		return content
 	}
-	remaining := len(content) - maxBytes
-	if maxBytes > len(content) {
-		maxBytes = len(content)
+
+	cut := maxBytes
+	if cut > len(content) {
+		cut = len(content)
 	}
-	for maxBytes > 0 && !utf8.ValidString(content[:maxBytes]) {
-		maxBytes--
+	// Prefer to cut on a line boundary so the continuation offset lands on a
+	// whole line rather than mid-line.
+	if nl := strings.LastIndexByte(content[:cut], '\n'); nl >= 0 {
+		cut = nl
+	} else {
+		cut = 0
 	}
-	return content[:maxBytes] + "\n...[truncated " + strconv.Itoa(remaining) + " bytes]"
+	// Back off to a valid rune boundary in case the line itself is multibyte.
+	for cut > 0 && !utf8.ValidString(content[:cut]) {
+		cut--
+	}
+
+	shown := content[:cut]
+	// Number of complete numbered lines kept before the cut.
+	kept := 0
+	if shown != "" {
+		kept = strings.Count(shown, "\n") + 1
+	}
+	nextLine := span.firstLine + kept
+
+	if kept == 0 {
+		// The first line alone exceeds the budget; offset paging cannot help, so
+		// point at a shell fallback that streams just that line's bytes.
+		return fmt.Sprintf(
+			"[Line %d exceeds the %d-byte view limit; use bash: sed -n %q <path> | head -c %d]",
+			span.firstLine, maxBytes, fmt.Sprintf("%dp", span.firstLine), maxBytes,
+		)
+	}
+
+	lastShown := nextLine - 1
+	return shown + fmt.Sprintf(
+		"\n[Showing lines %d-%d of %d. Use offset=%d to continue.]",
+		span.firstLine, lastShown, span.total, nextLine,
+	)
 }
 
 func maxToolOutputBytes(cfg *config.Config) int {

@@ -202,22 +202,47 @@ func (s *SkillSet) Len() int {
 	return len(s.byName)
 }
 
-// Summaries renders a compact "name — description" block, one skill per
-// line in name order, for injection into the system prompt. It returns
-// an empty string when the set holds no skills.
+// Summaries renders the loaded skills as an <available_skills> XML block
+// for injection into the system prompt. Each skill becomes a <skill>
+// element carrying its <name>, <description>, and the absolute <location>
+// of its directory, in deterministic name order. Advertising the
+// location lets the model load a skill's manifest by absolute path and
+// resolve any relative paths the skill references against that directory.
+// It returns an empty string when the set holds no skills.
 func (s *SkillSet) Summaries() string {
 	if s == nil || len(s.order) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	for i, name := range s.order {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
+	b.WriteString("<available_skills>")
+	for _, name := range s.order {
 		skill := s.byName[name]
-		b.WriteString(skill.Name)
-		b.WriteString(" — ")
-		b.WriteString(skill.Description)
+		b.WriteString("\n  <skill>")
+		b.WriteString("\n    <name>")
+		b.WriteString(escapeXML(skill.Name))
+		b.WriteString("</name>")
+		b.WriteString("\n    <description>")
+		b.WriteString(escapeXML(skill.Description))
+		b.WriteString("</description>")
+		b.WriteString("\n    <location>")
+		b.WriteString(escapeXML(skill.Dir))
+		b.WriteString("</location>")
+		b.WriteString("\n  </skill>")
 	}
+	b.WriteString("\n</available_skills>")
 	return b.String()
+}
+
+// escapeXML escapes the five XML special characters so skill metadata
+// that contains markup characters renders as well-formed XML text rather
+// than confusing the model's parse of the block.
+func escapeXML(s string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&apos;",
+	)
+	return replacer.Replace(s)
 }

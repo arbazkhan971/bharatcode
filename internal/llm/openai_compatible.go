@@ -121,7 +121,10 @@ func (p *openAICompatibleProvider) readResponse(ctx context.Context, resp *http.
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		send(ctx, events, ErrorEvent{Err: fmt.Errorf("reading provider response: %w", err)})
+		// A mid-read failure is a transient transport fault (a truncated or
+		// reset connection), not a permanent error; wrap it as ErrServer so the
+		// failover and backoff layers retry it.
+		send(ctx, events, ErrorEvent{Err: fmt.Errorf("reading provider response: %v: %w", err, ErrServer)})
 		return
 	}
 	if err := emitOpenAIResponse(ctx, data, events); err != nil {

@@ -153,6 +153,36 @@ func TestSlashSessions_FuzzyFilterMatchesSubsequence(t *testing.T) {
 	require.Equal(t, refactorID, visible[1].ID, "the subsequence-only match must follow")
 }
 
+// TestSlashSessions_TitlePrefixRanksAheadOfSubstring asserts that a session
+// whose title begins with the query ranks ahead of an older session that merely
+// contains the query mid-string, mirroring the @-file picker's base-name-prefix
+// tier. Typing the start of a name should surface that session first even when a
+// stale match is newer.
+func TestSlashSessions_TitlePrefixRanksAheadOfSubstring(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// "Parser refactor" begins with "par"; "Compare parsers" only contains it
+	// mid-string and is seeded last (so newer). The prefix match must still win.
+	prefixID := seedSession(t, h.repo, "Parser refactor", "fix the parser")
+	_ = seedSession(t, h.repo, "Unrelated work", "nothing here")
+	substrID := seedSession(t, h.repo, "Compare parsers", "diff them")
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+
+	for _, ch := range "par" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+	require.Equal(t, "par", m.sessionFilter)
+
+	visible := m.visibleSessions()
+	require.Len(t, visible, 2, "both the prefix and substring rows must match")
+	require.Equal(t, prefixID, visible[0].ID, "the title-prefix match must rank first")
+	require.Equal(t, substrID, visible[1].ID, "the mid-string substring match must follow")
+}
+
 // TestSlashSessions_HomeEndJumpToEnds asserts the session picker's Home/End
 // bindings jump the cursor to the first and last visible rows, mirroring the
 // chat's Home/End (oldest/newest) navigation, and that they are bounded so a

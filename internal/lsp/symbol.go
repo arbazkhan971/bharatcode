@@ -198,40 +198,86 @@ func parseRename(raw json.RawMessage) (WorkspaceEdit, error) {
 	return edit, nil
 }
 
-// parseWorkspaceEdit parses a WorkspaceEdit object. Only the "changes" map
-// ({uri: [{range, newText}]}) is parsed; the keys are URIs and are converted to
-// file paths. The "documentChanges" form is not supported. An edit with no
+// wireTextEdit is the on-the-wire shape of a single text edit, shared by both
+// the "changes" and "documentChanges" forms of a WorkspaceEdit. An
+// AnnotatedTextEdit carries an extra "annotationId" that is irrelevant here, so
+// it decodes through this same struct.
+type wireTextEdit struct {
+	Range   wireRange `json:"range"`
+	NewText string    `json:"newText"`
+}
+
+// toTextEdits converts wire edits to the package TextEdit type.
+func toTextEdits(wireEdits []wireTextEdit) []TextEdit {
+	edits := make([]TextEdit, 0, len(wireEdits))
+	for _, edit := range wireEdits {
+		edits = append(edits, TextEdit{
+			Range: Range{
+				Start: Position{Line: edit.Range.Start.Line, Character: edit.Range.Start.Character},
+				End:   Position{Line: edit.Range.End.Line, Character: edit.Range.End.Character},
+			},
+			NewText: edit.NewText,
+		})
+	}
+	return edits
+}
+
+// parseWorkspaceEdit parses a WorkspaceEdit object. Both encodings the LSP spec
+// allows are accepted: the "changes" map ({uri: [{range, newText}]}) and the
+// "documentChanges" array of TextDocumentEdits ([{textDocument: {uri}, edits:
+// [...]}]). Servers that advertise documentChanges support (gopls,
+// rust-analyzer, typescript-language-server, ...) return the latter for rename
+// and code actions, so both must be handled or those tools silently see no
+// edits. URIs are converted to file paths. Pure resource operations in
+// documentChanges (create/rename/delete file, identified by a "kind" field) are
+// skipped: the text-edit model cannot represent them. An edit with no text
 // changes yields a zero WorkspaceEdit.
 func parseWorkspaceEdit(raw json.RawMessage) (WorkspaceEdit, error) {
 	var result struct {
-		Changes map[string][]struct {
-			Range   wireRange `json:"range"`
-			NewText string    `json:"newText"`
-		} `json:"changes"`
+		Changes         map[string][]wireTextEdit `json:"changes"`
+		DocumentChanges []json.RawMessage         `json:"documentChanges"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return WorkspaceEdit{}, fmt.Errorf("parsing workspace edit: %w", err)
 	}
-	if len(result.Changes) == 0 {
-		return WorkspaceEdit{}, nil
-	}
-	changes := make(map[string][]TextEdit, len(result.Changes))
+
+	changes := make(map[string][]TextEdit)
 	for uri, wireEdits := range result.Changes {
 		path, err := uriToPath(uri)
 		if err != nil {
 			return WorkspaceEdit{}, fmt.Errorf("parsing workspace edit uri: %w", err)
 		}
-		edits := make([]TextEdit, 0, len(wireEdits))
-		for _, edit := range wireEdits {
-			edits = append(edits, TextEdit{
-				Range: Range{
-					Start: Position{Line: edit.Range.Start.Line, Character: edit.Range.Start.Character},
-					End:   Position{Line: edit.Range.End.Line, Character: edit.Range.End.Character},
-				},
-				NewText: edit.NewText,
-			})
+		changes[path] = toTextEdits(wireEdits)
+	}
+
+	// documentChanges entries are either TextDocumentEdits (carrying edits) or
+	// resource operations (carrying a "kind"). Decode only the former; multiple
+	// entries may target the same file, so edits accumulate per path.
+	for _, entry := range result.DocumentChanges {
+		var probe struct {
+			Kind         string `json:"kind"`
+			TextDocument *struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			Edits []wireTextEdit `json:"edits"`
 		}
-		changes[path] = edits
+		if err := json.Unmarshal(entry, &probe); err != nil {
+			return WorkspaceEdit{}, fmt.Errorf("parsing workspace document change: %w", err)
+		}
+		// Resource operations (create/rename/delete) set "kind" and carry no
+		// textDocument; skip them rather than fail the whole edit.
+		if probe.Kind != "" || probe.TextDocument == nil {
+			continue
+		}
+		path, err := uriToPath(probe.TextDocument.URI)
+		if err != nil {
+			return WorkspaceEdit{}, fmt.Errorf("parsing workspace edit uri: %w", err)
+		}
+		changes[path] = append(changes[path], toTextEdits(probe.Edits)...)
+	}
+
+	if len(changes) == 0 {
+		return WorkspaceEdit{}, nil
 	}
 	return WorkspaceEdit{Changes: changes}, nil
 }

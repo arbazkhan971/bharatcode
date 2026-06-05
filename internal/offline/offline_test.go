@@ -106,3 +106,53 @@ func TestCheckProvidersNilConfig(t *testing.T) {
 		t.Fatalf("CheckProviders(nil) = %v, want nil", err)
 	}
 }
+
+func TestCheckMCPServersAcceptsLocal(t *testing.T) {
+	cfg := &config.Config{MCP: []config.MCPServer{
+		{Name: "fs", Transport: "stdio", Command: "npx"},                       // local child process
+		{Name: "remote-url-but-stdio", Transport: "stdio", URL: "https://x.y"}, // transport wins
+		{Name: "local-http", Transport: "http", URL: "http://localhost:8080/mcp"},
+		{Name: "local-sse", Transport: "sse", URL: "http://127.0.0.1:9000/sse"},
+	}}
+	if err := CheckMCPServers(cfg); err != nil {
+		t.Fatalf("CheckMCPServers() = %v, want nil", err)
+	}
+}
+
+func TestCheckMCPServersRejectsRemote(t *testing.T) {
+	cfg := &config.Config{MCP: []config.MCPServer{
+		{Name: "remote-http", Transport: "http", URL: "https://mcp.example.com/v1"},
+		{Name: "remote-sse", Transport: "sse", URL: "https://sse.example.com/stream"},
+		{Name: "no-url", Transport: "http"},                 // fail closed: missing url is not local
+		{Name: "local", Transport: "stdio", Command: "npx"}, // local: must NOT appear
+	}}
+	err := CheckMCPServers(cfg)
+	if err == nil {
+		t.Fatal("CheckMCPServers() = nil, want error")
+	}
+	msg := err.Error()
+	for _, name := range []string{"remote-http", "remote-sse", "no-url"} {
+		if !strings.Contains(msg, name) {
+			t.Errorf("error %q does not mention rejected server %q", msg, name)
+		}
+	}
+	if strings.Contains(msg, "\"local\"") {
+		t.Errorf("error %q wrongly mentions local stdio server", msg)
+	}
+}
+
+func TestCheckMCPServersIgnoresDisabled(t *testing.T) {
+	cfg := &config.Config{MCP: []config.MCPServer{
+		{Name: "remote", Transport: "http", URL: "https://mcp.example.com", Disabled: true},
+		{Name: "local", Transport: "stdio", Command: "npx"},
+	}}
+	if err := CheckMCPServers(cfg); err != nil {
+		t.Fatalf("CheckMCPServers() with disabled remote = %v, want nil", err)
+	}
+}
+
+func TestCheckMCPServersNilConfig(t *testing.T) {
+	if err := CheckMCPServers(nil); err != nil {
+		t.Fatalf("CheckMCPServers(nil) = %v, want nil", err)
+	}
+}

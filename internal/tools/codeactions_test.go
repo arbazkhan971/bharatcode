@@ -403,6 +403,93 @@ func TestCodeActionsApplyIndexMatchesListingOrder(t *testing.T) {
 	require.Contains(t, result.Content, `applied "Organize Imports"`)
 }
 
+func TestCodeActionsKindFilterListsMatchingSubkinds(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports"},
+		{Title: "Remove unused", Kind: "quickfix"},
+		{Title: "Extract function", Kind: "refactor.extract.function"},
+		{Title: "Run go generate", Kind: "source"},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	// "source" admits the bare kind and its "source.organizeImports" sub-kind, but
+	// not "quickfix" or "refactor.*".
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "kind": "source",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t,
+		"1. Run go generate [source]\n"+
+			"2. Organize Imports [source.organizeImports]",
+		result.Content,
+	)
+}
+
+func TestCodeActionsKindFilterIsCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Extract function", Kind: "Refactor.Extract"},
+		{Title: "Remove unused", Kind: "quickfix"},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "kind": "refactor",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "1. Extract function [Refactor.Extract]", result.Content)
+}
+
+func TestCodeActionsKindFilterReportsWhenNoneMatch(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Remove unused", Kind: "quickfix"},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "kind": "refactor",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, `No code actions of kind "refactor" available.`, result.Content)
+}
+
+func TestCodeActionsKindFilterAppliesIntoFilteredOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	// Unfiltered, the quickfix would sort before the organize-imports edit. With
+	// kind=source the quickfix drops out, so apply index 1 is the edit.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Remove unused", Kind: "quickfix"},
+		{Title: "Organize Imports", Kind: "source.organizeImports", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range:   lsp.Range{Start: lsp.Position{Line: 0, Character: 0}, End: lsp.Position{Line: 0, Character: 12}},
+				NewText: "package widget",
+			}}},
+		}},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "kind": "source", "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, `applied "Organize Imports"`)
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package widget\n", string(got))
+}
+
 func TestCodeActionsRejectsMalformedJSON(t *testing.T) {
 	tool := &codeActionsTool{source: &fakeCodeActions{}, workDir: t.TempDir()}
 	result, err := tool.Run(context.Background(), json.RawMessage(`{bad`))

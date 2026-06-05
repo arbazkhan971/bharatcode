@@ -267,4 +267,43 @@ func TestParseRenameShapes(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, edit.Changes)
 	})
+
+	t.Run("document_changes", func(t *testing.T) {
+		// Servers advertising documentChanges support (gopls, rust-analyzer, ...)
+		// return TextDocumentEdits instead of a changes map.
+		raw := `{"documentChanges":[{"textDocument":{"uri":"` + uri + `","version":7},"edits":[{` + rangeJSON + `,"newText":"Renamed"}]}]}`
+		edit, err := parseRename(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, WorkspaceEdit{
+			Changes: map[string][]TextEdit{
+				wantPath: {{Range: wantRange, NewText: "Renamed"}},
+			},
+		}, edit)
+	})
+
+	t.Run("document_changes_skips_resource_ops", func(t *testing.T) {
+		// A create-file resource operation is interleaved with a text edit; only
+		// the text edit is representable, so the op is skipped rather than failing.
+		other := pathToURI("/tmp/example/new.go")
+		raw := `{"documentChanges":[` +
+			`{"kind":"create","uri":"` + other + `"},` +
+			`{"textDocument":{"uri":"` + uri + `","version":7},"edits":[{` + rangeJSON + `,"newText":"Renamed"}]}` +
+			`]}`
+		edit, err := parseRename(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, WorkspaceEdit{
+			Changes: map[string][]TextEdit{
+				wantPath: {{Range: wantRange, NewText: "Renamed"}},
+			},
+		}, edit)
+	})
+
+	t.Run("document_changes_empty", func(t *testing.T) {
+		// A documentChanges array carrying only resource operations leaves no text
+		// edits, yielding a zero WorkspaceEdit.
+		raw := `{"documentChanges":[{"kind":"delete","uri":"` + uri + `"}]}`
+		edit, err := parseRename(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Nil(t, edit.Changes)
+	})
 }

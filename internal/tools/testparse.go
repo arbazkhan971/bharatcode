@@ -74,6 +74,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parsePlaywrightFailures(output)
 	case runnerMinitest:
 		return parseMinitestFailures(output)
+	case runnerDart:
+		return parseDartTestFailures(output)
 	default:
 		return nil
 	}
@@ -103,6 +105,7 @@ const (
 	runnerPlaywright
 	runnerMinitest
 	runnerNextest
+	runnerDart
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -278,6 +281,14 @@ func classifyTestRunner(command string) testRunner {
 		// the jest runners since a "playwright test" invocation carries none of their
 		// substrings, but kept explicit to guard against future overlap.
 		return runnerPlaywright
+	case strings.Contains(c, "dart test"), strings.Contains(c, "flutter test"):
+		// `dart test`/`flutter test` drive Dart's package:test runner, whose default
+		// (compact) reporter prints a rewritten "MM:SS +P ~S -F: <name> [E]" status
+		// line — the "[E]" suffix marking a failing test — followed by the indented
+		// assertion/exception block. Checked before the JS runners since a Dart
+		// invocation carries none of their substrings, but kept explicit to guard
+		// against future overlap.
+		return runnerDart
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1612,6 +1623,62 @@ func parseMinitestFailures(output string) []testFailure {
 		}
 		if f.Detail == "" {
 			f.Detail = idm[2]
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "00:01 +0 -1: my group my test [E]" — the compact-reporter status line Dart's
+	// package:test runner prints for a failing test (`dart test`/`flutter test`).
+	// The "MM:SS" elapsed clock is followed by the running "+passed", optional
+	// "~skipped", and "-failed" counters, then the test name (group labels folded
+	// in, space-separated) and a trailing " [E]" marker that distinguishes a
+	// failure from a passing update. The closing "Some tests failed." summary line
+	// carries the counter prefix but no " [E]", so it does not match.
+	dartFailRe = regexp.MustCompile(`^\d{2}:\d{2} \+\d+(?: ~\d+)?(?: -\d+)?: (.+) \[E\]\s*$`)
+	// A new compact-reporter status line, used to bound a failure's indented detail
+	// block so it does not bleed into the next test's output.
+	dartStatusRe = regexp.MustCompile(`^\d{2}:\d{2} `)
+)
+
+// parseDartTestFailures extracts failing tests from Dart package:test output
+// (`dart test`/`flutter test`). Each failing test prints a
+// "MM:SS +P -F: <name> [E]" status line; the name (with any group labels folded
+// in) is the failing test, reported in run order and deduplicated since a test
+// with multiple errors emits the line more than once. The detail is the first
+// non-empty indented line of the assertion/exception block beneath it (e.g.
+// "Expected: <2>" or "TestFailure: ..."), located before the next status line so
+// an entry without a body does not borrow the following one's.
+func parseDartTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := dartFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		// The assertion/exception message sits on the first non-empty indented line
+		// beneath the status line, before the next status line.
+		for j := i + 1; j < len(lines); j++ {
+			if dartStatusRe.MatchString(lines[j]) {
+				break
+			}
+			if lines[j] == "" || (lines[j][0] != ' ' && lines[j][0] != '\t') {
+				continue
+			}
+			if t := strings.TrimSpace(lines[j]); t != "" {
+				f.Detail = t
+				break
+			}
 		}
 		failures = append(failures, f)
 	}

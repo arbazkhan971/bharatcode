@@ -531,9 +531,11 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 // JSON Schema generators routinely do (a top-level "$schema", an
 // "additionalProperties": false on every object) — fails the whole request.
 // Each key here is metadata or a constraint Gemini ignores anyway, so dropping
-// it is safe and changes no accepted-request semantics; keys whose removal would
-// leave a dangling reference (notably "$ref"/"$defs") are deliberately not
-// listed, since those need resolution rather than deletion.
+// it is safe and changes no accepted-request semantics. "$ref"/"$defs" are
+// deliberately absent because deletion would leave a dangling reference; they
+// are instead inlined by resolveGeminiSchemaRefs (run before this strip pass),
+// which replaces each local $ref with a copy of its target and drops the now
+// unused definition containers.
 var geminiUnsupportedSchemaKeys = map[string]struct{}{
 	"$schema":               {},
 	"$id":                   {},
@@ -559,11 +561,126 @@ func sanitizeGeminiSchema(raw json.RawMessage) json.RawMessage {
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return raw
 	}
-	cleaned, err := json.Marshal(stripGeminiSchemaKeys(decoded))
+	// Inline local $ref/$defs first so the inlined subtrees also pass through the
+	// unsupported-key strip below, then drop the keys Gemini rejects.
+	cleaned, err := json.Marshal(stripGeminiSchemaKeys(resolveGeminiSchemaRefs(decoded)))
 	if err != nil {
 		return raw
 	}
 	return cleaned
+}
+
+// resolveGeminiSchemaRefs inlines local JSON Schema references in an
+// already-decoded tool schema so the result carries no "$ref", "$defs", or
+// "definitions" — keywords Gemini's function-declaration parameters field does
+// not support. Common JSON Schema generators factor shared or nested object
+// types into a "$defs"/"definitions" container and reference them by a local
+// "#/$defs/Name" pointer; sending such a schema to Gemini 400s, so each pointer
+// is replaced by a copy of its target and the now-unused containers are dropped.
+//
+// Only local pointers into the root's own definition containers are resolved. A
+// reference that targets something else (an external URL, or a name with no
+// matching definition) is left untouched rather than guessed at, so the schema
+// is never made worse than the raw passthrough. A recursive reference — a
+// definition that reaches itself — cannot be expressed as a finite inlined tree,
+// so it collapses to a permissive {"type":"object"} to keep resolution
+// terminating instead of looping.
+func resolveGeminiSchemaRefs(root any) any {
+	obj, ok := root.(map[string]any)
+	if !ok {
+		return root
+	}
+	defs := collectGeminiSchemaDefs(obj)
+	if len(defs) == 0 {
+		return root
+	}
+	resolved := inlineGeminiSchemaRefs(obj, defs, nil)
+	if m, ok := resolved.(map[string]any); ok {
+		// The containers are fully inlined now; Gemini rejects them, so remove them.
+		delete(m, "$defs")
+		delete(m, "definitions")
+	}
+	return resolved
+}
+
+// collectGeminiSchemaDefs indexes the root schema's "$defs" and "definitions"
+// containers by the JSON Pointer key a local $ref uses to reach them (e.g.
+// "$defs/Address"), so inlineGeminiSchemaRefs can look a reference up directly.
+func collectGeminiSchemaDefs(root map[string]any) map[string]any {
+	defs := make(map[string]any)
+	for _, container := range []string{"$defs", "definitions"} {
+		sub, ok := root[container].(map[string]any)
+		if !ok {
+			continue
+		}
+		for name, schema := range sub {
+			defs[container+"/"+name] = schema
+		}
+	}
+	return defs
+}
+
+// inlineGeminiSchemaRefs walks a decoded schema, replacing every resolvable
+// local $ref with a deep copy of its target (recursing into the copy so nested
+// references are inlined too) and recursing into all other object values and
+// array elements. active tracks the references currently being expanded along
+// the path so a cycle is detected and collapsed rather than followed forever.
+func inlineGeminiSchemaRefs(node any, defs map[string]any, active map[string]bool) any {
+	switch v := node.(type) {
+	case map[string]any:
+		if ref, ok := v["$ref"].(string); ok {
+			key := strings.TrimPrefix(ref, "#/")
+			target, found := defs[key]
+			if !found {
+				// External or unknown reference: leave it as-is.
+				return v
+			}
+			if active[key] {
+				// Recursive reference: collapse to a permissive object so inlining
+				// terminates.
+				return map[string]any{"type": "object"}
+			}
+			next := make(map[string]bool, len(active)+1)
+			for k := range active {
+				next[k] = true
+			}
+			next[key] = true
+			return inlineGeminiSchemaRefs(deepCopyJSONValue(target), defs, next)
+		}
+		for key, child := range v {
+			v[key] = inlineGeminiSchemaRefs(child, defs, active)
+		}
+		return v
+	case []any:
+		for i := range v {
+			v[i] = inlineGeminiSchemaRefs(v[i], defs, active)
+		}
+		return v
+	default:
+		return node
+	}
+}
+
+// deepCopyJSONValue returns an independent copy of a decoded JSON value so a
+// definition referenced from more than one place can be inlined into each site
+// without the copies sharing (and mutating) the same nested maps.
+func deepCopyJSONValue(node any) any {
+	switch v := node.(type) {
+	case map[string]any:
+		cp := make(map[string]any, len(v))
+		for k, val := range v {
+			cp[k] = deepCopyJSONValue(val)
+		}
+		return cp
+	case []any:
+		cp := make([]any, len(v))
+		for i, val := range v {
+			cp[i] = deepCopyJSONValue(val)
+		}
+		return cp
+	default:
+		return node
+	}
 }
 
 // stripGeminiSchemaKeys walks an already-decoded JSON value, deleting

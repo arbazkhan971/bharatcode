@@ -39,6 +39,14 @@ func TestInferContextWindow(t *testing.T) {
 		{"codestral-latest", 256_000},
 		{"kimi-k2-0905-preview", 200_000},
 		{"gpt-oss-120b", 128_000},
+		// Pixtral, Gemma, Cohere Command, GLM and Nemotron open-weight families.
+		{"pixtral-large-latest", 128_000},
+		{"gemma-3-27b-it", 128_000},
+		{"gemma-2-9b-it", 8_192},
+		{"command-a-03-2025", 256_000},
+		{"command-r-plus", 128_000},
+		{"glm-4-plus", 128_000},
+		{"nemotron-4-340b", 128_000},
 		// Case-insensitive and whitespace-tolerant.
 		{"  GPT-4O  ", 128_000},
 		// Unknown ids stay "unknown" (zero).

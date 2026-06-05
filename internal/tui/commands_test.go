@@ -183,6 +183,52 @@ func TestSlashSessions_TitlePrefixRanksAheadOfSubstring(t *testing.T) {
 	require.Equal(t, substrID, visible[1].ID, "the mid-string substring match must follow")
 }
 
+// TestHighlightSessionMatch_AccentsMatchedRunes asserts the session-title
+// highlighter emphasizes exactly the runes a filter query matched and leaves the
+// rest in the default color, mirroring the @-file and slash menus: the matched
+// substring is wrapped in the accent style, the unmatched remainder is not, and
+// the visible text round-trips unchanged once the styling is stripped.
+func TestHighlightSessionMatch_AccentsMatchedRunes(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+
+	// A contiguous, case-insensitive match: "par" lights the first three runes of
+	// "Parser refactor". The matched run is accent-styled; the tail is plain.
+	got := m.highlightSessionMatch("Parser refactor", "par")
+	require.Equal(t, "Parser refactor", stripANSI(got), "highlighting must not alter the visible text")
+	require.Contains(t, got, m.theme.Accent.Render("Par"), "the matched runes must be accent-styled")
+	require.NotContains(t, got, m.theme.Accent.Render("ser refactor"), "the unmatched tail must stay in the default color")
+
+	// An empty query and a no-match query both return the title byte-for-byte, so
+	// no styling is added where it would not explain a result.
+	require.Equal(t, "Parser refactor", m.highlightSessionMatch("Parser refactor", ""))
+	require.Equal(t, "Parser refactor", m.highlightSessionMatch("Parser refactor", "zzz"))
+}
+
+// TestSlashSessions_FilterHighlightsMatchInBody asserts the open picker accents
+// the matched runes of a session's title once a filter is active, so the body
+// carries the accent-styled match while the surrounding row text stays plain.
+func TestSlashSessions_FilterHighlightsMatchInBody(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	_ = seedSession(t, h.repo, "Parser refactor", "fix the parser")
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+
+	for _, ch := range "par" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+	require.Equal(t, "par", m.sessionFilter)
+
+	body := m.dialogs.Render(200)
+	require.Contains(t, plainText(body), "Parser refactor", "the title's visible text must survive highlighting")
+	require.Contains(t, body, m.theme.Accent.Render("Par"), "the matched runes must be accent-styled in the picker body")
+}
+
 // TestSlashSessions_HomeEndJumpToEnds asserts the session picker's Home/End
 // bindings jump the cursor to the first and last visible rows, mirroring the
 // chat's Home/End (oldest/newest) navigation, and that they are bounded so a

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -774,6 +775,13 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			}
 			history = append(history, toolMsg)
 
+			// Forward any image the tool attached (e.g. view of an image file)
+			// to the model as a real image block, so vision models see the
+			// pixels rather than only the text placeholder in the tool result.
+			if err := l.maybeAppendToolImage(runCtx, sessionID, call, result, &history); err != nil {
+				return err
+			}
+
 			// When a tool signals that its result ends the turn, record the
 			// remaining unexecuted calls as aborted so history stays well-formed,
 			// then finish the turn cleanly after the batch.
@@ -1054,6 +1062,58 @@ func (l *Loop) applyReasoning(req *llm.Request) {
 	if model.ThinkingBudget > 0 {
 		req.Thinking = &llm.ThinkingConfig{BudgetTokens: model.ThinkingBudget}
 	}
+}
+
+// maybeAppendToolImage forwards an image a tool attached to its Result back to
+// the model as a real ImageBlock. The view tool reads image files into
+// Result.Metadata (base64 bytes + MIME type) while its tool_result block carries
+// only a text placeholder, so without this a vision model would never see the
+// pixels. The image is delivered as a follow-up user message — mirroring how
+// tool results are themselves separate user messages — and only when the active
+// model advertises image support, since otherwise the provider would reject the
+// turn. Malformed or absent metadata is skipped silently: the text placeholder
+// already informs the model, so a bad image must never break the turn.
+func (l *Loop) maybeAppendToolImage(ctx context.Context, sessionID string, call pendingToolCall, result tools.Result, history *[]message.Message) error {
+	if result.IsError || len(result.Metadata) == 0 {
+		return nil
+	}
+	encoded, ok := result.Metadata[tools.MetadataImage].(string)
+	if !ok || encoded == "" {
+		return nil
+	}
+	if !l.activeModelSupportsImages() {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	mimeType, _ := result.Metadata[tools.MetadataMimeType].(string)
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+	imgMsg := message.Message{
+		SessionID: sessionID,
+		Role:      message.RoleUser,
+		Content: []message.ContentBlock{
+			message.TextBlock{Text: fmt.Sprintf("Image returned by the %s tool:", call.Name)},
+			message.ImageBlock{MimeType: mimeType, Data: data},
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := l.cfg.Sessions.AppendMessage(ctx, sessionID, imgMsg); err != nil {
+		return fmt.Errorf("appending tool image: %w", err)
+	}
+	*history = append(*history, imgMsg)
+	return nil
+}
+
+// activeModelSupportsImages reports whether the model selected for the current
+// turn advertises image input. It returns false when the model is unknown so
+// images are withheld from providers that would reject them.
+func (l *Loop) activeModelSupportsImages() bool {
+	model, ok := findModelByID(l.cfg.Provider.Models(), l.activeModel)
+	return ok && model.SupportsImages
 }
 
 // findModelByID returns the model with the given id from models and whether it

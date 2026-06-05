@@ -141,6 +141,37 @@ func TestGrepTypeParityRgVsFallback(t *testing.T) {
 	require.Equal(t, []string{"main.go", "util_test.go"}, goFiles)
 }
 
+// TestGrepCaseInsensitiveParityRgVsFallback asserts the rg path and the Go
+// fallback agree when case_insensitive forces a mixed-case pattern to match
+// differing case: rg's --ignore-case must override its --smart-case the same
+// way the fallback's compileSmartCase override does.
+func TestGrepCaseInsensitiveParityRgVsFallback(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("ripgrep not installed; skipping parity check")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"), []byte("var httpClient int\n"), 0o644))
+
+	run := func() string {
+		tool := newGrepTool(Dependencies{WorkDir: dir})
+		res, err := tool.Run(context.Background(),
+			json.RawMessage(`{"pattern":"HTTP","case_insensitive":true,"output_mode":"files_with_matches"}`))
+		require.NoError(t, err)
+		require.False(t, res.IsError)
+		return res.Content
+	}
+
+	rgFiles := filesFromOutput(run()) // rg path (rg on PATH)
+
+	oldLookPath := lookPath
+	lookPath = func(string) (string, error) { return "", os.ErrNotExist }
+	t.Cleanup(func() { lookPath = oldLookPath })
+	goFiles := filesFromOutput(run()) // forced Go fallback
+
+	require.Equal(t, goFiles, rgFiles, "rg and Go fallback must agree under case_insensitive")
+	require.Equal(t, []string{"a.go"}, goFiles)
+}
+
 // filesFromOutput parses files_with_matches output into a sorted base-name list.
 func filesFromOutput(out string) []string {
 	var names []string

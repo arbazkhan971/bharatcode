@@ -219,7 +219,10 @@ var contextWindowRules = []struct {
 	// 128k, so the specific marker precedes the family one.
 	{"command-a", 256_000},
 	{"command", 128_000},
-	// Zhipu GLM-4 and Nvidia Nemotron both expose a 128k window.
+	// Zhipu GLM-4 and Nvidia Nemotron both expose a 128k window. GLM-4.6 lifted
+	// its window to 200k, so its specific marker must precede the family rule to
+	// avoid falling through to 128k.
+	{"glm-4.6", 200_000},
 	{"glm", 128_000},
 	{"nemotron", 128_000},
 	// Moonshot Kimi K2 exposes a 200k window.

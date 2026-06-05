@@ -87,7 +87,7 @@ func (m *model) sessionPickerBody() string {
 		}
 		lines = append(lines, fmt.Sprintf("%s%s · %d msgs · %s · %s", marker, title, s.MessageCount, relativeTime(s.UpdatedAt, time.Now()), shortSessionID(s.ID)))
 	}
-	lines = append(lines, "", "type to filter · ↑/↓ to move · enter to restore · esc to cancel")
+	lines = append(lines, "", "type to filter · ↑/↓ to move · home/end to jump · enter to restore · esc to cancel")
 	return strings.Join(lines, "\n")
 }
 
@@ -105,6 +105,22 @@ func (m *model) handleSessionPickerKey(msg tea.KeyPressMsg) (consumed bool, cmd 
 	case "down":
 		if m.sessionCursor < len(m.visibleSessions())-1 {
 			m.sessionCursor++
+			m.refreshSessionPicker()
+		}
+		return true, nil
+	case "home":
+		// Jump to the first visible row, mirroring the chat's Home binding
+		// (oldest message). A no-op when already at the top.
+		if m.sessionCursor != 0 {
+			m.sessionCursor = 0
+			m.refreshSessionPicker()
+		}
+		return true, nil
+	case "end":
+		// Jump to the last visible row, mirroring the chat's End binding (newest
+		// message). A no-op on an empty or single-row list.
+		if last := len(m.visibleSessions()) - 1; last >= 0 && m.sessionCursor != last {
+			m.sessionCursor = last
 			m.refreshSessionPicker()
 		}
 		return true, nil

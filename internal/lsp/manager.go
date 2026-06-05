@@ -457,6 +457,34 @@ func (m *Manager) CodeActions(ctx context.Context, file string, rng Range) ([]Co
 	return actions, nil
 }
 
+// ResolveCodeAction asks the language server serving file to populate the edit
+// of an action it returned without one, via a codeAction/resolve round-trip. The
+// action must carry the resolve data the server originally sent (CodeAction.Data,
+// preserved by CodeActions). A nil error with the action's edit still empty means
+// the server resolved to no edit. An error means no server is configured for the
+// file or the resolve request failed.
+func (m *Manager) ResolveCodeAction(ctx context.Context, file string, action CodeAction) (CodeAction, error) {
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return CodeAction{}, fmt.Errorf("resolving code action path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return CodeAction{}, fmt.Errorf("no language server configured for %s", file)
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return CodeAction{}, err
+	}
+	if !ok {
+		return CodeAction{}, fmt.Errorf("no language server available for %s", file)
+	}
+
+	return c.resolveCodeAction(ctx, action)
+}
+
 // WorkspaceSymbols returns the symbols matching query across the workspace,
 // starting servers if needed. Every discovered language server is queried and
 // the matches are aggregated. A nil slice with a nil error means no server is

@@ -20,6 +20,7 @@ import (
 // *lsp.Manager satisfies it; tests substitute a fake.
 type CodeActionSource interface {
 	CodeActions(ctx context.Context, file string, rng lsp.Range) ([]lsp.CodeAction, error)
+	ResolveCodeAction(ctx context.Context, file string, action lsp.CodeAction) (lsp.CodeAction, error)
 }
 
 type codeActionsTool struct {
@@ -175,7 +176,7 @@ func (t *codeActionsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 
 	ordered := orderedCodeActions(actions)
 	if args.Apply > 0 {
-		return t.applyCodeAction(ctx, ordered, args.Apply, args.Preview, raw)
+		return t.applyCodeAction(ctx, path, ordered, args.Apply, args.Preview, raw)
 	}
 	if len(ordered) == 0 && kind != "" {
 		return Result{Content: fmt.Sprintf("No code actions of kind %q available.", kind)}, nil
@@ -211,7 +212,7 @@ func filterCodeActionsByKind(actions []lsp.CodeAction, kind string) []lsp.CodeAc
 // writes nothing, records nothing, skips the permission check, and skips the
 // post-write diagnostics re-check, so the model can inspect a wide-reaching
 // refactoring before committing — mirroring the rename tool's preview mode.
-func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.CodeAction, idx int, preview bool, raw json.RawMessage) (Result, error) {
+func (t *codeActionsTool) applyCodeAction(ctx context.Context, path string, ordered []lsp.CodeAction, idx int, preview bool, raw json.RawMessage) (Result, error) {
 	if idx > len(ordered) {
 		if len(ordered) == 0 {
 			return errorResult("cannot apply: no code actions available for this range"), nil
@@ -222,6 +223,18 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.Cod
 	title := strings.TrimSpace(action.Title)
 	if title == "" {
 		title = "(untitled action)"
+	}
+	// Servers that advertise resolveProvider (gopls, rust-analyzer) often return
+	// refactorings with an empty edit and defer computing it to a
+	// codeAction/resolve round-trip. When the chosen action carries no edit but
+	// does carry resolve data, ask the server to populate it before deciding the
+	// action is unapplyable. A resolve failure is non-fatal: fall through to the
+	// existing "no edits"/"server-side command" handling below.
+	if len(action.Edit.Changes) == 0 && len(action.Data) > 0 {
+		if resolved, rerr := t.source.ResolveCodeAction(ctx, path, action); rerr == nil {
+			resolved.Title = action.Title
+			action = resolved
+		}
 	}
 	if len(action.Edit.Changes) == 0 {
 		if action.Command != nil && action.Command.Command != "" {

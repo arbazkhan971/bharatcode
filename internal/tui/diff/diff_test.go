@@ -435,6 +435,63 @@ func TestStatLines_EmptyPatch(t *testing.T) {
 	require.Equal(t, "", New(styles.Theme{}).StatLines("", 0))
 }
 
+// TestStat_CountsBinaryAndRename proves a binary blob and a pure rename — neither
+// of which carries a "+++" content header — are still counted as changed files in
+// the aggregate header, so a review that touches only binary assets or renames no
+// longer reports "0 files changed".
+func TestStat_CountsBinaryAndRename(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/logo.png b/logo.png\nindex e69de29..d95f3ad 100644\nBinary files a/logo.png and b/logo.png differ\n" +
+		"diff --git a/old.go b/new.go\nsimilarity index 100%\nrename from old.go\nrename to new.go\n" +
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	got := New(styles.Theme{}).Stat(patch)
+	require.Equal(t, "3 files changed, +1 -1", got)
+}
+
+// TestStatLines_BinaryShowsBinMarker proves a binary file row shows git's "Bin"
+// marker (with no histogram bar) instead of a "+0 -0" that would read as an empty
+// change, a pure rename keeps its accurate zero counts, and a text file in the
+// same patch keeps its counts and bar.
+func TestStatLines_BinaryShowsBinMarker(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n" +
+		"diff --git a/old.go b/new.go\nrename from old.go\nrename to new.go\n" +
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	got := New(styles.Theme{}).StatLines(patch, 0)
+	lines := strings.Split(got, "\n")
+
+	require.Equal(t, "3 files changed, +1 -1", lines[0])
+	require.Equal(t, "  logo.png  Bin", lines[1])
+	require.Equal(t, "  new.go    +0 -0", lines[2])
+	require.Equal(t, "  main.go   +1 -1  +-", lines[3])
+	require.Len(t, lines, 4)
+}
+
+// TestStat_RenameWithContentCountedOnce proves a rename that also edits the file
+// (so the block carries both "rename to" metadata and a "+++" content header) is
+// counted once, by its content header, rather than twice.
+func TestStat_RenameWithContentCountedOnce(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/old.go b/new.go\nsimilarity index 80%\nrename from old.go\nrename to new.go\n" +
+		"--- a/old.go\n+++ b/new.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	got := New(styles.Theme{}).Stat(patch)
+	require.Equal(t, "1 file changed, +1 -1", got)
+}
+
+// TestBinaryPath_FallsBackToASideForDeletedBlob proves the binary file path is
+// read from the post-change (b) side, falling back to the a side when the b side
+// is /dev/null (a deleted binary), so the row never displays "/dev/null".
+func TestBinaryPath_FallsBackToASideForDeletedBlob(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "logo.png", binaryPath("Binary files a/logo.png and /dev/null differ"))
+	require.Equal(t, "logo.png", binaryPath("Binary files a/logo.png and b/logo.png differ"))
+	require.Equal(t, "", binaryPath("not a binary line"))
+}
+
 // TestUnified_TruncatesWithEllipsis checks that a line wider than the render
 // width is clipped with a trailing ellipsis (not silently cut) and that the
 // result still fits within the width, so a reviewer can tell content was

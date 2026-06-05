@@ -16,6 +16,8 @@ Text files return numbered lines. Supported image files return a short text summ
 
 ## Truncation
 
+Individual lines longer than 2000 characters are truncated in place, ending with a marker such as `… [N characters truncated]`, so a minified or single-line file stays viewable.
+
 Text output is capped at roughly 32 KB (configurable). When a file exceeds that budget the result is cut on a line boundary and ends with a marker such as `[Showing lines X-Y of Z. Use offset=N to continue.]`; pass that `offset` (with an optional `limit`) to page through the rest of the file. If a single line is itself larger than the budget, the marker instead suggests a `bash` fallback to stream just that line's bytes. Prefer `offset` and `limit` up front when you only need a known region.
 
 ## Failures

@@ -407,8 +407,11 @@ var contextWindowRules = []struct {
 	// broader marker above, so this rule keeps it from falling through to 0.
 	{"ernie", 131_072},
 	// Amazon Nova (commonly served via Bedrock) — Nova Pro and Nova Lite both
-	// expose a 300k window while Nova Micro is 128k, so the specific "nova-micro"
-	// marker must precede the family one.
+	// expose a 300k window while Nova Micro is 128k, and Nova Premier lifted the
+	// window to 1M. The "nova-premier" and "nova-micro" ids both carry the "nova"
+	// marker, so their specific rules must precede the family one to avoid falling
+	// through to 300k.
+	{"nova-premier", 1_000_000},
 	{"nova-micro", 128_000},
 	{"nova", 300_000},
 	// AI21 Jamba 1.5 (Large/Mini, also Bedrock-served) exposes a 256k window.

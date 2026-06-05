@@ -175,6 +175,23 @@ type Symbol struct {
 // WorkspaceEdit describes the file edits a rename produces, keyed by file path.
 type WorkspaceEdit struct {
 	Changes map[string][]TextEdit
+	// ResourceOps lists the file create/rename/delete operations a server bundled
+	// into the edit's documentChanges (e.g. gopls "extract to new file",
+	// rust-analyzer "move to module"). The text-edit apply path cannot perform
+	// them, so they are retained here for a consumer to surface rather than
+	// silently dropping them and reporting a clean apply on a partial result.
+	ResourceOps []ResourceOperation
+}
+
+// ResourceOperation is a file create, rename, or delete carried in a
+// WorkspaceEdit's documentChanges. Kind is "create", "rename", or "delete".
+// Path is the target for create/delete; OldPath and NewPath are the source and
+// destination for rename. Paths are absolute, converted from the wire URIs.
+type ResourceOperation struct {
+	Kind    string
+	Path    string
+	OldPath string
+	NewPath string
 }
 
 // CodeAction describes one quick fix or refactoring a language server offers for

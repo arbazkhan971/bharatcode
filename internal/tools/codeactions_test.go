@@ -268,6 +268,70 @@ func TestCodeActionsApplyWritesEditAndDiffs(t *testing.T) {
 	require.Equal(t, "Organize Imports", result.Metadata["applied"])
 }
 
+func TestCodeActionsApplyWarnsAboutUnappliedResourceOps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	// A "move to new file" refactor bundles a create-file operation with the text
+	// edits. The text edit is applied, but the file creation is not, so the result
+	// must warn rather than imply the refactor is complete.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Move to new file", Kind: "refactor.move", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range: lsp.Range{
+					Start: lsp.Position{Line: 0, Character: 0},
+					End:   lsp.Position{Line: 0, Character: 12},
+				},
+				NewText: "package widget",
+			}}},
+			ResourceOps: []lsp.ResourceOperation{{Kind: "create", Path: filepath.Join(dir, "moved.go")}},
+		}},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package widget\n", string(got))
+
+	require.Contains(t, result.Content, "file operation(s) the server requested were NOT applied")
+	require.Contains(t, result.Content, "create moved.go")
+	require.Equal(t, 1, result.Metadata["resource_ops"])
+}
+
+func TestCodeActionsApplyReportsResourceOpsWhenNoTextEdits(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	// An action that resolves to only a file operation has no text edits to apply,
+	// but the model must still learn what the server wanted to do.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Delete file", Kind: "refactor", Edit: lsp.WorkspaceEdit{
+			ResourceOps: []lsp.ResourceOperation{{Kind: "delete", Path: path}},
+		}},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "No text edits were applied")
+	require.Contains(t, result.Content, "delete main.go")
+	require.Equal(t, 1, result.Metadata["resource_ops"])
+
+	// The file is left in place.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package main\n", string(got))
+}
+
 func TestCodeActionsApplyResolvesEditlessAction(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "main.go")

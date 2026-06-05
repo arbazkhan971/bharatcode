@@ -141,7 +141,7 @@ func (t *renameTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 	if err != nil {
 		return Result{}, fmt.Errorf("renaming symbol at %s:%d:%d: %w", args.Path, args.Line, col, err)
 	}
-	if len(edit.Changes) == 0 {
+	if len(edit.Changes) == 0 && len(edit.ResourceOps) == 0 {
 		return Result{Content: "No rename performed: the language server reported no edits (the symbol may not be renamable)."}, nil
 	}
 
@@ -198,6 +198,15 @@ func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceE
 	}
 
 	if len(updates) == 0 {
+		// A rename can consist solely of file operations (rare, but a server may
+		// answer with only a resource rename). There is nothing to write, but the
+		// model still needs to know what was requested.
+		if note := resourceOpsNote(edit.ResourceOps, t.deps.WorkDir); note != "" {
+			return Result{
+				Content:  "No text edits were applied.\n\n" + note,
+				Metadata: map[string]any{"resource_ops": len(edit.ResourceOps)},
+			}, nil
+		}
 		return Result{Content: "No rename performed: the edits left every file unchanged."}, nil
 	}
 
@@ -239,6 +248,13 @@ func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceE
 	}
 	if len(diffs) > 0 {
 		metadata["diffs"] = diffs
+	}
+	// A server may bundle file create/rename/delete operations alongside the text
+	// edits (e.g. a rename that also renames the file). Those are not applied, so
+	// warn rather than letting the model assume the rename is complete.
+	if note := resourceOpsNote(edit.ResourceOps, t.deps.WorkDir); note != "" {
+		fmt.Fprintf(&b, "\n%s\n", note)
+		metadata["resource_ops"] = len(edit.ResourceOps)
 	}
 
 	// A rename can introduce errors (a name collision, a now-shadowed symbol),

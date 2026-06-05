@@ -1,6 +1,9 @@
 package tui
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // maxInputHistory bounds the number of submitted prompts retained for Up/Down
 // recall. Older entries are dropped once the cap is reached.
@@ -176,5 +179,34 @@ func matchSlash(prefix string) []string {
 			matches = append(matches, cmd)
 		}
 	}
+	rankFuzzySlash(matches, token)
 	return matches
+}
+
+// rankFuzzySlash reorders the fuzzy-fallback matches in place so the most
+// relevant command sorts first. A command whose name contains the token as a
+// contiguous substring ranks ahead of one that only matches as a scattered
+// subsequence; within a rank a tighter match span wins, then a shorter name,
+// and the stable sort otherwise preserves the canonical slashCommands order.
+// This mirrors the relevance scoring the @-file picker already applies, so
+// "/et" surfaces "/budget" (which contains "et") ahead of "/agent" and
+// "/export" (which only spell it out of order). token is expected lower-cased
+// by the caller.
+func rankFuzzySlash(matches []string, token string) {
+	name := func(cmd string) string { return strings.ToLower(strings.TrimPrefix(cmd, "/")) }
+	rank := func(cmd string) int {
+		if strings.Contains(name(cmd), token) {
+			return 0
+		}
+		return 1
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if ri, rj := rank(matches[i]), rank(matches[j]); ri != rj {
+			return ri < rj
+		}
+		if si, sj := matchSpan(token, name(matches[i])), matchSpan(token, name(matches[j])); si != sj {
+			return si < sj
+		}
+		return len(matches[i]) < len(matches[j])
+	})
 }

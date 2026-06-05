@@ -113,19 +113,52 @@ func (t *webFetchTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 	return Result{Content: strings.TrimSpace(text)}, nil
 }
 
+var (
+	reScriptBlock = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
+	reStyleBlock  = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	reHTMLComment = regexp.MustCompile(`(?is)<!--.*?-->`)
+	rePreBlock    = regexp.MustCompile(`(?is)<pre\b[^>]*>(.*?)</pre>`)
+	reInlineCode  = regexp.MustCompile(`(?is)<code\b[^>]*>(.*?)</code>`)
+	reAnchor      = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
+	reListItem    = regexp.MustCompile(`(?is)<li\b[^>]*>`)
+	reBlockBreak  = regexp.MustCompile(`(?is)</p>|<br\s*/?>|</div>|</section>|</article>|</tr>`)
+	reAnyTag      = regexp.MustCompile(`(?is)<[^>]+>`)
+)
+
+// htmlToMarkdown reduces simple HTML to model-readable, markdown-like text.
+// Whitespace is aggressively collapsed everywhere EXCEPT inside <pre> blocks,
+// whose indentation and line breaks are preserved verbatim inside fenced code
+// blocks — documentation code samples survive intact instead of being flattened
+// into a single space-collapsed line.
 func htmlToMarkdown(input string) string {
-	s := regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`).ReplaceAllString(input, " ")
-	s = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`).ReplaceAllString(s, " ")
-	s = regexp.MustCompile(`(?is)<!--.*?-->`).ReplaceAllString(s, " ")
+	s := reScriptBlock.ReplaceAllString(input, " ")
+	s = reStyleBlock.ReplaceAllString(s, " ")
+	s = reHTMLComment.ReplaceAllString(s, " ")
+
+	// Stash each <pre> block as a fenced code block behind a placeholder token
+	// that carries no angle brackets or whitespace, so it survives both the tag
+	// stripping and field-joining passes below and can be restored verbatim.
+	var codeBlocks []string
+	s = rePreBlock.ReplaceAllStringFunc(s, func(m string) string {
+		inner := rePreBlock.ReplaceAllString(m, "$1")
+		inner = reAnyTag.ReplaceAllString(inner, "")
+		inner = html.UnescapeString(inner)
+		inner = strings.Trim(inner, "\n")
+		token := fmt.Sprintf("\x00CODE%d\x00", len(codeBlocks))
+		codeBlocks = append(codeBlocks, "\n\n```\n"+inner+"\n```\n\n")
+		return "\n\n" + token + "\n\n"
+	})
+
 	for i := 6; i >= 1; i-- {
 		re := regexp.MustCompile(fmt.Sprintf(`(?is)<h%d\b[^>]*>(.*?)</h%d>`, i, i))
 		prefix := strings.Repeat("#", i)
 		s = re.ReplaceAllString(s, "\n\n"+prefix+" $1\n\n")
 	}
-	s = regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`).ReplaceAllString(s, "$2 ($1)")
-	s = regexp.MustCompile(`(?is)<li\b[^>]*>`).ReplaceAllString(s, "\n- ")
-	s = regexp.MustCompile(`(?is)</p>|<br\s*/?>|</div>|</section>|</article>|</tr>`).ReplaceAllString(s, "\n")
-	s = regexp.MustCompile(`(?is)<[^>]+>`).ReplaceAllString(s, " ")
+	s = reAnchor.ReplaceAllString(s, "$2 ($1)")
+	s = reInlineCode.ReplaceAllString(s, "`$1`")
+	s = reListItem.ReplaceAllString(s, "\n- ")
+	s = reBlockBreak.ReplaceAllString(s, "\n")
+	s = reAnyTag.ReplaceAllString(s, " ")
 	s = html.UnescapeString(s)
 
 	var lines []string
@@ -135,5 +168,10 @@ func htmlToMarkdown(input string) string {
 			lines = append(lines, line)
 		}
 	}
-	return strings.Join(lines, "\n")
+	out := strings.Join(lines, "\n")
+
+	for i, block := range codeBlocks {
+		out = strings.Replace(out, fmt.Sprintf("\x00CODE%d\x00", i), block, 1)
+	}
+	return out
 }

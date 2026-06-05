@@ -21,6 +21,9 @@ questions:
   you can map a function's behavior without reading its whole body.
 - `hover`: what is this symbol? Returns the language server's type, signature,
   and documentation for it.
+- `signature`: what does this call expect? Point at a call's arguments to get
+  the function's signature(s), with the argument the cursor is currently on
+  marked, plus parameter documentation when the server provides it.
 
 Position comes from other tools: the `symbols`, `grep`, and `view` tools all
 report 1-based `path:line:column`, which you pass straight in here.
@@ -32,8 +35,8 @@ Arguments:
 - `column` integer, optional: 1-based column of the symbol on that line.
   Defaults to 1 (start of line); point it at the symbol's name for accuracy.
 - `action` string, optional: `definition` (default), `type_definition`,
-  `implementation`, `references`, `incoming_calls`, `outgoing_calls`, or
-  `hover`.
+  `implementation`, `references`, `incoming_calls`, `outgoing_calls`, `hover`,
+  or `signature`.
 
 What success looks like:
 
@@ -45,12 +48,13 @@ file or line cannot be read). `references`, `incoming_calls`, and
 `outgoing_calls` additionally lead with a summary line (`N references across M
 files:`, `N callers across M files:`, `N callees across M files:`) so you can
 gauge a symbol's blast radius or call-hierarchy fan-out at a glance. For
-`hover`, the language server's text.
+`hover` and `signature`, the language server's text, with `signature` marking
+the active overload (`→`) and the parameter the cursor is on.
 
 Failure cases:
 
 Malformed JSON, an unavailable LSP manager, a path outside the BharatCode
 workspace, a missing path, a line below 1, an unknown action, or an
 infrastructure failure while asking the language server returns an error. When
-the server has no answer (undefined symbol, no references, no hover), the tool
-says so directly.
+the server has no answer (undefined symbol, no references, no hover, no
+signature), the tool says so directly.

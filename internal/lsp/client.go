@@ -96,6 +96,9 @@ func (c *client) initialize(ctx context.Context) error {
 				"hover": map[string]any{
 					"dynamicRegistration": false,
 				},
+				"signatureHelp": map[string]any{
+					"dynamicRegistration": false,
+				},
 				"definition": map[string]any{
 					"dynamicRegistration": false,
 				},

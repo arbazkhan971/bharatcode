@@ -23,6 +23,7 @@ type NavigateSource interface {
 	IncomingCalls(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	OutgoingCalls(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	Hover(ctx context.Context, path string, line, col int) (string, error)
+	SignatureHelp(ctx context.Context, path string, line, col int) (string, error)
 }
 
 type navigateTool struct {
@@ -59,8 +60,8 @@ var schemaNavigate = json.RawMessage(`{
     },
     "action": {
       "type": "string",
-      "enum": ["definition", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls", "hover"],
-      "description": "definition: jump to where the symbol is declared. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. incoming_calls: list the functions that call this one (callers). outgoing_calls: list the functions this one calls (callees). hover: the language server's type/signature/doc for the symbol. Defaults to definition."
+      "enum": ["definition", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls", "hover", "signature"],
+      "description": "definition: jump to where the symbol is declared. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. incoming_calls: list the functions that call this one (callers). outgoing_calls: list the functions this one calls (callees). hover: the language server's type/signature/doc for the symbol. signature: the call signature(s) at the position, marking which argument the cursor is on (point at a call's arguments). Defaults to definition."
     }
   }
 }`)
@@ -177,8 +178,17 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 			return Result{Content: "No hover information found."}, nil
 		}
 		return Result{Content: strings.TrimRight(text, "\n")}, nil
+	case "signature":
+		text, err := t.source.SignatureHelp(ctx, path, line0, col0)
+		if err != nil {
+			return Result{}, fmt.Errorf("reading signature help at %s:%d:%d: %w", args.Path, args.Line, col, err)
+		}
+		if strings.TrimSpace(text) == "" {
+			return Result{Content: "No signature help found."}, nil
+		}
+		return Result{Content: strings.TrimRight(text, "\n")}, nil
 	default:
-		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, type_definition, implementation, references, incoming_calls, outgoing_calls, or hover)", action)), nil
+		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, type_definition, implementation, references, incoming_calls, outgoing_calls, hover, or signature)", action)), nil
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/arbazkhan971/bharatcode/internal/diffutil"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/util/fsext"
 )
@@ -173,6 +174,10 @@ func (t *MultiEditTool) Run(ctx context.Context, args json.RawMessage) (res Resu
 	}
 	if flexible > 0 {
 		metadata["flexible_edits"] = flexible
+	}
+	if d := diffutil.Unified(string(oldContent), next); d != "" {
+		content += "\n\n" + d
+		metadata["diff"] = d
 	}
 	if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, path); note != "" {
 		content += "\n\n" + note

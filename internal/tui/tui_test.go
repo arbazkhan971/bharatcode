@@ -229,6 +229,33 @@ func TestRunningStatus_SurfacesInStatusBar(t *testing.T) {
 		"a turn in flight must surface its elapsed working time")
 }
 
+// TestCtrlC_InterruptsRunningTurnInsteadOfQuitting locks the interrupt-first
+// behavior: while a turn is in flight, Ctrl+C must stop the run rather than tear
+// down the session, even though the prompt is empty (the usual state while
+// watching the agent work). When idle, the empty-prompt Ctrl+C still quits.
+func TestCtrlC_InterruptsRunningTurnInsteadOfQuitting(t *testing.T) {
+	t.Parallel()
+
+	ctrlC := tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl})
+
+	// In flight with an empty prompt: Ctrl+C interrupts, not quits.
+	m := newSizedModel(t)
+	m.running = true
+	require.Equal(t, 0, m.input.Len())
+	_, _ = m.Update(ctrlC)
+	require.False(t, m.quitting,
+		"Ctrl+C during a run must interrupt the turn, not quit the app")
+
+	// Idle with an empty prompt: Ctrl+C still quits, so the exit path is intact.
+	idle := newSizedModel(t)
+	require.False(t, idle.running)
+	require.Equal(t, 0, idle.input.Len())
+	_, cmd := idle.Update(ctrlC)
+	require.True(t, idle.quitting,
+		"Ctrl+C on an idle empty prompt must still quit")
+	require.NotNil(t, cmd, "quitting must return a command")
+}
+
 // TestScrollStatus_SurfacesInStatusBar drives the rendered view: at rest the
 // status bar shows no scroll segment, and after wheeling up into history it
 // reports how many newer lines sit below, so a scrolled-up reader sees they are

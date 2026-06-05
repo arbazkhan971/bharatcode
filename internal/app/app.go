@@ -185,6 +185,12 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		if err := offline.CheckProviders(app.Cfg); err != nil {
 			return rollback(err)
 		}
+		// A remote MCP server is an egress channel too: its tool arguments (which
+		// can carry source code) are sent to whatever URL it lives at. Reject any
+		// non-loopback http/sse server before the MCP client starts below.
+		if err := offline.CheckMCPServers(app.Cfg); err != nil {
+			return rollback(err)
+		}
 		logger.Info(offline.Banner)
 	}
 

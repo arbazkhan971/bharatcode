@@ -397,6 +397,36 @@ func (m *Manager) Format(ctx context.Context, path string) ([]TextEdit, error) {
 	return edits, nil
 }
 
+// FormatRange returns the edits the language server would apply to reformat just
+// the given range of the file, starting a server if needed. A nil slice with a
+// nil error means no server is configured for the file or the server reports no
+// edits for the range.
+func (m *Manager) FormatRange(ctx context.Context, path string, rng Range) ([]TextEdit, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving range format path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	edits, err := c.formatRange(ctx, abs, rng)
+	if err != nil {
+		return nil, err
+	}
+	return edits, nil
+}
+
 // CodeActions returns the quick fixes and refactorings the language server
 // offers for the range in file, starting a server if needed. A nil slice with a
 // nil error means no server is configured for the file or the server offers no

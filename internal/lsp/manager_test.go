@@ -420,6 +420,37 @@ func TestFormatReturnsEdits(t *testing.T) {
 	require.NoError(t, manager.Shutdown(ctx))
 }
 
+func TestFormatRangeReturnsEdits(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	edits, err := manager.FormatRange(ctx, source, Range{
+		Start: Position{Line: 2, Character: 0},
+		End:   Position{Line: 3, Character: 0},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []TextEdit{
+		{
+			Range:   Range{Start: Position{Line: 2, Character: 0}, End: Position{Line: 2, Character: 4}},
+			NewText: "\tx := 1\n",
+		},
+	}, edits)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
 func TestCodeActionsReturnsActions(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1006,6 +1037,22 @@ func runFakeLSPServer() {
 						"range":   fakeRange(),
 						"newText": "package main\n",
 					},
+					{
+						"range": map[string]any{
+							"start": map[string]any{"line": 2, "character": 0},
+							"end":   map[string]any{"line": 2, "character": 4},
+						},
+						"newText": "\tx := 1\n",
+					},
+				}),
+			})
+		case "textDocument/rangeFormatting":
+			// Return a flat array of TextEdit, the same shape as whole-document
+			// formatting but scoped to the requested range.
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result: mustRaw([]map[string]any{
 					{
 						"range": map[string]any{
 							"start": map[string]any{"line": 2, "character": 0},

@@ -257,6 +257,58 @@ func (m *Manager) References(ctx context.Context, path string, line, col int) ([
 	return locations, nil
 }
 
+// IncomingCalls returns the locations of the symbols that call the function at
+// the position in path (who calls this), starting a server if needed. A nil
+// slice with a nil error means no server is configured for the file or the
+// symbol is not callable / has no callers.
+func (m *Manager) IncomingCalls(ctx context.Context, path string, line, col int) ([]Location, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving incoming calls path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	return c.incomingCalls(ctx, abs, line, col)
+}
+
+// OutgoingCalls returns the locations of the symbols that the function at the
+// position in path calls (what this calls), starting a server if needed. A nil
+// slice with a nil error means no server is configured for the file or the
+// symbol is not callable / makes no calls.
+func (m *Manager) OutgoingCalls(ctx context.Context, path string, line, col int) ([]Location, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving outgoing calls path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	return c.outgoingCalls(ctx, abs, line, col)
+}
+
 // Rename returns the file edits the language server would apply to rename the
 // symbol at the position in path to newName, starting a server if needed. An
 // empty WorkspaceEdit with a nil error means no server is configured for the

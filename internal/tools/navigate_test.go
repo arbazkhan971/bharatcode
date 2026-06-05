@@ -18,12 +18,16 @@ type fakeNavigate struct {
 	typeDefinition []lsp.Location
 	implementation []lsp.Location
 	references     []lsp.Location
+	incomingCalls  []lsp.Location
+	outgoingCalls  []lsp.Location
 	hover          string
 
 	defErr  error
 	typeErr error
 	implErr error
 	refErr  error
+	inErr   error
+	outErr  error
 	hovErr  error
 
 	lastPath string
@@ -49,6 +53,16 @@ func (f *fakeNavigate) Implementation(_ context.Context, path string, line, col 
 func (f *fakeNavigate) References(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
 	f.lastPath, f.lastLine, f.lastCol = path, line, col
 	return f.references, f.refErr
+}
+
+func (f *fakeNavigate) IncomingCalls(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
+	f.lastPath, f.lastLine, f.lastCol = path, line, col
+	return f.incomingCalls, f.inErr
+}
+
+func (f *fakeNavigate) OutgoingCalls(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
+	f.lastPath, f.lastLine, f.lastCol = path, line, col
+	return f.outgoingCalls, f.outErr
 }
 
 func (f *fakeNavigate) Hover(_ context.Context, path string, line, col int) (string, error) {
@@ -154,6 +168,72 @@ func TestNavigateImplementationEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.IsError)
 	require.Equal(t, "No implementations found.", result.Content)
+}
+
+func TestNavigateIncomingCalls(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{incomingCalls: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8, Character: 4}}},
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 5, "column": 3, "action": "incoming_calls",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Position is converted 1-based -> 0-based and routed to IncomingCalls.
+	require.Equal(t, 4, src.lastLine)
+	require.Equal(t, 2, src.lastCol)
+	// Callers are sorted by position, workspace-relative, and 1-based.
+	require.Equal(t, "main.go:3:1\nmain.go:9:5", result.Content)
+}
+
+func TestNavigateIncomingCallsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "incoming_calls",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "No callers found.", result.Content)
+}
+
+func TestNavigateOutgoingCalls(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{outgoingCalls: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 5, "action": "outgoing_calls",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Line 1 is readable, so its trimmed source is appended after the coordinates.
+	require.Equal(t, "main.go:1:1: package main", result.Content)
+}
+
+func TestNavigateOutgoingCallsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "outgoing_calls",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "No callees found.", result.Content)
 }
 
 func TestNavigateDefaultsToDefinitionAndColumnOne(t *testing.T) {

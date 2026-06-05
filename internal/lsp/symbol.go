@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf16"
 )
 
 // hover issues a textDocument/hover request for the position and returns the
@@ -21,6 +22,23 @@ func (c *client) hover(ctx context.Context, path string, line, col int) (string,
 		return "", fmt.Errorf("requesting hover: %w", err)
 	}
 	return parseHover(result)
+}
+
+// signatureHelp issues a textDocument/signatureHelp request for the position
+// and returns the server's rendered signature(s). An empty string means the
+// server reported no signature help (the position is not inside a call).
+func (c *client) signatureHelp(ctx context.Context, path string, line, col int) (string, error) {
+	if err := c.open(ctx, path); err != nil {
+		return "", err
+	}
+	result, err := c.request(ctx, "textDocument/signatureHelp", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"position":     map[string]any{"line": line, "character": col},
+	})
+	if err != nil {
+		return "", fmt.Errorf("requesting signature help: %w", err)
+	}
+	return parseSignatureHelp(result)
 }
 
 // definition issues a textDocument/definition request for the position and
@@ -831,6 +849,148 @@ func markupStrings(raw json.RawMessage) ([]string, error) {
 		}
 		return []string{obj.Value}, nil
 	}
+}
+
+// parseSignatureHelp renders a textDocument/signatureHelp response into a
+// compact, model-readable block. The active overload is marked with "→"; its
+// active parameter (the argument the cursor is currently on) is called out so
+// the model knows which value to supply next. Signature and parameter
+// documentation are included when the server provides it. An empty string means
+// the server reported no signatures.
+func parseSignatureHelp(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var sh struct {
+		Signatures []struct {
+			Label         string          `json:"label"`
+			Documentation json.RawMessage `json:"documentation"`
+			Parameters    []struct {
+				Label         json.RawMessage `json:"label"`
+				Documentation json.RawMessage `json:"documentation"`
+			} `json:"parameters"`
+			ActiveParameter *int `json:"activeParameter"`
+		} `json:"signatures"`
+		ActiveSignature *int `json:"activeSignature"`
+		ActiveParameter *int `json:"activeParameter"`
+	}
+	if err := json.Unmarshal(raw, &sh); err != nil {
+		return "", fmt.Errorf("parsing signature help response: %w", err)
+	}
+	if len(sh.Signatures) == 0 {
+		return "", nil
+	}
+	active := 0
+	if sh.ActiveSignature != nil && *sh.ActiveSignature >= 0 && *sh.ActiveSignature < len(sh.Signatures) {
+		active = *sh.ActiveSignature
+	}
+
+	var b strings.Builder
+	for i, sig := range sh.Signatures {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		marker := "  "
+		if i == active {
+			marker = "→ "
+		}
+		b.WriteString(marker)
+		b.WriteString(sig.Label)
+
+		// The active parameter index can live on the signature (newer servers) or
+		// on the response (older servers); the per-signature value wins.
+		if i == active {
+			ap := -1
+			if sig.ActiveParameter != nil {
+				ap = *sig.ActiveParameter
+			} else if sh.ActiveParameter != nil {
+				ap = *sh.ActiveParameter
+			}
+			if ap >= 0 && ap < len(sig.Parameters) {
+				if label := parameterLabel(sig.Parameters[ap].Label, sig.Label); label != "" {
+					fmt.Fprintf(&b, "\n    active parameter: %s", label)
+					if doc := markupPlain(sig.Parameters[ap].Documentation); doc != "" {
+						b.WriteString(" — " + firstLine(doc))
+					}
+				}
+			}
+		}
+		if doc := markupPlain(sig.Documentation); doc != "" {
+			b.WriteString("\n    " + strings.ReplaceAll(doc, "\n", "\n    "))
+		}
+	}
+	return b.String(), nil
+}
+
+// parameterLabel resolves an LSP ParameterInformation label, which is either a
+// literal string or a [start, end] pair of UTF-16 offsets into the enclosing
+// signature label. It returns the displayed parameter text, or "" when neither
+// form is present.
+func parameterLabel(raw json.RawMessage, sigLabel string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return ""
+		}
+		return s
+	}
+	var pair []int
+	if err := json.Unmarshal(raw, &pair); err != nil || len(pair) != 2 {
+		return ""
+	}
+	return utf16Substring(sigLabel, pair[0], pair[1])
+}
+
+// utf16Substring returns the substring of s spanning the half-open range of
+// UTF-16 code-unit offsets [start, end), the units LSP parameter labels are
+// measured in. Out-of-range offsets are clamped so a malformed pair never
+// panics.
+func utf16Substring(s string, start, end int) string {
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		return ""
+	}
+	units := 0
+	startByte, endByte := -1, len(s)
+	for i, r := range s {
+		if units == start && startByte < 0 {
+			startByte = i
+		}
+		if units == end {
+			endByte = i
+			break
+		}
+		units += utf16.RuneLen(r)
+	}
+	if startByte < 0 {
+		return ""
+	}
+	return s[startByte:endByte]
+}
+
+// markupPlain flattens a documentation value (a string or a MarkupContent /
+// MarkedString object) into trimmed plain text, joining multiple parts with a
+// blank line. It returns "" when there is nothing to show.
+func markupPlain(raw json.RawMessage) string {
+	parts, err := markupStrings(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+// firstLine returns s up to its first newline, used to keep an inline parameter
+// note to a single line while the full doc is shown separately.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
 }
 
 // wireLocation mirrors the LSP Location structure.

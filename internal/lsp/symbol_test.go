@@ -63,6 +63,69 @@ func TestParseHoverShapes(t *testing.T) {
 	}
 }
 
+func TestParseSignatureHelpShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "null_result",
+			raw:  `null`,
+			want: "",
+		},
+		{
+			name: "no_signatures",
+			raw:  `{"signatures":[]}`,
+			want: "",
+		},
+		{
+			// The active parameter (string label) is called out, and its doc is
+			// appended inline as a single line.
+			name: "active_parameter_string_label",
+			raw: `{"signatures":[{"label":"Run(ctx, name string)","parameters":[` +
+				`{"label":"ctx"},{"label":"name string","documentation":"the name to run"}]}],` +
+				`"activeSignature":0,"activeParameter":1}`,
+			want: "→ Run(ctx, name string)\n    active parameter: name string — the name to run",
+		},
+		{
+			// A [start,end] offset pair resolves to the substring of the label.
+			name: "active_parameter_offset_label",
+			raw: `{"signatures":[{"label":"Run(ctx, name string)","parameters":[` +
+				`{"label":[4,7]},{"label":[9,20]}]}],"activeParameter":1}`,
+			want: "→ Run(ctx, name string)\n    active parameter: name string",
+		},
+		{
+			// Multiple overloads: only the active one is marked with the arrow, and
+			// the active parameter applies to it.
+			name: "overloads_mark_active",
+			raw: `{"signatures":[{"label":"F(a int)"},{"label":"F(a int, b int)","parameters":[` +
+				`{"label":"a int"},{"label":"b int"}]}],"activeSignature":1,"activeParameter":0}`,
+			want: "  F(a int)\n→ F(a int, b int)\n    active parameter: a int",
+		},
+		{
+			// Per-signature activeParameter overrides the response-level value.
+			name: "signature_active_parameter_wins",
+			raw: `{"signatures":[{"label":"F(a, b)","parameters":[{"label":"a"},{"label":"b"}],` +
+				`"activeParameter":1}],"activeParameter":0}`,
+			want: "→ F(a, b)\n    active parameter: b",
+		},
+		{
+			// Signature documentation is indented beneath the label.
+			name: "signature_documentation",
+			raw:  `{"signatures":[{"label":"F()","documentation":"does a thing"}]}`,
+			want: "→ F()\n    does a thing",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSignatureHelp(json.RawMessage(tc.raw))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestParseDefinitionShapes(t *testing.T) {
 	uri := pathToURI("/tmp/example/main.go")
 	wantPath, err := uriToPath(uri)

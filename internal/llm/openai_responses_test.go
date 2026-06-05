@@ -217,11 +217,12 @@ func TestResponsesProviderMapsOutputAndUsage(t *testing.T) {
 }
 
 // TestResponsesProviderReasoningGating asserts the reasoning-vs-normal param
-// gating mirrors the chat/completions path on the wire: a reasoning model omits
-// temperature and forwards reasoning_effort, while a normal model sends
-// temperature and never emits reasoning_effort.
+// gating on the wire: a reasoning model omits temperature and forwards the
+// effort nested under the Responses API "reasoning" object (not the
+// chat/completions top-level reasoning_effort), while a normal model sends
+// temperature and never emits a reasoning object.
 func TestResponsesProviderReasoningGating(t *testing.T) {
-	t.Run("reasoning model omits temperature and sends effort", func(t *testing.T) {
+	t.Run("reasoning model omits temperature and nests effort under reasoning", func(t *testing.T) {
 		provider, _, gotBody := responsesProvider(t, "o3-mini", cannedResponsesReply)
 
 		_, err := provider.Stream(context.Background(), Request{
@@ -233,14 +234,31 @@ func TestResponsesProviderReasoningGating(t *testing.T) {
 		require.NoError(t, err)
 
 		require.NotContains(t, string(*gotBody), `"temperature"`)
+		// The effort must be nested, never sent as a top-level chat-style field.
+		require.NotContains(t, string(*gotBody), `"reasoning_effort"`)
 		var probe struct {
-			ReasoningEffort string `json:"reasoning_effort"`
+			Reasoning *struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
 		}
 		require.NoError(t, json.Unmarshal(*gotBody, &probe))
-		require.Equal(t, "high", probe.ReasoningEffort)
+		require.NotNil(t, probe.Reasoning)
+		require.Equal(t, "high", probe.Reasoning.Effort)
 	})
 
-	t.Run("normal model sends temperature and omits effort", func(t *testing.T) {
+	t.Run("reasoning model without effort omits the reasoning object", func(t *testing.T) {
+		provider, _, gotBody := responsesProvider(t, "o3-mini", cannedResponsesReply)
+
+		_, err := provider.Stream(context.Background(), Request{
+			Model:    "o3-mini",
+			Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+		})
+		require.NoError(t, err)
+
+		require.NotContains(t, string(*gotBody), `"reasoning"`)
+	})
+
+	t.Run("normal model sends temperature and omits the reasoning object", func(t *testing.T) {
 		provider, _, gotBody := responsesProvider(t, "gpt-4o", cannedResponsesReply)
 
 		_, err := provider.Stream(context.Background(), Request{
@@ -251,7 +269,7 @@ func TestResponsesProviderReasoningGating(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		require.NotContains(t, string(*gotBody), `"reasoning_effort"`)
+		require.NotContains(t, string(*gotBody), `"reasoning"`)
 		var probe struct {
 			Temperature *float64 `json:"temperature"`
 		}

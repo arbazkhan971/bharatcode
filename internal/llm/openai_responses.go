@@ -152,11 +152,15 @@ func buildResponsesRequest(req Request) (responsesRequest, error) {
 			Parameters:  schema,
 		})
 	}
-	// Reasoning models reject temperature and accept reasoning_effort instead;
+	// Reasoning models reject temperature and accept a reasoning budget instead;
 	// gate both by model id exactly as the chat/completions path does so the
-	// API never sees a param it would reject.
+	// API never sees a param it would reject. The Responses API nests the effort
+	// under a "reasoning" object (not a top-level reasoning_effort), so only emit
+	// it when an effort is configured to avoid sending an empty object.
 	if isReasoningModel(req.Model) {
-		body.ReasoningEffort = req.ReasoningEffort
+		if req.ReasoningEffort != "" {
+			body.Reasoning = &responsesReasoning{Effort: req.ReasoningEffort}
+		}
 	} else {
 		body.Temperature = req.Temperature
 	}

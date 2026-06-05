@@ -183,7 +183,7 @@ func (v *Viewer) StatLines(patch string, width int) string {
 	// begins at the same offset, and find the busiest file to scale the bars.
 	countWidth, maxTotal := 0, 0
 	for _, f := range files {
-		if n := len(fmt.Sprintf("+%d -%d", f.Added, f.Removed)); n > countWidth {
+		if n := len(countLabel(f)); n > countWidth {
 			countWidth = n
 		}
 		if t := f.Added + f.Removed; t > maxTotal {
@@ -219,10 +219,18 @@ func (v *Viewer) StatLines(patch string, width int) string {
 	for i, f := range files {
 		name := names[i]
 		namePad := strings.Repeat(" ", nameWidth-len([]rune(name)))
-		count := fmt.Sprintf("+%d -%d", f.Added, f.Removed)
+		count := countLabel(f)
 		countPad := strings.Repeat(" ", countWidth-len(count))
 
 		row := "  " + v.theme.Muted.Render(name+namePad+"  ")
+		if f.Binary {
+			// A binary blob or pure rename has no countable lines; show git's
+			// "Bin" marker in the muted style rather than a "+0 -0" that would
+			// read as an empty change, and draw no histogram bar.
+			row += v.theme.Muted.Render(count)
+			out += "\n" + row
+			continue
+		}
 		row += v.theme.DiffAdd.Render(fmt.Sprintf("+%d", f.Added))
 		row += v.theme.Muted.Render(" ")
 		row += v.theme.DiffRemove.Render(fmt.Sprintf("-%d", f.Removed))
@@ -279,6 +287,17 @@ func scaledBar(added, removed, maxTotal, width int) (plus, minus int) {
 	return plus, minus
 }
 
+// countLabel formats the per-file count column of a diffstat row: git's "Bin"
+// marker for a binary or pure-rename change that carries no text lines, and the
+// "+A -B" added/removed counts otherwise. It is shared by the column-width sizing
+// pass and the row renderer so both agree on the label's width.
+func countLabel(f FileStat) string {
+	if f.Binary {
+		return "Bin"
+	}
+	return fmt.Sprintf("+%d -%d", f.Added, f.Removed)
+}
+
 // displayPath returns the file name to show in a per-file diffstat row, falling
 // back to a placeholder for an unnamed bare hunk.
 func displayPath(p string) string {
@@ -306,11 +325,15 @@ func elidePath(p string, width int) string {
 }
 
 // FileStat is the per-file portion of a diffstat: the new-file path and the
-// added/removed content-line counts attributed to it.
+// added/removed content-line counts attributed to it. Binary marks a file whose
+// change carries no countable text lines — a binary blob or a pure rename — so
+// the diffstat can still list it (git shows such files as "Bin" rather than a
+// "+0 -0" that reads as an empty change).
 type FileStat struct {
 	Path    string
 	Added   int
 	Removed int
+	Binary  bool
 }
 
 // diffStat counts the changed files and the added/removed content lines in a
@@ -332,6 +355,14 @@ func diffStat(patch string) (files, added, removed int) {
 // the reported name matches the working-tree path. Content that appears before
 // any "+++" header (a bare hunk) is attributed to a single unnamed file so it is
 // still counted once, mirroring diffStat's bare-hunk handling.
+//
+// A "diff --git" block that names a file only through rename or binary metadata —
+// a pure rename ("rename to X") or a binary blob ("Binary files … differ"), both
+// of which carry no "+++" content header — is still counted as one changed file,
+// flagged Binary so callers can show it as "Bin" rather than an empty "+0 -0".
+// Such metadata is realized lazily, only when the block ends without a "+++"
+// header, so a rename or binary change that also carries text content is counted
+// once by its "+++" rather than twice.
 func fileStats(patch string) []FileStat {
 	var files []FileStat
 	cur := -1
@@ -341,12 +372,34 @@ func fileStats(patch string) []FileStat {
 			cur = 0
 		}
 	}
+
+	// Metadata pending for the current "diff --git" block: a rename target
+	// and/or a binary marker, neither of which emits a "+++" header.
+	var pendingPath string
+	var pendingBinary, sawContent bool
+	flushMeta := func() {
+		if !sawContent && (pendingBinary || pendingPath != "") {
+			files = append(files, FileStat{Path: pendingPath, Binary: pendingBinary})
+		}
+		pendingPath, pendingBinary, sawContent = "", false, false
+	}
+
 	for _, line := range strings.Split(patch, "\n") {
 		switch {
+		case strings.HasPrefix(line, "diff --git"):
+			flushMeta()
+		case strings.HasPrefix(line, "rename to "):
+			pendingPath = cleanDiffPath(line[len("rename to "):])
+		case strings.HasPrefix(line, "Binary files "):
+			pendingBinary = true
+			if p := binaryPath(line); p != "" {
+				pendingPath = p
+			}
 		case strings.HasPrefix(line, "+++"):
 			files = append(files, FileStat{Path: cleanDiffPath(line[len("+++"):])})
 			cur = len(files) - 1
-		case strings.HasPrefix(line, "---"), strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "index "), strings.HasPrefix(line, "@@"):
+			sawContent = true
+		case strings.HasPrefix(line, "---"), strings.HasPrefix(line, "index "), strings.HasPrefix(line, "@@"):
 			// File-boundary or hunk metadata: not counted as content.
 		case strings.HasPrefix(line, "+"):
 			ensureBare()
@@ -356,7 +409,29 @@ func fileStats(patch string) []FileStat {
 			files[cur].Removed++
 		}
 	}
+	flushMeta()
 	return files
+}
+
+// binaryPath extracts the changed file's path from git's "Binary files <a> and
+// <b> differ" annotation. It returns the b-side (post-change) path with its
+// "a/"/"b/" prefix and any trailing tab metadata stripped, falling back to the
+// a-side when the b-side is /dev/null (a deleted binary), and "" when the line
+// does not match — letting the caller leave the path to other metadata.
+func binaryPath(line string) string {
+	rest, ok := strings.CutPrefix(line, "Binary files ")
+	if !ok {
+		return ""
+	}
+	rest = strings.TrimSuffix(rest, " differ")
+	a, b, ok := strings.Cut(rest, " and ")
+	if !ok {
+		return ""
+	}
+	if bp := cleanDiffPath(b); bp != "" && bp != "/dev/null" {
+		return bp
+	}
+	return cleanDiffPath(a)
 }
 
 // cleanDiffPath normalizes the path captured from a "---"/"+++" header: it trims

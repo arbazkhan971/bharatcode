@@ -324,6 +324,13 @@ var contextWindowRules = []struct {
 	{"qwen3-coder", 262_144},
 	{"qwen3", 131_072},
 	{"qwen", 32_768},
+	// Qwen's QwQ reasoning line and QVQ vision-reasoning line both ship a 128k
+	// window, but their ids ("qwq-32b", "qvq-72b-preview") carry neither the
+	// "qwen" marker nor any other family marker above, so without these rules
+	// they fall through to "unknown" (0) when a user adds them — commonly via
+	// OpenRouter or a local runtime — without an explicit context_window.
+	{"qwq", 131_072},
+	{"qvq", 131_072},
 	// Microsoft Phi open-weight line — Phi-3/Phi-3.5 (mini, small, medium, MoE) as
 	// served by hosted providers ship the long-context 128k variant, while Phi-4
 	// shipped a 16k window. The "phi-3"/"phi-4" markers are deliberately specific:

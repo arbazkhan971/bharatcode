@@ -187,8 +187,9 @@ func TestNavigateIncomingCalls(t *testing.T) {
 	// Position is converted 1-based -> 0-based and routed to IncomingCalls.
 	require.Equal(t, 4, src.lastLine)
 	require.Equal(t, 2, src.lastCol)
-	// Callers are sorted by position, workspace-relative, and 1-based.
-	require.Equal(t, "main.go:3:1\nmain.go:9:5", result.Content)
+	// Callers are sorted by position, workspace-relative, and 1-based, behind a
+	// scope summary mirroring the references output.
+	require.Equal(t, "2 callers across 1 file:\nmain.go:3:1\nmain.go:9:5", result.Content)
 }
 
 func TestNavigateIncomingCallsEmpty(t *testing.T) {
@@ -218,8 +219,30 @@ func TestNavigateOutgoingCalls(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.False(t, result.IsError)
-	// Line 1 is readable, so its trimmed source is appended after the coordinates.
-	require.Equal(t, "main.go:1:1: package main", result.Content)
+	// Line 1 is readable, so its trimmed source is appended after the coordinates,
+	// behind a single-callee scope summary.
+	require.Equal(t, "1 callee across 1 file:\nmain.go:1:1: package main", result.Content)
+}
+
+func TestNavigateIncomingCallsCountsDistinctFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	other := filepath.Join(dir, "other.go")
+	require.NoError(t, os.WriteFile(other, []byte("package main\n"), 0o644))
+	src := &fakeNavigate{incomingCalls: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: other, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: other, Range: lsp.Range{Start: lsp.Position{Line: 3, Character: 2}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "incoming_calls",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Three callers spanning two files; the header reflects both plural counts.
+	require.True(t, strings.HasPrefix(result.Content, "3 callers across 2 files:\n"), result.Content)
 }
 
 func TestNavigateOutgoingCallsEmpty(t *testing.T) {

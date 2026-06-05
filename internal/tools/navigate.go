@@ -161,13 +161,13 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if err != nil {
 			return Result{}, fmt.Errorf("finding callers at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No callers found."), nil
+		return callsResult(root, locs, "caller", "callers", "No callers found."), nil
 	case "outgoing_calls":
 		locs, err := t.source.OutgoingCalls(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("finding callees at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No callees found."), nil
+		return callsResult(root, locs, "callee", "callees", "No callees found."), nil
 	case "hover":
 		text, err := t.source.Hover(ctx, path, line0, col0)
 		if err != nil {
@@ -208,6 +208,23 @@ func referencesResult(root string, locs []lsp.Location) Result {
 	refs := strings.Count(body, "\n") + 1
 	header := fmt.Sprintf("%d %s across %d %s:",
 		refs, plural(refs, "reference", "references"),
+		files, plural(files, "file", "files"))
+	return Result{Content: header + "\n" + body}
+}
+
+// callsResult renders call-hierarchy locations (callers or callees) like
+// referencesResult: a "N <noun> across M file(s):" summary line followed by the
+// `path:line:column[: source]` entries, so the model sees the scope of the call
+// hierarchy before scanning the list. singular/plural name the relation
+// ("caller"/"callers" or "callee"/"callees"). An empty input returns emptyMsg.
+func callsResult(root string, locs []lsp.Location, singular, plural2, emptyMsg string) Result {
+	if len(locs) == 0 {
+		return Result{Content: emptyMsg}
+	}
+	body, files := renderLocations(root, locs)
+	count := strings.Count(body, "\n") + 1
+	header := fmt.Sprintf("%d %s across %d %s:",
+		count, plural(count, singular, plural2),
 		files, plural(files, "file", "files"))
 	return Result{Content: header + "\n" + body}
 }

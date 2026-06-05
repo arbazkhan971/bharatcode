@@ -44,10 +44,17 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 	modelsByProvider := make(map[string][]Model)
 	allModels := make([]Model, 0, len(cfg.Models))
 	for _, m := range cfg.Models {
+		// A model configured without an explicit context_window falls back to a
+		// family heuristic keyed on the model id, so the agent's compaction and
+		// overflow checks get a real budget instead of zero ("unknown").
+		contextWindow := m.ContextWindow
+		if contextWindow <= 0 {
+			contextWindow = inferContextWindow(m.ID)
+		}
 		model := Model{
 			ID:                    m.ID,
 			Provider:              m.Provider,
-			ContextWindow:         m.ContextWindow,
+			ContextWindow:         contextWindow,
 			InputPricePerMTokUSD:  m.InputPricePerMTokUSD,
 			OutputPricePerMTokUSD: m.OutputPricePerMTokUSD,
 			SupportsImages:        m.SupportsImages,

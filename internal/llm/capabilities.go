@@ -87,6 +87,56 @@ func modelSupportsGeminiThinking(models []Model, id string) bool {
 	return false
 }
 
+// contextWindowRule maps a case-insensitive model-id substring to the context
+// window (in tokens) of the family it identifies. inferContextWindow walks the
+// rules in order and returns the first match, so more specific markers must
+// precede the broader ones that would also match them (e.g. "gemini-1.5-pro"
+// before "gemini-1.5", "gpt-4o" before "gpt-4"). The values track each family's
+// published maximum input window as of the catalog in defaults/config.json.
+var contextWindowRules = []struct {
+	substring string
+	window    int
+}{
+	// OpenAI
+	{"gpt-4.1", 1_047_576},
+	{"gpt-4o", 128_000},
+	{"gpt-4-turbo", 128_000},
+	{"gpt-4", 8_192},
+	{"gpt-3.5", 16_385},
+	{"gpt-5", 400_000},
+	{"o1", 200_000},
+	{"o3", 200_000},
+	{"o4", 200_000},
+	// Anthropic — every shipping Claude model exposes a 200k window.
+	{"claude", 200_000},
+	// Google Gemini — 1.5 Pro is 2M, the rest of the 1.5/2.x line is 1M.
+	{"gemini-1.5-pro", 2_097_152},
+	{"gemini-1.5", 1_048_576},
+	{"gemini-2", 1_048_576},
+	// Common open-weight families served via openai_compatible/ollama.
+	{"llama", 128_000},
+	{"mixtral", 32_768},
+	{"mistral", 32_768},
+	{"qwen", 32_768},
+	{"deepseek", 65_536},
+}
+
+// inferContextWindow guesses a model's context window from its id when the
+// catalog does not specify one. It exists so a user who adds a model to their
+// config without a context_window still gets a sensible budget for compaction
+// and overflow checks instead of zero (which the agent loop reads as "unknown").
+// The match is a case-insensitive substring scan over contextWindowRules; an
+// unrecognized id returns 0, preserving the prior "unknown" behavior.
+func inferContextWindow(id string) int {
+	lid := strings.ToLower(strings.TrimSpace(id))
+	for _, rule := range contextWindowRules {
+		if strings.Contains(lid, rule.substring) {
+			return rule.window
+		}
+	}
+	return 0
+}
+
 func modelSupportsTools(models []Model, id string) bool {
 	model, ok := findModel(models, id)
 	return ok && model.SupportsTools

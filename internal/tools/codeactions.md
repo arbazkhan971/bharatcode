@@ -26,8 +26,13 @@ Arguments:
 - `end_column` integer, optional: 1-based end column. Defaults to `column`, i.e.
   a cursor position rather than a span. Widen the range to surface refactorings
   that act on a selection.
+- `kind` string, optional: restrict to a single LSP CodeActionKind and its
+  sub-kinds — `quickfix` (error/warning fixes), `refactor` (extract/inline), or
+  `source` (whole-file actions like `source.organizeImports`). A dotted value
+  such as `refactor.extract` narrows further. Omit to list every action.
 - `apply` integer, optional: 1-based index of an action from a prior listing to
-  apply. Omit to list rather than apply.
+  apply. The index is into the filtered list when `kind` is set, so keep `kind`
+  the same across the listing and the apply call. Omit to list rather than apply.
 - `preview` boolean, optional: used with `apply`, show the diff the action would
   produce without writing anything. Use it to inspect a refactoring that may
   touch several files, then re-run without `preview` to commit.

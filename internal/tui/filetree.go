@@ -31,31 +31,107 @@ var filetreeIgnored = map[string]struct{}{
 
 // filetree holds the side-panel state: whether it is visible, whether it has
 // keyboard focus, the enumerated workspace-relative file paths, and the cursor.
+//
+// allFiles is the full workspace listing; files is the currently visible subset
+// after the quick-filter is applied, so the cursor, windowing, and selection all
+// operate on the narrowed view without special-casing. filter holds the active
+// filter token and filtering reports whether the panel is capturing keystrokes
+// into it, the way a side-panel quick-filter works in Claude Code and opencode.
 type filetree struct {
-	visible bool
-	focused bool
-	root    string
-	files   []string
-	cursor  int
+	visible   bool
+	focused   bool
+	root      string
+	allFiles  []string
+	files     []string
+	cursor    int
+	filter    string
+	filtering bool
 }
 
-// toggle flips panel visibility. Showing the panel also focuses it and, when the
-// listing is empty, refreshes it from the workspace root.
+// toggle flips panel visibility. Showing the panel also focuses it, clears any
+// stale quick-filter so it opens on the full listing, and refreshes it from the
+// workspace root.
 func (f *filetree) toggle(root string) {
 	f.visible = !f.visible
 	f.focused = f.visible
 	if f.visible {
 		f.root = root
+		f.filter = ""
+		f.filtering = false
 		f.refresh()
 	}
 }
 
-// refresh re-enumerates the workspace file listing from the panel root.
+// refresh re-enumerates the workspace file listing from the panel root, then
+// re-applies the active quick-filter so the visible subset stays in sync.
 func (f *filetree) refresh() {
-	f.files = listWorkspaceFiles(f.root)
+	f.allFiles = listWorkspaceFiles(f.root)
+	f.applyFilter()
+}
+
+// applyFilter recomputes the visible listing from allFiles through the active
+// filter token, clamping the cursor so it never points past the narrowed view.
+func (f *filetree) applyFilter() {
+	f.files = filterFiles(f.filter, f.allFiles)
 	if f.cursor >= len(f.files) {
 		f.cursor = 0
 	}
+}
+
+// appendFilter extends the quick-filter with typed text, resets the cursor to the
+// top of the new result set, and re-applies the filter.
+func (f *filetree) appendFilter(s string) {
+	f.filter += s
+	f.cursor = 0
+	f.applyFilter()
+}
+
+// backspaceFilter drops the last rune of the quick-filter (a no-op when empty),
+// resets the cursor, and re-applies the filter.
+func (f *filetree) backspaceFilter() {
+	if f.filter == "" {
+		return
+	}
+	r := []rune(f.filter)
+	f.filter = string(r[:len(r)-1])
+	f.cursor = 0
+	f.applyFilter()
+}
+
+// clearFilter discards the quick-filter, leaves filtering mode, and restores the
+// full listing.
+func (f *filetree) clearFilter() {
+	f.filter = ""
+	f.filtering = false
+	f.cursor = 0
+	f.applyFilter()
+}
+
+// filterFiles ranks files against a quick-filter token, best-first, reusing the
+// same scoring the @-file picker uses so the panel and the picker rank a query
+// the same way. An empty token returns the listing unchanged; the input order
+// (lexical) breaks ties through the stable sort.
+func filterFiles(filter string, files []string) []string {
+	if filter == "" {
+		return files
+	}
+	lower := strings.ToLower(filter)
+	type scored struct {
+		path  string
+		score int
+	}
+	var matched []scored
+	for _, f := range files {
+		if s, ok := mentionScore(lower, strings.ToLower(f)); ok {
+			matched = append(matched, scored{f, s})
+		}
+	}
+	sort.SliceStable(matched, func(i, j int) bool { return matched[i].score < matched[j].score })
+	out := make([]string, 0, len(matched))
+	for _, m := range matched {
+		out = append(out, m.path)
+	}
+	return out
 }
 
 // moveCursor advances the selection by delta, clamped to the listing bounds.
@@ -184,8 +260,24 @@ func (m *model) renderFiletree(width, height int) string {
 	b.WriteString(m.theme.Accent.Render(filetreeTitle(f.cursor, len(f.files))))
 	b.WriteByte('\n')
 
+	// Surface the quick-filter on its own row while it is active (or applied) so
+	// the user can see what is narrowing the listing; a trailing caret marks live
+	// capture, the way an inline filter shows its cursor.
+	if f.filtering || f.filter != "" {
+		label := "/" + f.filter
+		if f.filtering {
+			label += "▌"
+		}
+		b.WriteString(m.theme.Accent.Render(clampLine(label, width)))
+		b.WriteByte('\n')
+	}
+
 	if len(f.files) == 0 {
-		b.WriteString(m.theme.Muted.Render("(no files)"))
+		empty := "(no files)"
+		if f.filter != "" {
+			empty = "(no matches)"
+		}
+		b.WriteString(m.theme.Muted.Render(empty))
 	} else {
 		rows := filetreeListingRows(height, len(f.files))
 		start := filetreeScrollStart(f.cursor, len(f.files), rows)
@@ -321,8 +413,13 @@ func (m *model) editDiffMessages() []message.Message {
 // handleFiletreeKey processes a key while the panel has focus. It reports
 // whether the key was consumed; unconsumed keys fall through to the normal
 // input handling. Up/Down move the cursor, Tab returns focus to the input line
-// (leaving the panel visible), and Ctrl+F continues to toggle the panel.
-func (m *model) handleFiletreeKey(msg keyStringer) (consumed bool, cmd tea.Cmd) {
+// (leaving the panel visible), "/" starts a quick-filter, and Esc clears an
+// active filter before falling through to close the panel. Ctrl+F continues to
+// toggle the panel.
+func (m *model) handleFiletreeKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.Cmd) {
+	if m.filetree.filtering {
+		return m.handleFiletreeFilterKey(msg)
+	}
 	switch msg.String() {
 	case "up":
 		m.filetree.moveCursor(-1)
@@ -330,6 +427,18 @@ func (m *model) handleFiletreeKey(msg keyStringer) (consumed bool, cmd tea.Cmd) 
 	case "down":
 		m.filetree.moveCursor(1)
 		return true, nil
+	case "/":
+		// Enter quick-filter mode; subsequent keystrokes narrow the listing.
+		m.filetree.filtering = true
+		return true, nil
+	case "esc":
+		// A live filter is cleared first; only an unfiltered panel lets Esc fall
+		// through to the panel-closing handler.
+		if m.filetree.filter != "" {
+			m.filetree.clearFilter()
+			return true, nil
+		}
+		return false, nil
 	case "tab":
 		m.filetree.focused = false
 		return true, nil
@@ -338,10 +447,39 @@ func (m *model) handleFiletreeKey(msg keyStringer) (consumed bool, cmd tea.Cmd) 
 	}
 }
 
-// keyStringer is the minimal key interface handleFiletreeKey needs. It is
-// satisfied by tea.KeyPressMsg and keeps the helper unit-testable.
-type keyStringer interface {
-	String() string
+// handleFiletreeFilterKey processes a key while the quick-filter is capturing
+// input. Printable text extends the filter, Backspace trims it, Up/Down still
+// move the cursor through the narrowed listing, Enter/Tab confirm the filter and
+// leave capture mode (keeping the results), and Esc clears the filter entirely.
+// Every other key is consumed so a stray keystroke never leaks to the prompt
+// while the panel owns the keyboard.
+func (m *model) handleFiletreeFilterKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.filetree.clearFilter()
+		return true, nil
+	case "enter", "tab":
+		m.filetree.filtering = false
+		return true, nil
+	case "up":
+		m.filetree.moveCursor(-1)
+		return true, nil
+	case "down":
+		m.filetree.moveCursor(1)
+		return true, nil
+	case "backspace":
+		m.filetree.backspaceFilter()
+		return true, nil
+	default:
+		// Plain printable text extends the filter; modified or unprintable keys
+		// (Ctrl+F to toggle the panel, PgUp to scroll, …) fall through so the
+		// global shortcuts still reach their handlers while the filter is active.
+		if k := msg.Key(); k.Text != "" && k.Mod == 0 {
+			m.filetree.appendFilter(k.Text)
+			return true, nil
+		}
+		return false, nil
+	}
 }
 
 // joinPanels lays the panel column to the left of body, separated by a single

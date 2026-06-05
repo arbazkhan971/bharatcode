@@ -234,7 +234,10 @@ var contextWindowRules = []struct {
 	{"nemotron", 128_000},
 	// Moonshot Kimi K2 exposes a 200k window.
 	{"kimi", 200_000},
-	{"deepseek", 65_536},
+	// DeepSeek — the deepseek-chat (V3 non-thinking) and deepseek-reasoner
+	// (thinking) models served by the official API both expose a 128k window,
+	// up from the 64k the earlier releases shipped.
+	{"deepseek", 131_072},
 	// Amazon Nova (commonly served via Bedrock) — Nova Pro and Nova Lite both
 	// expose a 300k window while Nova Micro is 128k, so the specific "nova-micro"
 	// marker must precede the family one.

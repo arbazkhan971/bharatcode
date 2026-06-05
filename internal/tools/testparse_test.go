@@ -21,6 +21,8 @@ func TestClassifyTestRunner(t *testing.T) {
 		"rspec":                               runnerRSpec,
 		"bundle exec rspec spec/foo_spec.rb":  runnerRSpec,
 		"bin/rspec":                           runnerRSpec,
+		"vendor/bin/phpunit":                  runnerPHPUnit,
+		"phpunit --filter testFoo":            runnerPHPUnit,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
@@ -375,6 +377,52 @@ func TestParseRSpecFailures_NoSummaryFallback(t *testing.T) {
 	want := []testFailure{
 		{Name: "Array#index_of returns -1 when the value is absent", Detail: "expect(arr.index_of(5)).to eq(-1)"},
 		{Name: "Calculator adds two numbers", Detail: "expect(calc.add(1, 2)).to eq(4)"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParsePHPUnitFailures(t *testing.T) {
+	out := `PHPUnit 10.5.0 by Sebastian Bergmann and contributors.
+
+..F.E                                                               5 / 5 (100%)
+
+Time: 00:00.123, Memory: 8.00 MB
+
+There was 1 failure:
+
+1) App\Tests\MathTest::testAddition
+Failed asserting that 4 matches expected 5.
+
+/app/tests/MathTest.php:15
+
+There was 1 error:
+
+1) App\Tests\MathTest::testThrows
+RuntimeException: boom
+
+/app/tests/MathTest.php:20
+
+FAILURES!
+Tests: 5, Assertions: 4, Failures: 1, Errors: 1.`
+	got := parseTestFailures("vendor/bin/phpunit", out)
+	want := []testFailure{
+		{Name: `App\Tests\MathTest::testAddition`, Detail: "Failed asserting that 4 matches expected 5."},
+		{Name: `App\Tests\MathTest::testThrows`, Detail: "RuntimeException: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParsePHPUnitFailures_DataSet(t *testing.T) {
+	out := `There was 1 failure:
+
+1) MathTest::testAdd with data set #0 (1, 2, 4)
+Failed asserting that 3 matches expected 4.
+
+/app/tests/MathTest.php:30
+`
+	got := parseTestFailures("phpunit --testdox", out)
+	want := []testFailure{
+		{Name: "MathTest::testAdd with data set #0 (1, 2, 4)", Detail: "Failed asserting that 3 matches expected 4."},
 	}
 	assertFailures(t, got, want)
 }

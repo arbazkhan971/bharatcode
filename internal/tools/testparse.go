@@ -62,6 +62,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseDenoTestFailures(output)
 	case runnerSwift:
 		return parseSwiftTestFailures(output)
+	case runnerBun:
+		return parseBunTestFailures(output)
 	default:
 		return nil
 	}
@@ -85,6 +87,7 @@ const (
 	runnerTAP
 	runnerDeno
 	runnerSwift
+	runnerBun
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -178,6 +181,14 @@ func classifyTestRunner(command string) testRunner {
 		// the JS runners since a "swift test" invocation carries none of their
 		// substrings, but kept explicit to guard against future overlap.
 		return runnerSwift
+	case strings.Contains(c, "bun test"):
+		// `bun test` runs Bun's built-in test runner, whose default reporter marks
+		// each failing test with a "✗" glyph rather than the "✕"/"×" jest uses, so
+		// it needs its own parser. Checked before the JS runners since a "bun test"
+		// invocation carries none of their substrings, but kept explicit to guard
+		// against future overlap. `bun run test` (an arbitrary npm script) has "run"
+		// between the words and so does not match here.
+		return runnerBun
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1103,6 +1114,36 @@ func parseSwiftTestFailures(output string) []testFailure {
 		}
 		seen[name] = true
 		failures = append(failures, testFailure{Name: name, Detail: details[name]})
+	}
+	return failures
+}
+
+// "✗ adds two numbers [0.42ms]" — Bun's built-in test runner marks a failed
+// test with a "✗" (U+2717) glyph; some terminals/versions render it as "✘"
+// (U+2718), so both are accepted. Nested describe blocks are folded into the
+// name with " > ". The trailing " [<time>]" duration marker (e.g. "[0.42ms]" or
+// "[1.20s]") is optional and stripped.
+var bunFailRe = regexp.MustCompile(`^\s*[✗✘]\s+(.+?)(?:\s*\[[\d.]+\s*m?s\])?$`)
+
+// parseBunTestFailures collects the "✗ <name>" lines emitted by `bun test`. Like
+// the jest parser it reports the failing names rather than attempting to pair the
+// trailing "error:" assertion blocks, which Bun interleaves with source snippets
+// in a reporter-dependent way; the names are the actionable signal.
+func parseBunTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		m := bunFailRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name})
 	}
 	return failures
 }

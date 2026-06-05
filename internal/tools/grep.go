@@ -27,9 +27,16 @@ type grepTool struct {
 }
 
 type grepArgs struct {
-	Pattern    string `json:"pattern"`
-	Path       string `json:"path,omitempty"`
-	Include    string `json:"include,omitempty"`
+	Pattern string `json:"pattern"`
+	Path    string `json:"path,omitempty"`
+	Include string `json:"include,omitempty"`
+	// Exclude skips files whose base name matches this glob (like rg
+	// -g '!pattern'), the inverse of Include. Use it to search everything
+	// except a noisy subset, e.g. exclude="*_test.go" to skip Go test files.
+	// When both Include and Exclude are set a file must pass Include AND not
+	// match Exclude. On the rg path it becomes a negated --glob; the Go
+	// fallback matches it against the base name, keeping both paths aligned.
+	Exclude    string `json:"exclude,omitempty"`
 	OutputMode string `json:"output_mode,omitempty"`
 	// Context lines — mirrors rg -C / -A / -B.  Context takes precedence over
 	// Before/After when both are set (same semantics as rg).  Only meaningful
@@ -85,6 +92,32 @@ type grepArgs struct {
 	HeadLimit int `json:"head_limit,omitempty"`
 }
 
+// passesNameFilters reports whether a file whose base name is name survives the
+// include and exclude globs in the Go fallback. A file must match Include (when
+// set) and must not match Exclude (when set), mirroring how the rg path passes
+// --glob / negated --glob. A malformed pattern yields a non-nil error.
+func passesNameFilters(args grepArgs, name string) (bool, error) {
+	if args.Include != "" {
+		ok, err := filepath.Match(args.Include, name)
+		if err != nil {
+			return false, fmt.Errorf("matching include glob %q: %w", args.Include, err)
+		}
+		if !ok {
+			return false, nil
+		}
+	}
+	if args.Exclude != "" {
+		ok, err := filepath.Match(args.Exclude, name)
+		if err != nil {
+			return false, fmt.Errorf("matching exclude glob %q: %w", args.Exclude, err)
+		}
+		if ok {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 var (
 	lookPath       = exec.LookPath
 	commandContext = exec.CommandContext
@@ -97,6 +130,7 @@ var (
     "pattern": {"type": "string", "description": "Regular expression to search for."},
     "path": {"type": "string", "description": "Workspace-relative file or directory to search."},
     "include": {"type": "string", "description": "Optional file glob such as *.go."},
+    "exclude": {"type": "string", "description": "Optional file glob to skip, the inverse of include (like rg -g '!pattern'). Files whose base name matches it are not searched; e.g. \"*_test.go\" to exclude Go test files. Combine with include to search a subset while skipping noise."},
     "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"], "description": "Shape of the search results."},
     "context": {"type": "integer", "minimum": 0, "description": "Number of lines of context to show before and after each match (like rg -C). Takes precedence over before/after when set."},
     "before": {"type": "integer", "minimum": 0, "description": "Number of lines to show before each match (like rg -B). Ignored when context is set."},
@@ -308,6 +342,9 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 
 	if args.Include != "" {
 		cmdArgs = append(cmdArgs, "--glob", args.Include)
+	}
+	if args.Exclude != "" {
+		cmdArgs = append(cmdArgs, "--glob", "!"+args.Exclude)
 	}
 	if exts, ok := resolveGrepType(args.Type); ok {
 		// Define a synthetic type from our shared table rather than relying on
@@ -625,14 +662,10 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 			return nil
 		}
 
-		if args.Include != "" {
-			ok, matchErr := filepath.Match(args.Include, entry.Name())
-			if matchErr != nil {
-				return fmt.Errorf("matching include glob %q: %w", args.Include, matchErr)
-			}
-			if !ok {
-				return nil
-			}
+		if pass, matchErr := passesNameFilters(args, entry.Name()); matchErr != nil {
+			return matchErr
+		} else if !pass {
+			return nil
 		}
 		if !extInTypeSet(entry.Name(), typeSet) {
 			return nil
@@ -819,14 +852,10 @@ func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepA
 			return nil
 		}
 
-		if args.Include != "" {
-			ok, matchErr := filepath.Match(args.Include, entry.Name())
-			if matchErr != nil {
-				return fmt.Errorf("matching include glob %q: %w", args.Include, matchErr)
-			}
-			if !ok {
-				return nil
-			}
+		if pass, matchErr := passesNameFilters(args, entry.Name()); matchErr != nil {
+			return matchErr
+		} else if !pass {
+			return nil
 		}
 		if !extInTypeSet(entry.Name(), typeSet) {
 			return nil

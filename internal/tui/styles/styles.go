@@ -80,6 +80,12 @@ type Theme struct {
 	DiffRemoveEmph lipgloss.Style
 	DiffHunk       lipgloss.Style
 	DiffHeader     lipgloss.Style
+	// DiffWhitespace flags trailing whitespace an added line introduced at its
+	// end — the kind of whitespace error git's "diff --check" reports — by
+	// drawing those blank cells as a reverse-video block so they are visible
+	// rather than invisible, matching how delta and opencode surface introduced
+	// trailing blanks in a reviewed diff.
+	DiffWhitespace lipgloss.Style
 	// Match emphasizes the runs of a line that matched an active scrollback
 	// search, so the reader sees exactly what matched within the centered line —
 	// the reverse-video hit highlight an editor draws on a search result. It
@@ -141,8 +147,11 @@ func build(p palette) Theme {
 		// file boundaries stand out from added/removed content in a multi-file
 		// diff without competing with the accent-colored hunk markers.
 		DiffHeader: muted.Bold(true),
-		Match:      accent.Reverse(true),
-		MatchOther: accent.Underline(true),
+		// Trailing whitespace shows as a reverse-video block in the remove color
+		// so an introduced blank run reads as an error, the way git/delta flag it.
+		DiffWhitespace: err.Reverse(true),
+		Match:          accent.Reverse(true),
+		MatchOther:     accent.Underline(true),
 	}
 }
 

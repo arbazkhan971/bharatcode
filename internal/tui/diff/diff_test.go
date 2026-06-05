@@ -649,3 +649,83 @@ func TestUnified_NoNewlineMarkerMuted(t *testing.T) {
 	require.NotContains(t, lines, theme.DiffRemove.Render(marker))
 	require.NotContains(t, lines, theme.DiffAdd.Render(marker))
 }
+
+// TestUnified_FlagsAddedTrailingWhitespace checks that trailing whitespace an
+// added line introduces is rendered with the DiffWhitespace style rather than
+// folded into the plain add color, so a reviewer sees the introduced blank run
+// the way git's "diff --check" flags it.
+func TestUnified_FlagsAddedTrailingWhitespace(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -0,0 +1,1 @@\n+hello   \n"
+	out := New(theme).RenderUnified(patch, 120)
+
+	// The content keeps the add color; only the trailing blanks get the
+	// whitespace-error style, and the whole line is never rendered plain-add.
+	require.Contains(t, out, theme.DiffAdd.Render("+hello")+theme.DiffWhitespace.Render("   "))
+	require.NotContains(t, out, theme.DiffAdd.Render("+hello   "))
+}
+
+// TestUnifiedNumbered_FlagsAddedTrailingWhitespace checks the numbered renderer
+// flags an introduced trailing-whitespace run the same way the plain renderer
+// does, so the diff-review display marks it too.
+func TestUnifiedNumbered_FlagsAddedTrailingWhitespace(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -0,0 +1,1 @@\n+hello   \n"
+	out := New(theme).RenderUnifiedNumbered(patch, 120)
+
+	require.Contains(t, out, theme.DiffAdd.Render("+hello")+theme.DiffWhitespace.Render("   "))
+}
+
+// TestUnified_TrailingWhitespaceOnlyOnAddedLines checks that trailing
+// whitespace on context and removed lines is left untouched — git reports a
+// whitespace error only for introduced content, so an unchanged or removed
+// line's blanks are not the reviewer's to fix.
+func TestUnified_TrailingWhitespaceOnlyOnAddedLines(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,2 +1,1 @@\n context  \n-removed  \n"
+	out := New(theme).RenderUnified(patch, 120)
+
+	require.NotContains(t, out, theme.DiffWhitespace.Render("  "))
+	require.Contains(t, out, theme.DiffRemove.Render("-removed  "))
+}
+
+// TestStyleLine_NoTrailingWhitespaceUnchanged checks that an added line without
+// trailing whitespace renders byte-for-byte as the plain add style, so the
+// common case is untouched by the whitespace flagging.
+func TestStyleLine_NoTrailingWhitespaceUnchanged(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -0,0 +1,1 @@\n+clean line\n"
+	out := New(theme).RenderUnified(patch, 120)
+
+	require.Contains(t, out, theme.DiffAdd.Render("+clean line"))
+}
+
+// TestSplitTrailingWhitespace checks the helper isolates the trailing run of
+// spaces and tabs while preserving the marker and content.
+func TestSplitTrailingWhitespace(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in, body, trail string
+	}{
+		{"+code", "+code", ""},
+		{"+code  ", "+code", "  "},
+		{"+code\t", "+code", "\t"},
+		{"+code \t ", "+code", " \t "},
+		{"+", "+", ""},
+		{"+   ", "+", "   "},
+	}
+	for _, c := range cases {
+		body, trail := splitTrailingWhitespace(c.in)
+		require.Equal(t, c.body, body, "body for %q", c.in)
+		require.Equal(t, c.trail, trail, "trail for %q", c.in)
+	}
+}

@@ -524,12 +524,43 @@ func (v *Viewer) styleLine(line string) string {
 		// changed line, matching how git and delta present it.
 		return v.theme.Muted.Render(line)
 	case strings.HasPrefix(line, "+"):
-		return v.theme.DiffAdd.Render(line)
+		return v.styleAddedLine(line)
 	case strings.HasPrefix(line, "-"):
 		return v.theme.DiffRemove.Render(line)
 	default:
 		return line
 	}
+}
+
+// styleAddedLine renders an added content line, flagging any trailing
+// whitespace the edit introduced at the line's end with the DiffWhitespace
+// style so a reviewer catches the kind of whitespace error git's "diff --check"
+// reports, the way delta and opencode mark introduced trailing blanks. Only
+// added lines are flagged — git reports whitespace errors only on introduced
+// content, and an unchanged or removed line's trailing blanks are not the
+// reviewer's to fix. A line with no trailing whitespace is rendered wholly in
+// the add style, so the common case is byte-for-byte unchanged. (Modified lines
+// paired for word-diffing render through styleWordLine and are not flagged.)
+func (v *Viewer) styleAddedLine(line string) string {
+	body, trail := splitTrailingWhitespace(line)
+	if trail == "" {
+		return v.theme.DiffAdd.Render(line)
+	}
+	return v.theme.DiffAdd.Render(body) + v.theme.DiffWhitespace.Render(trail)
+}
+
+// splitTrailingWhitespace splits s into its leading content and the run of
+// space and tab characters at its very end. The trailing run is empty when s
+// does not end in whitespace. The "+" marker is never whitespace, so body
+// always retains it. Tabs are matched as well as spaces because a line whose
+// indentation reaches its end as a tab is the same whitespace error once tabs
+// have been expanded to spaces for display.
+func splitTrailingWhitespace(s string) (body, trailing string) {
+	i := len(s)
+	for i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
+		i--
+	}
+	return s[:i], s[i:]
 }
 
 // styleHunkHeader renders a "@@ -a,b +c,d @@ <section>" hunk header, coloring

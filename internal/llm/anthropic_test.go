@@ -332,9 +332,10 @@ func TestAnthropicMarksSystemAndToolsWithCacheControl(t *testing.T) {
 	body := string(rawBody)
 	require.Contains(t, body, `"cache_control":{"type":"ephemeral"}`)
 
-	// Exactly two cache breakpoints: one for the system prefix, one for the
-	// tools prefix. Anthropic permits at most four.
-	require.Equal(t, 2, strings.Count(body, `"cache_control"`))
+	// Three cache breakpoints: one for the system prefix, one for the tools
+	// prefix, and one rolling breakpoint on the conversation history (the last
+	// block of the final message). Anthropic permits at most four.
+	require.Equal(t, 3, strings.Count(body, `"cache_control"`))
 
 	// Structural assertions: the marker sits on the system block.
 	require.Len(t, captured.System, 1)
@@ -348,11 +349,19 @@ func TestAnthropicMarksSystemAndToolsWithCacheControl(t *testing.T) {
 	require.Nil(t, captured.Tools[0].CacheControl)
 	require.NotNil(t, captured.Tools[1].CacheControl)
 	require.Equal(t, "ephemeral", captured.Tools[1].CacheControl.Type)
+
+	// The rolling history breakpoint sits on the last block of the final message.
+	require.Len(t, captured.Messages, 1)
+	last := captured.Messages[0].Content
+	require.NotEmpty(t, last)
+	require.NotNil(t, last[len(last)-1].CacheControl)
+	require.Equal(t, "ephemeral", last[len(last)-1].CacheControl.Type)
 }
 
 // TestAnthropicNoSystemPromptOmitsSystemAndCacheControl asserts that with no
 // system prompt the request omits the system field entirely and emits no
-// system cache_control, and that tools (when absent) introduce no breakpoint.
+// system cache_control, and that with no tools the only breakpoint is the
+// rolling conversation-history one on the final message.
 func TestAnthropicNoSystemPromptOmitsSystemAndCacheControl(t *testing.T) {
 	var rawBody []byte
 	var captured anthropicRequest
@@ -381,10 +390,14 @@ func TestAnthropicNoSystemPromptOmitsSystemAndCacheControl(t *testing.T) {
 	body := string(rawBody)
 	// The system key must be absent entirely (omitempty), not an empty block.
 	require.NotContains(t, body, `"system"`)
-	// With no system and no tools there are no cache breakpoints.
-	require.NotContains(t, body, `"cache_control"`)
+	// With no system and no tools the only breakpoint is the rolling history one.
+	require.Equal(t, 1, strings.Count(body, `"cache_control"`))
 	require.Empty(t, captured.System)
 	require.Empty(t, captured.Tools)
+	require.Len(t, captured.Messages, 1)
+	last := captured.Messages[0].Content
+	require.NotEmpty(t, last)
+	require.NotNil(t, last[len(last)-1].CacheControl)
 }
 
 // TestAnthropicMarksToolsWhenSystemAbsent asserts that tools still receive a
@@ -418,12 +431,56 @@ func TestAnthropicMarksToolsWhenSystemAbsent(t *testing.T) {
 
 	body := string(rawBody)
 	require.NotContains(t, body, `"system"`)
-	// Exactly one breakpoint: the tools prefix, with no system block to mark.
-	require.Equal(t, 1, strings.Count(body, `"cache_control"`))
+	// Two breakpoints: the tools prefix and the rolling conversation-history one;
+	// there is no system block to mark.
+	require.Equal(t, 2, strings.Count(body, `"cache_control"`))
 	require.Empty(t, captured.System)
 	require.Len(t, captured.Tools, 1)
 	require.NotNil(t, captured.Tools[0].CacheControl)
 	require.Equal(t, "ephemeral", captured.Tools[0].CacheControl.Type)
+}
+
+// TestAnthropicMarksOnlyFinalMessageForHistoryCache asserts that across a
+// multi-turn conversation the rolling history breakpoint lands solely on the
+// last block of the final message, leaving earlier turns unmarked. A single
+// moving breakpoint lets the next turn read the whole prior conversation from
+// cache while staying within Anthropic's four-breakpoint budget.
+func TestAnthropicMarksOnlyFinalMessageForHistoryCache(t *testing.T) {
+	var captured anthropicRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(b, &captured))
+		writeMinimalAnthropicSSE(w, `{"input_tokens":9,"output_tokens":1}`)
+	}))
+	defer server.Close()
+
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{
+			{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "first"}}},
+			{Role: message.RoleAssistant, Content: []message.ContentBlock{message.TextBlock{Text: "reply"}}},
+			{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "second"}}},
+		},
+		// No system prompt or tools, so the only breakpoint is the history one.
+		MaxTokens: 64,
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	require.Len(t, captured.Messages, 3)
+	// Earlier turns carry no breakpoint.
+	for i, msg := range captured.Messages[:2] {
+		for j, block := range msg.Content {
+			require.Nil(t, block.CacheControl, "message %d block %d must be unmarked", i, j)
+		}
+	}
+	// Only the last block of the final message is the rolling breakpoint.
+	last := captured.Messages[2].Content
+	require.NotEmpty(t, last)
+	require.NotNil(t, last[len(last)-1].CacheControl)
+	require.Equal(t, "ephemeral", last[len(last)-1].CacheControl.Type)
 }
 
 // TestAnthropicPopulatesCacheUsageFromResponse asserts the usage mapping carries

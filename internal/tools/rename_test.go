@@ -87,6 +87,59 @@ func TestRenameAppliesEditsAcrossFiles(t *testing.T) {
 	require.Contains(t, diffs["a.go"], "+bar()")
 }
 
+func TestRenameSurfacesPostWriteDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("foo()\n"), 0o644))
+
+	src := &fakeRename{edit: lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		a: {replaceWord(0, 3, "bar")},
+	}}}
+	tool := &renameTool{
+		source: src,
+		deps:   Dependencies{WorkDir: dir},
+		diag: &fakeDiagnoser{diags: []lsp.Diagnostic{
+			diag(a, 0, 0, lsp.Error, "undefined: bar"),
+		}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "new_name": "bar",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	require.Contains(t, result.Content, "undefined: bar")
+	require.Contains(t, result.Content, "please fix")
+	require.Contains(t, result.Metadata["diagnostics"], "undefined: bar")
+}
+
+func TestRenameOmitsDiagnosticsWhenClean(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("foo()\n"), 0o644))
+
+	src := &fakeRename{edit: lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		a: {replaceWord(0, 3, "bar")},
+	}}}
+	// Only hint/info-level diagnostics: nothing actionable should be appended.
+	tool := &renameTool{
+		source: src,
+		deps:   Dependencies{WorkDir: dir},
+		diag: &fakeDiagnoser{diags: []lsp.Diagnostic{
+			diag(a, 0, 0, lsp.Hint, "consider simplifying"),
+		}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "new_name": "bar",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.NotContains(t, result.Content, "Diagnostics after editing")
+	require.Nil(t, result.Metadata["diagnostics"])
+}
+
 func TestRenameNoChangesReportsNothingDone(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"), []byte("foo\n"), 0o644))

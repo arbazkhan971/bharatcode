@@ -25,6 +25,7 @@ type RenameSource interface {
 type renameTool struct {
 	deps   Dependencies
 	source RenameSource
+	diag   editDiagnoser
 }
 
 type renameArgs struct {
@@ -72,6 +73,9 @@ func newRenameTool(deps Dependencies) Tool {
 	// when the manager is actually present.
 	if deps.LSP != nil {
 		t.source = deps.LSP
+		// The same manager re-checks each renamed file afterwards so the model
+		// sees any errors the rename introduced, matching the edit/write tools.
+		t.diag = deps.LSP
 	}
 	return t
 }
@@ -216,6 +220,24 @@ func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceE
 	if len(diffs) > 0 {
 		metadata["diffs"] = diffs
 	}
+
+	// A rename can introduce errors (a name collision, a now-shadowed symbol),
+	// so re-check each touched file and surface the problems, as edit/write do.
+	// Files are processed in the same sorted-path order for deterministic output.
+	if t.diag != nil {
+		var notes []string
+		for _, u := range updates {
+			if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, u.path); note != "" {
+				notes = append(notes, note)
+			}
+		}
+		if len(notes) > 0 {
+			joined := strings.Join(notes, "\n\n")
+			fmt.Fprintf(&b, "\n%s", joined)
+			metadata["diagnostics"] = joined
+		}
+	}
+
 	return Result{
 		Content:  strings.TrimRight(b.String(), "\n"),
 		Metadata: metadata,

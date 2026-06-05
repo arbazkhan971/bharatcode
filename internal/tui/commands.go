@@ -317,7 +317,7 @@ func (m *model) handleRegistryPrompt(name string, args string) (handled bool, mo
 	if _, ok := m.deps.Prompts.Get(name); !ok {
 		return false, m, nil
 	}
-	rendered, err := m.deps.Prompts.Render(name, map[string]string{"input": args})
+	rendered, err := m.deps.Prompts.RenderSlash(name, args)
 	if err != nil {
 		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Prompt error", Body: err.Error(), Theme: m.theme})
 		return true, m, nil

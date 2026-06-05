@@ -119,6 +119,124 @@ func TestRenderIgnoresExtraArgs(t *testing.T) {
 	require.Equal(t, "Triage bug 42", out)
 }
 
+func TestRenderSlashPositionalArgs(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "review.md"),
+		[]byte("Review $1 for $2; full request: $@"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	out, err := reg.RenderSlash("review", "main.go races")
+	require.NoError(t, err)
+	require.Equal(t, "Review main.go for races; full request: main.go races", out)
+}
+
+func TestRenderSlashArgumentsAlias(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "explain.md"),
+		[]byte("Explain: $ARGUMENTS"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	out, err := reg.RenderSlash("explain", "the failover logic")
+	require.NoError(t, err)
+	require.Equal(t, "Explain: the failover logic", out)
+}
+
+func TestRenderSlashQuotedFieldStaysWhole(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "open.md"),
+		[]byte("Open [$1] then [$2]"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	// The double-quoted run with a space must survive as a single field.
+	out, err := reg.RenderSlash("open", `"my file.go" tail`)
+	require.NoError(t, err)
+	require.Equal(t, "Open [my file.go] then [tail]", out)
+}
+
+func TestRenderSlashOutOfRangeIndexIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "triage.md"),
+		[]byte("First=$1 Second=$2 Third=$3"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	out, err := reg.RenderSlash("triage", "only")
+	require.NoError(t, err)
+	require.Equal(t, "First=only Second= Third=", out)
+}
+
+func TestRenderSlashEscapedDollarIsLiteral(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "cost.md"),
+		[]byte("Budget is $$5 for $@"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	out, err := reg.RenderSlash("cost", "the task")
+	require.NoError(t, err)
+	require.Equal(t, "Budget is $5 for the task", out)
+}
+
+func TestRenderSlashStillSupportsInputPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "triage.md"),
+		[]byte("Triage {{input}} now"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	out, err := reg.RenderSlash("triage", "bug 42")
+	require.NoError(t, err)
+	require.Equal(t, "Triage bug 42 now", out)
+}
+
+func TestRenderSlashUnknownNameErrors(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "triage.md"), []byte("$1"), 0o644))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	_, err = reg.RenderSlash("nope", "x")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPromptNotFound)
+}
+
+func TestSplitFieldsHonorsQuotes(t *testing.T) {
+	require.Equal(t, []string{"a", "b", "c"}, splitFields("a b c"))
+	require.Equal(t, []string{"a b", "c"}, splitFields(`"a b" c`))
+	require.Equal(t, []string{"a b", "c d"}, splitFields(`'a b' "c d"`))
+	require.Equal(t, []string{"abc"}, splitFields(`a"b"c`))
+	require.Equal(t, []string{"unterminated run"}, splitFields(`"unterminated run`))
+	require.Empty(t, splitFields("   "))
+}
+
 func TestLoadPromptRegistryIgnoresNonMarkdownAndDirs(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "triage.md"), []byte("ok"), 0o644))

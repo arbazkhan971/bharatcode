@@ -114,7 +114,7 @@ func TestResponsesProviderPostsToResponsesEndpoint(t *testing.T) {
 	require.Equal(t, "gpt-4o", probe.Model)
 	require.Equal(t, "You are BharatCode.", probe.Instructions)
 	require.NotNil(t, probe.Stream)
-	require.False(t, *probe.Stream, "non-streaming path must send stream:false")
+	require.True(t, *probe.Stream, "the provider must request a streaming response")
 
 	require.Len(t, probe.Input, 1)
 	require.Equal(t, "user", probe.Input[0].Role)
@@ -466,4 +466,126 @@ func TestResponsesProviderMissingKey(t *testing.T) {
 		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
 	})
 	require.ErrorIs(t, err, ErrAuth)
+}
+
+// streamingResponsesProvider stands up an httptest server that replies with an
+// event-stream body (Content-Type text/event-stream) so the provider exercises
+// its incremental SSE path rather than the buffered fallback. sse is the raw
+// event-stream body; each event must already be framed as "data: <json>\n\n".
+func streamingResponsesProvider(t *testing.T, model, sse string) Provider {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, sse)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("TEST_RESPONSES_KEY", "sk-resp-123")
+
+	cfg := testConfig("openai-responses", providerOpenAIResponses, server.URL+"/v1")
+	cfg.Providers[0].APIKeyEnv = "TEST_RESPONSES_KEY"
+	cfg.Providers[0].Models = []string{model}
+	cfg.Models[0].ID = model
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	provider, err := reg.Get("openai-responses")
+	require.NoError(t, err)
+	return provider
+}
+
+// TestResponsesProviderStreamsText asserts the SSE path emits each
+// output_text.delta as a DeltaTextEvent in order, maps reasoning deltas to
+// ThinkingEvents, and carries the usage from the terminal response.completed
+// envelope on the EndEvent.
+func TestResponsesProviderStreamsText(t *testing.T) {
+	sse := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n" +
+		"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"thinking...\"}\n\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello from \"}\n\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"BharatCode.\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":42,\"input_tokens_details\":{\"cached_tokens\":7},\"output_tokens\":13,\"total_tokens\":55}}}\n\n" +
+		"data: [DONE]\n\n"
+	provider := streamingResponsesProvider(t, "gpt-4o", sse)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "gpt-4o",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	var text string
+	for _, ev := range got {
+		if d, ok := ev.(DeltaTextEvent); ok {
+			text += d.Text
+		}
+	}
+	require.Equal(t, "Hello from BharatCode.", text)
+
+	think, ok := findEvent[ThinkingEvent](got)
+	require.True(t, ok, "reasoning deltas must surface as ThinkingEvents")
+	require.Equal(t, "thinking...", think.Text)
+
+	end, ok := findEvent[EndEvent](got)
+	require.True(t, ok, "expected a terminal EndEvent")
+	require.Equal(t, 42, end.Usage.InputTokens)
+	require.Equal(t, 13, end.Usage.OutputTokens)
+	require.Equal(t, 7, end.Usage.CacheReadTokens)
+}
+
+// TestResponsesProviderStreamsToolCall asserts a streamed function call —
+// announced by output_item.added then filled in by function_call_arguments.delta
+// chunks — is assembled into ToolUseStart/End events carrying the call_id, name,
+// and concatenated arguments, so the agent loop can dispatch it.
+func TestResponsesProviderStreamsToolCall(t *testing.T) {
+	sse := "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_abc\",\"name\":\"lookup\",\"arguments\":\"\"}}\n\n" +
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"q\\\":\"}\n\n" +
+		"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"\\\"weather\\\"}\"}\n\n" +
+		"data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"arguments\":\"{\\\"q\\\":\\\"weather\\\"}\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n"
+	provider := streamingResponsesProvider(t, "gpt-4o", sse)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "gpt-4o",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "weather?"}}}},
+		Tools:    []Tool{{Name: "lookup", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	start, ok := findEvent[ToolUseStartEvent](got)
+	require.True(t, ok, "expected a ToolUseStartEvent")
+	require.Equal(t, "call_abc", start.ID, "the model addresses the call by call_id")
+	require.Equal(t, "lookup", start.Name)
+
+	end, ok := findEvent[ToolUseEndEvent](got)
+	require.True(t, ok, "expected a ToolUseEndEvent")
+	require.Equal(t, "call_abc", end.ID)
+	require.Equal(t, "lookup", end.Name)
+	require.JSONEq(t, `{"q":"weather"}`, string(end.Input))
+
+	_, hasEnd := findEvent[EndEvent](got)
+	require.True(t, hasEnd, "EndEvent terminates the stream after the tool call")
+}
+
+// TestResponsesProviderStreamSurfacesFailure asserts a terminal
+// response.failed event is surfaced as an ErrorEvent (wrapping ErrServer for the
+// retry layer) carrying the reported message, and that no EndEvent follows it.
+func TestResponsesProviderStreamSurfacesFailure(t *testing.T) {
+	sse := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n" +
+		"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"model overloaded\"}}}\n\n"
+	provider := streamingResponsesProvider(t, "gpt-4o", sse)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "gpt-4o",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	errEv, ok := findEvent[ErrorEvent](got)
+	require.True(t, ok, "a failed stream must surface an ErrorEvent")
+	require.ErrorIs(t, errEv.Err, ErrServer)
+	require.Contains(t, errEv.Err.Error(), "model overloaded")
+
+	_, hasEnd := findEvent[EndEvent](got)
+	require.False(t, hasEnd, "no EndEvent after a surfaced failure")
 }

@@ -58,10 +58,12 @@ func (p *openAIResponsesProvider) SupportsImages() bool {
 	return supportsImages(p.models)
 }
 
-// Stream posts a non-streaming Responses request and emits the parsed output as
-// Start/DeltaText/ToolUse/End events. Native streaming is a followup; a request
-// carrying tools for a model that does not advertise tool support is rejected so
-// callers do not silently lose them.
+// Stream posts a streaming Responses request and emits the parsed output as
+// Start/DeltaText/Thinking/ToolUse/End events. The server-sent-event payload is
+// parsed incrementally; a server that ignores stream=true and replies with a
+// single JSON body is still handled via the buffered fallback in readResponse. A
+// request carrying tools for a model that does not advertise tool support is
+// rejected so callers do not silently lose them.
 func (p *openAIResponsesProvider) Stream(ctx context.Context, req Request) (<-chan Event, error) {
 	if len(req.Tools) > 0 && !modelSupportsTools(p.models, req.Model) {
 		return nil, fmt.Errorf("model %q tools: %w", req.Model, ErrUnsupportedFeature)
@@ -81,6 +83,7 @@ func (p *openAIResponsesProvider) Stream(ctx context.Context, req Request) (<-ch
 	if err != nil {
 		return nil, fmt.Errorf("building responses request: %w", err)
 	}
+	body.Stream = true
 	resp, err := postJSON(ctx, p.client, p.baseURL+"/responses", apiKey, body)
 	if err != nil {
 		return nil, err
@@ -96,6 +99,18 @@ func (p *openAIResponsesProvider) readResponse(ctx context.Context, resp *http.R
 	defer resp.Body.Close()
 
 	send(ctx, events, StartEvent{Provider: p.name, Model: model})
+
+	// The default path requests stream=true, so a Responses server replies with
+	// an event-stream we parse incrementally. A server that ignores the flag (or
+	// an error page) replies with a single JSON body; fall back to the buffered
+	// parse so neither shape is dropped.
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		if err := emitResponsesStream(ctx, resp.Body, events); err != nil {
+			emitTerminalError(ctx, events, err)
+		}
+		return
+	}
+
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		// A mid-read failure is a transient transport fault (a truncated or
@@ -272,4 +287,125 @@ func emitResponsesResponse(ctx context.Context, data []byte, events chan<- Event
 	state.endAll(ctx, events)
 	send(ctx, events, EndEvent{Usage: resp.Usage.toUsage()})
 	return nil
+}
+
+// responsesStreamEvent is one event from a streaming Responses reply. The event
+// kind lives in the JSON "type" field rather than the SSE event name, so a
+// single struct covers every kind: text/reasoning deltas (Delta), function-call
+// lifecycle (Item on output_item.added, Delta on
+// function_call_arguments.delta), the terminal envelope (Response on
+// response.completed/failed/incomplete), and a top-level error event
+// (Code/Message when Type == "error").
+type responsesStreamEvent struct {
+	Type        string `json:"type"`
+	Delta       string `json:"delta"`
+	OutputIndex int    `json:"output_index"`
+	Item        struct {
+		Type      string `json:"type"`
+		ID        string `json:"id"`
+		CallID    string `json:"call_id"`
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"item"`
+	Code     string             `json:"code"`
+	Message  string             `json:"message"`
+	Response *responsesResponse `json:"response"`
+}
+
+// emitResponsesStream parses a streaming Responses event-stream and emits
+// DeltaText/Thinking/ToolUse events as they arrive, followed by a terminal
+// EndEvent carrying the mapped usage. Start is emitted by the caller. Tool calls
+// are replayed through the shared toolCallState keyed by output_index so the
+// emitted events (and the empty/invalid-argument normalization) match the chat
+// and buffered paths exactly; the model addresses each call by call_id in later
+// turns, so that is the ID surfaced rather than the item's own id.
+func emitResponsesStream(ctx context.Context, body io.Reader, events chan<- Event) error {
+	state := newToolCallState()
+	var usage Usage
+	err := readSSE(ctx, body, func(ev sseEvent) error {
+		data := strings.TrimSpace(ev.Data)
+		if data == "" || data == "[DONE]" {
+			return nil
+		}
+		var e responsesStreamEvent
+		if jerr := json.Unmarshal([]byte(data), &e); jerr != nil {
+			// Keep-alives and any non-JSON comment lines carry no event payload.
+			return nil
+		}
+		switch e.Type {
+		case "response.output_text.delta":
+			if e.Delta != "" {
+				send(ctx, events, DeltaTextEvent{Text: e.Delta})
+			}
+		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+			if e.Delta != "" {
+				send(ctx, events, ThinkingEvent{Text: e.Delta})
+			}
+		case "response.output_item.added":
+			if e.Item.Type == "function_call" {
+				idx := e.OutputIndex
+				state.applyDelta(ctx, events, openAIToolCallDelta{
+					Index: &idx,
+					ID:    e.Item.CallID,
+					Type:  "function",
+					Function: openAIFunctionDelta{
+						Name:      e.Item.Name,
+						Arguments: e.Item.Arguments,
+					},
+				})
+			}
+		case "response.function_call_arguments.delta":
+			if e.Delta != "" {
+				idx := e.OutputIndex
+				state.applyDelta(ctx, events, openAIToolCallDelta{
+					Index:    &idx,
+					Function: openAIFunctionDelta{Arguments: e.Delta},
+				})
+			}
+		case "response.completed":
+			if e.Response != nil {
+				usage = e.Response.Usage.toUsage()
+			}
+		case "response.failed", "response.incomplete":
+			return responsesStreamError(e.Type, e.Response)
+		case "error":
+			msg := e.Message
+			if msg == "" {
+				msg = e.Code
+			}
+			if msg == "" {
+				msg = "stream error"
+			}
+			return fmt.Errorf("responses api: %s: %w", msg, ErrServer)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// Close any open tool calls first, then emit a single terminal EndEvent so
+	// the trailing ToolUseEndEvents are not ordered after End.
+	state.endAll(ctx, events)
+	send(ctx, events, EndEvent{Usage: usage})
+	return nil
+}
+
+// responsesStreamError builds the error for a terminal failed/incomplete stream
+// event, preferring the response object's reported status and error message.
+func responsesStreamError(kind string, resp *responsesResponse) error {
+	status := strings.TrimPrefix(kind, "response.")
+	msg := "stream " + status
+	if resp != nil {
+		if resp.Status != "" {
+			status = resp.Status
+		}
+		if resp.Error != nil {
+			if resp.Error.Message != "" {
+				msg = resp.Error.Message
+			} else if resp.Error.Code != "" {
+				msg = resp.Error.Code
+			}
+		}
+	}
+	return fmt.Errorf("responses api %s: %s: %w", status, msg, ErrServer)
 }

@@ -152,6 +152,58 @@ func TestTabs_CycleAndClose(t *testing.T) {
 	require.Equal(t, "sessBBBB2222", m.sessionID)
 }
 
+// TestTabs_CtrlTabAliasesSwitch proves the Ctrl+Tab / Ctrl+Shift+Tab aliases
+// drive the same next/prev cycling as Ctrl+Right/Left, through the real Update
+// key path, and that the /keys help documents the aliases so they are
+// discoverable rather than hidden.
+func TestTabs_CtrlTabAliasesSwitch(t *testing.T) {
+	h := newAgentHarness(t, &scriptedProvider{})
+	m := h.model
+
+	_ = m.newTab()
+	_ = m.newTab()
+	require.Len(t, m.tabs, 3)
+	m.tabs[0].sessionID = "sessAAAA1111"
+	m.tabs[1].sessionID = "sessBBBB2222"
+	m.tabs[2].sessionID = "sessCCCC3333"
+	m.loadTab(0)
+	require.Equal(t, 0, m.activeTab)
+
+	// Ctrl+Tab cycles forward, exactly like Ctrl+Right.
+	_, cmd := m.Update(keyCtrlTab(false))
+	h.run(t, cmd)
+	require.Equal(t, 1, m.activeTab, "Ctrl+Tab advances to the next tab")
+	require.Equal(t, "sessBBBB2222", m.sessionID)
+
+	// Ctrl+Shift+Tab cycles backward, exactly like Ctrl+Left, wrapping past the
+	// first tab to the last.
+	_, cmd = m.Update(keyCtrlTab(true))
+	h.run(t, cmd)
+	require.Equal(t, 0, m.activeTab, "Ctrl+Shift+Tab steps to the previous tab")
+	require.Equal(t, "sessAAAA1111", m.sessionID)
+
+	_, cmd = m.Update(keyCtrlTab(true))
+	h.run(t, cmd)
+	require.Equal(t, 2, m.activeTab, "Ctrl+Shift+Tab wraps from the first tab to the last")
+	require.Equal(t, "sessCCCC3333", m.sessionID)
+
+	// The aliases must be documented in the /keys overlay, the only in-app place
+	// the Ctrl-key shortcuts are surfaced.
+	help := keybindingHelpBody()
+	require.Contains(t, help, "Ctrl+Tab")
+	require.Contains(t, help, "Ctrl+Shift+Tab")
+}
+
+// keyCtrlTab builds the Ctrl+Tab (or Ctrl+Shift+Tab when shift is set) key press
+// the model dispatches on by its String() form.
+func keyCtrlTab(shift bool) tea.KeyPressMsg {
+	mod := tea.ModCtrl
+	if shift {
+		mod |= tea.ModShift
+	}
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyTab, Mod: mod})
+}
+
 // TestTabs_SwitchBlockedDuringRun proves a tab switch is refused while an agent
 // turn is in flight, so streamed output never lands in the wrong tab.
 func TestTabs_SwitchBlockedDuringRun(t *testing.T) {

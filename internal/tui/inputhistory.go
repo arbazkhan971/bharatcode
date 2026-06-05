@@ -11,6 +11,7 @@ const maxInputHistory = 100
 // listed in slashHelpLines.
 var slashCommands = []string{
 	"/help",
+	"/keys",
 	"/clear",
 	"/model",
 	"/agent",

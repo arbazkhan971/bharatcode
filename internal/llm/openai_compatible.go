@@ -92,7 +92,7 @@ func (p *openAICompatibleProvider) Stream(ctx context.Context, req Request) (<-c
 	if isOpenRouter(p.baseURL) && !isReasoningModel(req.Model) {
 		body.Reasoning = openRouterReasoning(req)
 	}
-	resp, err := postJSON(ctx, p.client, appendPath(p.baseURL, "/chat/completions"), apiKey, body)
+	resp, err := postOpenAIJSON(ctx, p.client, p.baseURL, appendPath(p.baseURL, "/chat/completions"), apiKey, body)
 	if err != nil {
 		return nil, err
 	}

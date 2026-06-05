@@ -1,6 +1,10 @@
 package tools
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestClassifyTestRunner(t *testing.T) {
 	cases := map[string]testRunner{
@@ -535,6 +539,50 @@ func TestSummarizeTestFailures(t *testing.T) {
 	want := "[test failures: 2]\n  TestFoo — foo_test.go:42: boom\n  TestBar"
 	if s != want {
 		t.Errorf("summary mismatch:\n got %q\nwant %q", s, want)
+	}
+}
+
+func TestSummarizeTestFailuresCapsLongLists(t *testing.T) {
+	// A wholesale breakage produces far more failures than the inline cap; the
+	// summary lists maxSummarizedFailures of them, reports the true total in the
+	// header, and collapses the rest into an explicit "... and N more" marker.
+	total := maxSummarizedFailures + 7
+	failures := make([]testFailure, total)
+	for i := range failures {
+		failures[i] = testFailure{Name: fmt.Sprintf("Test%03d", i)}
+	}
+	s := summarizeTestFailures(failures)
+
+	if want := fmt.Sprintf("[test failures: %d]", total); !strings.HasPrefix(s, want) {
+		t.Errorf("header = %q, want prefix %q", s, want)
+	}
+	lines := strings.Split(s, "\n")
+	// header + maxSummarizedFailures entries + the "... and N more" line.
+	if wantLines := 1 + maxSummarizedFailures + 1; len(lines) != wantLines {
+		t.Fatalf("line count = %d, want %d", len(lines), wantLines)
+	}
+	if last := lines[len(lines)-1]; last != "  ... and 7 more" {
+		t.Errorf("trailer = %q, want %q", last, "  ... and 7 more")
+	}
+	// The last shown entry is the one immediately before the cap; entries past it
+	// must not appear inline.
+	if strings.Contains(s, fmt.Sprintf("Test%03d", maxSummarizedFailures)) {
+		t.Errorf("summary should not contain the first elided entry:\n%s", s)
+	}
+}
+
+func TestSummarizeTestFailuresNoCapAtBoundary(t *testing.T) {
+	// Exactly maxSummarizedFailures failures fit without a "... and N more" line.
+	failures := make([]testFailure, maxSummarizedFailures)
+	for i := range failures {
+		failures[i] = testFailure{Name: fmt.Sprintf("Test%03d", i)}
+	}
+	s := summarizeTestFailures(failures)
+	if strings.Contains(s, "more") {
+		t.Errorf("boundary summary should not be truncated:\n%s", s)
+	}
+	if got := strings.Count(s, "\n"); got != maxSummarizedFailures {
+		t.Errorf("entry line count = %d, want %d", got, maxSummarizedFailures)
 	}
 }
 

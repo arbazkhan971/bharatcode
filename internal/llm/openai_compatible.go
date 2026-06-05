@@ -141,8 +141,15 @@ func (p *openAICompatibleProvider) handleStreamChunk(ctx context.Context, data s
 		if choice.Delta.Content != "" {
 			send(ctx, events, DeltaTextEvent{Text: choice.Delta.Content})
 		}
-		if choice.Delta.ReasoningContent != "" {
-			send(ctx, events, ThinkingEvent{Text: choice.Delta.ReasoningContent})
+		// A reasoning model exposes its thinking under reasoning_content when
+		// reached directly (DeepSeek) and under reasoning when reached via
+		// OpenRouter. A single provider populates only one of the two, so prefer
+		// reasoning_content and fall back to reasoning rather than emitting both,
+		// which would double a relay that ever echoed the text into each field.
+		if reasoning := choice.Delta.ReasoningContent; reasoning != "" {
+			send(ctx, events, ThinkingEvent{Text: reasoning})
+		} else if choice.Delta.Reasoning != "" {
+			send(ctx, events, ThinkingEvent{Text: choice.Delta.Reasoning})
 		}
 		for _, call := range choice.Delta.ToolCalls {
 			state.applyDelta(ctx, events, call)

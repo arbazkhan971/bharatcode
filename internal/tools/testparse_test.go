@@ -66,6 +66,38 @@ testing.tRunner.func1.2(...)
 	assertFailures(t, got, want)
 }
 
+func TestParseGoTestFailures_JSON(t *testing.T) {
+	// `go test -json` wraps every line in an event object, so the text "--- FAIL:"
+	// matcher never fires; the JSON parser keys on "fail" events instead and pulls
+	// detail from the preceding "output" events.
+	out := `{"Action":"run","Test":"TestOK"}
+{"Action":"pass","Test":"TestOK","Elapsed":0}
+{"Action":"run","Test":"TestFoo"}
+{"Action":"output","Test":"TestFoo","Output":"    foo_test.go:42: expected 1, got 2\n"}
+{"Action":"output","Test":"TestFoo","Output":"--- FAIL: TestFoo (0.01s)\n"}
+{"Action":"fail","Test":"TestFoo","Elapsed":0.01}
+{"Action":"run","Test":"TestNoDetail"}
+{"Action":"fail","Test":"TestNoDetail","Elapsed":0}
+{"Action":"fail","Package":"github.com/x/y","Elapsed":0.12}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo", Detail: "foo_test.go:42: expected 1, got 2"},
+		{Name: "TestNoDetail"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_JSONPanic(t *testing.T) {
+	out := `{"Action":"run","Test":"TestPanics"}
+{"Action":"output","Test":"TestPanics","Output":"panic: boom [recovered]\n"}
+{"Action":"fail","Test":"TestPanics","Elapsed":0}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "TestPanics", Detail: "panic: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseGoTestFailures_BuildFailed(t *testing.T) {
 	out := `# github.com/x/y [github.com/x/y.test]
 ./y_test.go:10:2: undefined: helper

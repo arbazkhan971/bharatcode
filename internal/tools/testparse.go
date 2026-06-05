@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -116,6 +117,14 @@ var (
 // to compile produces a "FAIL pkg [build failed]" entry instead, with the first
 // compiler error in that package's block as its detail.
 func parseGoTestFailures(output string) []testFailure {
+	// `go test -json` (and wrappers like gotestsum) emit a newline-delimited
+	// event stream rather than the "--- FAIL:" lines the text parser keys on.
+	// Detect and dispatch to the JSON parser so CI/IDE-style invocations still
+	// surface structured failures.
+	if looksLikeGoTestJSON(output) {
+		return parseGoTestJSONFailures(output)
+	}
+
 	lines := splitLines(output)
 	var failures []testFailure
 	// The first compiler error since the current package's "# pkg" header, used
@@ -163,6 +172,101 @@ func parseGoTestFailures(output string) []testFailure {
 		failures = append(failures, f)
 	}
 	return failures
+}
+
+// goJSONEvent is one event from the `go test -json` stream (the shape produced
+// by the testing package's JSON output). Only the fields the parser needs are
+// decoded; unknown fields are ignored.
+type goJSONEvent struct {
+	Action  string `json:"Action"`
+	Test    string `json:"Test"`
+	Package string `json:"Package"`
+	Output  string `json:"Output"`
+}
+
+// looksLikeGoTestJSON reports whether output is a `go test -json` event stream
+// (newline-delimited JSON objects carrying an "Action" field) rather than the
+// human-readable verbose output. Only the first non-blank line is inspected: a
+// genuine stream begins with an event, and prose that merely contains JSON
+// later does not warrant the JSON parser.
+func looksLikeGoTestJSON(output string) bool {
+	for _, ln := range splitLines(output) {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		if !strings.HasPrefix(ln, "{") {
+			return false
+		}
+		var ev goJSONEvent
+		if err := json.Unmarshal([]byte(ln), &ev); err != nil {
+			return false
+		}
+		return ev.Action != ""
+	}
+	return false
+}
+
+// parseGoTestJSONFailures extracts failing tests from a `go test -json` stream.
+// A test fails when it receives an "Action":"fail" event carrying a Test name
+// (package-level fail events, which omit Test, are skipped — their individual
+// tests already reported). The detail is the first assertion ("file.go:line:")
+// or panic line seen in that test's "output" events, mirroring the text parser.
+// Failing tests are returned in first-seen order for deterministic output.
+func parseGoTestJSONFailures(output string) []testFailure {
+	var order []string
+	failed := map[string]bool{}
+	detail := map[string]string{}
+	for _, ln := range splitLines(output) {
+		ln = strings.TrimSpace(ln)
+		if !strings.HasPrefix(ln, "{") {
+			continue
+		}
+		var ev goJSONEvent
+		if err := json.Unmarshal([]byte(ln), &ev); err != nil {
+			continue
+		}
+		switch ev.Action {
+		case "output":
+			if ev.Test == "" {
+				continue
+			}
+			if _, ok := detail[ev.Test]; ok {
+				continue // keep the first detail line per test
+			}
+			if d := goDetailFromOutput(ev.Output); d != "" {
+				detail[ev.Test] = d
+			}
+		case "fail":
+			if ev.Test == "" {
+				continue // package-level fail, not an individual test
+			}
+			if !failed[ev.Test] {
+				failed[ev.Test] = true
+				order = append(order, ev.Test)
+			}
+		}
+	}
+	var failures []testFailure
+	for _, name := range order {
+		failures = append(failures, testFailure{Name: name, Detail: detail[name]})
+	}
+	return failures
+}
+
+// goDetailFromOutput pulls an assertion or panic message out of a single
+// "output" event's text, reusing the same matchers as the text parser so JSON
+// and verbose output yield identical detail lines. Returns "" when the line is
+// neither.
+func goDetailFromOutput(out string) string {
+	line := strings.TrimRight(out, "\r\n")
+	if d := goDetailRe.FindStringSubmatch(line); d != nil {
+		return strings.TrimSpace(d[1])
+	}
+	if p := goPanicRe.FindStringSubmatch(strings.TrimSpace(line)); p != nil {
+		return "panic: " + strings.TrimSpace(p[1])
+	}
+	return ""
 }
 
 // "FAILED tests/test_x.py::test_y - AssertionError: ..." (pytest short summary).

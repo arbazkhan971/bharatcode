@@ -40,6 +40,7 @@ var readClassTools = map[string]bool{
 	"glob":        true,
 	"diagnostics": true,
 	"symbols":     true,
+	"navigate":    true,
 	"web_fetch":   true,
 	"web_search":  true,
 	"job_output":  true,

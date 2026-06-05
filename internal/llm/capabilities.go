@@ -130,8 +130,18 @@ var contextWindowRules = []struct {
 	{"gpt-4.5", 128_000},
 	{"gpt-4o", 128_000},
 	{"gpt-4-turbo", 128_000},
+	// gpt-4-32k is the 32k-window variant of the original GPT-4. Its id
+	// contains the "gpt-4" marker, so this specific rule must precede the bare
+	// "gpt-4" family rule (8k) to avoid mis-resolving to a quarter of its real
+	// window.
+	{"gpt-4-32k", 32_768},
 	{"gpt-4", 8_192},
 	{"gpt-3.5", 16_385},
+	// Azure OpenAI deployments name the GPT-3.5 family without the dot
+	// ("gpt-35-turbo", "gpt-35-turbo-16k"), which the dotted "gpt-3.5" rule
+	// above does not match. The current Azure default ships a 16k window, so
+	// this rule keeps the dot-less ids from falling through to "unknown" (0).
+	{"gpt-35", 16_385},
 	{"gpt-5", 400_000},
 	// OpenAI o-series. The released o1 (and o3/o4-mini) expose a 200k window, but
 	// the earlier o1-preview and o1-mini shipped only 128k. Both carry the "o1"

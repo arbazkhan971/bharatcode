@@ -100,6 +100,54 @@ func TestStat_StylesSegments(t *testing.T) {
 	require.Contains(t, got, theme.DiffRemove.Render("-1"))
 }
 
+// TestStatLines_PerFileBreakdown checks that a multi-file patch yields the
+// aggregate header plus one indented row per file with that file's own +A -B
+// counts and its working-tree path (the a/ b/ prefix stripped).
+func TestStatLines_PerFileBreakdown(t *testing.T) {
+	t.Parallel()
+
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,3 @@\n package main\n-func old() {}\n+func new() {}\n" +
+		"--- a/util.go\n+++ b/util.go\n@@ -1,1 +1,2 @@\n+// added\n+func helper() {}\n"
+	got := New(styles.Theme{}).StatLines(patch)
+	lines := strings.Split(got, "\n")
+
+	require.Equal(t, "2 files changed, +3 -1", lines[0])
+	require.Equal(t, "  main.go  +1 -1", lines[1])
+	require.Equal(t, "  util.go  +2 -0", lines[2])
+	require.Len(t, lines, 3)
+}
+
+// TestStatLines_SingleFileIsHeaderOnly checks that a one-file patch returns just
+// the aggregate header, with no per-file row, so the common case is unchanged.
+func TestStatLines_SingleFileIsHeaderOnly(t *testing.T) {
+	t.Parallel()
+
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	got := New(styles.Theme{}).StatLines(patch)
+	require.Equal(t, "1 file changed, +1 -1", got)
+}
+
+// TestStatLines_AlignsPaths checks that per-file rows pad the path column to the
+// widest name so the +A -B counts line up.
+func TestStatLines_AlignsPaths(t *testing.T) {
+	t.Parallel()
+
+	patch := "--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n-x\n+y\n" +
+		"--- a/longer.go\n+++ b/longer.go\n@@ -0,0 +1,1 @@\n+z\n"
+	got := New(styles.Theme{}).StatLines(patch)
+	lines := strings.Split(got, "\n")
+
+	require.Equal(t, "  a.go       +1 -1", lines[1])
+	require.Equal(t, "  longer.go  +1 -0", lines[2])
+}
+
+// TestStatLines_EmptyPatch checks that a content-free patch yields no summary.
+func TestStatLines_EmptyPatch(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", New(styles.Theme{}).StatLines(""))
+}
+
 // TestUnifiedHeader_StyledDistinctly checks that file-boundary metadata lines
 // (---, +++, diff --git, index) are rendered with the header style and not
 // mistaken for added/removed content, so file boundaries stand out in a

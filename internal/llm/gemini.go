@@ -270,6 +270,14 @@ func classifyGeminiStreamError(status string, code int, msg string) error {
 		return fmt.Errorf("provider stream error: %s: %w", msg, ErrRateLimit)
 	case "UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED":
 		return fmt.Errorf("provider stream error: %s: %w", msg, ErrServer)
+	case "INVALID_ARGUMENT":
+		// A prompt that overflows the model context window comes back as
+		// INVALID_ARGUMENT whose message names the token overflow. Surface it as
+		// ErrContextLimit so the agent's compaction/overflow path can recover
+		// instead of treating it as an unrecoverable bad request.
+		if mentionsContextLimit(msg) {
+			return fmt.Errorf("provider stream error: %s: %w", msg, ErrContextLimit)
+		}
 	}
 	if code == http.StatusTooManyRequests {
 		return fmt.Errorf("provider stream error: %s: %w", msg, ErrRateLimit)

@@ -295,6 +295,60 @@ func TestGeminiClassifiesStreamErrorAsRetryable(t *testing.T) {
 	require.ErrorIs(t, streamErr, ErrRateLimit)
 }
 
+func TestGeminiClassifiesContextOverflowStreamError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// An over-budget prompt comes back mid-stream as INVALID_ARGUMENT whose
+		// message names the token overflow; it must map to ErrContextLimit so the
+		// compaction path can recover rather than fail the turn outright.
+		_, _ = io.WriteString(w, geminiSSE(
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"The input token count (1290224) exceeds the maximum number of tokens allowed (1048575)."}}`,
+		))
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.NoError(t, err)
+	collected := collectEvents(events)
+
+	var streamErr error
+	for _, ev := range collected {
+		if e, ok := ev.(ErrorEvent); ok {
+			streamErr = e.Err
+		}
+	}
+	require.Error(t, streamErr)
+	require.ErrorIs(t, streamErr, ErrContextLimit)
+}
+
+func TestGeminiClassifiesContextOverflowHTTPError(t *testing.T) {
+	stubSleep(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Gemini rejects an over-budget prompt before streaming with a 400 whose
+		// body uses its own token-overflow wording, not the OpenAI/Anthropic
+		// "context length" phrasing.
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"The input token count (1290224) exceeds the maximum number of tokens allowed (1048575)."}}`)
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	_, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.ErrorIs(t, err, ErrContextLimit)
+}
+
 func TestGeminiSurfacesBlockingFinishReason(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

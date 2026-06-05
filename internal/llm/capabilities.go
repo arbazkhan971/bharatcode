@@ -165,6 +165,10 @@ var contextWindowRules = []struct {
 	// instead of the family default.
 	{"ministral", 128_000},
 	{"devstral", 128_000},
+	// Magistral is Mistral's reasoning line (Small/Medium); its id carries
+	// neither the "mistral" marker nor any other family marker above, so it
+	// needs its own rule to avoid falling through to "unknown" (0).
+	{"magistral", 128_000},
 	{"mistral", 32_768},
 	{"qwen", 32_768},
 	// Microsoft Phi open-weight line — Phi-3/Phi-3.5 (mini, small, medium, MoE) as

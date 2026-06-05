@@ -47,7 +47,13 @@ func TestInferContextWindow(t *testing.T) {
 		{"meta-llama/Llama-4-Scout-17B-16E-Instruct", 10_485_760},
 		{"meta-llama/llama-4-maverick", 1_048_576},
 		{"mixtral-8x7b", 32_768},
-		{"mistral-large", 32_768},
+		// Mistral Large 2 lifted the window to 128k; its id carries the "mistral"
+		// marker, so the specific rule must win over the family default (32k).
+		{"mistral-large-latest", 128_000},
+		{"mistral-large-2411", 128_000},
+		// A bare Mistral model with no more specific marker still resolves to the
+		// 32k family default.
+		{"mistral-small-latest", 32_768},
 		// Ministral and Devstral ship a 128k window and do not contain the
 		// "mistral" marker, so each needs its own rule rather than the family
 		// default (32k) — or, before these rules existed, "unknown" (0).

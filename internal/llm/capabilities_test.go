@@ -21,7 +21,16 @@ func TestInferContextWindow(t *testing.T) {
 		// family rule.
 		{"gpt-4.5-preview", 128_000},
 		{"gpt-4", 8_192},
+		// gpt-4-32k is a real 32k model whose id contains "gpt-4"; it must win
+		// over the bare 8k family rule rather than mis-resolving to a quarter of
+		// its window.
+		{"gpt-4-32k", 32_768},
+		{"gpt-4-32k-0613", 32_768},
 		{"gpt-3.5-turbo", 16_385},
+		// Azure names the GPT-3.5 family without the dot; these dot-less ids must
+		// resolve to the 16k window rather than falling through to "unknown" (0).
+		{"gpt-35-turbo", 16_385},
+		{"gpt-35-turbo-16k", 16_385},
 		{"gpt-5", 400_000},
 		// o1-preview and o1-mini shipped a 128k window; the released o1 and the
 		// o3/o4-mini line are 200k. The specific preview/mini rules must win over

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
+	"github.com/arbazkhan971/bharatcode/internal/diffutil"
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/util/fsext"
@@ -123,9 +124,16 @@ func (t *formatTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 	}
 
 	content := fmt.Sprintf("formatted %s (%d edit(s))", args.Path, len(edits))
+	metadata := map[string]any{"path": path, "edits": len(edits)}
+	// Surface a unified diff of the reformatting so the model can see exactly
+	// what changed, mirroring the edit tool's output shaping.
+	if d := diffutil.Unified(string(oldContent), newText); d != "" {
+		content += "\n\n" + d
+		metadata["diff"] = d
+	}
 	return Result{
 		Content:  content,
-		Metadata: map[string]any{"path": path, "edits": len(edits)},
+		Metadata: metadata,
 	}, nil
 }
 

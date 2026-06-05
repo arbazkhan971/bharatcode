@@ -106,6 +106,15 @@ func TestInferContextWindow(t *testing.T) {
 		{"deepseek-chat", 131_072},
 		{"deepseek-reasoner", 131_072},
 		{"deepseek/deepseek-chat-v3.1", 131_072},
+		// MiniMax-01 and MiniMax-M1 ship a 1M native window; their ids carry no
+		// broader family marker, so each resolves via the dedicated rule rather
+		// than falling through to "unknown" (0).
+		{"minimax/minimax-01", 1_000_000},
+		{"MiniMax-M1-80k", 1_000_000},
+		{"minimax-text-01", 1_000_000},
+		// Baidu ERNIE 4.5 exposes a 128k window via its own rule.
+		{"ernie-4.5-300b-a47b", 131_072},
+		{"baidu/ernie-4.5-21b-a3b", 131_072},
 		// Amazon Nova (Bedrock): Pro/Lite are 300k, Micro is 128k.
 		{"nova-pro-v1", 300_000},
 		{"nova-lite-v1", 300_000},

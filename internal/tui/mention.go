@@ -156,9 +156,16 @@ func renderMentionBlock(rel string, body []byte, truncated bool) string {
 	return b.String()
 }
 
-// mentionLang maps a file extension to a fenced-code language hint. An unknown
-// or absent extension yields an empty hint, which renders as a plain block.
+// mentionLang maps a file to a fenced-code language hint. It first checks the
+// base name for well-known files that carry no informative extension — a
+// Dockerfile, a Makefile, go.mod — the way opencode and Claude Code tag those
+// attachments by name rather than suffix; it then falls back to the extension.
+// An unrecognized name with no known extension yields an empty hint, which
+// renders as a plain block.
 func mentionLang(rel string) string {
+	if lang := mentionLangByName(strings.ToLower(filepath.Base(rel))); lang != "" {
+		return lang
+	}
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(rel), "."))
 	switch ext {
 	case "go":
@@ -177,7 +184,15 @@ func mentionLang(rel string) string {
 		return "java"
 	case "rb":
 		return "ruby"
-	case "sh", "bash":
+	case "kt", "kts":
+		return "kotlin"
+	case "swift":
+		return "swift"
+	case "php":
+		return "php"
+	case "scala":
+		return "scala"
+	case "sh", "bash", "zsh":
 		return "bash"
 	case "json":
 		return "json"
@@ -195,8 +210,40 @@ func mentionLang(rel string) string {
 		return "sql"
 	case "c", "h":
 		return "c"
-	case "cpp", "cc", "hpp":
+	case "cpp", "cc", "hpp", "cxx":
 		return "cpp"
+	case "xml":
+		return "xml"
+	case "ini", "cfg", "conf":
+		return "ini"
+	case "dockerfile":
+		return "dockerfile"
+	case "mk":
+		return "makefile"
+	default:
+		return ""
+	}
+}
+
+// mentionLangByName maps a lower-cased base name to a fenced-code language hint
+// for well-known files that carry no informative extension (Dockerfile,
+// Makefile) or whose tag conventionally follows the whole name (go.mod). It
+// returns "" when the name is not special, leaving extension-based detection to
+// the caller.
+func mentionLangByName(base string) string {
+	switch base {
+	case "dockerfile", "containerfile":
+		return "dockerfile"
+	case "makefile", "gnumakefile":
+		return "makefile"
+	case "go.mod", "go.sum":
+		return "go"
+	case "cmakelists.txt":
+		return "cmake"
+	case ".gitignore", ".dockerignore", ".gitattributes":
+		return "gitignore"
+	case ".env":
+		return "bash"
 	default:
 		return ""
 	}

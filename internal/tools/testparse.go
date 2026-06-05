@@ -166,13 +166,15 @@ func parseGoTestFailures(output string) []testFailure {
 }
 
 // "FAILED tests/test_x.py::test_y - AssertionError: ..." (pytest short summary).
-var pytestFailRe = regexp.MustCompile(`^FAILED (\S+)(?: - (.*))?$`)
+// "ERROR" lines appear here too, for collection/fixture/teardown errors that
+// never reach an assertion; both are actionable failures the agent must see.
+var pytestFailRe = regexp.MustCompile(`^(?:FAILED|ERROR) (\S+)(?: - (.*))?$`)
 
 // "tests/test_x.py::test_y FAILED" (pytest verbose, no summary).
 var pytestVerboseRe = regexp.MustCompile(`^(\S+::\S+) (?:FAILED|ERROR)\b`)
 
-// parsePytestFailures prefers the short-summary "FAILED <id> - <msg>" lines and
-// falls back to verbose "<id> FAILED" lines when no summary is present.
+// parsePytestFailures prefers the short-summary "FAILED/ERROR <id> - <msg>"
+// lines and falls back to verbose "<id> FAILED" lines when no summary is present.
 func parsePytestFailures(output string) []testFailure {
 	lines := splitLines(output)
 	var failures []testFailure

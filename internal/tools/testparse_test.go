@@ -126,6 +126,23 @@ FAILED tests/test_b.py::test_three
 	assertFailures(t, got, want)
 }
 
+func TestParsePytestFailures_SummaryErrors(t *testing.T) {
+	// pytest reports collection/fixture errors as ERROR lines in the short
+	// summary (alongside any FAILED lines); both must surface.
+	out := `=========================== short test summary info ============================
+FAILED tests/test_a.py::test_two - AssertionError: assert 1 == 2
+ERROR tests/test_b.py::test_three - ValueError: boom
+ERROR tests/test_c.py
+======================== 1 failed, 2 errors in 0.05s ===========================`
+	got := parseTestFailures("pytest -q", out)
+	want := []testFailure{
+		{Name: "tests/test_a.py::test_two", Detail: "AssertionError: assert 1 == 2"},
+		{Name: "tests/test_b.py::test_three", Detail: "ValueError: boom"},
+		{Name: "tests/test_c.py"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParsePytestFailures_VerboseFallback(t *testing.T) {
 	out := `tests/test_a.py::test_one PASSED
 tests/test_a.py::test_two FAILED

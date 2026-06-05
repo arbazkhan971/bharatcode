@@ -97,17 +97,52 @@ var (
 	// than failing an assertion. A trailing " [recovered]" is the testing
 	// framework's marker, not part of the message, so it is dropped.
 	goPanicRe = regexp.MustCompile(`^panic: (.*?)(?: \[recovered\])?$`)
+	// "FAIL\tgithub.com/x/y [build failed]" — a package that failed to compile
+	// (or whose test setup failed) rather than a failing assertion. Go emits no
+	// "--- FAIL:" line in this case, so without separate handling a failed run
+	// would surface zero structured failures.
+	goBuildFailRe = regexp.MustCompile(`^FAIL\s+(\S+) \[(build failed|setup failed)\]$`)
+	// A compiler/vet diagnostic at column 0, e.g. "./foo.go:10:2: undefined: x"
+	// or an absolute path. Used as the detail for a build failure. Indented
+	// assertion details are matched by goDetailRe instead, so the two do not
+	// collide.
+	goCompileErrRe = regexp.MustCompile(`^\S*\.go:\d+:\d+: .+`)
 )
 
 // parseGoTestFailures handles `go test` verbose/non-verbose output. Each
 // "--- FAIL:" line names a failed test; the detail is the first following
 // indented "file.go:line:" line or "panic:" line (before the next "---" marker),
-// so both assertion failures and panics surface a message.
+// so both assertion failures and panics surface a message. A package that fails
+// to compile produces a "FAIL pkg [build failed]" entry instead, with the first
+// compiler error in that package's block as its detail.
 func parseGoTestFailures(output string) []testFailure {
 	lines := splitLines(output)
 	var failures []testFailure
+	// The first compiler error since the current package's "# pkg" header, used
+	// as the detail when that package reports a build failure.
+	compileErr := ""
 	for i := 0; i < len(lines); i++ {
-		m := goFailRe.FindStringSubmatch(lines[i])
+		line := lines[i]
+		if strings.HasPrefix(line, "# ") {
+			// A new package block begins in the build output; any earlier
+			// compiler error belonged to a different package.
+			compileErr = ""
+			continue
+		}
+		if compileErr == "" && goCompileErrRe.MatchString(line) {
+			compileErr = strings.TrimSpace(line)
+			continue
+		}
+		if m := goBuildFailRe.FindStringSubmatch(line); m != nil {
+			f := testFailure{Name: m[1] + " [" + m[2] + "]"}
+			if compileErr != "" {
+				f.Detail = compileErr
+			}
+			failures = append(failures, f)
+			compileErr = ""
+			continue
+		}
+		m := goFailRe.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}

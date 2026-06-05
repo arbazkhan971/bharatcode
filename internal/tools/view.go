@@ -167,9 +167,9 @@ func (t *ViewTool) viewImage(ctx context.Context, path string, size int64) (Resu
 	return Result{
 		Content: "image file: " + path,
 		Metadata: map[string]any{
-			"path":      path,
-			"image":     base64.StdEncoding.EncodeToString(data),
-			"mime_type": mimeType,
+			"path":           path,
+			MetadataImage:    base64.StdEncoding.EncodeToString(data),
+			MetadataMimeType: mimeType,
 		},
 	}, nil
 }

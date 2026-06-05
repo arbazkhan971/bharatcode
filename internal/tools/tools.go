@@ -50,6 +50,16 @@ type Result struct {
 	VerifyNeeded bool `json:"verify_needed,omitempty"`
 }
 
+// Metadata keys a tool may set on Result to attach an inline image. The agent
+// loop forwards such an image to vision-capable models as a real image block so
+// the model sees the pixels, not just the text placeholder in Result.Content.
+const (
+	// MetadataImage holds standard-base64-encoded image bytes.
+	MetadataImage = "image"
+	// MetadataMimeType holds the image MIME type, e.g. "image/png".
+	MetadataMimeType = "mime_type"
+)
+
 // Dependencies groups collaborators injected into built-in tools.
 type Dependencies struct {
 	Config      *config.Config

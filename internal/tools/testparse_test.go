@@ -14,6 +14,11 @@ func TestClassifyTestRunner(t *testing.T) {
 		"python -m py.test":                     runnerPytest,
 		"python -m unittest test_mod":           runnerUnittest,
 		"python -m unittest discover":           runnerUnittest,
+		"nose2":                                 runnerUnittest,
+		"nose2 -v tests":                        runnerUnittest,
+		"python -m nose2":                       runnerUnittest,
+		"nosetests tests/":                      runnerUnittest,
+		"echo a diagnosis2 of the problem":      runnerNone,
 		"npm test":                              runnerJest,
 		"npm run test -- --ci":                  runnerJest,
 		"yarn test":                             runnerJest,
@@ -318,6 +323,30 @@ FAILED (failures=1)`
 	got := parseTestFailures("python -m unittest discover", out)
 	want := []testFailure{
 		{Name: "test_x (mod.T)", Detail: "AssertionError"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseUnittestFailures_Nose2(t *testing.T) {
+	// nose2 renders results through unittest's TextTestResult, so its output
+	// drives the same parser: the "nose2" command must be recognized and the
+	// "FAIL:/ERROR: <id>" blocks parsed identically to `python -m unittest`.
+	out := `.F
+======================================================================
+FAIL: test_add (tests.test_calc.CalcTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "tests/test_calc.py", line 6, in test_add
+    self.assertEqual(add(2, 2), 5)
+AssertionError: 4 != 5
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.001s
+
+FAILED (failures=1)`
+	got := parseTestFailures("nose2 -v tests", out)
+	want := []testFailure{
+		{Name: "test_add (tests.test_calc.CalcTests)", Detail: "AssertionError: 4 != 5"},
 	}
 	assertFailures(t, got, want)
 }

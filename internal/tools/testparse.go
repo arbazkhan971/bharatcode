@@ -158,6 +158,14 @@ var (
 	// substrings at a word boundary — from matching. Checked after rspecRe so a
 	// "bundle exec rspec" invocation (RSpec, not Minitest) is classified first.
 	minitestRe = regexp.MustCompile(`\brails test\b|\brake test\b|\bminitest\b|\bruby\b.*\s-itest\b`)
+	// "nose2" and "nosetests" (classic nose) are Python runners built on the
+	// stdlib unittest framework: both render results through unittest's
+	// TextTestResult, so their failure output is the same "FAIL:/ERROR: <id>"
+	// block the unittest parser handles. \b keeps prose like "a diagnosis2 step"
+	// from matching while admitting "nose2", "python -m nose2", and "nosetests".
+	// The bare package name "nose" is intentionally not matched, since it appears
+	// as an ordinary word far more often than as a runner invocation.
+	noseRe = regexp.MustCompile(`\bnose2\b|\bnosetests\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -216,8 +224,12 @@ func classifyTestRunner(command string) testRunner {
 	case strings.Contains(c, "pytest"), strings.Contains(c, "py.test"):
 		return runnerPytest
 	// `python -m unittest` (and `unittest discover`) print a "FAIL:"/"ERROR:"
-	// summary distinct from pytest's, so they get their own parser.
-	case strings.Contains(c, "unittest"):
+	// summary distinct from pytest's, so they get their own parser. `nose2` and
+	// `nosetests` build on unittest and emit the same TextTestResult report, so
+	// they route to the same parser. Checked before the JS runners since these
+	// invocations carry none of their substrings, but kept explicit to guard
+	// against future overlap.
+	case strings.Contains(c, "unittest"), noseRe.MatchString(c):
 		return runnerUnittest
 	case tapRe.MatchString(c), batsRe.MatchString(c):
 		return runnerTAP

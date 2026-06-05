@@ -56,6 +56,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseGradleTestFailures(output)
 	case runnerExUnit:
 		return parseExUnitFailures(output)
+	case runnerTAP:
+		return parseTAPFailures(output)
 	default:
 		return nil
 	}
@@ -76,6 +78,7 @@ const (
 	runnerMaven
 	runnerGradle
 	runnerExUnit
+	runnerTAP
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -96,6 +99,12 @@ var (
 	// boundary; the optional "w" admits the wrapper script. \b keeps prose like
 	// "an upgrade plan" from matching while allowing the wrapper-script suffix.
 	gradleRe = regexp.MustCompile(`\bgradlew?\b`)
+	// "node --test"/"node:test" drive Node's built-in test runner, whose non-TTY
+	// (CI) default reporter emits TAP; "tape" is the classic standalone
+	// TAP-emitting runner. All three produce "not ok N - <desc>" failure lines, so
+	// a single TAP parser covers them. \btape\b keeps prose like "tapestry" from
+	// matching while admitting "node tape.js" / "npx tape".
+	tapRe = regexp.MustCompile(`node\s+--test\b|node:test\b|\btape\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -143,6 +152,8 @@ func classifyTestRunner(command string) testRunner {
 	// summary distinct from pytest's, so they get their own parser.
 	case strings.Contains(c, "unittest"):
 		return runnerUnittest
+	case tapRe.MatchString(c):
+		return runnerTAP
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -880,6 +891,72 @@ func parseExUnitFailures(output string) []testFailure {
 	}
 	return failures
 }
+
+var (
+	// "not ok 1 - description" — a failing TAP assertion. The number and the
+	// " - " separator are both optional in the spec, and the trailing text is the
+	// test description, which may carry a " # TODO"/" # SKIP" directive. The
+	// leading number is captured so a directive-only or description-less failure
+	// can still be named ("TAP test 1").
+	tapNotOkRe = regexp.MustCompile(`^not ok\b\s*(\d+)?\s*-?\s*(.*)$`)
+	// A " # TODO ..."/" # SKIP ..." directive suffix on a TAP result line. A
+	// "not ok" carrying either directive is an expected/ignored result, not a
+	// genuine failure, so it is excluded from the report.
+	tapDirectiveRe = regexp.MustCompile(`(?i)\s+#\s*(?:todo|skip)\b`)
+	// "  message: expected 1 to equal 2" — the message field of the indented YAML
+	// diagnostic block TAP emitters (node:test, tape, node-tap) print beneath a
+	// failing assertion. Surrounding quotes on the value are stripped by the
+	// caller so single- and double-quoted YAML scalars render the same.
+	tapMessageRe = regexp.MustCompile(`^\s+message:\s*(.*\S)\s*$`)
+)
+
+// parseTAPFailures extracts failing tests from TAP (Test Anything Protocol)
+// output, as produced by `node --test` in CI, `tape`, and other TAP emitters.
+// Each "not ok N - <description>" line is a failure; the detail is the "message:"
+// field of the indented YAML diagnostic block beneath it, located before the next
+// "ok"/"not ok" result or the closing "..." of the block. A "not ok" carrying a
+// "# TODO"/"# SKIP" directive is an expected result, not a failure, so it is
+// skipped.
+func parseTAPFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	for i := 0; i < len(lines); i++ {
+		m := tapNotOkRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		desc := strings.TrimSpace(m[2])
+		if loc := tapDirectiveRe.FindStringIndex(desc); loc != nil {
+			// A TODO/SKIP directive marks an expected or ignored result; drop it.
+			continue
+		}
+		name := desc
+		if name == "" {
+			if m[1] != "" {
+				name = "TAP test " + m[1]
+			} else {
+				name = "TAP test"
+			}
+		}
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			// The YAML block ends at "..." and never spans past the next result.
+			if strings.TrimSpace(lines[j]) == "..." || tapNotOkRe.MatchString(lines[j]) || tapOkRe.MatchString(lines[j]) {
+				break
+			}
+			if d := tapMessageRe.FindStringSubmatch(lines[j]); d != nil {
+				f.Detail = strings.Trim(strings.TrimSpace(d[1]), `'"`)
+				break
+			}
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+// "ok 1 - description" — a passing TAP assertion, used only to bound a failure's
+// YAML diagnostic scan so it does not bleed into the next result.
+var tapOkRe = regexp.MustCompile(`^ok\b`)
 
 // maxSummarizedFailures bounds how many failed tests the appended summary block
 // lists. A suite that breaks wholesale (a bad import, a renamed symbol) can fail

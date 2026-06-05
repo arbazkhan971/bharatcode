@@ -78,6 +78,50 @@ func TestSlashSessions_RestoresChosenSession(t *testing.T) {
 	require.NotContains(t, rendered, "add a flag", "the unchosen session's transcript must not be shown")
 }
 
+// TestSlashSessions_TypeToFilterNarrowsAndRestores asserts the session picker
+// supports live type-to-filter: typing narrows the visible rows by title, the
+// cursor is bounded to the filtered set, and enter restores the matching
+// session. Backspace widens the filter again.
+func TestSlashSessions_TypeToFilterNarrowsAndRestores(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// Three sessions with distinct, searchable titles.
+	_ = seedSession(t, h.repo, "Parser refactor", "fix the parser")
+	bumpID := seedSession(t, h.repo, "Bump version", "release prep")
+	_ = seedSession(t, h.repo, "Parser cleanup", "tidy the parser")
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+	require.Len(t, m.sessionCandidates, 3, "all seeded sessions must be listed")
+
+	// Type "bump" — only the single "Bump version" row should remain visible.
+	for _, ch := range "bump" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+	require.Equal(t, "bump", m.sessionFilter, "typed runes must extend the filter query")
+	visible := m.visibleSessions()
+	require.Len(t, visible, 1, "filter must narrow to the single matching session")
+	require.Equal(t, bumpID, visible[0].ID, "the matching row must be the Bump session")
+
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "Filter: bump", "the active filter must be echoed in the picker")
+	require.Contains(t, body, "Bump version", "the matching session must remain visible")
+	require.NotContains(t, body, "Parser refactor", "non-matching sessions must be filtered out")
+
+	// Backspace once widens "bump" -> "bum"; still one match here.
+	_, _ = m.Update(keySpecial("backspace", tea.KeyBackspace))
+	require.Equal(t, "bum", m.sessionFilter, "backspace must trim the filter query")
+
+	// Enter restores the (single visible) filtered session.
+	_, cmd := m.Update(keySpecial("enter", tea.KeyEnter))
+	h.run(t, cmd)
+
+	require.Equal(t, bumpID, m.sessionID, "enter must restore the filtered session")
+	require.Equal(t, "", m.sessionFilter, "the filter must reset once a session is restored")
+}
+
 // TestSlashFork_CreatesAndSwitchesToNewSession is the /fork contract test: it
 // branches the active session into a new persisted session with its own id,
 // switches to it, and copies the transcript.

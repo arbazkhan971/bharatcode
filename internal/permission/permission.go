@@ -34,16 +34,17 @@ const (
 // readClassTools is the allowlist of tools considered read-only (no writes or execution).
 // It is a package var so it can be adjusted without touching the resolution logic.
 var readClassTools = map[string]bool{
-	"view":        true,
-	"ls":          true,
-	"grep":        true,
-	"glob":        true,
-	"diagnostics": true,
-	"symbols":     true,
-	"navigate":    true,
-	"web_fetch":   true,
-	"web_search":  true,
-	"job_output":  true,
+	"view":          true,
+	"ls":            true,
+	"grep":          true,
+	"glob":          true,
+	"diagnostics":   true,
+	"symbols":       true,
+	"navigate":      true,
+	"mcp_resources": true,
+	"web_fetch":     true,
+	"web_search":    true,
+	"job_output":    true,
 }
 
 // Decision represents the permission level of a check.

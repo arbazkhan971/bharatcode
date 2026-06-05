@@ -108,6 +108,10 @@ func TestInferContextWindow(t *testing.T) {
 		{"command-a-03-2025", 256_000},
 		{"command-r-plus", 128_000},
 		{"glm-4-plus", 128_000},
+		{"glm-4.5", 128_000},
+		// GLM-4.6 lifted its window to 200k; its id carries the "glm" marker, so the
+		// specific rule must win over the 128k family default.
+		{"glm-4.6", 200_000},
 		{"nemotron-4-340b", 128_000},
 		// Case-insensitive and whitespace-tolerant.
 		{"  GPT-4O  ", 128_000},

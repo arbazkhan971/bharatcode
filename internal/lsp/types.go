@@ -1,7 +1,10 @@
 // Package lsp provides a small Language Server Protocol diagnostics client.
 package lsp
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Severity is the diagnostic severity reported by a language server.
 type Severity int
@@ -17,6 +20,32 @@ const (
 	Hint
 )
 
+// DiagnosticTag is metadata a language server attaches to a diagnostic to
+// classify it beyond its severity, mirroring the LSP DiagnosticTag enumeration.
+type DiagnosticTag int
+
+const (
+	// Unnecessary marks code the server considers dead or redundant, such as an
+	// unused import or an unreachable branch. Editors typically fade it out.
+	Unnecessary DiagnosticTag = 1
+	// Deprecated marks the use of a symbol the server reports as deprecated.
+	// Editors typically render it with a strike-through.
+	Deprecated DiagnosticTag = 2
+)
+
+// String returns the lowercase name of the tag ("unnecessary", "deprecated"),
+// or "tag(N)" for an unrecognized value.
+func (t DiagnosticTag) String() string {
+	switch t {
+	case Unnecessary:
+		return "unnecessary"
+	case Deprecated:
+		return "deprecated"
+	default:
+		return fmt.Sprintf("tag(%d)", int(t))
+	}
+}
+
 // Diagnostic describes one issue reported by a language server.
 type Diagnostic struct {
 	Path     string
@@ -28,6 +57,11 @@ type Diagnostic struct {
 	// such as "E0425" (rustc), "2304" (tsserver), or "unused-import". The LSP
 	// wire value may be a string or an integer; both are normalized to a string.
 	Code string
+	// Tags carries the diagnostic's classification tags (Unnecessary, Deprecated)
+	// when the server supplies them, so consumers can tell dead code and
+	// deprecated usages apart from ordinary warnings. It is empty when the server
+	// attaches none.
+	Tags []DiagnosticTag
 	// Related carries the diagnostic's relatedInformation entries: other source
 	// locations the server links to this issue, such as the conflicting prior
 	// declaration behind a "redeclared" error or the unused import's use site.

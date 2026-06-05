@@ -240,6 +240,39 @@ func TestDiagnosticsShowsRelatedInformation(t *testing.T) {
 	require.Contains(t, result.Content, "    related: main.go:3:5: other declaration of x")
 }
 
+func TestDiagnosticsShowsTags(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n\nimport \"fmt\"\n\nfunc main() { OldAPI() }\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{
+				Path:     path,
+				Range:    lsp.Range{Start: lsp.Position{Line: 2, Character: 7}},
+				Severity: lsp.Hint,
+				Message:  "imported and not used",
+				Source:   "gopls",
+				Tags:     []lsp.DiagnosticTag{lsp.Unnecessary},
+			},
+			{
+				Path:     path,
+				Range:    lsp.Range{Start: lsp.Position{Line: 4, Character: 13}},
+				Severity: lsp.Warning,
+				Message:  "OldAPI is deprecated",
+				Tags:     []lsp.DiagnosticTag{lsp.Deprecated},
+			},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Tags are rendered as angle-bracketed labels on the diagnostic line.
+	require.Contains(t, result.Content, "main.go:3:8: hint: imported and not used (gopls) <unnecessary>")
+	require.Contains(t, result.Content, "main.go:5:14: warning: OldAPI is deprecated <deprecated>")
+}
+
 // TestDiagnosticFilesScansRootNamedLikeIgnored guards the path != root exception:
 // when the workspace root itself is named like an ignored directory, its files
 // are still scanned rather than the whole tree being skipped.

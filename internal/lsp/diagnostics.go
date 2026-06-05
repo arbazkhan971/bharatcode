@@ -17,6 +17,9 @@ type wireDiagnostic struct {
 	// Code is the rule identifier. The LSP spec allows a string or an integer
 	// here, so it is decoded as raw JSON and normalized by codeFromWire.
 	Code json.RawMessage `json:"code,omitempty"`
+	// Tags classify the diagnostic beyond its severity (1=Unnecessary,
+	// 2=Deprecated).
+	Tags []int `json:"tags,omitempty"`
 	// RelatedInformation links other source locations to this diagnostic, such as
 	// the conflicting prior declaration behind a redeclaration error.
 	RelatedInformation []wireRelatedInformation `json:"relatedInformation,omitempty"`
@@ -69,6 +72,7 @@ func convertDiagnostics(path string, items []wireDiagnostic) []Diagnostic {
 			Message:  item.Message,
 			Source:   item.Source,
 			Code:     codeFromWire(item.Code),
+			Tags:     tagsFromWire(item.Tags),
 			Related:  relatedFromWire(item.RelatedInformation),
 		})
 	}
@@ -106,6 +110,27 @@ func relatedFromWire(items []wireRelatedInformation) []RelatedInformation {
 			},
 			Message: item.Message,
 		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// tagsFromWire converts a diagnostic's wire tag codes to DiagnosticTag values,
+// keeping only the recognized ones (1=Unnecessary, 2=Deprecated) so an unknown
+// future tag does not surface as a meaningless number. It returns nil when no
+// recognized tag survives, leaving Tags empty for servers that send none.
+func tagsFromWire(tags []int) []DiagnosticTag {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make([]DiagnosticTag, 0, len(tags))
+	for _, t := range tags {
+		switch DiagnosticTag(t) {
+		case Unnecessary, Deprecated:
+			out = append(out, DiagnosticTag(t))
+		}
 	}
 	if len(out) == 0 {
 		return nil

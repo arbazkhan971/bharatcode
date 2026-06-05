@@ -175,6 +175,14 @@ var contextWindowRules = []struct {
 	// needs its own rule to avoid falling through to "unknown" (0).
 	{"magistral", 128_000},
 	{"mistral", 32_768},
+	// Alibaba Qwen — the Qwen3 generation lifted the window well past the 32k
+	// Qwen2.x default: the Qwen3-Coder line ships a 256k native window (extendable
+	// to 1M) and the Qwen3 2507 instruct refresh a 128k window, while the original
+	// Qwen3 release and the whole Qwen2.x line stay at 32k. All carry the "qwen"
+	// marker, so the specific "qwen3-coder"/"qwen3" rules must precede the family
+	// one to avoid falling through to 32k.
+	{"qwen3-coder", 262_144},
+	{"qwen3", 131_072},
 	{"qwen", 32_768},
 	// Microsoft Phi open-weight line — Phi-3/Phi-3.5 (mini, small, medium, MoE) as
 	// served by hosted providers ship the long-context 128k variant, while Phi-4

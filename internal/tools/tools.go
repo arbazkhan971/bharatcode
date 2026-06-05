@@ -104,6 +104,7 @@ func NewRegistry(deps Dependencies) *Registry {
 	r.Register(newNavigateTool(deps))
 	r.Register(newCodeActionsTool(deps))
 	r.Register(newFormatTool(deps))
+	r.Register(newRenameTool(deps))
 	r.Register(newWebFetchTool(deps))
 	r.Register(newWebSearchTool(deps))
 	r.Register(newJobOutputTool(deps))

@@ -186,6 +186,19 @@ func TestParseDocumentSymbolsShapes(t *testing.T) {
 		}, symbols)
 	})
 
+	t.Run("detail_carried_through", func(t *testing.T) {
+		// The server-supplied "detail" (signature/type) is parsed onto each
+		// document symbol, including nested children.
+		raw := `[{"name":"Add","kind":12,"detail":"func(a int, b int) int",` + rng + `,` +
+			`"children":[{"name":"sum","kind":13,"detail":"int",` + rng + `}]}]`
+		symbols, err := parseDocumentSymbols(wantPath, json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, []Symbol{
+			{Name: "Add", Kind: Function, Path: wantPath, Range: wantRange, Detail: "func(a int, b int) int"},
+			{Name: "sum", Kind: Variable, Path: wantPath, Range: wantRange, ContainerName: "Add", Detail: "int"},
+		}, symbols)
+	})
+
 	t.Run("null_result", func(t *testing.T) {
 		symbols, err := parseDocumentSymbols(wantPath, json.RawMessage(`null`))
 		require.NoError(t, err)

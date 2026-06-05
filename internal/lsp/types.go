@@ -117,6 +117,10 @@ type Symbol struct {
 	Path          string
 	Range         Range
 	ContainerName string
+	// Detail is the server-supplied signature or type for a document symbol,
+	// such as "func(x int) error" (gopls) or "i32" (rust-analyzer). It is empty
+	// for workspace symbols, whose wire shape carries no detail.
+	Detail string
 }
 
 // WorkspaceEdit describes the file edits a rename produces, keyed by file path.

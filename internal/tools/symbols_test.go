@@ -73,6 +73,30 @@ func TestSymbolsDocumentOutlineFiltersByQuery(t *testing.T) {
 	require.Equal(t, "main.go:3:1: struct Server", result.Content)
 }
 
+func TestSymbolsDocumentOutlineRendersDetail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	src := &fakeSymbols{document: []lsp.Symbol{
+		{Name: "Add", Kind: lsp.Function, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2}}, Detail: "func(a int, b int) int"},
+		// A symbol without a detail keeps the bare "kind name" form.
+		{Name: "Server", Kind: lsp.Struct, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8}}},
+		// Detail and container both present: detail precedes the "(in ...)" suffix.
+		{Name: "Run", Kind: lsp.Method, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 12}}, Detail: "func() error", ContainerName: "Server"},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t,
+		"main.go:3:1: function Add func(a int, b int) int\n"+
+			"main.go:9:1: struct Server\n"+
+			"main.go:13:1: method Run func() error (in Server)",
+		result.Content)
+}
+
 func TestSymbolsWorkspaceRequiresQuery(t *testing.T) {
 	tool := &symbolsTool{source: &fakeSymbols{}, workDir: t.TempDir()}
 	result, err := tool.Run(context.Background(), json.RawMessage(`{}`))

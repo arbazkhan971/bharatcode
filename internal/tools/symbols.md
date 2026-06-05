@@ -22,9 +22,10 @@ Arguments:
 
 What success looks like:
 
-The result is a sorted list formatted as `path:line:column: kind name`, with the
-enclosing container appended as `(in container)` when the language server
-provides one.
+The result is a sorted list formatted as `path:line:column: kind name`. In a file
+outline the symbol's signature or type is appended when the language server
+supplies one (e.g. `function Add func(a int, b int) int`), and the enclosing
+container is appended as `(in container)` when present.
 
 Failure cases:
 

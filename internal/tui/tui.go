@@ -283,6 +283,11 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	if m.deps.Recipes == nil {
 		m.deps.Recipes = loadRecipeRegistry(deps.Cfg)
 	}
+	// Surface the user's recipes and custom prompts in Tab completion, the slash
+	// hint dropdown, and the did-you-mean suggester, so the /name commands /help
+	// already documents are also completable as you type — not just discoverable
+	// after the fact.
+	m.inputHistory.setDynamicCommands(dynamicSlashNames(m.deps))
 	// Seed the single default tab from the freshly wired active state. With one
 	// tab the tab bar stays hidden, so the default render is unchanged.
 	m.initTabs()
@@ -676,9 +681,9 @@ func (m *model) handleUnknownSlash(text string) (tea.Model, tea.Cmd) {
 		return model, cmd
 	}
 	body := text
-	if s := suggestSlash(name); s != "" {
-		// Point a likely typo at its closest built-in command so the user can
-		// fix it without reopening /help, matching how git and the Claude Code /
+	if s := suggestSlash(m.inputHistory.candidates(), name); s != "" {
+		// Point a likely typo at its closest command so the user can fix it
+		// without reopening /help, matching how git and the Claude Code /
 		// opencode command palettes suggest the nearest command.
 		body += "\n\nDid you mean " + s + "?"
 	}
@@ -1039,6 +1044,26 @@ func emptyDefault(value string, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// dynamicSlashNames collects the runtime slash-command names contributed by the
+// recipe and custom-prompt registries, each as a leading-slash name. Recipes
+// come first, then prompts, matching the order slashHelpLines prints them, so
+// Tab completion and the hint dropdown list them the same way /help does. It
+// backs setDynamicCommands; nil registries contribute nothing.
+func dynamicSlashNames(deps Dependencies) []string {
+	var names []string
+	if deps.Recipes != nil {
+		for _, e := range deps.Recipes.List() {
+			names = append(names, "/"+e.Name)
+		}
+	}
+	if deps.Prompts != nil {
+		for _, p := range deps.Prompts.List() {
+			names = append(names, "/"+p.Name)
+		}
+	}
+	return names
 }
 
 func (m *model) slashHelpLines() []string {

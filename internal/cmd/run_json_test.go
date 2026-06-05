@@ -331,7 +331,10 @@ func (p *scriptedProvider) Stream(ctx context.Context, req llm.Request) (<-chan 
 }
 
 func (p *scriptedProvider) Models() []llm.Model {
-	return []llm.Model{{ID: "stub-model", Provider: "stub", ContextWindow: 8192, SupportsTools: true}}
+	// A large window keeps these CLI contract tests from being coupled to the
+	// byte size of the built-in tool descriptions (which feed the system
+	// prompt); they exercise streaming/output behavior, not compaction.
+	return []llm.Model{{ID: "stub-model", Provider: "stub", ContextWindow: 1 << 20, SupportsTools: true}}
 }
 
 func (p *scriptedProvider) SupportsTools() bool  { return true }

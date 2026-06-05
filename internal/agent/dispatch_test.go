@@ -53,7 +53,11 @@ func (p *echoProvider) Stream(ctx context.Context, req llm.Request) (<-chan llm.
 }
 
 func (p *echoProvider) Models() []llm.Model {
-	return []llm.Model{{ID: "fake-model", Provider: "echo", ContextWindow: 8192, SupportsTools: true}}
+	// A large window keeps these dispatch tests from being coupled to the byte
+	// size of the built-in tool descriptions: a window too small to hold the
+	// system prompt would make the loop return ErrContextOverflow before the
+	// provider is ever called, deadlocking the hand-coordinated concurrency gate.
+	return []llm.Model{{ID: "fake-model", Provider: "echo", ContextWindow: 1 << 20, SupportsTools: true}}
 }
 
 func (p *echoProvider) SupportsTools() bool  { return true }
@@ -176,7 +180,7 @@ func (p *countingBlockProvider) Stream(ctx context.Context, req llm.Request) (<-
 }
 
 func (p *countingBlockProvider) Models() []llm.Model {
-	return []llm.Model{{ID: "fake-model", Provider: "block", ContextWindow: 8192, SupportsTools: true}}
+	return []llm.Model{{ID: "fake-model", Provider: "block", ContextWindow: 1 << 20, SupportsTools: true}}
 }
 
 func (p *countingBlockProvider) SupportsTools() bool  { return true }

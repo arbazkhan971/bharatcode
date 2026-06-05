@@ -114,12 +114,14 @@ func (t *MultiEditTool) Run(ctx context.Context, args json.RawMessage) (res Resu
 	}
 	next := string(oldContent)
 	replacements := 0
+	flexible := 0
 	for i, edit := range in.Edits {
 		if edit.Old == "" {
 			return errorResult(fmt.Sprintf("edits[%d].old is required", i)), nil
 		}
-		count := strings.Count(next, edit.Old)
-		if count == 0 {
+		outcome := applyReplacement(next, edit.Old, edit.New, edit.ReplaceAll)
+		switch outcome.status {
+		case replaceNotFound:
 			hint := nearestMatchHint(next, edit.Old)
 			msg := fmt.Sprintf(
 				"edits[%d].old was not found in %s. old must match exactly, including all whitespace and newlines.",
@@ -129,21 +131,17 @@ func (t *MultiEditTool) Run(ctx context.Context, args json.RawMessage) (res Resu
 				msg += "\n" + hint
 			}
 			return errorResult(msg), nil
-		}
-		if count > 1 && !edit.ReplaceAll {
+		case replaceAmbiguous:
 			return errorResult(fmt.Sprintf(
 				"Found %d occurrences of edits[%d].old in %s. Each old must be unique — provide more surrounding context to make it unique (or set replace_all to true to replace every match).",
-				count, i, path,
+				outcome.found, i, path,
 			)), nil
 		}
-		n := 1
-		if edit.ReplaceAll {
-			n = -1
-			replacements += count
-		} else {
-			replacements++
+		replacements += outcome.count
+		if outcome.strategy != "" {
+			flexible++
 		}
-		next = strings.Replace(next, edit.Old, edit.New, n)
+		next = outcome.text
 	}
 	newContent := []byte(next)
 	if string(oldContent) == next {
@@ -158,15 +156,20 @@ func (t *MultiEditTool) Run(ctx context.Context, args json.RawMessage) (res Resu
 		return Result{}, err
 	}
 	afterHash := sha256.Sum256(newContent)
-	return Result{
-		Content: fmt.Sprintf("edited %s (%d replacement(s))", path, replacements),
-		Metadata: map[string]any{
-			"path":         path,
-			"replacements": replacements,
-			"before_hash":  hex.EncodeToString(beforeHash[:]),
-			"after_hash":   hex.EncodeToString(afterHash[:]),
-		},
-	}, nil
+	content := fmt.Sprintf("edited %s (%d replacement(s))", path, replacements)
+	if flexible > 0 {
+		content += fmt.Sprintf(" [%d edit(s) matched via flexible whitespace-tolerant matching]", flexible)
+	}
+	metadata := map[string]any{
+		"path":         path,
+		"replacements": replacements,
+		"before_hash":  hex.EncodeToString(beforeHash[:]),
+		"after_hash":   hex.EncodeToString(afterHash[:]),
+	}
+	if flexible > 0 {
+		metadata["flexible_edits"] = flexible
+	}
+	return Result{Content: content, Metadata: metadata}, nil
 }
 
 func recordToolWrite(ctx context.Context, deps Dependencies, path string, oldContent, newContent []byte) error {

@@ -85,9 +85,18 @@ type openAIStreamChunk struct {
 }
 
 type openAIStreamDelta struct {
-	Content          string                `json:"content"`
-	ReasoningContent string                `json:"reasoning_content"`
-	ToolCalls        []openAIToolCallDelta `json:"tool_calls"`
+	Content string `json:"content"`
+	// ReasoningContent carries a reasoning model's visible thinking text in the
+	// field name used by DeepSeek's direct API and the providers that copied it
+	// (e.g. some Together/Fireworks deployments).
+	ReasoningContent string `json:"reasoning_content"`
+	// Reasoning is the field name OpenRouter normalizes every upstream
+	// reasoning model's thinking text into (DeepSeek R1, o-series, Gemini, ...).
+	// Native OpenAI/DeepSeek never set it, so reading both fields lets a single
+	// reasoning model surface its thinking whether it is reached directly or via
+	// OpenRouter, instead of the OpenRouter path dropping it silently.
+	Reasoning string                `json:"reasoning"`
+	ToolCalls []openAIToolCallDelta `json:"tool_calls"`
 }
 
 type openAIToolCallDelta struct {

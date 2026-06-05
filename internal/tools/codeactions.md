@@ -15,6 +15,11 @@ applied. For changes the
 server does not offer, make the edit yourself with `edit`/`multiedit`, or call
 `format` for whole-file reformatting.
 
+Some refactorings (e.g. gopls "extract to new file", rust-analyzer "move to
+module") also create, rename, or delete files. Those file operations are NOT
+performed — only the text edits are applied — and the result lists them under a
+warning so you can carry them out yourself to complete the change.
+
 Position comes from other tools: `diagnostics`, `symbols`, `grep`, and `view`
 all report 1-based `path:line:column`, which you pass straight in here. Point it
 at a diagnostic's location to find the matching quick fix.

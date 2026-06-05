@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode/utf16"
@@ -204,6 +205,46 @@ func (t *formatTool) recordWrite(ctx context.Context, path string, oldContent, n
 	}
 	markViewed(t.deps.SessionID, path)
 	return nil
+}
+
+// resourceOpsNote renders a warning listing the file create/rename/delete
+// operations a WorkspaceEdit carried that the text-edit apply path cannot
+// perform. It returns "" when there are none. Callers append it so the model
+// knows an applied rename or code action is only partial — the language server
+// wanted to create, rename, or delete files as well, and BharatCode applies
+// text edits only. Paths are shown workspace-relative when they fall inside it.
+func resourceOpsNote(ops []lsp.ResourceOperation, workDir string) string {
+	if len(ops) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "warning: %d file operation(s) the server requested were NOT applied (BharatCode applies text edits only):", len(ops))
+	for _, op := range ops {
+		switch op.Kind {
+		case "rename":
+			fmt.Fprintf(&b, "\n  rename %s -> %s", relToWorkDir(op.OldPath, workDir), relToWorkDir(op.NewPath, workDir))
+		case "create":
+			fmt.Fprintf(&b, "\n  create %s", relToWorkDir(op.Path, workDir))
+		case "delete":
+			fmt.Fprintf(&b, "\n  delete %s", relToWorkDir(op.Path, workDir))
+		default:
+			fmt.Fprintf(&b, "\n  %s %s", op.Kind, relToWorkDir(op.Path, workDir))
+		}
+	}
+	b.WriteString("\nPerform these file operations yourself to complete the change.")
+	return b.String()
+}
+
+// relToWorkDir renders path relative to workDir with forward slashes when it
+// lies inside the workspace, otherwise returns it unchanged.
+func relToWorkDir(path, workDir string) string {
+	if workDir == "" {
+		return path
+	}
+	if r, err := filepath.Rel(workDir, path); err == nil && !strings.HasPrefix(r, "..") {
+		return filepath.ToSlash(r)
+	}
+	return path
 }
 
 // applyTextEdits applies LSP text edits to src and returns the result. Edits are

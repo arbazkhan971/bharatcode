@@ -46,6 +46,12 @@ func TestInferContextWindow(t *testing.T) {
 		{"devstral-small-2507", 128_000},
 		{"qwen2.5-coder", 32_768},
 		{"deepseek-chat", 65_536},
+		// Amazon Nova (Bedrock): Pro/Lite are 300k, Micro is 128k.
+		{"nova-pro-v1", 300_000},
+		{"nova-lite-v1", 300_000},
+		{"nova-micro-v1", 128_000},
+		// AI21 Jamba 1.5 (Bedrock) is 256k.
+		{"jamba-1.5-large", 256_000},
 		// Indian-built models: Sarvam's 32k flagship and Krutrim's 8k spectre line.
 		{"sarvam-m", 32_768},
 		{"Krutrim-spectre-v2", 8_192},

@@ -176,6 +176,13 @@ var contextWindowRules = []struct {
 	// Moonshot Kimi K2 exposes a 200k window.
 	{"kimi", 200_000},
 	{"deepseek", 65_536},
+	// Amazon Nova (commonly served via Bedrock) — Nova Pro and Nova Lite both
+	// expose a 300k window while Nova Micro is 128k, so the specific "nova-micro"
+	// marker must precede the family one.
+	{"nova-micro", 128_000},
+	{"nova", 300_000},
+	// AI21 Jamba 1.5 (Large/Mini, also Bedrock-served) exposes a 256k window.
+	{"jamba", 256_000},
 	// Indian-built models served via openai_compatible. Sarvam's flagship (sarvam-m)
 	// ships a 32k window; Krutrim's spectre line an 8k window. Neither id contains a
 	// broader family marker above, so without these rules they fall through to

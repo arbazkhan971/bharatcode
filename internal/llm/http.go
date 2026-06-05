@@ -23,6 +23,21 @@ var sleepFn = time.Sleep
 // time.Now for Retry-After HTTP-date math.
 var retryBackoff = Backoff{NoJitter: true}
 
+// appendPath joins an endpoint path (such as "/chat/completions") onto a
+// provider base URL while preserving any query string already present on the
+// base. Azure OpenAI endpoints encode a required api-version on the base URL
+// (".../deployments/<name>?api-version=2024-06-01"), so a naive base+path concat
+// would place the path after the query — ".../<name>?api-version=2024-06-01/chat/completions"
+// — yielding an invalid URL that Azure rejects. Splitting on the first "?" keeps
+// the query trailing the inserted path. A base without a query is concatenated
+// unchanged, so non-Azure providers are unaffected.
+func appendPath(base, path string) string {
+	if i := strings.IndexByte(base, '?'); i >= 0 {
+		return base[:i] + path + base[i:]
+	}
+	return base + path
+}
+
 func postJSON(ctx context.Context, client *http.Client, url string, apiKey string, body any) (*http.Response, error) {
 	headers := map[string]string{
 		"Content-Type": "application/json",

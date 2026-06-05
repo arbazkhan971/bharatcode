@@ -8,7 +8,7 @@ const maxInputHistory = 100
 
 // slashCommands is the known set of built-in slash commands offered by Tab
 // completion. It is kept in sync with the commands handled in handleSlash and
-// listed in slashHelp.
+// listed in slashHelpLines.
 var slashCommands = []string{
 	"/help",
 	"/clear",

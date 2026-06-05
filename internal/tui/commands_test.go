@@ -10,6 +10,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
+	"github.com/arbazkhan971/bharatcode/internal/recipe"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/stretchr/testify/require"
@@ -347,4 +348,244 @@ func TestSlashRegistryPrompt_UnknownFallsBackToErrorDialog(t *testing.T) {
 	h.submitSlash(t, "/nonexistent do something")
 	require.True(t, m.dialogs.Contains("error"), "an unregistered slash command must raise the unknown-command dialog")
 	require.Contains(t, m.dialogs.Render(200), "/nonexistent")
+}
+
+// writeRecipeFile writes a recipe JSON file to dir and returns its path.
+func writeRecipeFile(t *testing.T, dir, name string, r recipe.Recipe) {
+	t.Helper()
+	data, err := json.Marshal(r)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name+".recipe.json"), data, 0o644))
+}
+
+// seedRecipeRegistry registers a recipe registry on the model from a temp dir.
+func seedRecipeRegistry(t *testing.T, m *model, dir string) *recipe.Registry {
+	t.Helper()
+	reg, err := recipe.NewRegistry(dir)
+	require.NoError(t, err)
+	m.deps.Recipes = reg
+	m.recipeCollector = nil
+	return reg
+}
+
+// TestSlashRegistryRecipe_NoParams_RendersAndSubmits is the core recipe contract
+// test: a "/<name>" command whose recipe has no user_prompt parameters must
+// render the prompt immediately and submit it to the agent without opening any
+// dialog. The rendered text must be persisted as the user message.
+func TestSlashRegistryRecipe_NoParams_RendersAndSubmits(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	dir := t.TempDir()
+	writeRecipeFile(t, dir, "greet", recipe.Recipe{
+		Title:  "Greet",
+		Prompt: "Say hello to the team.",
+	})
+	seedRecipeRegistry(t, m, dir)
+
+	h.submitSlash(t, "/greet")
+	h.drain(t, func() bool { return !m.running })
+
+	require.False(t, m.dialogs.Contains("error"), "a registered recipe must not raise the error dialog")
+	msgs, err := h.repo.Messages(context.Background(), m.sessionID)
+	require.NoError(t, err)
+	require.Equal(t, "Say hello to the team.", firstUserText(msgs),
+		"the rendered recipe must be submitted to the agent loop as the user message")
+}
+
+// TestSlashRegistryRecipe_ArgsPrePopulatesInput asserts that trailing args after
+// the recipe name are used as the "input" substitution and also pre-populate a
+// single user_prompt parameter, so a one-param recipe works without a dialog.
+func TestSlashRegistryRecipe_ArgsPrePopulatesInput(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	dir := t.TempDir()
+	writeRecipeFile(t, dir, "review", recipe.Recipe{
+		Title:  "Code review",
+		Prompt: "Review the following file: {{target}}",
+		Parameters: []recipe.Parameter{
+			{
+				Name:        "target",
+				Type:        recipe.ParamTypeString,
+				Requirement: recipe.RequirementUserPrompt,
+				Description: "File to review",
+			},
+		},
+	})
+	seedRecipeRegistry(t, m, dir)
+
+	// Pass the target as trailing args — no dialog should open because a single
+	// user_prompt param is pre-populated from the args.
+	h.submitSlash(t, "/review main.go")
+	h.drain(t, func() bool { return !m.running })
+
+	require.False(t, m.dialogs.Contains("error"), "recipe with pre-populated param must not raise error")
+	require.Nil(t, m.recipeCollector, "collector must be cleared after completion")
+
+	msgs, err := h.repo.Messages(context.Background(), m.sessionID)
+	require.NoError(t, err)
+	require.Equal(t, "Review the following file: main.go", firstUserText(msgs),
+		"args must pre-populate the single user_prompt parameter without a dialog")
+}
+
+// TestSlashRegistryRecipe_UserPromptParam_CollectsViaDialog is the interactive
+// parameter collection contract test: when a recipe has a user_prompt parameter
+// that cannot be pre-populated from args (two params), the TUI must push a
+// dialog, collect the value on enter, and then submit the rendered recipe.
+func TestSlashRegistryRecipe_UserPromptParam_CollectsViaDialog(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	dir := t.TempDir()
+	writeRecipeFile(t, dir, "test-gen", recipe.Recipe{
+		Title:  "Generate tests",
+		Prompt: "Write tests for {{package}} targeting {{coverage}}.",
+		Parameters: []recipe.Parameter{
+			{
+				Name:        "package",
+				Type:        recipe.ParamTypeString,
+				Requirement: recipe.RequirementUserPrompt,
+				Description: "Go package to test",
+			},
+			{
+				Name:        "coverage",
+				Type:        recipe.ParamTypeString,
+				Requirement: recipe.RequirementUserPrompt,
+				Description: "Coverage target",
+				Default:     "80%",
+			},
+		},
+	})
+	seedRecipeRegistry(t, m, dir)
+
+	// Invoke the recipe; two params → first dialog must open.
+	h.submitSlash(t, "/test-gen")
+	require.True(t, m.dialogs.Contains("recipe_param_package"),
+		"recipe with user_prompt param must open a parameter dialog")
+	require.NotNil(t, m.recipeCollector, "collector must be active while dialogs are open")
+	require.False(t, m.running, "agent must not start until all params are collected")
+
+	// Type the package name and press enter to submit.
+	for _, ch := range "internal/config" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	// The first dialog popped; the second (coverage) must now be open.
+	require.True(t, m.dialogs.Contains("recipe_param_coverage"),
+		"after submitting the first param the second param dialog must open")
+
+	// Accept the default for coverage by pressing enter with an empty buffer.
+	_, cmd := m.Update(keySpecial("enter", tea.KeyEnter))
+	h.startBatch(t, cmd)
+	h.drain(t, func() bool { return !m.running })
+
+	require.Nil(t, m.recipeCollector, "collector must be cleared after completion")
+	require.False(t, m.dialogs.Contains("error"), "completed recipe must not raise an error dialog")
+
+	msgs, err := h.repo.Messages(context.Background(), m.sessionID)
+	require.NoError(t, err)
+	require.Equal(t,
+		"Write tests for internal/config targeting 80%.",
+		firstUserText(msgs),
+		"rendered recipe with collected params must reach the agent loop")
+}
+
+// TestSlashRegistryRecipe_EscCancels asserts that pressing esc during parameter
+// collection surfaces a cancellation dialog and does NOT start an agent run.
+func TestSlashRegistryRecipe_EscCancels(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	dir := t.TempDir()
+	writeRecipeFile(t, dir, "regen", recipe.Recipe{
+		Title:  "Regenerate",
+		Prompt: "Regenerate {{target}}.",
+		Parameters: []recipe.Parameter{
+			{
+				Name:        "target",
+				Type:        recipe.ParamTypeString,
+				Requirement: recipe.RequirementUserPrompt,
+				Description: "What to regenerate",
+			},
+		},
+	})
+	seedRecipeRegistry(t, m, dir)
+
+	// Open the recipe — one user_prompt param → dialog opens.
+	h.submitSlash(t, "/regen")
+	require.True(t, m.dialogs.Contains("recipe_param_target"),
+		"user_prompt param must trigger a dialog")
+
+	// Cancel with esc.
+	_, _ = m.Update(keySpecial("esc", tea.KeyEsc))
+
+	require.False(t, m.running, "esc during parameter collection must not start an agent run")
+	require.Nil(t, m.recipeCollector, "collector must be cleared after cancellation")
+	require.True(t, m.dialogs.Contains("recipe_cancelled"),
+		"esc must surface the recipe_cancelled dialog")
+	require.Equal(t, 0, provider.calls(), "no provider call must be made when recipe is cancelled")
+}
+
+// TestSlashRegistryRecipe_UnknownNameFallsToErrorDialog asserts that an unknown
+// slash command that also has no matching recipe falls through to the
+// unknown-command error dialog (both registries are checked before falling back).
+func TestSlashRegistryRecipe_UnknownNameFallsToErrorDialog(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	dir := t.TempDir()
+	writeRecipeFile(t, dir, "greet", recipe.Recipe{
+		Title:  "Greet",
+		Prompt: "Say hello.",
+	})
+	seedRecipeRegistry(t, m, dir)
+
+	h.submitSlash(t, "/no-such-recipe")
+	require.True(t, m.dialogs.Contains("error"),
+		"a command unknown to both prompt and recipe registries must raise the error dialog")
+	require.Contains(t, m.dialogs.Render(200), "/no-such-recipe")
+}
+
+// TestSlashHelp_ListsRegisteredRecipes asserts that /help output includes
+// registered recipe names alongside the built-in commands.
+func TestSlashHelp_ListsRegisteredRecipes(t *testing.T) {
+	m := newSizedModel(t)
+
+	dir := t.TempDir()
+	writeRecipeFile(t, dir, "daily-standup", recipe.Recipe{
+		Title:  "Daily standup",
+		Prompt: "Summarise progress.",
+	})
+	reg, err := recipe.NewRegistry(dir)
+	require.NoError(t, err)
+	m.deps.Recipes = reg
+
+	m.helpVisible = true
+	out := plainText(m.renderMain())
+
+	require.Contains(t, out, "/help", "built-in commands must still appear in /help")
+	require.Contains(t, out, "/daily-standup", "registered recipe name must appear in /help output")
+	require.Contains(t, out, "Daily standup", "registered recipe title must appear in /help output")
 }

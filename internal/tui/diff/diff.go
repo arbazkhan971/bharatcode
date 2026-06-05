@@ -116,27 +116,118 @@ func (v *Viewer) Stat(patch string) string {
 	return out
 }
 
+// StatLines renders a multi-line diffstat: the aggregate Stat header followed,
+// when more than one file changed, by one indented row per file showing its path
+// and its own "+A -B" counts, matching the per-file breakdown Claude Code and
+// opencode show above a multi-file review. File paths are left-aligned in a
+// shared column so the counts line up. A single-file or content-free patch
+// returns just the Stat header (or "" when empty), so the common case is
+// unchanged. Unnamed bare hunks are labelled with a muted placeholder.
+func (v *Viewer) StatLines(patch string) string {
+	header := v.Stat(patch)
+	if header == "" {
+		return ""
+	}
+	files := fileStats(patch)
+	if len(files) <= 1 {
+		return header
+	}
+
+	width := 0
+	for _, f := range files {
+		if n := len([]rune(displayPath(f.Path))); n > width {
+			width = n
+		}
+	}
+
+	out := header
+	for _, f := range files {
+		name := displayPath(f.Path)
+		pad := strings.Repeat(" ", width-len([]rune(name)))
+		row := "  " + v.theme.Muted.Render(name+pad+"  ")
+		row += v.theme.DiffAdd.Render(fmt.Sprintf("+%d", f.Added))
+		row += v.theme.Muted.Render(" ")
+		row += v.theme.DiffRemove.Render(fmt.Sprintf("-%d", f.Removed))
+		out += "\n" + row
+	}
+	return out
+}
+
+// displayPath returns the file name to show in a per-file diffstat row, falling
+// back to a placeholder for an unnamed bare hunk.
+func displayPath(p string) string {
+	if p == "" {
+		return "(unnamed)"
+	}
+	return p
+}
+
+// FileStat is the per-file portion of a diffstat: the new-file path and the
+// added/removed content-line counts attributed to it.
+type FileStat struct {
+	Path    string
+	Added   int
+	Removed int
+}
+
 // diffStat counts the changed files and the added/removed content lines in a
 // unified diff. It mirrors the line classification used by the renderers so the
 // summary always agrees with what is shown. A patch carrying added or removed
 // content but no "+++" header (a bare hunk) is reported as one changed file.
 func diffStat(patch string) (files, added, removed int) {
+	for _, f := range fileStats(patch) {
+		files++
+		added += f.Added
+		removed += f.Removed
+	}
+	return files, added, removed
+}
+
+// fileStats breaks a unified diff into one FileStat per changed file, attributing
+// added/removed content lines to the file named by the most recent "+++" header.
+// The "a/"/"b/" prefix and any trailing tab metadata on the path are stripped so
+// the reported name matches the working-tree path. Content that appears before
+// any "+++" header (a bare hunk) is attributed to a single unnamed file so it is
+// still counted once, mirroring diffStat's bare-hunk handling.
+func fileStats(patch string) []FileStat {
+	var files []FileStat
+	cur := -1
+	ensureBare := func() {
+		if cur < 0 {
+			files = append(files, FileStat{})
+			cur = 0
+		}
+	}
 	for _, line := range strings.Split(patch, "\n") {
 		switch {
 		case strings.HasPrefix(line, "+++"):
-			files++
+			files = append(files, FileStat{Path: cleanDiffPath(line[len("+++"):])})
+			cur = len(files) - 1
 		case strings.HasPrefix(line, "---"), strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "index "), strings.HasPrefix(line, "@@"):
 			// File-boundary or hunk metadata: not counted as content.
 		case strings.HasPrefix(line, "+"):
-			added++
+			ensureBare()
+			files[cur].Added++
 		case strings.HasPrefix(line, "-"):
-			removed++
+			ensureBare()
+			files[cur].Removed++
 		}
 	}
-	if files == 0 && (added > 0 || removed > 0) {
-		files = 1
+	return files
+}
+
+// cleanDiffPath normalizes the path captured from a "---"/"+++" header: it trims
+// surrounding spaces, drops any trailing tab-delimited timestamp, and removes a
+// leading "a/" or "b/" prefix so the name matches the working-tree path.
+func cleanDiffPath(raw string) string {
+	p := strings.TrimSpace(raw)
+	if tab := strings.IndexByte(p, '\t'); tab >= 0 {
+		p = strings.TrimSpace(p[:tab])
 	}
-	return files, added, removed
+	if strings.HasPrefix(p, "a/") || strings.HasPrefix(p, "b/") {
+		p = p[2:]
+	}
+	return p
 }
 
 // gutter renders the muted two-column "old new " line-number prefix. A column

@@ -188,6 +188,47 @@ func TestScrollStatus_OnlyWhenScrolledUp(t *testing.T) {
 	require.Equal(t, "↓ 12 lines below", scrollStatus(12))
 }
 
+// TestRunningStatus_OnlyWhileTurnInFlight asserts the working segment is empty
+// when no turn is running (zero start time), names the elapsed turn time once a
+// turn begins, and advances its spinner glyph as seconds pass.
+func TestRunningStatus_OnlyWhileTurnInFlight(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	require.Empty(t, runningStatus(time.Time{}, start),
+		"an idle prompt (zero start) must add no working segment")
+
+	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second)),
+		"a running turn must report its elapsed time")
+
+	// A negative elapsed (clock skew) must clamp to the first frame, not panic.
+	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(-time.Second)), spinnerFrames[0]+" working "),
+		"a negative elapsed must clamp to the first frame without panicking")
+
+	// The spinner advances one frame per whole second and wraps at the end.
+	first := runningStatus(start, start.Add(time.Second))
+	tenth := runningStatus(start, start.Add(time.Duration(len(spinnerFrames))*time.Second))
+	require.True(t, strings.HasPrefix(first, spinnerFrames[1]))
+	require.True(t, strings.HasPrefix(tenth, spinnerFrames[0]), "the spinner must wrap around")
+}
+
+// TestRunningStatus_SurfacesInStatusBar drives the rendered view: at rest the
+// status bar shows no working segment, and once a turn is in flight it reports
+// that the agent is working so the user has live progress feedback.
+func TestRunningStatus_SurfacesInStatusBar(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	rendered := func() string { return stripANSI(m.renderMain()) }
+	require.NotContains(t, rendered(), "working",
+		"an idle prompt must show no working indicator")
+
+	m.running = true
+	m.turnStartedAt = m.now.Add(-5 * time.Second)
+	require.Contains(t, rendered(), "working 5s",
+		"a turn in flight must surface its elapsed working time")
+}
+
 // TestScrollStatus_SurfacesInStatusBar drives the rendered view: at rest the
 // status bar shows no scroll segment, and after wheeling up into history it
 // reports how many newer lines sit below, so a scrolled-up reader sees they are

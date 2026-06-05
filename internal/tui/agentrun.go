@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -80,6 +81,7 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.chat.FinishStream(userStreamID)
 	m.chat.Reindex(userStreamID)
 	m.running = true
+	m.turnStartedAt = m.now
 	// Inline any @-file references so the model sees their contents, while the
 	// chat bubble above keeps the user's original text. Resolution is scoped to
 	// the workspace root; unresolved mentions are left untouched.
@@ -233,6 +235,7 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 // loop (CHANGE 2) when one is active. A run error aborts any goal loop.
 func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	m.running = false
+	m.turnStartedAt = time.Time{}
 	m.chat.FinishStream(m.assistantStreamID())
 	m.chat.Reindex(m.assistantStreamID())
 

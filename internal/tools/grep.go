@@ -57,6 +57,19 @@ type grepArgs struct {
 	// the rg and Go-fallback paths stay consistent; context options do not apply
 	// when it is set.
 	OnlyMatching bool `json:"only_matching,omitempty"`
+	// Offset skips the first N result entries before HeadLimit is applied, the
+	// analogue of piping ripgrep through `tail -n +N` (0-based skip count). It
+	// pages through results across every output_mode. Zero (the default) skips
+	// nothing; a negative value is rejected.
+	Offset int `json:"offset,omitempty"`
+	// HeadLimit caps the output to the first N result entries after Offset, like
+	// piping ripgrep through `head -N`. It counts output lines (matches, context,
+	// and "--" separators in content mode; one line per file in
+	// files_with_matches / count mode), so it composes with Offset as
+	// `tail -n +offset | head -N`. Zero (the default) applies no head limit, so
+	// the existing grepMatchCap behaviour is preserved; a negative value is
+	// rejected.
+	HeadLimit int `json:"head_limit,omitempty"`
 }
 
 var (
@@ -78,7 +91,9 @@ var (
     "multiline": {"type": "boolean", "description": "Match patterns across line boundaries (like rg -U --multiline-dotall); . matches newlines. Context options are ignored in this mode."},
     "type": {"type": "string", "description": "Filter to a language by file type, like rg --type go (e.g. go, py, js, ts, rust, java, c, cpp). Combine with include to narrow further."},
     "case_insensitive": {"type": "boolean", "description": "Force case-insensitive matching (like rg -i), overriding the default smart-case behaviour."},
-    "only_matching": {"type": "boolean", "description": "Print only the matched (non-empty) parts of each line, one match per row (like rg -o). Content mode only; ignored in multiline mode and context options do not apply."}
+    "only_matching": {"type": "boolean", "description": "Print only the matched (non-empty) parts of each line, one match per row (like rg -o). Content mode only; ignored in multiline mode and context options do not apply."},
+    "offset": {"type": "integer", "minimum": 0, "description": "Skip the first N result entries before applying head_limit (like piping through tail -n +N). Pages through results across every output_mode. Defaults to 0."},
+    "head_limit": {"type": "integer", "minimum": 0, "description": "Cap output to the first N result entries after offset (like piping through head -N), across every output_mode. Defaults to 0 (no extra limit beyond the built-in match cap)."}
   }
 }`)
 )
@@ -127,6 +142,12 @@ func (t *grepTool) Run(ctx context.Context, raw json.RawMessage) (res Result, er
 			return errorResult(fmt.Sprintf("unknown type %q; supported types: %s", args.Type, grepTypeNames())), nil
 		}
 	}
+	if args.Offset < 0 {
+		return errorResult("offset must be >= 0"), nil
+	}
+	if args.HeadLimit < 0 {
+		return errorResult("head_limit must be >= 0"), nil
+	}
 
 	root, err := workspaceRoot(t.deps.WorkDir)
 	if err != nil {
@@ -137,19 +158,74 @@ func (t *grepTool) Run(ctx context.Context, raw json.RawMessage) (res Result, er
 		return errorResult(err.Error()), nil
 	}
 
-	if rg, err := lookPath("rg"); err == nil {
-		content, err := runRipgrep(ctx, rg, root, searchPath, args)
-		if err != nil {
-			return Result{}, err
-		}
-		return Result{Content: content}, nil
+	var content string
+	if rg, lpErr := lookPath("rg"); lpErr == nil {
+		content, err = runRipgrep(ctx, rg, root, searchPath, args)
+	} else {
+		content, err = runGoGrep(ctx, root, searchPath, args)
 	}
-
-	content, err := runGoGrep(ctx, root, searchPath, args)
 	if err != nil {
 		return Result{}, err
 	}
+	content = applyHeadWindow(content, args.Offset, args.HeadLimit)
 	return Result{Content: content}, nil
+}
+
+// capNoticePrefix is the leading text of the trailing line both grep paths
+// append when results were trimmed at grepMatchCap. applyHeadWindow peels it off
+// so the offset/head_limit window operates on result entries, not on the notice.
+const capNoticePrefix = "[results capped"
+
+// applyHeadWindow narrows already-rendered grep output to the entry window
+// [offset, offset+headLimit), mirroring `tail -n +offset | head -N`. offset is
+// the number of leading entries to skip and headLimit the maximum to keep; a
+// headLimit <= 0 means "no head limit", so the built-in grepMatchCap behaviour
+// is preserved untouched. The window counts output lines — matches, context, and
+// "--" separators in content mode; one line per file in files/count mode — which
+// is exactly what piping ripgrep through head/tail would yield.
+//
+// When the window actually trims the body it supersedes any cap notice with its
+// own "[showing entries X-Y of Z]" line, since the cap count no longer describes
+// what is displayed; when it does not trim, an original cap notice is kept.
+func applyHeadWindow(content string, offset, headLimit int) string {
+	if offset <= 0 && headLimit <= 0 {
+		return content
+	}
+	if content == "" || content == "No matches found." {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	// Peel off a trailing cap notice so it neither consumes a window slot nor is
+	// counted as a result entry.
+	if n := len(lines); n > 0 && strings.HasPrefix(lines[n-1], capNoticePrefix) {
+		lines = lines[:n-1]
+	}
+
+	total := len(lines)
+	start := offset
+	if start > total {
+		start = total
+	}
+	end := total
+	if headLimit > 0 && start+headLimit < end {
+		end = start + headLimit
+	}
+	window := lines[start:end]
+
+	if len(window) == 0 {
+		return fmt.Sprintf("No results in window: offset %d skips all %d entries.", offset, total)
+	}
+
+	body := strings.Join(window, "\n")
+	if start > 0 || end < total {
+		// The window is now the limiting factor; describe the 1-based range shown
+		// and drop any cap notice, whose count no longer matches the display.
+		return body + fmt.Sprintf("\n[showing entries %d-%d of %d]", start+1, end, total)
+	}
+	// Window covered every entry; return the original content so an unrelated cap
+	// notice (if any) survives verbatim.
+	return content
 }
 
 func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs) (string, error) {

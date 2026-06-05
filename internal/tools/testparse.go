@@ -66,6 +66,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseBunTestFailures(output)
 	case runnerMocha:
 		return parseMochaFailures(output)
+	case runnerCTest:
+		return parseCTestFailures(output)
 	default:
 		return nil
 	}
@@ -91,6 +93,7 @@ const (
 	runnerSwift
 	runnerBun
 	runnerMocha
+	runnerCTest
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -126,6 +129,11 @@ var (
 	// like "swift testing guide" from matching while admitting flags and paths
 	// ("swift test --filter FooTests").
 	swiftTestRe = regexp.MustCompile(`\bswift test\b`)
+	// "ctest" drives CMake's test runner; \bctest\b admits "ctest", "ctest -R Foo",
+	// and "cmake --build . && ctest" while keeping prose like "subjects of the
+	// ctesting" — and the unrelated "go test"/"cargo test" runners, which never
+	// contain the "ctest" substring at a word boundary — from matching.
+	ctestRe = regexp.MustCompile(`\bctest\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -205,6 +213,13 @@ func classifyTestRunner(command string) testRunner {
 		// carries none of their substrings, but kept explicit to guard against
 		// future overlap.
 		return runnerMocha
+	case ctestRe.MatchString(c):
+		// `ctest` drives CMake's test runner, whose run summary closes with a
+		// "The following tests FAILED:" block listing each failure as
+		// "<n> - <name> (<status>)". Checked before the JS runners since a ctest
+		// invocation carries none of their substrings, but kept explicit to guard
+		// against future overlap.
+		return runnerCTest
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1264,6 +1279,59 @@ func parseMochaFailures(output string) []testFailure {
 			}
 		}
 		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "The following tests FAILED:" — the header CTest prints before listing each
+	// failed test in its run summary. Anchoring the scan on it keeps the per-test
+	// "***Failed" progress lines printed earlier in the run from being mistaken for
+	// entries.
+	ctestHeaderRe = regexp.MustCompile(`^\s*The following tests FAILED:`)
+	// "\t  2 - FailTest (Failed)" — one entry in that block. The leading number is
+	// the test index, the name is the registered CTest name (re-runnable via
+	// `ctest -R '^<name>$'`), and the parenthesized status (Failed, Timeout,
+	// "Subprocess aborted", ...) is kept as the detail.
+	ctestEntryRe = regexp.MustCompile(`^\s*\d+ - (.+) \((.+)\)\s*$`)
+)
+
+// parseCTestFailures extracts failing tests from CTest output (`ctest`, the
+// CMake test driver). A failing run closes with a "The following tests FAILED:"
+// block, one "<n> - <name> (<status>)" line per failure; the name is the
+// registered test name and the parenthesized status (Failed, Timeout,
+// "Subprocess aborted", ...) becomes the detail. The block is parsed from the
+// header onward — and ends at the first non-blank, non-entry line (e.g. the
+// trailing "Errors while running CTest") — so the per-test "***Failed" progress
+// lines earlier in the output are never mistaken for entries.
+func parseCTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	start := -1
+	for i, ln := range lines {
+		if ctestHeaderRe.MatchString(ln) {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines[start:] {
+		m := ctestEntryRe.FindStringSubmatch(ln)
+		if m == nil {
+			if strings.TrimSpace(ln) == "" {
+				continue // a blank separator inside the block, not its end
+			}
+			break // the list is contiguous; the first other line ends it
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: strings.TrimSpace(m[2])})
 	}
 	return failures
 }

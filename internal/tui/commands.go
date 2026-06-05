@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
@@ -84,7 +85,7 @@ func (m *model) sessionPickerBody() string {
 		if title == "" {
 			title = "(untitled)"
 		}
-		lines = append(lines, fmt.Sprintf("%s%s · %d msgs · %s", marker, title, s.MessageCount, shortSessionID(s.ID)))
+		lines = append(lines, fmt.Sprintf("%s%s · %d msgs · %s · %s", marker, title, s.MessageCount, relativeTime(s.UpdatedAt, time.Now()), shortSessionID(s.ID)))
 	}
 	lines = append(lines, "", "type to filter · ↑/↓ to move · enter to restore · esc to cancel")
 	return strings.Join(lines, "\n")
@@ -462,6 +463,31 @@ func (m *model) handleRegistryRecipe(name string, args string) (handled bool, mo
 	m.recipeCollector = collector
 	mod, cmd = collector.pushNextOrComplete(m)
 	return true, mod, cmd
+}
+
+// relativeTime renders how long ago then was, relative to now, as a compact
+// "just now" / "5m ago" / "3h ago" / "2d ago" label for the session switcher,
+// matching the last-active column Claude Code and opencode show beside each
+// session. Granularity coarsens as the gap widens (minutes, then hours, then
+// days, then weeks); a zero or future timestamp reads as "just now" so a
+// freshly-created session never shows a negative or empty age.
+func relativeTime(then, now time.Time) string {
+	if then.IsZero() {
+		return "just now"
+	}
+	d := now.Sub(then)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d/time.Hour))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
+	default:
+		return fmt.Sprintf("%dw ago", int(d/(7*24*time.Hour)))
+	}
 }
 
 // shortSessionID truncates a session id to a stable short form for display.

@@ -60,6 +60,24 @@ func isReasoningModel(id string) bool {
 	return false
 }
 
+// modelSupportsNoneReasoningEffort reports whether the OpenAI model named by id
+// accepts the reasoning_effort value "none". OpenAI introduced "none" with the
+// gpt-5.1 generation (where it replaces the now-deprecated "minimal" as the
+// fastest, no-reasoning setting); the original gpt-5 family and the o-series
+// accept only minimal/low/medium/high and 400 on "none". The classification keys
+// on the bare model id, so an aggregator's "vendor/model" prefix (e.g.
+// "openai/gpt-5.1-codex") is stripped first, mirroring isReasoningModel. Future
+// numbered generations (gpt-5.2, ...) are intentionally not matched here: until
+// their effort vocabulary is confirmed, "none" is dropped for them rather than
+// risking a 400.
+func modelSupportsNoneReasoningEffort(id string) bool {
+	lid := strings.ToLower(strings.TrimSpace(id))
+	if idx := strings.LastIndex(lid, "/"); idx >= 0 {
+		lid = lid[idx+1:]
+	}
+	return strings.HasPrefix(lid, "gpt-5.1")
+}
+
 // thinkingModelSubstrings lists case-insensitive markers in Anthropic model ids
 // whose models support extended thinking (Claude 3.7 Sonnet and the Claude 4
 // families). The Anthropic provider only emits the thinking request field for a

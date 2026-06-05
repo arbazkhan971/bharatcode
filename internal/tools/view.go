@@ -24,6 +24,11 @@ import (
 const (
 	defaultMaxToolOutputBytes = 32 * 1024
 	maxViewImageBytes         = 5 * 1024 * 1024
+	// maxViewLineLength caps how many characters of a single source line are
+	// rendered before the rest is elided. It mirrors Claude Code's Read, which
+	// truncates lines longer than 2000 characters, so a minified/one-line file
+	// stays viewable instead of one wide line consuming the whole byte budget.
+	maxViewLineLength = 2000
 )
 
 type viewedFiles struct {
@@ -361,12 +366,34 @@ func numberedLines(content string, offset, limit int) (string, lineSpan) {
 	width := len(strconv.Itoa(end))
 	var b strings.Builder
 	for i := start; i < end; i++ {
-		b.WriteString(fmt.Sprintf("%*d | %s", width, i+1, lines[i]))
+		b.WriteString(fmt.Sprintf("%*d | %s", width, i+1, truncateLine(lines[i], maxViewLineLength)))
 		if i < end-1 {
 			b.WriteByte('\n')
 		}
 	}
 	return b.String(), lineSpan{firstLine: start + 1, lastLine: end, total: total}
+}
+
+// truncateLine caps a single source line at max characters (runes), appending a
+// marker noting how many characters were elided. This matches Claude Code's
+// Read, which truncates over-long lines so a single very wide line (e.g. a
+// minified bundle) stays viewable instead of dominating the output budget and
+// forcing the per-line shell fallback in truncateContent. Lines at or under the
+// cap, or a non-positive max, are returned unchanged.
+func truncateLine(line string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(line) <= max {
+		return line
+	}
+	count, cut := 0, len(line)
+	for i := range line {
+		if count == max {
+			cut = i
+			break
+		}
+		count++
+	}
+	elided := utf8.RuneCountInString(line[cut:])
+	return line[:cut] + fmt.Sprintf(" … [%d characters truncated]", elided)
 }
 
 // truncateContent caps numbered output at maxBytes and replaces the dead-end

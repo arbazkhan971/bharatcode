@@ -170,6 +170,12 @@ var contextWindowRules = []struct {
 	// Moonshot Kimi K2 exposes a 200k window.
 	{"kimi", 200_000},
 	{"deepseek", 65_536},
+	// Indian-built models served via openai_compatible. Sarvam's flagship (sarvam-m)
+	// ships a 32k window; Krutrim's spectre line an 8k window. Neither id contains a
+	// broader family marker above, so without these rules they fall through to
+	// "unknown" (0) when a user adds them without an explicit context_window.
+	{"sarvam", 32_768},
+	{"krutrim", 8_192},
 }
 
 // inferContextWindow guesses a model's context window from its id when the

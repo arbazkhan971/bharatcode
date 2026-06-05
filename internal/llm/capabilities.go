@@ -29,8 +29,18 @@ const gpt5ChatPrefix = "gpt-5-chat"
 // o-series, or a gpt-5 model other than gpt-5-chat). Reasoning models reject
 // params such as temperature, so the OpenAI request builder gates those by this
 // check rather than sending values the API would 400 on.
+//
+// OpenRouter (and other aggregators reached through the openai_compatible
+// dialect) namespace model ids as "vendor/model", e.g. "openai/gpt-5" or
+// "openai/o3-mini". The classification keys on the bare model id, so the vendor
+// prefix is stripped first; otherwise a prefixed reasoning id would slip through
+// as a chat model and the builder would send the temperature/max_tokens the API
+// rejects.
 func isReasoningModel(id string) bool {
 	lid := strings.ToLower(strings.TrimSpace(id))
+	if idx := strings.LastIndex(lid, "/"); idx >= 0 {
+		lid = lid[idx+1:]
+	}
 	// The whole gpt-5 family runs a hidden reasoning pass except gpt-5-chat, so
 	// match the family by prefix and carve out the chat variant. This also
 	// covers point releases such as gpt-5.5 that share the prefix.

@@ -167,6 +167,66 @@ func (m *Manager) Definition(ctx context.Context, path string, line, col int) ([
 	return locations, nil
 }
 
+// TypeDefinition returns the locations of the type of the symbol at the
+// position in path, starting a server if needed. A nil slice with a nil error
+// means no server is configured for the file or the symbol has no type
+// definition.
+func (m *Manager) TypeDefinition(ctx context.Context, path string, line, col int) ([]Location, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving type definition path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	locations, err := c.typeDefinition(ctx, abs, line, col)
+	if err != nil {
+		return nil, err
+	}
+	return locations, nil
+}
+
+// Implementation returns the locations implementing the symbol at the position
+// in path (e.g. the concrete types satisfying an interface), starting a server
+// if needed. A nil slice with a nil error means no server is configured for the
+// file or the symbol has no implementations.
+func (m *Manager) Implementation(ctx context.Context, path string, line, col int) ([]Location, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving implementation path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	locations, err := c.implementation(ctx, abs, line, col)
+	if err != nil {
+		return nil, err
+	}
+	return locations, nil
+}
+
 // References returns every location referencing the symbol at the position in
 // path, including its declaration, starting a server if needed. A nil slice
 // with a nil error means no server is configured for the file or the symbol has

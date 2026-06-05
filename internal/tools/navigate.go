@@ -17,6 +17,8 @@ import (
 // *lsp.Manager satisfies it; tests substitute a fake.
 type NavigateSource interface {
 	Definition(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
+	TypeDefinition(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
+	Implementation(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	References(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	Hover(ctx context.Context, path string, line, col int) (string, error)
 }
@@ -55,8 +57,8 @@ var schemaNavigate = json.RawMessage(`{
     },
     "action": {
       "type": "string",
-      "enum": ["definition", "references", "hover"],
-      "description": "definition: jump to where the symbol is declared. references: list every use site, including the declaration. hover: the language server's type/signature/doc for the symbol. Defaults to definition."
+      "enum": ["definition", "type_definition", "implementation", "references", "hover"],
+      "description": "definition: jump to where the symbol is declared. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. hover: the language server's type/signature/doc for the symbol. Defaults to definition."
     }
   }
 }`)
@@ -134,6 +136,18 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 			return Result{}, fmt.Errorf("resolving definition at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
 		return locationsResult(root, locs, "No definition found."), nil
+	case "type_definition":
+		locs, err := t.source.TypeDefinition(ctx, path, line0, col0)
+		if err != nil {
+			return Result{}, fmt.Errorf("resolving type definition at %s:%d:%d: %w", args.Path, args.Line, col, err)
+		}
+		return locationsResult(root, locs, "No type definition found."), nil
+	case "implementation":
+		locs, err := t.source.Implementation(ctx, path, line0, col0)
+		if err != nil {
+			return Result{}, fmt.Errorf("finding implementations at %s:%d:%d: %w", args.Path, args.Line, col, err)
+		}
+		return locationsResult(root, locs, "No implementations found."), nil
 	case "references":
 		locs, err := t.source.References(ctx, path, line0, col0)
 		if err != nil {
@@ -150,7 +164,7 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		}
 		return Result{Content: strings.TrimRight(text, "\n")}, nil
 	default:
-		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, references, or hover)", action)), nil
+		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, type_definition, implementation, references, or hover)", action)), nil
 	}
 }
 

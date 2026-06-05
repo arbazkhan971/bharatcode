@@ -39,6 +39,40 @@ func (c *client) definition(ctx context.Context, path string, line, col int) ([]
 	return parseDefinition(result)
 }
 
+// typeDefinition issues a textDocument/typeDefinition request for the position
+// and returns the locations of the type of the symbol there. The response shape
+// matches textDocument/definition, so parseDefinition handles it.
+func (c *client) typeDefinition(ctx context.Context, path string, line, col int) ([]Location, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/typeDefinition", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"position":     map[string]any{"line": line, "character": col},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting type definition: %w", err)
+	}
+	return parseDefinition(result)
+}
+
+// implementation issues a textDocument/implementation request for the position
+// and returns the locations implementing the symbol (e.g. the concrete types
+// satisfying an interface). The response shape matches textDocument/definition.
+func (c *client) implementation(ctx context.Context, path string, line, col int) ([]Location, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/implementation", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"position":     map[string]any{"line": line, "character": col},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting implementation: %w", err)
+	}
+	return parseDefinition(result)
+}
+
 // references issues a textDocument/references request for the position and
 // returns every location the server reports referencing the symbol, including
 // its declaration.

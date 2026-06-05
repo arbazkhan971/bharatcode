@@ -203,6 +203,43 @@ func TestSlashCommandsAllHaveDescriptions(t *testing.T) {
 	}
 }
 
+// TestMatchSlash_PrefixWins asserts that when a command begins with the typed
+// prefix the fuzzy fallback never fires: the result is exactly the prefix
+// matches in canonical order, so existing prefix completion is unchanged.
+func TestMatchSlash_PrefixWins(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, []string{"/sessions", "/status", "/save", "/search"}, matchSlash("/s"))
+	require.Equal(t, []string{"/help"}, matchSlash("/help"),
+		"a fully typed command still returns itself, not a fuzzy expansion")
+}
+
+// TestMatchSlash_FuzzyFallback asserts that when no command begins with the
+// prefix, a case-insensitive subsequence match on the command name still finds
+// it — so a mistyped or mid-word query like "/port" reaches "/export".
+func TestMatchSlash_FuzzyFallback(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, []string{"/export"}, matchSlash("/port"),
+		"a subsequence of the name resolves when no prefix matches")
+	require.Equal(t, []string{"/compact"}, matchSlash("/PACT"),
+		"the fuzzy fallback is case-insensitive")
+	require.Empty(t, matchSlash("/zzz"),
+		"a token that is not even a subsequence still matches nothing")
+}
+
+// TestMatchSlash_FuzzyCompletesViaTab asserts the fuzzy fallback flows through
+// the end-to-end Tab completion path, not just the matcher in isolation.
+func TestMatchSlash_FuzzyCompletesViaTab(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/port")
+	_, _ = m.Update(keyTab())
+	require.Equal(t, "/export", m.input.String(),
+		"Tab completes a fuzzy match when no command shares the prefix")
+}
+
 // TestSlashCompletion_EditMidCycleReseeds asserts that editing the buffer after
 // a completion ends the cycle and the next Tab completes the new prefix.
 func TestSlashCompletion_EditMidCycleReseeds(t *testing.T) {

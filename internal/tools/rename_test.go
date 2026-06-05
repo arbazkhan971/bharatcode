@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
+	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,6 +87,84 @@ func TestRenameAppliesEditsAcrossFiles(t *testing.T) {
 	require.Contains(t, diffs, "a.go")
 	require.Contains(t, diffs, "b.go")
 	require.Contains(t, diffs["a.go"], "+bar()")
+}
+
+func TestRenamePreviewShowsDiffWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	b := filepath.Join(dir, "b.go")
+	require.NoError(t, os.WriteFile(a, []byte("foo()\n"), 0o644))
+	require.NoError(t, os.WriteFile(b, []byte("foo()\n"), 0o644))
+
+	src := &fakeRename{edit: lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		a: {replaceWord(0, 3, "bar")},
+		b: {replaceWord(0, 3, "bar")},
+	}}}
+	// A diagnoser is wired but must not run for a preview, which writes nothing.
+	tool := &renameTool{
+		source: src,
+		deps:   Dependencies{WorkDir: dir},
+		diag: &fakeDiagnoser{diags: []lsp.Diagnostic{
+			diag(a, 0, 0, lsp.Error, "undefined: bar"),
+		}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "new_name": "bar", "preview": true,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The result is framed as a preview and still carries the per-file diffs.
+	require.Contains(t, result.Content, "preview: renaming to \"bar\"")
+	require.Contains(t, result.Content, "2 edit(s) across 2 file(s)")
+	require.Contains(t, result.Content, "nothing written")
+	require.Contains(t, result.Content, "-foo()")
+	require.Contains(t, result.Content, "+bar()")
+	require.Equal(t, true, result.Metadata["preview"])
+	diffs, ok := result.Metadata["diffs"].(map[string]string)
+	require.True(t, ok)
+	require.Contains(t, diffs["a.go"], "+bar()")
+
+	// Nothing is written to disk and the diagnostics re-check is skipped.
+	gotA, err := os.ReadFile(a)
+	require.NoError(t, err)
+	require.Equal(t, "foo()\n", string(gotA))
+	gotB, err := os.ReadFile(b)
+	require.NoError(t, err)
+	require.Equal(t, "foo()\n", string(gotB))
+	require.NotContains(t, result.Content, "undefined: bar")
+	require.Nil(t, result.Metadata["diagnostics"])
+}
+
+func TestRenamePreviewSkipsPermissionCheck(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("foo()\n"), 0o644))
+
+	src := &fakeRename{edit: lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		a: {replaceWord(0, 3, "bar")},
+	}}}
+	// A permission policy that denies the rename tool outright: an applying rename
+	// would be blocked, but a preview writes nothing and so never consults it.
+	cfg := &config.Config{}
+	cfg.Permissions.Deny = []string{"rename"}
+	tool := &renameTool{source: src, deps: Dependencies{WorkDir: dir, Permission: permission.New(cfg, nil)}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "new_name": "bar", "preview": true,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "preview: renaming to \"bar\"")
+
+	// The same rename without preview is denied, confirming the policy is live.
+	denied, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "new_name": "bar",
+	}))
+	require.NoError(t, err)
+	require.True(t, denied.IsError)
+	require.Contains(t, denied.Content, "permission denied")
 }
 
 func TestRenameSurfacesPostWriteDiagnostics(t *testing.T) {

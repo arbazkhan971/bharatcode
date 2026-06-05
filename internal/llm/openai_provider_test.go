@@ -316,27 +316,37 @@ func TestOpenAIMaxTokensFieldSelection(t *testing.T) {
 
 // TestNormalizeOpenAIReasoningEffort pins the effort normalization that keeps the
 // provider-independent ReasoningEffort knob from sending OpenAI a value it 400s
-// on: the four accepted labels pass through lowercased, while "auto"/"dynamic"
+// on: the four universally-accepted labels pass through lowercased, "none" is
+// honored only on the gpt-5.1 generation that accepts it, and "auto"/"dynamic"
 // (and anything unrecognized) collapse to "" so the field is omitted.
 func TestNormalizeOpenAIReasoningEffort(t *testing.T) {
 	cases := []struct {
-		in   string
-		want string
+		in    string
+		model string
+		want  string
 	}{
-		{"minimal", "minimal"},
-		{"low", "low"},
-		{"medium", "medium"},
-		{"high", "high"},
-		{"High", "high"},
-		{"  high  ", "high"},
-		{"auto", ""},
-		{"dynamic", ""},
-		{"", ""},
-		{"bogus", ""},
+		{"minimal", "gpt-5", "minimal"},
+		{"low", "gpt-5", "low"},
+		{"medium", "gpt-5", "medium"},
+		{"high", "gpt-5", "high"},
+		{"High", "gpt-5", "high"},
+		{"  high  ", "gpt-5", "high"},
+		{"auto", "gpt-5", ""},
+		{"dynamic", "gpt-5", ""},
+		{"", "gpt-5", ""},
+		{"bogus", "gpt-5", ""},
+		// "none" is a gpt-5.1-only effort: honored there (including its codex
+		// variant and an OpenRouter-style vendor prefix), dropped to "" on the
+		// original gpt-5 family and the o-series that 400 on it.
+		{"none", "gpt-5.1", "none"},
+		{"None", "gpt-5.1-codex", "none"},
+		{"none", "openai/gpt-5.1", "none"},
+		{"none", "gpt-5", ""},
+		{"none", "o3-mini", ""},
 	}
 	for _, tc := range cases {
-		require.Equal(t, tc.want, normalizeOpenAIReasoningEffort(tc.in),
-			"normalizeOpenAIReasoningEffort(%q)", tc.in)
+		require.Equal(t, tc.want, normalizeOpenAIReasoningEffort(tc.in, tc.model),
+			"normalizeOpenAIReasoningEffort(%q, %q)", tc.in, tc.model)
 	}
 }
 

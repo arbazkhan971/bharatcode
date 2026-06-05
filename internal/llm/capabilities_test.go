@@ -41,6 +41,9 @@ func TestInferContextWindow(t *testing.T) {
 		{"devstral-small-2507", 128_000},
 		{"qwen2.5-coder", 32_768},
 		{"deepseek-chat", 65_536},
+		// Indian-built models: Sarvam's 32k flagship and Krutrim's 8k spectre line.
+		{"sarvam-m", 32_768},
+		{"Krutrim-spectre-v2", 8_192},
 		// xAI Grok, Perplexity Sonar tiers, Codestral, Kimi and gpt-oss.
 		{"grok-2-latest", 131_072},
 		{"sonar", 128_000},

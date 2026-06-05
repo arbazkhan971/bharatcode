@@ -13,6 +13,7 @@ Arguments:
 - `context` integer, optional: number of lines to show before **and** after each match (like `rg -C`). Takes precedence over `before`/`after` when all three are set.
 - `before` integer, optional: number of lines to show before each match (like `rg -B`). Ignored when `context` is set.
 - `after` integer, optional: number of lines to show after each match (like `rg -A`). Ignored when `context` is set.
+- `multiline` boolean, optional: match patterns that span line boundaries (like `rg -U --multiline-dotall`); `.` matches newlines. Context options are ignored in this mode.
 
 What success looks like:
 
@@ -34,10 +35,15 @@ the rg path and the Go fallback.
 
 Multiline patterns:
 
-Patterns are single-line by default, matching ripgrep's default behaviour.
-The regex engine (Go `regexp` or rg) matches within individual lines; a
-pattern that spans a newline will not match. Use separate `grep` calls or
-a `view` call followed by manual inspection for cross-line analysis.
+Patterns are single-line by default, matching ripgrep's default behaviour:
+the regex engine matches within individual lines, so a pattern that spans a
+newline will not match. Set `multiline: true` to search each file as one
+buffer (like `rg -U --multiline-dotall`), letting a pattern — and `.` — cross
+line boundaries. In `content` mode every line a multiline match touches is
+printed as `path:line:content`, exactly as ripgrep prints it. The `context`,
+`before`, and `after` options are ignored when `multiline` is set, so the
+ripgrep and Go-fallback paths stay consistent. Multiline reads whole files
+into memory, so prefer `include`/`path` scoping on large trees.
 
 Match cap:
 

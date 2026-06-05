@@ -80,6 +80,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseJuliaTestFailures(output)
 	case runnerScala:
 		return parseScalaTestFailures(output)
+	case runnerClojure:
+		return parseClojureTestFailures(output)
 	default:
 		return nil
 	}
@@ -112,6 +114,7 @@ const (
 	runnerDart
 	runnerJulia
 	runnerScala
+	runnerClojure
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -188,6 +191,13 @@ var (
 	// keeping prose like "subtle changes" — and the unrelated "go test"/"cargo
 	// test" runners, which never contain "sbt" at a word boundary — from matching.
 	sbtRe = regexp.MustCompile(`\bsbt\b`)
+	// Clojure's stdlib clojure.test has no dedicated binary; it is driven by
+	// "lein test" (Leiningen), "kaocha"/"lein kaocha", or the tools.deps CLI with
+	// a test alias ("clojure -M:test", "clj -X:test"). The ":test" alias token and
+	// the "lein test"/"kaocha" invocations are distinctive enough to avoid matching
+	// a plain "clojure script.clj" run that is not a test invocation. \b keeps
+	// prose like "include the latest features" from matching.
+	clojureTestRe = regexp.MustCompile(`\blein test\b|\bkaocha\b|\bcl(?:j|ojure)\b[^&|;]*:test\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -323,6 +333,14 @@ func classifyTestRunner(command string) testRunner {
 		// line below. Checked before the JS runners since an sbt invocation carries
 		// none of their substrings, but kept explicit to guard against future overlap.
 		return runnerScala
+	case clojureTestRe.MatchString(c):
+		// `lein test`/`clojure -M:test`/`clj -X:test`/`kaocha` drive clojure.test,
+		// whose default reporter opens each failure with a "FAIL in (<var>)
+		// (<file>:<line>)" / "ERROR in (<var>) (<file>:<line>)" header and prints
+		// the failing form on an indented "actual:" line beneath. Checked before
+		// the JS runners since a Clojure invocation carries none of their
+		// substrings, but kept explicit to guard against future overlap.
+		return runnerClojure
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1811,6 +1829,56 @@ func parseScalaTestFailures(output string) []testFailure {
 			}
 			if t := strings.TrimSpace(body); t != "" {
 				f.Detail = t
+				break
+			}
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "FAIL in (a-test) (core_test.clj:7)" / "ERROR in (a-test) (core_test.clj:9)"
+	// — the header clojure.test's default reporter prints for each failing or
+	// erroring assertion. Group 1 is the test var, group 2 the "file:line" site.
+	// lein/Cognitect's test-runner relay the same header verbatim, so one matcher
+	// covers them. The line may carry leading whitespace under nested reporters.
+	clojureFailRe = regexp.MustCompile(`^\s*(?:FAIL|ERROR) in \((.+?)\) \((.+?)\)`)
+	// "  actual: (not (= 0 1))" — the indented line clojure.test prints with the
+	// failing form (or the thrown exception, for an ERROR). It is the closest
+	// thing to a one-line assertion message, so it is used as the detail.
+	clojureActualRe = regexp.MustCompile(`^\s*actual:\s*(.+)$`)
+)
+
+// parseClojureTestFailures extracts failures from clojure.test output
+// (`lein test`/`clojure -M:test`/`clj -X:test`/`kaocha`). Each failing or
+// erroring assertion opens with a "FAIL in (<var>) (<file>:<line>)" /
+// "ERROR in (<var>) (<file>:<line>)" header; Name is "<var> (<file>:<line>)" so
+// the failing form's source site travels with the test name, and Detail is the
+// first following indented "actual:" line — the failing form or thrown exception.
+// Scanning for the detail stops at the next header so an entry without an
+// "actual:" line does not borrow the following failure's.
+func parseClojureTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := clojureFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1]) + " (" + strings.TrimSpace(m[2]) + ")"
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if clojureFailRe.MatchString(lines[j]) {
+				break
+			}
+			if d := clojureActualRe.FindStringSubmatch(lines[j]); d != nil {
+				f.Detail = strings.TrimSpace(d[1])
 				break
 			}
 		}

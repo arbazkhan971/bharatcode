@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bufio"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -77,10 +76,10 @@ func (t *lsTool) Run(ctx context.Context, raw json.RawMessage) (res Result, err 
 		return errorResult("path is not a directory"), nil
 	}
 
-	patterns, err := ignorePatterns(root, args.Ignore)
-	if err != nil {
-		return Result{}, err
-	}
+	// Honor .gitignore — including any in the listed directory or its ancestors
+	// up to the workspace root (e.g. listing build/ respects build/.gitignore) —
+	// plus the caller's extra ignore patterns.
+	ignore := newGitignoreStack(root)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return Result{}, fmt.Errorf("listing directory %s: %w", dir, err)
@@ -93,7 +92,10 @@ func (t *lsTool) Run(ctx context.Context, raw json.RawMessage) (res Result, err 
 	for _, entry := range entries {
 		full := filepath.Join(dir, entry.Name())
 		rel := relativeSlash(root, full)
-		if ignored(rel, entry.Name(), entry.IsDir(), patterns) {
+		if ignore.ignored(full, entry.Name(), entry.IsDir()) {
+			continue
+		}
+		if len(args.Ignore) > 0 && ignored(rel, entry.Name(), entry.IsDir(), args.Ignore) {
 			continue
 		}
 		name := entry.Name()
@@ -107,31 +109,6 @@ func (t *lsTool) Run(ctx context.Context, raw json.RawMessage) (res Result, err 
 		return Result{Content: "Directory is empty."}, nil
 	}
 	return Result{Content: strings.Join(names, "\n")}, nil
-}
-
-func ignorePatterns(root string, extra []string) ([]string, error) {
-	patterns := append([]string(nil), extra...)
-	file, err := os.Open(filepath.Join(root, ".gitignore"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return patterns, nil
-		}
-		return nil, fmt.Errorf("opening .gitignore: %w", err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
-			continue
-		}
-		patterns = append(patterns, line)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading .gitignore: %w", err)
-	}
-	return patterns, nil
 }
 
 func ignored(rel, name string, isDir bool, patterns []string) bool {

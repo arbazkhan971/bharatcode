@@ -124,6 +124,35 @@ func TestSlashSessions_TypeToFilterNarrowsAndRestores(t *testing.T) {
 	require.Equal(t, "", m.sessionFilter, "the filter must reset once a session is restored")
 }
 
+// TestSlashSessions_FuzzyFilterMatchesSubsequence asserts the picker filter
+// accepts a scattered subsequence (typing "psr" finds "Parser refactor"), and
+// that a substring match ranks ahead of a subsequence-only match regardless of
+// recency order, mirroring the @-file picker's fuzzy ranking.
+func TestSlashSessions_FuzzyFilterMatchesSubsequence(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// "Parser refactor" matches "psr" only as a subsequence; "psr tool" (seeded
+	// last, so newest) contains "psr" as a substring and must rank first.
+	refactorID := seedSession(t, h.repo, "Parser refactor", "fix the parser")
+	_ = seedSession(t, h.repo, "Unrelated work", "nothing here")
+	reloadID := seedSession(t, h.repo, "psr tool", "restart it")
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+
+	for _, ch := range "psr" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+	require.Equal(t, "psr", m.sessionFilter)
+
+	visible := m.visibleSessions()
+	require.Len(t, visible, 2, "both the substring and subsequence rows must match")
+	require.Equal(t, reloadID, visible[0].ID, "the substring match must rank first")
+	require.Equal(t, refactorID, visible[1].ID, "the subsequence-only match must follow")
+}
+
 // TestSlashSessions_HomeEndJumpToEnds asserts the session picker's Home/End
 // bindings jump the cursor to the first and last visible rows, mirroring the
 // chat's Home/End (oldest/newest) navigation, and that they are bounded so a

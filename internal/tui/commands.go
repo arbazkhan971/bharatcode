@@ -44,24 +44,30 @@ func (m *model) openSessionPicker() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// visibleSessions returns the picker rows that match the live filter query,
-// in candidate order. An empty query returns every candidate. Matching is a
-// case-insensitive substring test against the session title and short id, so
-// typing part of either narrows the list (mirroring the session switchers in
-// Claude Code and opencode).
+// visibleSessions returns the picker rows that match the live filter query.
+// An empty query returns every candidate in candidate (recency) order. A query
+// is matched case-insensitively against the session title and short id: rows
+// whose haystack contains the query as a substring rank first, then rows it
+// matches only as a scattered subsequence (so "psr" finds "Parser refactor").
+// Within each band the original recency order is preserved, mirroring the fuzzy
+// session switchers in Claude Code and opencode and the @-file picker's own
+// substring-before-subsequence ranking.
 func (m *model) visibleSessions() []session.Session {
 	if m.sessionFilter == "" {
 		return m.sessionCandidates
 	}
 	q := strings.ToLower(m.sessionFilter)
-	out := make([]session.Session, 0, len(m.sessionCandidates))
+	var substr, subseq []session.Session
 	for _, s := range m.sessionCandidates {
 		hay := strings.ToLower(s.Title + " " + shortSessionID(s.ID))
-		if strings.Contains(hay, q) {
-			out = append(out, s)
+		switch {
+		case strings.Contains(hay, q):
+			substr = append(substr, s)
+		case isSubsequence(q, hay):
+			subseq = append(subseq, s)
 		}
 	}
-	return out
+	return append(substr, subseq...)
 }
 
 // sessionPickerBody renders the session list with a cursor marker and a hint.
@@ -87,7 +93,7 @@ func (m *model) sessionPickerBody() string {
 		}
 		lines = append(lines, fmt.Sprintf("%s%s · %d msgs · %s · %s", marker, title, s.MessageCount, relativeTime(s.UpdatedAt, time.Now()), shortSessionID(s.ID)))
 	}
-	lines = append(lines, "", "type to filter · ↑/↓ to move · home/end to jump · enter to restore · esc to cancel")
+	lines = append(lines, "", "type to fuzzy filter · ↑/↓ to move · home/end to jump · enter to restore · esc to cancel")
 	return strings.Join(lines, "\n")
 }
 

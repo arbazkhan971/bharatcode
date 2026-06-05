@@ -18,6 +18,12 @@ type fakeCodeActions struct {
 	actions []lsp.CodeAction
 	err     error
 
+	// resolved is the action ResolveCodeAction returns; resolveErr the error it
+	// returns. resolveCalls counts how many times ResolveCodeAction was invoked.
+	resolved     lsp.CodeAction
+	resolveErr   error
+	resolveCalls int
+
 	lastPath  string
 	lastRange lsp.Range
 }
@@ -25,6 +31,11 @@ type fakeCodeActions struct {
 func (f *fakeCodeActions) CodeActions(_ context.Context, file string, rng lsp.Range) ([]lsp.CodeAction, error) {
 	f.lastPath, f.lastRange = file, rng
 	return f.actions, f.err
+}
+
+func (f *fakeCodeActions) ResolveCodeAction(_ context.Context, _ string, _ lsp.CodeAction) (lsp.CodeAction, error) {
+	f.resolveCalls++
+	return f.resolved, f.resolveErr
 }
 
 func writeCodeActionsFile(t *testing.T, dir string) string {
@@ -190,6 +201,90 @@ func TestCodeActionsApplyWritesEditAndDiffs(t *testing.T) {
 	require.Contains(t, result.Content, "-package main")
 	require.Contains(t, result.Content, "+package widget")
 	require.Equal(t, "Organize Imports", result.Metadata["applied"])
+}
+
+func TestCodeActionsApplyResolvesEditlessAction(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	// The server lists an action without an edit but with resolve data, as gopls
+	// does for refactorings; the edit is computed on codeAction/resolve.
+	src := &fakeCodeActions{
+		actions: []lsp.CodeAction{
+			{Title: "Extract function", Kind: "refactor.extract", Data: json.RawMessage(`{"title":"Extract function"}`)},
+		},
+		resolved: lsp.CodeAction{Title: "Extract function", Kind: "refactor.extract", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range: lsp.Range{
+					Start: lsp.Position{Line: 0, Character: 0},
+					End:   lsp.Position{Line: 0, Character: 12},
+				},
+				NewText: "package widget",
+			}}},
+		}},
+	}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, 1, src.resolveCalls, "an editless action should be resolved before applying")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package widget\n", string(got))
+	require.Contains(t, result.Content, `applied "Extract function"`)
+}
+
+func TestCodeActionsApplyResolveFailureFallsThrough(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	// Resolve fails (e.g. the server does not implement codeAction/resolve), so
+	// the action is still treated as carrying no edits rather than crashing.
+	src := &fakeCodeActions{
+		actions: []lsp.CodeAction{
+			{Title: "Extract function", Kind: "refactor.extract", Data: json.RawMessage(`{"title":"Extract function"}`)},
+		},
+		resolveErr: errors.New("resolve unsupported"),
+	}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Equal(t, 1, src.resolveCalls)
+	require.Contains(t, result.Content, "no edits")
+}
+
+func TestCodeActionsApplyEditPresentSkipsResolve(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	// An action that already carries an edit must be applied directly, never
+	// round-tripped through resolve.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports", Data: json.RawMessage(`{"title":"Organize Imports"}`), Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range: lsp.Range{
+					Start: lsp.Position{Line: 0, Character: 0},
+					End:   lsp.Position{Line: 0, Character: 12},
+				},
+				NewText: "package widget",
+			}}},
+		}},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, 0, src.resolveCalls, "an action with an edit should not be resolved")
 }
 
 func TestCodeActionsPreviewShowsDiffWithoutWriting(t *testing.T) {

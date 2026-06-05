@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -319,4 +320,34 @@ func TestParseRenameShapes(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, edit.Changes)
 	})
+}
+
+func TestParseCodeActionPreservesResolveData(t *testing.T) {
+	t.Run("editless_action_keeps_data", func(t *testing.T) {
+		// An action without an edit retains its raw object so a follow-up
+		// codeAction/resolve can echo it back to the server.
+		raw := `{"title":"Extract function","kind":"refactor.extract","data":{"fn":"x"}}`
+		action, err := parseCodeAction(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, "Extract function", action.Title)
+		require.Empty(t, action.Edit.Changes)
+		require.JSONEq(t, raw, string(action.Data))
+	})
+
+	t.Run("bare_command_has_no_data", func(t *testing.T) {
+		// A bare Command entry cannot be resolved, so it carries no resolve data.
+		raw := `{"title":"Generate","command":"gopls.generate","arguments":[]}`
+		action, err := parseCodeAction(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Nil(t, action.Data)
+	})
+}
+
+func TestResolveCodeActionRequiresData(t *testing.T) {
+	// Resolving an action with no round-trip data is rejected before any request
+	// is issued, so a nil client never gets dereferenced.
+	c := &client{}
+	_, err := c.resolveCodeAction(context.Background(), CodeAction{Title: "Extract function"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not resolvable")
 }

@@ -226,6 +226,22 @@ func (c *client) codeAction(ctx context.Context, path string, rng Range) ([]Code
 	return parseCodeActions(result)
 }
 
+// resolveCodeAction issues a codeAction/resolve request for an action that the
+// server returned without a populated edit, echoing the original action object
+// (action.Data) back so the server can compute the edit lazily. The resolved
+// action the server returns is parsed and returned. It is an error to resolve an
+// action that carries no Data, since there is nothing to round-trip.
+func (c *client) resolveCodeAction(ctx context.Context, action CodeAction) (CodeAction, error) {
+	if len(action.Data) == 0 {
+		return CodeAction{}, fmt.Errorf("code action %q is not resolvable: server sent no resolve data", action.Title)
+	}
+	result, err := c.request(ctx, "codeAction/resolve", action.Data)
+	if err != nil {
+		return CodeAction{}, fmt.Errorf("resolving code action %q: %w", action.Title, err)
+	}
+	return parseCodeAction(result)
+}
+
 // codeActionDiagnostics returns the wire-form diagnostics overlapping rng, to
 // be attached to a textDocument/codeAction request's context so quick fixes
 // keyed on a diagnostic are offered. Pull-capable servers are queried (cheap,
@@ -526,7 +542,7 @@ func parseCodeAction(raw json.RawMessage) (CodeAction, error) {
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return CodeAction{}, fmt.Errorf("parsing code action: %w", err)
 	}
-	action := CodeAction{Title: wire.Title, Kind: wire.Kind}
+	action := CodeAction{Title: wire.Title, Kind: wire.Kind, Data: append(json.RawMessage(nil), raw...)}
 	if len(wire.Edit) > 0 && string(wire.Edit) != "null" {
 		edit, err := parseWorkspaceEdit(wire.Edit)
 		if err != nil {

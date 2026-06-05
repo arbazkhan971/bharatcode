@@ -77,7 +77,11 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.chat.FinishStream(userStreamID)
 	m.chat.Reindex(userStreamID)
 	m.running = true
-	return m.runAgent(prompt), nil
+	// Inline any @-file references so the model sees their contents, while the
+	// chat bubble above keeps the user's original text. Resolution is scoped to
+	// the workspace root; unresolved mentions are left untouched.
+	expanded, _ := expandFileMentions(prompt, m.workspaceRoot)
+	return m.runAgent(expanded), nil
 }
 
 // ensureSession creates a persisted session row the first time the user runs a

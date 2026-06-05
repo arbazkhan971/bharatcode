@@ -188,15 +188,26 @@ func formatJob(job shell.Job) string {
 	return header + "\n" + body
 }
 
-// capOutput caps output to maxLines lines, appending a notice when truncated.
+// capOutput caps output to maxLines lines, eliding the middle when truncation
+// is needed. It keeps a head and a tail so both the start of the output and its
+// end survive: for command output the most actionable lines — a build/test
+// failure summary, the final error, a non-zero exit trace — land at the very
+// end, and a head-only cap would silently drop exactly those. A clear notice
+// reports how many middle lines were removed. (The loop-level byte cap also
+// keeps head+tail; this mirrors that policy at the line granularity bash uses.)
 func capOutput(output string, maxLines int) string {
 	lines := splitLines(output)
 	if len(lines) <= maxLines {
 		return output
 	}
-	dropped := len(lines) - maxLines
-	truncated := joinLines(lines[:maxLines])
-	return truncated + fmt.Sprintf("\n[%d more lines truncated]", dropped)
+	// Split the budget between head and tail. The tail gets the extra line on an
+	// odd budget since the terminal summary is usually the most valuable part.
+	tailLen := maxLines / 2
+	headLen := maxLines - tailLen
+	dropped := len(lines) - headLen - tailLen
+	head := joinLines(lines[:headLen])
+	tail := joinLines(lines[len(lines)-tailLen:])
+	return head + fmt.Sprintf("\n[%d lines truncated]\n", dropped) + tail
 }
 
 // splitLines splits s on "\n" without including a spurious empty element for a

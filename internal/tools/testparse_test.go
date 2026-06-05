@@ -98,6 +98,36 @@ func TestParseGoTestFailures_JSONPanic(t *testing.T) {
 	assertFailures(t, got, want)
 }
 
+func TestParseGoTestFailures_JSONBuildFailed(t *testing.T) {
+	// `go test -json` emits no "--- FAIL:" or "[build failed]" text on a compile
+	// error: the diagnostics arrive as package-scoped "output" events followed by
+	// a package-level "fail" with no Test. The JSON parser must surface a
+	// "pkg [build failed]" entry with the first diagnostic as detail.
+	out := `{"Action":"output","Package":"github.com/x/y","Output":"# github.com/x/y [github.com/x/y.test]\n"}
+{"Action":"output","Package":"github.com/x/y","Output":"./y_test.go:10:2: undefined: helper\n"}
+{"Action":"output","Package":"github.com/x/y","Output":"./y_test.go:14:6: f declared and not used\n"}
+{"Action":"fail","Package":"github.com/x/y","Elapsed":0}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "github.com/x/y [build failed]", Detail: "./y_test.go:10:2: undefined: helper"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_JSONTestFailNoBuildEntry(t *testing.T) {
+	// A package-level "fail" that accompanies an individual test failure must not
+	// also produce a spurious "[build failed]" entry: only the test is reported.
+	out := `{"Action":"run","Test":"TestFoo"}
+{"Action":"output","Test":"TestFoo","Output":"    foo_test.go:42: boom\n"}
+{"Action":"fail","Test":"TestFoo","Package":"github.com/x/y","Elapsed":0}
+{"Action":"fail","Package":"github.com/x/y","Elapsed":0}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo", Detail: "foo_test.go:42: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseGoTestFailures_BuildFailed(t *testing.T) {
 	out := `# github.com/x/y [github.com/x/y.test]
 ./y_test.go:10:2: undefined: helper

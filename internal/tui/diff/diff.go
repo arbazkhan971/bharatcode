@@ -83,7 +83,7 @@ func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 		}
 
 		switch {
-		case isDiffHeader(line) || strings.HasPrefix(line, "@@") || !inHunk:
+		case isDiffHeader(line) || strings.HasPrefix(line, "@@") || isNoNewlineMarker(line) || !inHunk:
 			out[i] = blankGutter + styled
 		case strings.HasPrefix(line, "+"):
 			out[i] = v.gutter(oldLn, newLn, digits, false, true) + styled
@@ -351,7 +351,7 @@ func lineNumberCeiling(lines []string) int {
 			inHunk = true
 			continue
 		}
-		if isDiffHeader(line) || strings.HasPrefix(line, "@@") || !inHunk {
+		if isDiffHeader(line) || strings.HasPrefix(line, "@@") || isNoNewlineMarker(line) || !inHunk {
 			continue
 		}
 		switch {
@@ -391,6 +391,11 @@ func (v *Viewer) styleLine(line string) string {
 		return v.styleHunkHeader(line)
 	case isDiffHeader(line):
 		return v.theme.DiffHeader.Render(line)
+	case isNoNewlineMarker(line):
+		// Git's "\ No newline at end of file" annotation is metadata, not added
+		// or removed content; dim it so it reads as a quiet note rather than a
+		// changed line, matching how git and delta present it.
+		return v.theme.Muted.Render(line)
 	case strings.HasPrefix(line, "+"):
 		return v.theme.DiffAdd.Render(line)
 	case strings.HasPrefix(line, "-"):
@@ -582,4 +587,14 @@ func isDiffHeader(line string) bool {
 		strings.HasPrefix(line, "---") ||
 		strings.HasPrefix(line, "diff --git") ||
 		strings.HasPrefix(line, "index ")
+}
+
+// isNoNewlineMarker reports whether line is git's "\ No newline at end of file"
+// annotation, which trails a +/- line whose file lacks a final newline. It is
+// metadata rather than numbered content, so the renderers give it a blank
+// gutter and the line-number counters skip over it; otherwise it would be
+// mistaken for a context line, drawing a bogus line number and shifting every
+// number that follows.
+func isNoNewlineMarker(line string) bool {
+	return strings.HasPrefix(line, "\\ ")
 }

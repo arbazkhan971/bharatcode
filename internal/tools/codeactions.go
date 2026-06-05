@@ -35,6 +35,7 @@ type codeActionsArgs struct {
 	Column    int    `json:"column,omitempty"`
 	EndLine   int    `json:"end_line,omitempty"`
 	EndColumn int    `json:"end_column,omitempty"`
+	Kind      string `json:"kind,omitempty"`
 	Apply     int    `json:"apply,omitempty"`
 	Preview   bool   `json:"preview,omitempty"`
 }
@@ -68,6 +69,10 @@ var schemaCodeActions = json.RawMessage(`{
       "type": "integer",
       "minimum": 1,
       "description": "1-based end column. Defaults to column (a cursor position rather than a span)."
+    },
+    "kind": {
+      "type": "string",
+      "description": "Restrict to actions of this LSP CodeActionKind, including its sub-kinds: \"quickfix\" (error/warning fixes), \"refactor\" (extract/inline/rewrite), \"source\" (whole-file actions like \"source.organizeImports\"). A dotted kind narrows further, e.g. \"refactor.extract\". Omit to list every available action."
     },
     "apply": {
       "type": "integer",
@@ -163,11 +168,38 @@ func (t *codeActionsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		return Result{}, fmt.Errorf("getting code actions at %s:%d:%d: %w", args.Path, args.Line, col, err)
 	}
 
+	kind := strings.TrimSpace(args.Kind)
+	if kind != "" {
+		actions = filterCodeActionsByKind(actions, kind)
+	}
+
 	ordered := orderedCodeActions(actions)
 	if args.Apply > 0 {
 		return t.applyCodeAction(ctx, ordered, args.Apply, args.Preview, raw)
 	}
+	if len(ordered) == 0 && kind != "" {
+		return Result{Content: fmt.Sprintf("No code actions of kind %q available.", kind)}, nil
+	}
 	return codeActionsResult(ordered), nil
+}
+
+// filterCodeActionsByKind keeps the actions whose Kind matches the requested
+// CodeActionKind, applying the LSP hierarchy rule: a kind matches the filter
+// when it equals it exactly or is a sub-kind (the filter followed by a "."
+// segment). So "quickfix" admits "quickfix" and "quickfix.import", and "source"
+// admits "source.organizeImports", but "source" does not match a bare
+// "sourcery" kind. The match is case-insensitive since servers are inconsistent
+// about kind casing. Actions with an empty Kind never match a non-empty filter.
+func filterCodeActionsByKind(actions []lsp.CodeAction, kind string) []lsp.CodeAction {
+	want := strings.ToLower(kind)
+	out := make([]lsp.CodeAction, 0, len(actions))
+	for _, a := range actions {
+		have := strings.ToLower(strings.TrimSpace(a.Kind))
+		if have == want || strings.HasPrefix(have, want+".") {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // applyCodeAction applies the workspace edit of the action at the given 1-based

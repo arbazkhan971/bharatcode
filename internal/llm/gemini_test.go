@@ -1062,6 +1062,108 @@ func TestSanitizeGeminiSchemaStripsUnsupportedKeys(t *testing.T) {
 	require.Contains(t, branches[1].(map[string]any)["properties"].(map[string]any), "n")
 }
 
+func TestSanitizeGeminiSchemaInlinesRefs(t *testing.T) {
+	// A schema as generators commonly emit it: a shared object factored into
+	// "$defs" and referenced by a local "#/$defs/Name" pointer, including from
+	// inside an array's "items" and referenced twice. Gemini rejects $ref/$defs,
+	// so the sanitizer must inline the target and drop the containers.
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"home": {"$ref": "#/$defs/Address"},
+			"stops": {"type": "array", "items": {"$ref": "#/$defs/Address"}}
+		},
+		"$defs": {
+			"Address": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {"city": {"type": "string"}}
+			}
+		}
+	}`)
+
+	got := sanitizeGeminiSchema(raw)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(got, &decoded))
+
+	// The definition container is gone and no $ref survives anywhere.
+	require.NotContains(t, decoded, "$defs")
+	require.NotContains(t, string(got), "$ref")
+
+	props := decoded["properties"].(map[string]any)
+
+	// Both reference sites are inlined to a full copy of Address, and the
+	// unsupported "additionalProperties" carried by the definition is stripped.
+	home := props["home"].(map[string]any)
+	require.Equal(t, "object", home["type"])
+	require.NotContains(t, home, "additionalProperties")
+	require.Contains(t, home["properties"].(map[string]any), "city")
+
+	item := props["stops"].(map[string]any)["items"].(map[string]any)
+	require.Contains(t, item["properties"].(map[string]any), "city")
+
+	// The two inlined copies are independent values, not a shared map.
+	require.NotSame(t, &home, &item)
+}
+
+func TestSanitizeGeminiSchemaInlinesLegacyDefinitions(t *testing.T) {
+	// The legacy draft-07 "definitions" container is resolved just like "$defs".
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {"id": {"$ref": "#/definitions/Id"}},
+		"definitions": {"Id": {"type": "string"}}
+	}`)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(sanitizeGeminiSchema(raw), &decoded))
+
+	require.NotContains(t, decoded, "definitions")
+	id := decoded["properties"].(map[string]any)["id"].(map[string]any)
+	require.Equal(t, "string", id["type"])
+}
+
+func TestSanitizeGeminiSchemaCollapsesRecursiveRef(t *testing.T) {
+	// A self-referential definition cannot be inlined into a finite tree, so it
+	// collapses to a permissive object and resolution still terminates.
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {"node": {"$ref": "#/$defs/Node"}},
+		"$defs": {
+			"Node": {
+				"type": "object",
+				"properties": {"child": {"$ref": "#/$defs/Node"}}
+			}
+		}
+	}`)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(sanitizeGeminiSchema(raw), &decoded))
+
+	require.NotContains(t, decoded, "$defs")
+	node := decoded["properties"].(map[string]any)["node"].(map[string]any)
+	// One level of Node is inlined; its recursive "child" collapses to {"type":"object"}.
+	child := node["properties"].(map[string]any)["child"].(map[string]any)
+	require.Equal(t, "object", child["type"])
+	require.NotContains(t, child, "properties")
+}
+
+func TestSanitizeGeminiSchemaLeavesUnresolvableRef(t *testing.T) {
+	// A reference with no matching definition is left untouched rather than
+	// guessed at, so the sanitizer never makes a request worse than the input.
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {"x": {"$ref": "#/$defs/Missing"}},
+		"$defs": {"Other": {"type": "string"}}
+	}`)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(sanitizeGeminiSchema(raw), &decoded))
+
+	x := decoded["properties"].(map[string]any)["x"].(map[string]any)
+	require.Equal(t, "#/$defs/Missing", x["$ref"])
+}
+
 func TestSanitizeGeminiSchemaPassesThroughInvalidAndEmpty(t *testing.T) {
 	// A non-JSON schema is returned byte-for-byte rather than dropped, so the
 	// sanitizer never makes a request worse than the raw passthrough it replaced.

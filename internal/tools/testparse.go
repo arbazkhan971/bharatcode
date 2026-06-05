@@ -50,6 +50,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parsePHPUnitFailures(output)
 	case runnerDotnet:
 		return parseDotnetTestFailures(output)
+	case runnerMaven:
+		return parseMavenTestFailures(output)
 	default:
 		return nil
 	}
@@ -67,6 +69,7 @@ const (
 	runnerUnittest
 	runnerPHPUnit
 	runnerDotnet
+	runnerMaven
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -79,6 +82,10 @@ var (
 	// \brspec\b matches "rspec", "bundle exec rspec", and "bin/rspec" (the slash
 	// is a word boundary) without firing on prose like "rspecs are great".
 	rspecRe = regexp.MustCompile(`\brspec\b`)
+	// "mvn", "mvnw", and "./mvnw" all begin with "mvn" at a word boundary; the
+	// \b keeps prose like "an mvndaemon discussion" from matching while allowing
+	// the wrapper-script suffix.
+	mavenRe = regexp.MustCompile(`\bmvn`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -94,6 +101,11 @@ func classifyTestRunner(command string) testRunner {
 		return runnerGo
 	case rspecRe.MatchString(c):
 		return runnerRSpec
+	case mavenRe.MatchString(c):
+		// `mvn test`/`mvn verify` (and the `mvnw` wrapper) drive the Surefire
+		// plugin, whose console output marks each failure with "<<< FAILURE!" or
+		// "<<< ERROR!" regardless of the JUnit/TestNG version underneath.
+		return runnerMaven
 	case strings.Contains(c, "dotnet test"):
 		// `dotnet test` drives VSTest, whose console logger prints "Failed
 		// <FQN> [<time>]" per failure regardless of the underlying framework
@@ -662,6 +674,64 @@ func parseDotnetTestFailures(output string) []testFailure {
 					break
 				}
 			}
+			break
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "<<< FAILURE!" / "<<< ERROR!" — Surefire's per-test outcome marker. It
+	// appears both on the per-test header line and on the "Tests run: ..." run
+	// summary line, so the parser excludes the latter explicitly.
+	mavenFailMarkerRe = regexp.MustCompile(`<<<\s+(?:FAILURE|ERROR)!`)
+	// The fully-qualified test id sits before the "  Time elapsed: ..." segment of
+	// the failure header, after an optional Maven "[ERROR]"/"[INFO]"/"[WARNING]"
+	// log prefix. Surefire prints it as "com.example.FooTest.bar" (JUnit5) or
+	// "bar(com.example.FooTest)" (JUnit4); both are kept verbatim as the name.
+	mavenNameRe = regexp.MustCompile(`^(?:\[(?:ERROR|INFO|WARNING)\]\s+)?(\S.*?)\s+Time elapsed:`)
+)
+
+// parseMavenTestFailures extracts failing tests from Maven Surefire console
+// output (`mvn test`/`mvn verify`). Each failure opens with a
+// "<FQN>  Time elapsed: <t> s  <<< FAILURE!" (or "<<< ERROR!") header; the
+// detail is the exception line printed immediately beneath it (e.g.
+// "org.opentest4j.AssertionFailedError: expected: <5> but was: <4>"), located as
+// the first unindented non-empty line before the next failure header so stack
+// frames (indented "at ...") and the next entry are skipped. The aggregate
+// "Tests run: N, Failures: ... <<< FAILURE!" line carries the same marker but is
+// not a test, so it is excluded.
+func parseMavenTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		if !mavenFailMarkerRe.MatchString(lines[i]) {
+			continue
+		}
+		m := mavenNameRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		// The run-summary line ("Tests run: 2, Failures: 1, ... <<< FAILURE!")
+		// matches the marker and name shapes but is a count, not a test.
+		if name == "" || strings.HasPrefix(name, "Tests run:") || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if mavenFailMarkerRe.MatchString(lines[j]) {
+				break
+			}
+			// The exception message is at column 0; indented lines are stack
+			// frames ("\tat ...") and blank lines are separators.
+			if strings.TrimSpace(lines[j]) == "" || lines[j][0] == ' ' || lines[j][0] == '\t' {
+				continue
+			}
+			f.Detail = strings.TrimSpace(lines[j])
 			break
 		}
 		failures = append(failures, f)

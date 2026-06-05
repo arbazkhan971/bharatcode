@@ -25,6 +25,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"phpunit --filter testFoo":            runnerPHPUnit,
 		"dotnet test":                         runnerDotnet,
 		"dotnet test ./MyApp.sln -v normal":   runnerDotnet,
+		"mvn test":                            runnerMaven,
+		"mvn -q verify -Dtest=FooTest":        runnerMaven,
+		"./mvnw test":                         runnerMaven,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
@@ -462,6 +465,55 @@ Failed!  - Failed:     1, Passed:     0, Skipped:     0, Total:     1`
 	got := parseTestFailures("dotnet test ./MyApp.sln", out)
 	want := []testFailure{{Name: "Suite.Tests.Lonely"}}
 	assertFailures(t, got, want)
+}
+
+func TestParseMavenTestFailures(t *testing.T) {
+	out := `[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.CalculatorTest
+[ERROR] Tests run: 3, Failures: 1, Errors: 1, Skipped: 0, Time elapsed: 0.041 s <<< FAILURE! - in com.example.CalculatorTest
+[ERROR] com.example.CalculatorTest.testAdd  Time elapsed: 0.008 s  <<< FAILURE!
+org.opentest4j.AssertionFailedError: expected: <5> but was: <4>
+	at org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:55)
+	at com.example.CalculatorTest.testAdd(CalculatorTest.java:12)
+
+[ERROR] com.example.CalculatorTest.testDiv  Time elapsed: 0.002 s  <<< ERROR!
+java.lang.ArithmeticException: / by zero
+	at com.example.Calculator.div(Calculator.java:9)
+
+[INFO] Results:
+[INFO]
+[ERROR] Failures:
+[ERROR]   CalculatorTest.testAdd:12 expected: <5> but was: <4>`
+	got := parseTestFailures("mvn test", out)
+	want := []testFailure{
+		{Name: "com.example.CalculatorTest.testAdd", Detail: "org.opentest4j.AssertionFailedError: expected: <5> but was: <4>"},
+		{Name: "com.example.CalculatorTest.testDiv", Detail: "java.lang.ArithmeticException: / by zero"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseMavenTestFailures_JUnit4Name(t *testing.T) {
+	// Older Surefire prints "method(FQCN)" and may omit a Maven log prefix.
+	out := `Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.03 sec <<< FAILURE! - in com.example.OldTest
+testBar(com.example.OldTest)  Time elapsed: 0.01 sec  <<< FAILURE!
+junit.framework.AssertionFailedError: nope
+	at com.example.OldTest.testBar(OldTest.java:7)`
+	got := parseTestFailures("./mvnw test", out)
+	want := []testFailure{
+		{Name: "testBar(com.example.OldTest)", Detail: "junit.framework.AssertionFailedError: nope"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseMavenTestFailures_NoFailures(t *testing.T) {
+	out := `[INFO] Running com.example.OkTest
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS`
+	if got := parseTestFailures("mvn test", out); got != nil {
+		t.Errorf("expected nil for passing run, got %v", got)
+	}
 }
 
 func TestParseTestFailures_NonTestCommandIgnored(t *testing.T) {

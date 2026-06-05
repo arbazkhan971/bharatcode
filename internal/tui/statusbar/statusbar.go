@@ -24,6 +24,9 @@ type Bar struct {
 	// Goal shows autonomous goal-loop progress (e.g. "goal 3/10"). Empty
 	// hides the segment.
 	Goal string
+	// Search shows scrollback-search progress (e.g. "search 2/7"). Empty
+	// hides the segment, so the bar is unchanged when no search is active.
+	Search string
 }
 
 // Render returns one status line.
@@ -48,7 +51,11 @@ func (b Bar) Render(width int) string {
 	if b.Goal != "" {
 		goal = " · " + b.Goal
 	}
-	line := fmt.Sprintf("%s · %s · session %s · up %s%s%s%s", b.Model, b.Agent, shortID(b.SessionID), util.HumanDuration(now.Sub(started)), mode, yolo, goal)
+	search := ""
+	if b.Search != "" {
+		search = " · " + b.Search
+	}
+	line := fmt.Sprintf("%s · %s · session %s · up %s%s%s%s%s", b.Model, b.Agent, shortID(b.SessionID), util.HumanDuration(now.Sub(started)), mode, yolo, goal, search)
 	if len([]rune(line)) > width && width > 0 {
 		line = string([]rune(line)[:width])
 	}

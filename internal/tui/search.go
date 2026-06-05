@@ -25,6 +25,17 @@ func (s *searchState) active() bool {
 	return len(s.matches) > 0
 }
 
+// statusSegment returns the status-bar segment describing search progress, e.g.
+// "search 2/7". It is empty when no search is active, so the status bar is
+// unchanged until the user starts navigating matches. The 1-based current index
+// mirrors the dialog count ("Match 1 of N") the user first sees.
+func (s *searchState) statusSegment() string {
+	if !s.active() {
+		return ""
+	}
+	return fmt.Sprintf("search %d/%d", s.current+1, len(s.matches))
+}
+
 // reset clears the search so the viewport is no longer pinned to a match.
 func (s *searchState) reset() {
 	s.term = ""

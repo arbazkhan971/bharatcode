@@ -169,6 +169,38 @@ func TestMentionMatches_AcronymAcrossPathSegments(t *testing.T) {
 	require.Contains(t, mentionMatches("its", root), "internal/tui/statusbar.go")
 }
 
+// TestMentionMatches_TighterSpanRanksFirst asserts that within one score band the
+// candidate whose matched runes sit closer together ranks ahead of a looser
+// match, even when the looser one is shallower — the fzf-style contiguity
+// preference. Both files match the token only as a base-name subsequence (same
+// score band), so the span tie-break is what decides the order.
+func TestMentionMatches_TighterSpanRanksFirst(t *testing.T) {
+	t.Parallel()
+
+	// "az" threads "a..z" loosely across the shallow "axxz.go" (span 4) but
+	// tightly across the deeper "sub/dir/axz.go" (span 3). Shape alone would put
+	// the shallow file first; the span tie-break promotes the tighter match.
+	root := mentionWorkspace(t,
+		"axxz.go",
+		"sub/dir/axz.go",
+	)
+	got := mentionMatches("az", root)
+	require.Equal(t, []string{"sub/dir/axz.go", "axxz.go"}, got)
+}
+
+// TestMatchSpan_MeasuresMatchedRunRange asserts matchSpan reports the inclusive
+// rune distance from the first matched rune to the last: exactly the token
+// length for a contiguous match, and wider for a scattered subsequence.
+func TestMatchSpan_MeasuresMatchedRunRange(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 2, matchSpan("ax", "axz.go"))  // contiguous "ax" -> span equals token length
+	require.Equal(t, 3, matchSpan("az", "axz.go"))  // a..z one gap apart
+	require.Equal(t, 4, matchSpan("az", "axxz.go")) // a..z two gaps apart
+	require.Equal(t, 0, matchSpan("qq", "axz.go"))  // no match
+	require.Equal(t, 0, matchSpan("", "axz.go"))    // empty token
+}
+
 // TestInitialsPositions_LightsWordStarts asserts the acronym matcher reports the
 // rune indices of the word-start anchors it jumped between, and rejects a token
 // whose letters are not all word starts.

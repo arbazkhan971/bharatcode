@@ -50,6 +50,12 @@ type inputState struct {
 	// built-in are dropped by setDynamicCommands so completion never shows the
 	// same command twice.
 	dynamicCommands []string
+	// dynamicDescriptions maps a dynamic "/name" command to its terse one-line
+	// gloss (a recipe title or custom-prompt description), so the completion
+	// menu can describe a settled recipe or prompt the way slashCommandDescriptions
+	// already describes a built-in. Names are keyed with their leading slash to
+	// match candidates(); a command with no description simply has no entry.
+	dynamicDescriptions map[string]string
 	// history is the bounded list of submitted prompts, oldest first.
 	history []string
 	// cursor indexes history during Up/Down recall. It equals len(history)
@@ -184,6 +190,16 @@ func (s *inputState) setDynamicCommands(names []string) {
 		out = append(out, n)
 	}
 	s.dynamicCommands = out
+}
+
+// setDynamicDescriptions records one-line glosses for the runtime slash
+// commands so the completion menu can describe a settled recipe or custom
+// prompt the way it already describes a built-in. Keys are "/name" commands;
+// blank descriptions and entries that do not survive setDynamicCommands are
+// harmless since the menu only reads a description for a command it is already
+// showing. A nil or empty map simply leaves dynamic commands undescribed.
+func (s *inputState) setDynamicDescriptions(desc map[string]string) {
+	s.dynamicDescriptions = desc
 }
 
 // candidates returns the full set of completion targets: the built-in slash

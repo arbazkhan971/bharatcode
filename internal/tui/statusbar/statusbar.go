@@ -27,6 +27,10 @@ type Bar struct {
 	// Search shows scrollback-search progress (e.g. "search 2/7"). Empty
 	// hides the segment, so the bar is unchanged when no search is active.
 	Search string
+	// Scroll shows scrollback position when the chat view is scrolled up from
+	// the newest output (e.g. "↓ 12 below"). Empty hides the segment, so the
+	// bar is unchanged while the view is anchored to the bottom.
+	Scroll string
 }
 
 // Render returns one status line.
@@ -55,7 +59,11 @@ func (b Bar) Render(width int) string {
 	if b.Search != "" {
 		search = " · " + b.Search
 	}
-	line := fmt.Sprintf("%s · %s · session %s · up %s%s%s%s%s", b.Model, b.Agent, shortID(b.SessionID), util.HumanDuration(now.Sub(started)), mode, yolo, goal, search)
+	scroll := ""
+	if b.Scroll != "" {
+		scroll = " · " + b.Scroll
+	}
+	line := fmt.Sprintf("%s · %s · session %s · up %s%s%s%s%s%s", b.Model, b.Agent, shortID(b.SessionID), util.HumanDuration(now.Sub(started)), mode, yolo, goal, search, scroll)
 	if len([]rune(line)) > width && width > 0 {
 		line = string([]rune(line)[:width])
 	}

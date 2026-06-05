@@ -48,6 +48,13 @@ func writeNavFile(t *testing.T, dir string) string {
 	return path
 }
 
+func writeNavFileContent(t *testing.T, dir, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	return path
+}
+
 func TestNavigateDefinitionConvertsPositionAndFormats(t *testing.T) {
 	dir := t.TempDir()
 	path := writeNavFile(t, dir)
@@ -84,7 +91,8 @@ func TestNavigateDefaultsToDefinitionAndColumnOne(t *testing.T) {
 	require.False(t, result.IsError)
 	require.Equal(t, 4, src.lastLine)
 	require.Equal(t, 0, src.lastCol) // column defaulted to 1 -> 0-based 0
-	require.Equal(t, "main.go:1:1", result.Content)
+	// Line 1 is readable, so its trimmed source is appended after the coordinates.
+	require.Equal(t, "main.go:1:1: package main", result.Content)
 }
 
 func TestNavigateReferencesSortsAndDeduplicates(t *testing.T) {
@@ -103,6 +111,42 @@ func TestNavigateReferencesSortsAndDeduplicates(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.IsError)
 	require.Equal(t, "main.go:3:1\nmain.go:9:5", result.Content)
+}
+
+func TestNavigateReferencesAppendsSourceLines(t *testing.T) {
+	dir := t.TempDir()
+	content := "package main\n\nfunc Run() {}\n\nfunc main() { Run() }\n"
+	path := writeNavFileContent(t, dir, content)
+	src := &fakeNavigate{references: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 5}}},  // func Run() {}
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 4, Character: 13}}}, // call site
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 3, "action": "references",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Each entry carries the trimmed source line after its coordinates.
+	require.Equal(t, "main.go:3:6: func Run() {}\nmain.go:5:14: func main() { Run() }", result.Content)
+}
+
+func TestNavigateOmitsSnippetForOutOfRangeLine(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFileContent(t, dir, "package main\n")
+	src := &fakeNavigate{definition: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 99, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "definition",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// No readable source line -> bare coordinates, no trailing colon-space.
+	require.Equal(t, "main.go:100:1", result.Content)
 }
 
 func TestNavigateHoverReturnsText(t *testing.T) {

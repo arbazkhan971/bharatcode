@@ -24,8 +24,10 @@ Arguments:
 
 What success looks like:
 
-For `definition` and `references`, a sorted list of `path:line:column` entries,
-workspace-relative where possible. For `hover`, the language server's text.
+For `definition` and `references`, a sorted list of
+`path:line:column: <source line>` entries, workspace-relative where possible;
+the trailing source line is the trimmed code at that site (omitted when the
+file or line cannot be read). For `hover`, the language server's text.
 
 Failure cases:
 

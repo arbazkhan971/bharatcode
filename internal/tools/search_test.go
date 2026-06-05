@@ -425,6 +425,28 @@ func TestDiagnosticsUsesSource(t *testing.T) {
 	require.Contains(t, result.Content, "main.go:1:8: error: expected identifier")
 }
 
+func TestDiagnosticsRendersCodeAndSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.rs")
+	require.NoError(t, os.WriteFile(path, []byte("fn main() {}\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{{
+			Path:     path,
+			Range:    lsp.Range{Start: lsp.Position{Line: 0, Character: 3}},
+			Severity: lsp.Error,
+			Message:  "cannot find value x",
+			Source:   "rustc",
+			Code:     "E0425",
+		}}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.rs"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "main.rs:1:4: error: cannot find value x [E0425] (rustc)")
+}
+
 func TestWebFetchStripsScriptsAndKeepsLinks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")

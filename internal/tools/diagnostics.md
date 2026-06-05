@@ -12,8 +12,9 @@ Arguments:
 What success looks like:
 
 The result is a sorted list of diagnostics formatted as
-`path:line:column: severity: message`. Source names are included when the
-language server provides them.
+`path:line:column: severity: message`. When the language server supplies them, a
+rule code follows in brackets and the reporting source in parentheses, e.g.
+`main.rs:3:9: error: cannot find value `x` [E0425] (rustc)`.
 
 Failure cases:
 

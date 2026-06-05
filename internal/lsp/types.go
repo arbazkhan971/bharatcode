@@ -24,6 +24,10 @@ type Diagnostic struct {
 	Severity Severity
 	Message  string
 	Source   string
+	// Code is the diagnostic's rule identifier when the server supplies one,
+	// such as "E0425" (rustc), "2304" (tsserver), or "unused-import". The LSP
+	// wire value may be a string or an integer; both are normalized to a string.
+	Code string
 }
 
 // Range identifies the start and end positions of a diagnostic.

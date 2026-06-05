@@ -138,7 +138,12 @@ var contextWindowRules = []struct {
 	{"gemini-1.5", 1_048_576},
 	{"gemini-2", 1_048_576},
 	{"gemini-3", 1_048_576},
-	// xAI Grok — the grok-2/3/4 line exposes a 131k window.
+	// xAI Grok — Grok 4 and the grok-code coding line lifted the window to 256k,
+	// while the grok-2/3 line stays at 131k. Both ids carry the "grok" marker, so
+	// the specific "grok-4"/"grok-code" rules must precede the family one to avoid
+	// falling through to 131k.
+	{"grok-4", 256_000},
+	{"grok-code", 256_000},
 	{"grok", 131_072},
 	// Perplexity Sonar — the pro tier is 200k, the rest 128k, so the more
 	// specific "sonar-pro" marker must precede the bare "sonar".

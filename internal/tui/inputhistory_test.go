@@ -309,3 +309,101 @@ func TestSlashCompletion_NoMatchLeavesBuffer(t *testing.T) {
 	require.Equal(t, "/zzz", m.input.String(), "an unmatched slash prefix is left unchanged")
 	require.Equal(t, focusInput, m.focus, "an unmatched slash prefix must not toggle focus")
 }
+
+// TestSuggestSlash_OffersClosestCommand asserts a mistyped command name is
+// pointed at its nearest built-in command within the edit-distance threshold,
+// covering the common typo shapes (transposition, dropped/doubled letter, wrong
+// key), so the unknown-command dialog can show a "did you mean" hint.
+func TestSuggestSlash_OffersClosestCommand(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"exprot": "/export", // transposed letters
+		"statu":  "/status", // dropped trailing letter
+		"helpp":  "/help",   // doubled letter
+		"modle":  "/model",  // transposed letters
+		"clera":  "/clear",  // transposed letters
+		"Quit":   "/quit",   // case-insensitive
+	}
+	for input, want := range cases {
+		require.Equal(t, want, suggestSlash(input),
+			"%q should be corrected to %q", input, want)
+	}
+}
+
+// TestSuggestSlash_NoSuggestionForDistantOrEmpty asserts a name that is too far
+// from every command — or too short to be a typo of one — yields no suggestion,
+// so the dialog does not "correct" a genuinely novel command to an unrelated one.
+func TestSuggestSlash_NoSuggestionForDistantOrEmpty(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{"", "deploy", "xyzzy", "a", "go"} {
+		require.Empty(t, suggestSlash(input),
+			"%q should not be corrected to any built-in command", input)
+	}
+}
+
+// TestSuggestSlash_ResultIsKnownCommand guards the invariant that any suggestion
+// is itself a completable built-in command, so the hint never points at a name
+// the user cannot actually run.
+func TestSuggestSlash_ResultIsKnownCommand(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{"exprot", "statu", "sessons", "compatc"} {
+		if s := suggestSlash(input); s != "" {
+			require.Contains(t, slashCommands, s,
+				"suggestion %q for %q must be a real built-in command", s, input)
+		}
+	}
+}
+
+// TestLevenshtein_KnownDistances pins the edit-distance metric the suggestion
+// ranking depends on, so a refactor of the inner loop cannot silently change
+// which command a typo resolves to.
+func TestLevenshtein_KnownDistances(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"", "", 0},
+		{"", "abc", 3},
+		{"abc", "abc", 0},
+		{"export", "exprot", 2},
+		{"kitten", "sitting", 3},
+		{"flaw", "lawn", 2},
+	}
+	for _, c := range cases {
+		require.Equal(t, c.want, levenshtein(c.a, c.b), "levenshtein(%q,%q)", c.a, c.b)
+		require.Equal(t, c.want, levenshtein(c.b, c.a), "levenshtein must be symmetric")
+	}
+}
+
+// TestHandleSlash_UnknownCommandSuggestsClosest asserts the unknown-command
+// dialog echoes the typed command and points a likely typo at its nearest
+// built-in via a "Did you mean" hint, so the user can recover without /help.
+func TestHandleSlash_UnknownCommandSuggestsClosest(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.handleSlash("/exprot")
+
+	require.True(t, m.dialogs.Contains("error"), "an unknown command must surface the error dialog")
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "/exprot", "the dialog must echo the typed command")
+	require.Contains(t, body, "Did you mean /export?", "a close typo must suggest the nearest command")
+}
+
+// TestHandleSlash_UnknownCommandNoSuggestionWhenDistant asserts a genuinely
+// novel command name surfaces the error dialog without a misleading suggestion.
+func TestHandleSlash_UnknownCommandNoSuggestionWhenDistant(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.handleSlash("/deploy")
+
+	require.True(t, m.dialogs.Contains("error"))
+	require.NotContains(t, plainText(m.dialogs.Render(200)), "Did you mean",
+		"a distant command name must not be corrected to an unrelated one")
+}

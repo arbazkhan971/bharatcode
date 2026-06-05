@@ -457,10 +457,11 @@ func toTextEdits(wireEdits []wireTextEdit) []TextEdit {
 // [...]}]). Servers that advertise documentChanges support (gopls,
 // rust-analyzer, typescript-language-server, ...) return the latter for rename
 // and code actions, so both must be handled or those tools silently see no
-// edits. URIs are converted to file paths. Pure resource operations in
-// documentChanges (create/rename/delete file, identified by a "kind" field) are
-// skipped: the text-edit model cannot represent them. An edit with no text
-// changes yields a zero WorkspaceEdit.
+// edits. URIs are converted to file paths. Resource operations in
+// documentChanges (create/rename/delete file, identified by a "kind" field)
+// cannot be represented as text edits, so they are collected into ResourceOps
+// for a consumer to surface rather than dropped. An edit with neither text
+// changes nor resource operations yields a zero WorkspaceEdit.
 func parseWorkspaceEdit(raw json.RawMessage) (WorkspaceEdit, error) {
 	var result struct {
 		Changes         map[string][]wireTextEdit `json:"changes"`
@@ -480,11 +481,16 @@ func parseWorkspaceEdit(raw json.RawMessage) (WorkspaceEdit, error) {
 	}
 
 	// documentChanges entries are either TextDocumentEdits (carrying edits) or
-	// resource operations (carrying a "kind"). Decode only the former; multiple
-	// entries may target the same file, so edits accumulate per path.
+	// resource operations (carrying a "kind"). Multiple text edits may target the
+	// same file, so edits accumulate per path; resource operations are collected
+	// separately in document order so a consumer can warn about them.
+	var resourceOps []ResourceOperation
 	for _, entry := range result.DocumentChanges {
 		var probe struct {
 			Kind         string `json:"kind"`
+			URI          string `json:"uri"`
+			OldURI       string `json:"oldUri"`
+			NewURI       string `json:"newUri"`
 			TextDocument *struct {
 				URI string `json:"uri"`
 			} `json:"textDocument"`
@@ -494,8 +500,15 @@ func parseWorkspaceEdit(raw json.RawMessage) (WorkspaceEdit, error) {
 			return WorkspaceEdit{}, fmt.Errorf("parsing workspace document change: %w", err)
 		}
 		// Resource operations (create/rename/delete) set "kind" and carry no
-		// textDocument; skip them rather than fail the whole edit.
+		// textDocument; record them so the apply path can report what it skipped.
 		if probe.Kind != "" || probe.TextDocument == nil {
+			op, err := resourceOperation(probe.Kind, probe.URI, probe.OldURI, probe.NewURI)
+			if err != nil {
+				return WorkspaceEdit{}, err
+			}
+			if op != nil {
+				resourceOps = append(resourceOps, *op)
+			}
 			continue
 		}
 		path, err := uriToPath(probe.TextDocument.URI)
@@ -505,10 +518,40 @@ func parseWorkspaceEdit(raw json.RawMessage) (WorkspaceEdit, error) {
 		changes[path] = append(changes[path], toTextEdits(probe.Edits)...)
 	}
 
-	if len(changes) == 0 {
+	if len(changes) == 0 && len(resourceOps) == 0 {
 		return WorkspaceEdit{}, nil
 	}
-	return WorkspaceEdit{Changes: changes}, nil
+	if len(changes) == 0 {
+		changes = nil
+	}
+	return WorkspaceEdit{Changes: changes, ResourceOps: resourceOps}, nil
+}
+
+// resourceOperation converts a create/rename/delete documentChanges entry into a
+// ResourceOperation, resolving its wire URIs to file paths. It returns nil for an
+// entry with no recognized kind (e.g. a "kind"-less object that is not a
+// TextDocumentEdit), leaving the edit otherwise intact.
+func resourceOperation(kind, uri, oldURI, newURI string) (*ResourceOperation, error) {
+	switch kind {
+	case "create", "delete":
+		path, err := uriToPath(uri)
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s resource operation uri: %w", kind, err)
+		}
+		return &ResourceOperation{Kind: kind, Path: path}, nil
+	case "rename":
+		oldPath, err := uriToPath(oldURI)
+		if err != nil {
+			return nil, fmt.Errorf("parsing rename resource operation oldUri: %w", err)
+		}
+		newPath, err := uriToPath(newURI)
+		if err != nil {
+			return nil, fmt.Errorf("parsing rename resource operation newUri: %w", err)
+		}
+		return &ResourceOperation{Kind: kind, OldPath: oldPath, NewPath: newPath}, nil
+	default:
+		return nil, nil
+	}
 }
 
 // parseCodeActions extracts the actions of a textDocument/codeAction response.

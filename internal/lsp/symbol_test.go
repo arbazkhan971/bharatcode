@@ -367,12 +367,15 @@ func TestParseRenameShapes(t *testing.T) {
 		}, edit)
 	})
 
-	t.Run("document_changes_skips_resource_ops", func(t *testing.T) {
-		// A create-file resource operation is interleaved with a text edit; only
-		// the text edit is representable, so the op is skipped rather than failing.
-		other := pathToURI("/tmp/example/new.go")
+	t.Run("document_changes_keeps_resource_ops", func(t *testing.T) {
+		// A create-file resource operation is interleaved with a text edit. The text
+		// edit is applied as before, and the create op is retained in ResourceOps so
+		// the apply path can warn that it was not performed.
+		newURI := pathToURI("/tmp/example/new.go")
+		newWant, err := uriToPath(newURI)
+		require.NoError(t, err)
 		raw := `{"documentChanges":[` +
-			`{"kind":"create","uri":"` + other + `"},` +
+			`{"kind":"create","uri":"` + newURI + `"},` +
 			`{"textDocument":{"uri":"` + uri + `","version":7},"edits":[{` + rangeJSON + `,"newText":"Renamed"}]}` +
 			`]}`
 		edit, err := parseRename(json.RawMessage(raw))
@@ -381,16 +384,38 @@ func TestParseRenameShapes(t *testing.T) {
 			Changes: map[string][]TextEdit{
 				wantPath: {{Range: wantRange, NewText: "Renamed"}},
 			},
+			ResourceOps: []ResourceOperation{{Kind: "create", Path: newWant}},
 		}, edit)
 	})
 
-	t.Run("document_changes_empty", func(t *testing.T) {
-		// A documentChanges array carrying only resource operations leaves no text
-		// edits, yielding a zero WorkspaceEdit.
+	t.Run("document_changes_rename_op", func(t *testing.T) {
+		// A rename resource operation carries oldUri/newUri, which resolve to the
+		// OldPath/NewPath of a ResourceOperation.
+		oldURI := pathToURI("/tmp/example/old.go")
+		newURI := pathToURI("/tmp/example/new.go")
+		oldWant, err := uriToPath(oldURI)
+		require.NoError(t, err)
+		newWant, err := uriToPath(newURI)
+		require.NoError(t, err)
+		raw := `{"documentChanges":[{"kind":"rename","oldUri":"` + oldURI + `","newUri":"` + newURI + `"}]}`
+		edit, err := parseRename(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Nil(t, edit.Changes)
+		require.Equal(t, []ResourceOperation{{
+			Kind:    "rename",
+			OldPath: oldWant,
+			NewPath: newWant,
+		}}, edit.ResourceOps)
+	})
+
+	t.Run("document_changes_resource_op_only", func(t *testing.T) {
+		// A documentChanges array carrying only a delete operation yields no text
+		// edits but still reports the operation in ResourceOps.
 		raw := `{"documentChanges":[{"kind":"delete","uri":"` + uri + `"}]}`
 		edit, err := parseRename(json.RawMessage(raw))
 		require.NoError(t, err)
 		require.Nil(t, edit.Changes)
+		require.Equal(t, []ResourceOperation{{Kind: "delete", Path: wantPath}}, edit.ResourceOps)
 	})
 }
 

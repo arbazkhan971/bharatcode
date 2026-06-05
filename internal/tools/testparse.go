@@ -41,6 +41,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseJestFailures(output)
 	case runnerCargo:
 		return parseCargoTestFailures(output)
+	case runnerRSpec:
+		return parseRSpecFailures(output)
 	default:
 		return nil
 	}
@@ -54,6 +56,7 @@ const (
 	runnerPytest
 	runnerJest
 	runnerCargo
+	runnerRSpec
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -63,6 +66,9 @@ const (
 var (
 	goTestRe    = regexp.MustCompile(`\bgo test\b`)
 	cargoTestRe = regexp.MustCompile(`\bcargo test\b`)
+	// \brspec\b matches "rspec", "bundle exec rspec", and "bin/rspec" (the slash
+	// is a word boundary) without firing on prose like "rspecs are great".
+	rspecRe = regexp.MustCompile(`\brspec\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -76,6 +82,8 @@ func classifyTestRunner(command string) testRunner {
 		return runnerCargo
 	case goTestRe.MatchString(c):
 		return runnerGo
+	case rspecRe.MatchString(c):
+		return runnerRSpec
 	case strings.Contains(c, "pytest"), strings.Contains(c, "py.test"):
 		return runnerPytest
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
@@ -272,6 +280,62 @@ func parseCargoTestFailures(output string) []testFailure {
 				name += " (" + m[2] + ")"
 			}
 			failures = append(failures, testFailure{Name: name + " [build failed]", Detail: compileErr})
+		}
+	}
+	return failures
+}
+
+var (
+	// "rspec ./spec/foo_spec.rb:10 # MyClass#method does something" — a line from
+	// RSpec's "Failed examples:" summary, printed by the default formatter
+	// regardless of the progress/documentation style. The path:line is the
+	// re-runnable id; the text after " # " is the example's description.
+	rspecFailedExampleRe = regexp.MustCompile(`^rspec (\S+) # (.+)$`)
+	// "  1) MyClass#method does something" — the numbered header of an entry in
+	// the "Failures:" block, used to attach the assertion message as a detail.
+	rspecFailureHeaderRe = regexp.MustCompile(`^\s*\d+\) (.+)$`)
+	// "     Failure/Error: expect(x).to eq(y)" — the first line of a failure's
+	// body, the closest thing RSpec prints to a one-line assertion message.
+	rspecFailureErrorRe = regexp.MustCompile(`^\s*Failure/Error: (.+)$`)
+)
+
+// parseRSpecFailures extracts failures from RSpec output. The "Failed examples:"
+// summary gives a clean, single-line "rspec <location> # <description>" per
+// failure (Name is the description, Detail the re-runnable location). When that
+// summary is absent — e.g. a suite that errored before printing it — it falls
+// back to the numbered "Failures:" block, pairing each "N) <description>" header
+// with its following "Failure/Error:" line as the detail.
+func parseRSpecFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		if m := rspecFailedExampleRe.FindStringSubmatch(ln); m != nil {
+			desc := strings.TrimSpace(m[2])
+			if !seen[desc] {
+				seen[desc] = true
+				failures = append(failures, testFailure{Name: desc, Detail: strings.TrimSpace(m[1])})
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return failures
+	}
+	for i := 0; i < len(lines); i++ {
+		m := rspecFailureHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		f := testFailure{Name: strings.TrimSpace(m[1])}
+		for j := i + 1; j < len(lines) && j <= i+6; j++ {
+			if e := rspecFailureErrorRe.FindStringSubmatch(lines[j]); e != nil {
+				f.Detail = strings.TrimSpace(e[1])
+				break
+			}
+		}
+		if !seen[f.Name] {
+			seen[f.Name] = true
+			failures = append(failures, f)
 		}
 	}
 	return failures

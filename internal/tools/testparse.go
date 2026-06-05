@@ -48,6 +48,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseRSpecFailures(output)
 	case runnerPHPUnit:
 		return parsePHPUnitFailures(output)
+	case runnerDotnet:
+		return parseDotnetTestFailures(output)
 	default:
 		return nil
 	}
@@ -64,6 +66,7 @@ const (
 	runnerRSpec
 	runnerUnittest
 	runnerPHPUnit
+	runnerDotnet
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -91,6 +94,11 @@ func classifyTestRunner(command string) testRunner {
 		return runnerGo
 	case rspecRe.MatchString(c):
 		return runnerRSpec
+	case strings.Contains(c, "dotnet test"):
+		// `dotnet test` drives VSTest, whose console logger prints "Failed
+		// <FQN> [<time>]" per failure regardless of the underlying framework
+		// (xUnit/NUnit/MSTest), so one parser covers all three.
+		return runnerDotnet
 	case strings.Contains(c, "phpunit"):
 		// "phpunit", "vendor/bin/phpunit", "php artisan test" wrappers all carry
 		// the binary name; matching it before the JS/Python runners avoids any
@@ -599,6 +607,62 @@ func parsePHPUnitFailures(output string) []testFailure {
 				f.Detail = t
 				break
 			}
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "  Failed MyApp.Tests.CalcTests.Add [4 ms]" — the per-test failure line
+	// the VSTest console logger prints for `dotnet test`. The captured group is
+	// everything after "Failed " up to the trailing "[<time>]" duration marker,
+	// which dotnetTimeRe strips. The fully-qualified name (optionally with a
+	// "(arg: ...)" data-row suffix) is the re-runnable test id. Only the literal
+	// "Failed" prefix is matched so ordinary prose is not misclassified.
+	dotnetFailRe = regexp.MustCompile(`^\s*Failed\s+(\S.*?)\s*$`)
+	// The trailing " [4 ms]" / " [< 1 ms]" / " [1 s]" duration marker on a
+	// failure line; matched non-greedily off the end so a bracketed data-row
+	// argument earlier in the name is preserved.
+	dotnetTimeRe = regexp.MustCompile(`\s*\[[^\]]*\]\s*$`)
+)
+
+// parseDotnetTestFailures extracts failing tests from `dotnet test` (VSTest)
+// console output. Each failure opens with a "Failed <FQN> [<time>]" line; the
+// detail is the first non-empty line beneath the "Error Message:" header that
+// follows it (the assertion or thrown-exception message), located before the
+// next "Failed" line so an entry without a message does not borrow the next
+// one's. The "Failed!  - Failed: N, ..." run summary is not matched: its "!"
+// breaks the required whitespace after "Failed".
+func parseDotnetTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := dotnetFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(dotnetTimeRe.ReplaceAllString(m[1], ""))
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if dotnetFailRe.MatchString(lines[j]) {
+				break
+			}
+			if strings.TrimSpace(lines[j]) != "Error Message:" {
+				continue
+			}
+			for k := j + 1; k < len(lines); k++ {
+				if t := strings.TrimSpace(lines[k]); t != "" {
+					f.Detail = t
+					break
+				}
+			}
+			break
 		}
 		failures = append(failures, f)
 	}

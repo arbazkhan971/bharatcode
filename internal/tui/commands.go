@@ -261,7 +261,13 @@ func (m *model) handleDiff() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	patch := unifiedPatch(diffs)
-	rendered := diff.New(m.theme).RenderUnifiedNumbered(patch, max(1, m.width-6))
+	viewer := diff.New(m.theme)
+	rendered := viewer.RenderUnifiedNumbered(patch, max(1, m.width-6))
+	// Lead with a diffstat summary so the scope of the change is visible before
+	// scrolling, matching the header Claude Code and opencode show above a diff.
+	if stat := viewer.Stat(patch); stat != "" {
+		rendered = stat + "\n\n" + rendered
+	}
 	m.dialogs.Push(&dialog.Text{DialogID: "diff", Title: "Diff", Body: rendered, Theme: m.theme})
 	return m, nil
 }

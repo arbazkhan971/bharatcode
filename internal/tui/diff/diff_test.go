@@ -58,6 +58,48 @@ func TestUnifiedNumbered_GutterWidthScales(t *testing.T) {
 	require.Equal(t, "    101 +new", lines[3])
 }
 
+// TestStat_CountsFilesAndLines checks that Stat reports the changed-file count
+// and the added/removed content totals, excluding the +++/--- file-boundary
+// headers from the line counts.
+func TestStat_CountsFilesAndLines(t *testing.T) {
+	t.Parallel()
+
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,3 @@\n package main\n-func old() {}\n+func new() {}\n" +
+		"--- a/util.go\n+++ b/util.go\n@@ -1,1 +1,2 @@\n+// added\n+func helper() {}\n"
+	got := New(styles.Theme{}).Stat(patch)
+	require.Equal(t, "2 files changed, +3 -1", got)
+}
+
+// TestStat_SingularFile checks the noun is singular for a one-file diff and that
+// a bare hunk with no +++ header still counts as one changed file.
+func TestStat_SingularFile(t *testing.T) {
+	t.Parallel()
+
+	patch := "@@ -1,2 +1,2 @@\n context\n-old\n+new\n"
+	got := New(styles.Theme{}).Stat(patch)
+	require.Equal(t, "1 file changed, +1 -1", got)
+}
+
+// TestStat_EmptyPatch checks that a patch with no content yields no summary, so
+// the diff view does not lead with an empty header.
+func TestStat_EmptyPatch(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", New(styles.Theme{}).Stat(""))
+}
+
+// TestStat_StylesSegments checks the +A and -R segments are rendered with the
+// add and remove styles so they stand out in the summary.
+func TestStat_StylesSegments(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	got := New(theme).Stat(patch)
+	require.Contains(t, got, theme.DiffAdd.Render("+1"))
+	require.Contains(t, got, theme.DiffRemove.Render("-1"))
+}
+
 // TestUnifiedHeader_StyledDistinctly checks that file-boundary metadata lines
 // (---, +++, diff --git, index) are rendered with the header style and not
 // mistaken for added/removed content, so file boundaries stand out in a

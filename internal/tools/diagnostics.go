@@ -25,7 +25,8 @@ type diagnosticsTool struct {
 }
 
 type diagnosticsArgs struct {
-	Path string `json:"path,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Severity string `json:"severity,omitempty"`
 }
 
 var schemaDiagnostics = json.RawMessage(`{
@@ -36,6 +37,11 @@ var schemaDiagnostics = json.RawMessage(`{
     "path": {
       "type": "string",
       "description": "Optional file path to inspect. Omit to scan supported files in the workspace."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["error", "warning", "info", "hint"],
+      "description": "Optional minimum severity to report: only diagnostics at this level or more severe are shown (error > warning > info > hint). Use \"error\" to focus on what blocks a build. Omit to report every severity."
     }
   }
 }`)
@@ -78,6 +84,11 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		return errorResult("diagnostics are unavailable: no LSP manager configured"), nil
 	}
 
+	minSeverity, err := parseSeverityFilter(args.Severity)
+	if err != nil {
+		return errorResult(err.Error()), nil
+	}
+
 	root, err := workspaceRoot(t.workDir)
 	if err != nil {
 		return Result{}, err
@@ -105,6 +116,9 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		}
 		all = append(all, diagnostics...)
 	}
+	if minSeverity != 0 {
+		all = filterBySeverity(all, minSeverity)
+	}
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].Path != all[j].Path {
 			return all[i].Path < all[j].Path
@@ -116,6 +130,9 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 	})
 
 	if len(all) == 0 {
+		if minSeverity != 0 {
+			return Result{Content: fmt.Sprintf("No diagnostics at or above %s severity.", severityString(minSeverity))}, nil
+		}
 		return Result{Content: "No diagnostics found."}, nil
 	}
 
@@ -157,6 +174,42 @@ const (
 	// MetadataDiagnosticWarnings holds the int count of warning-severity diagnostics.
 	MetadataDiagnosticWarnings = "diagnostic_warnings"
 )
+
+// parseSeverityFilter maps the optional severity argument to the minimum
+// lsp.Severity to report. It returns 0 (no filter) for an empty argument and an
+// error for an unrecognized value. The accepted names mirror severityString's
+// output, with "information" tolerated as a synonym for "info".
+func parseSeverityFilter(s string) (lsp.Severity, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return 0, nil
+	case "error":
+		return lsp.Error, nil
+	case "warning":
+		return lsp.Warning, nil
+	case "info", "information":
+		return lsp.Information, nil
+	case "hint":
+		return lsp.Hint, nil
+	default:
+		return 0, fmt.Errorf("unknown severity %q (want error, warning, info, or hint)", s)
+	}
+}
+
+// filterBySeverity keeps only diagnostics at least as severe as min. Severities
+// are ordered Error(1) < Warning(2) < Information(3) < Hint(4), so "at least as
+// severe" means a value <= min. A diagnostic whose severity falls outside that
+// range (a server that omitted it) is kept regardless, since it cannot be safely
+// classified as below the threshold.
+func filterBySeverity(diags []lsp.Diagnostic, min lsp.Severity) []lsp.Diagnostic {
+	out := diags[:0:0]
+	for _, d := range diags {
+		if d.Severity < lsp.Error || d.Severity > lsp.Hint || d.Severity <= min {
+			out = append(out, d)
+		}
+	}
+	return out
+}
 
 // severityCounts tallies diagnostics by severity, indexed by the lsp.Severity
 // value (Error..Hint). Index 0 is unused so a severity can index directly.

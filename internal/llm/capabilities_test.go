@@ -30,6 +30,10 @@ func TestInferContextWindow(t *testing.T) {
 		{"gemini-1.5-pro-latest", 2_097_152},
 		{"gemini-1.5-flash", 1_048_576},
 		{"gemini-2.5-flash", 1_048_576},
+		// Gemini 3 keeps the 1M window but shares no substring with the older
+		// gemini rules, so it needs its own rule rather than falling through to 0.
+		{"gemini-3-pro-preview", 1_048_576},
+		{"gemini-3-flash", 1_048_576},
 		{"llama-3.1-70b", 128_000},
 		// Llama 4 Scout (10M) and Maverick (1M) ship far larger windows than the
 		// 128k Llama 3.x default; their ids contain "llama", so the specific
@@ -81,6 +85,37 @@ func TestInferContextWindow(t *testing.T) {
 		t.Run(tc.id, func(t *testing.T) {
 			require.Equal(t, tc.want, inferContextWindow(tc.id),
 				"inferContextWindow(%q)", tc.id)
+		})
+	}
+}
+
+// TestModelSupportsGeminiThinking verifies the native-thinking gate recognizes
+// the Gemini 2.5 family and the Gemini 3 line while rejecting older models and
+// ids absent from the configured catalog.
+func TestModelSupportsGeminiThinking(t *testing.T) {
+	models := []Model{
+		{ID: "gemini-2.5-flash"},
+		{ID: "gemini-3-pro-preview"},
+		{ID: "gemini-2.0-flash"},
+	}
+
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{"gemini-2.5-flash", true},
+		{"gemini-3-pro-preview", true},
+		// Pre-2.5 models do not support the native thinkingConfig.
+		{"gemini-2.0-flash", false},
+		// An id absent from the catalog is never thinking-capable, even if its
+		// name matches a marker.
+		{"gemini-3-flash", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			require.Equal(t, tc.want, modelSupportsGeminiThinking(models, tc.id),
+				"modelSupportsGeminiThinking(%q)", tc.id)
 		})
 	}
 }

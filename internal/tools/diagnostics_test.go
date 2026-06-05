@@ -34,7 +34,7 @@ func TestDiagnosticFilesSkipsIgnoredDirs(t *testing.T) {
 	writeDiagFile(t, root, "dist/bundle.go")
 	writeDiagFile(t, root, ".git/hooks/hook.go")
 
-	got, err := diagnosticFiles(context.Background(), root)
+	got, err := diagnosticFiles(context.Background(), root, nil)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{want, nested}, got)
 }
@@ -49,7 +49,7 @@ func TestDiagnosticFilesHonorsRootGitignore(t *testing.T) {
 	writeDiagFile(t, root, "target/debug/build.go")
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("target/\n"), 0o644))
 
-	got, err := diagnosticFiles(context.Background(), root)
+	got, err := diagnosticFiles(context.Background(), root, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{want}, got)
 }
@@ -281,7 +281,36 @@ func TestDiagnosticFilesScansRootNamedLikeIgnored(t *testing.T) {
 	root := filepath.Join(parent, "node_modules")
 	want := writeDiagFile(t, root, "main.go")
 
-	got, err := diagnosticFiles(context.Background(), root)
+	got, err := diagnosticFiles(context.Background(), root, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{want}, got)
+}
+
+// TestDiagnosticFilesHonorsExtensionSet asserts the scan opens only files whose
+// extension is in the supplied set, so the language set the LSP manager reports
+// drives which files are analysed rather than a fixed list.
+func TestDiagnosticFilesHonorsExtensionSet(t *testing.T) {
+	root := t.TempDir()
+	want := writeDiagFile(t, root, "lib.rs")
+	writeDiagFile(t, root, "main.go") // outside the requested set; must be skipped
+
+	got, err := diagnosticFiles(context.Background(), root, map[string]struct{}{".rs": {}})
+	require.NoError(t, err)
+	require.Equal(t, []string{want}, got)
+}
+
+// TestDiagnosticFilesNilExtensionsFallsBackToDefaults asserts that passing no
+// extension set scans the built-in language extensions, so a direct call (or a
+// missing manager) still has a target list rather than matching nothing.
+func TestDiagnosticFilesNilExtensionsFallsBackToDefaults(t *testing.T) {
+	root := t.TempDir()
+	goFile := writeDiagFile(t, root, "main.go")
+	tsFile := writeDiagFile(t, root, "app.ts")
+	writeDiagFile(t, root, "notes.txt") // not a supported language; must be skipped
+
+	got, err := diagnosticFiles(context.Background(), root, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{goFile, tsFile}, got)
+	// The fallback must be derived from the LSP specs, not an independent list.
+	require.Contains(t, lsp.DefaultExtensions(), ".go")
 }

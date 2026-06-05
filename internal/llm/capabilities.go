@@ -192,6 +192,11 @@ var contextWindowRules = []struct {
 	// neither the "mistral" marker nor any other family marker above, so it
 	// needs its own rule to avoid falling through to "unknown" (0).
 	{"magistral", 128_000},
+	// Mistral Large 2 (mistral-large-latest) lifted the window to 128k, far
+	// above the 32k of the original Large and the Mistral 7B/8x7B line. Its id
+	// carries the "mistral" marker, so this specific rule must precede the
+	// family one to avoid falling through to 32k.
+	{"mistral-large", 128_000},
 	{"mistral", 32_768},
 	// Alibaba Qwen — the Qwen3 generation lifted the window well past the 32k
 	// Qwen2.x default: the Qwen3-Coder line ships a 256k native window (extendable

@@ -32,9 +32,13 @@ func TestClassifyTestRunner(t *testing.T) {
 		"mvn test":                            runnerMaven,
 		"mvn -q verify -Dtest=FooTest":        runnerMaven,
 		"./mvnw test":                         runnerMaven,
+		"gradle test":                         runnerGradle,
+		"./gradlew test --tests FooTest":      runnerGradle,
+		"gradlew check":                       runnerGradle,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
+		"echo plan the upgrade":               runnerNone,
 	}
 	for cmd, want := range cases {
 		if got := classifyTestRunner(cmd); got != want {
@@ -516,6 +520,53 @@ func TestParseMavenTestFailures_NoFailures(t *testing.T) {
 [INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS`
 	if got := parseTestFailures("mvn test", out); got != nil {
+		t.Errorf("expected nil for passing run, got %v", got)
+	}
+}
+
+func TestParseGradleTestFailures(t *testing.T) {
+	out := `> Task :compileJava
+> Task :test
+
+com.example.CalculatorTest > testAdd() FAILED
+    org.opentest4j.AssertionFailedError: expected: <5> but was: <4>
+        at app//org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:55)
+        at app//com.example.CalculatorTest.testAdd(CalculatorTest.java:12)
+
+com.example.CalculatorTest > testDiv() FAILED
+    java.lang.ArithmeticException: / by zero
+        at app//com.example.Calculator.div(Calculator.java:9)
+
+3 tests completed, 2 failed
+
+> Task :test FAILED`
+	got := parseTestFailures("./gradlew test", out)
+	want := []testFailure{
+		{Name: "com.example.CalculatorTest > testAdd()", Detail: "org.opentest4j.AssertionFailedError: expected: <5> but was: <4>"},
+		{Name: "com.example.CalculatorTest > testDiv()", Detail: "java.lang.ArithmeticException: / by zero"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGradleTestFailures_NestedAndNoMessage(t *testing.T) {
+	// A nested display name adds further " > " segments, and a failure whose body
+	// is only stack frames yields no detail.
+	out := `CalculatorTest > division > divides by zero FAILED
+        at app//com.example.CalculatorTest.dividesByZero(CalculatorTest.java:20)
+
+> Task :test FAILED`
+	got := parseTestFailures("gradle test", out)
+	want := []testFailure{
+		{Name: "CalculatorTest > division > divides by zero"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGradleTestFailures_NoFailures(t *testing.T) {
+	out := `> Task :test
+
+BUILD SUCCESSFUL in 2s`
+	if got := parseTestFailures("gradle test", out); got != nil {
 		t.Errorf("expected nil for passing run, got %v", got)
 	}
 }

@@ -52,6 +52,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseDotnetTestFailures(output)
 	case runnerMaven:
 		return parseMavenTestFailures(output)
+	case runnerGradle:
+		return parseGradleTestFailures(output)
 	default:
 		return nil
 	}
@@ -70,6 +72,7 @@ const (
 	runnerPHPUnit
 	runnerDotnet
 	runnerMaven
+	runnerGradle
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -86,6 +89,10 @@ var (
 	// \b keeps prose like "an mvndaemon discussion" from matching while allowing
 	// the wrapper-script suffix.
 	mavenRe = regexp.MustCompile(`\bmvn`)
+	// "gradle", "gradlew", and "./gradlew" all begin with "gradle" at a word
+	// boundary; the optional "w" admits the wrapper script. \b keeps prose like
+	// "an upgrade plan" from matching while allowing the wrapper-script suffix.
+	gradleRe = regexp.MustCompile(`\bgradlew?\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -106,6 +113,12 @@ func classifyTestRunner(command string) testRunner {
 		// plugin, whose console output marks each failure with "<<< FAILURE!" or
 		// "<<< ERROR!" regardless of the JUnit/TestNG version underneath.
 		return runnerMaven
+	case gradleRe.MatchString(c):
+		// `gradle test`/`gradle check`/`gradle build` (and the `gradlew` wrapper)
+		// drive Gradle's test task, whose console output marks each failure with a
+		// "<Class> > <test> FAILED" header regardless of the JUnit/TestNG/Spock
+		// framework underneath.
+		return runnerGradle
 	case strings.Contains(c, "dotnet test"):
 		// `dotnet test` drives VSTest, whose console logger prints "Failed
 		// <FQN> [<time>]" per failure regardless of the underlying framework
@@ -732,6 +745,61 @@ func parseMavenTestFailures(output string) []testFailure {
 				continue
 			}
 			f.Detail = strings.TrimSpace(lines[j])
+			break
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "CalculatorTest > testAdd() FAILED" — Gradle's per-test failure header. The
+	// display name uses " > " to separate the (possibly fully-qualified) class
+	// from the test name, and nested suites add further " > " segments; the whole
+	// "Class > test" id is kept verbatim, since `gradle test --tests "<id>"`
+	// re-runs it. Gradle's own "> Task :test FAILED" progress line has no " > "
+	// separator, so it does not match.
+	gradleFailRe = regexp.MustCompile(`^(.+ > .+) FAILED$`)
+	// The exception message Gradle indents beneath a failure header, e.g.
+	// "    org.opentest4j.AssertionFailedError: expected: <5> but was: <4>". Stack
+	// frames are indented further and begin with "at ", so they are skipped.
+	gradleDetailRe = regexp.MustCompile(`^\s+(\S.*)$`)
+)
+
+// parseGradleTestFailures extracts failing tests from Gradle test console output
+// (`gradle test`/`./gradlew test`). Each failure opens with a
+// "<Class> > <test> FAILED" header; the detail is the first indented line
+// beneath it that is not a stack frame (those begin with "at "), which carries
+// the assertion or thrown-exception message. Scanning stops at the next failure
+// header so an entry without a message does not borrow the following one's.
+func parseGradleTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := gradleFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if gradleFailRe.MatchString(lines[j]) {
+				break
+			}
+			d := gradleDetailRe.FindStringSubmatch(lines[j])
+			if d == nil {
+				continue
+			}
+			text := strings.TrimSpace(d[1])
+			if strings.HasPrefix(text, "at ") {
+				continue // a stack frame, not the message
+			}
+			f.Detail = text
 			break
 		}
 		failures = append(failures, f)

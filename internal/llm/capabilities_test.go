@@ -32,6 +32,11 @@ func TestInferContextWindow(t *testing.T) {
 		{"gpt-35-turbo", 16_385},
 		{"gpt-35-turbo-16k", 16_385},
 		{"gpt-5", 400_000},
+		{"gpt-5-mini", 400_000},
+		{"gpt-5.1-codex", 400_000},
+		// The chat-tuned gpt-5-chat-latest ships only a 128k window; its id carries
+		// the "gpt-5" marker, so the specific rule must win over the 400k family rule.
+		{"gpt-5-chat-latest", 128_000},
 		// o1-preview and o1-mini shipped a 128k window; the released o1 and the
 		// o3/o4-mini line are 200k. The specific preview/mini rules must win over
 		// the broader "o1" family rule.

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +174,70 @@ func TestBackgroundJobOutputAndKill(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, killed.IsError)
 	require.Contains(t, killed.Content, "job "+jobID)
+}
+
+func TestCapOutputKeepsHeadAndTail(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 100; i++ {
+		b.WriteString("line")
+		b.WriteString(strconv.Itoa(i))
+		b.WriteByte('\n')
+	}
+	out := capOutput(b.String(), 10)
+
+	// Head survives.
+	require.Contains(t, out, "line1\n")
+	require.Contains(t, out, "line5\n")
+	// Tail survives — the part a head-only cap would drop.
+	require.Contains(t, out, "line96")
+	require.Contains(t, out, "line100")
+	// The bulky middle is gone.
+	require.NotContains(t, out, "line50")
+	// A notice reports the elided count (100 - 5 head - 5 tail = 90).
+	require.Contains(t, out, "[90 lines truncated]")
+
+	// The rendered output stays within budget: maxLines kept + one notice line.
+	require.Len(t, splitLines(out), 11)
+}
+
+func TestCapOutputShortInputUnchanged(t *testing.T) {
+	in := "a\nb\nc"
+	require.Equal(t, in, capOutput(in, 10))
+	require.NotContains(t, capOutput(in, 10), "truncated")
+}
+
+func TestCapOutputOddBudgetFavorsTail(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 20; i++ {
+		b.WriteString(strconv.Itoa(i))
+		b.WriteByte('\n')
+	}
+	// Odd budget of 5: head=3, tail=2 (tail biased smaller, head larger here).
+	out := capOutput(b.String(), 5)
+	lines := splitLines(out)
+	// 5 content lines + 1 notice line.
+	require.Len(t, lines, 6)
+	require.Contains(t, out, "[15 lines truncated]")
+	// Last real line of input must be present.
+	require.Contains(t, out, "20")
+}
+
+func TestBashTailOutputSurvivesLineCap(t *testing.T) {
+	tool, ok := NewRegistry(shellDeps(t, &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+	})).Get("bash")
+	require.True(t, ok)
+
+	// Emit far more than the 500-line cap, then a distinctive final summary line
+	// that a head-only cap would discard.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": `seq 1 2000; echo "FINAL-SUMMARY-MARKER"`,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "FINAL-SUMMARY-MARKER",
+		"the terminal summary line must survive the bash line cap")
+	require.Contains(t, result.Content, "lines truncated")
 }
 
 func shellDeps(t *testing.T, cfg *config.Config) Dependencies {

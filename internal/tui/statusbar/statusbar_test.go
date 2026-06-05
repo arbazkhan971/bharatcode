@@ -44,6 +44,19 @@ func TestSearchSegment(t *testing.T) {
 	require.Contains(t, bar.Render(160), "search 2/7", "a set Search must surface its segment")
 }
 
+// TestWorkingSegment asserts the working-progress segment appears only when
+// set, so the bar is byte-identical to its idle form until a turn is running.
+func TestWorkingSegment(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+	require.NotContains(t, bar.Render(160), "working", "an empty Working must add no segment")
+
+	bar.Working = "⠙ working 3s"
+	require.Contains(t, bar.Render(160), "⠙ working 3s", "a set Working must surface its segment")
+}
+
 // TestScrollSegment asserts the scrollback-position segment appears only when
 // set, so the bar is unchanged while the chat view is anchored to the bottom.
 func TestScrollSegment(t *testing.T) {

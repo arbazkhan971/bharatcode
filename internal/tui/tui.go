@@ -27,6 +27,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/tui/notification"
 	"github.com/arbazkhan971/bharatcode/internal/tui/statusbar"
 	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
+	"github.com/arbazkhan971/bharatcode/internal/util"
 	tea "github.com/charmbracelet/bubbletea/v2"
 )
 
@@ -167,11 +168,14 @@ type model struct {
 	quitting       bool
 
 	// Agent run state.
-	running      bool
-	turn         int
-	queueCounter int
-	eventCh      <-chan agent.Event
-	eventCancel  func()
+	running bool
+	// turnStartedAt marks when the in-flight turn began, so the status bar can
+	// show how long the agent has been working. It is the zero time while idle.
+	turnStartedAt time.Time
+	turn          int
+	queueCounter  int
+	eventCh       <-chan agent.Event
+	eventCancel   func()
 
 	// Autonomous goal-loop state (CHANGE 2).
 	goalActive    bool
@@ -815,6 +819,7 @@ func (m *model) renderMain() string {
 	if tabBar != "" {
 		parts = append(parts, tabBar)
 	}
+	m.status.Working = runningStatus(m.turnStartedAt, m.now)
 	m.status.Search = m.search.statusSegment()
 	// clampChat finalizes m.chatScroll (clamping it to the scrollable range), so
 	// the scroll indicator is computed from it afterwards to reflect the window
@@ -879,6 +884,32 @@ func scrollStatus(scroll int) string {
 		noun = "line"
 	}
 	return fmt.Sprintf("↓ %d %s below", scroll, noun)
+}
+
+// spinnerFrames are the braille glyphs cycled to signal that the agent is
+// actively working. One frame is advanced per one-second status tick, so the
+// indicator visibly animates while a turn is in flight.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// runningStatus returns the status-bar segment shown while a turn is in flight:
+// a cycling spinner, the word "working", and how long the turn has run, e.g.
+// "⠙ working 3s". It returns "" when no turn is running (a zero start time), so
+// the bar reverts to its idle form the moment the agent finishes. The elapsed
+// time is taken from now-started and the spinner frame from the whole-second
+// elapsed count, so the glyph advances in step with the one-second tick that
+// drives the duration. A negative elapsed (clock skew) is treated as zero so the
+// frame index never goes out of range. This gives the live progress cue Claude
+// Code and opencode show while their agent is thinking.
+func runningStatus(started, now time.Time) string {
+	if started.IsZero() {
+		return ""
+	}
+	elapsed := now.Sub(started)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	frame := spinnerFrames[int(elapsed/time.Second)%len(spinnerFrames)]
+	return frame + " working " + util.HumanDuration(elapsed)
 }
 
 func (m *model) pushModelPicker() {

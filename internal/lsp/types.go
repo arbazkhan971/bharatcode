@@ -257,9 +257,14 @@ var defaultLanguageSpecs = []languageSpec{
 		languageID: "go",
 	},
 	{
+		// typescript-language-server (npm: typescript-language-server) wraps the
+		// TypeScript compiler's tsserver and speaks LSP over stdio. The bare
+		// "tsserver" binary shipped with the typescript package speaks tsserver's
+		// own protocol, not LSP, so it cannot be driven by this client.
 		name:       "typescript",
 		extension:  extSet(".ts", ".tsx", ".js", ".jsx"),
-		command:    "tsserver",
+		command:    "typescript-language-server",
+		args:       []string{"--stdio"},
 		rootFiles:  []string{"tsconfig.json", "jsconfig.json", "package.json", ".git"},
 		languageID: "typescript",
 	},

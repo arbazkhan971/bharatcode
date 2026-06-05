@@ -157,9 +157,14 @@ type model struct {
 	now              time.Time
 	sessionID        string
 	sessionPersisted bool
-	goal             string
-	helpVisible      bool
-	quitting         bool
+	// tabFirstPrompt is the first user prompt submitted in the active tab, used
+	// to title the tab in the /tabs listing. It mirrors the active tab's
+	// firstPrompt field the way sessionID mirrors the tab's session (see
+	// snapshotTab/loadTab); it is empty until the tab's first turn.
+	tabFirstPrompt string
+	goal           string
+	helpVisible    bool
+	quitting       bool
 
 	// Agent run state.
 	running      bool

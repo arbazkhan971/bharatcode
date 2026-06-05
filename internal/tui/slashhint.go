@@ -2,6 +2,47 @@ package tui
 
 import "strings"
 
+// slashCommandDescriptions maps a built-in slash command to a terse one-line
+// summary surfaced in the completion menu once the selection narrows to a
+// single command. Keeping the gloss next to the command — rather than only in
+// /help — lets the user confirm what a command does without leaving the prompt,
+// matching the inline command descriptions in Claude Code and opencode.
+var slashCommandDescriptions = map[string]string{
+	"/help":        "list commands",
+	"/clear":       "clear visible chat",
+	"/model":       "open model picker",
+	"/agent":       "open agent picker",
+	"/sessions":    "restore a recent session",
+	"/fork":        "branch the current session",
+	"/diff":        "show the latest edit diff",
+	"/status":      "show model, session, and spend",
+	"/plan":        "restrict to read-only tools and propose a plan",
+	"/approve":     "exit plan mode and re-enable execution",
+	"/goal":        "show, set, run, or clear the goal",
+	"/permissions": "show or set approval mode",
+	"/budget":      "show ledger and budget settings",
+	"/yolo":        "toggle permission bypass",
+	"/save":        "persist session",
+	"/export":      "write the transcript to a file",
+	"/copy":        "copy reply or chat to clipboard",
+	"/compact":     "summarize older turns to shrink context",
+	"/quit":        "exit",
+}
+
+// slashHintDescIndex returns the index of the command whose description should
+// be shown, or -1 when none applies. A description is shown for the command the
+// user has settled on: the one marked active during a Tab cycle, or the sole
+// remaining match when a prefix narrows to one command.
+func slashHintDescIndex(cmds []string, active int) int {
+	if active >= 0 && active < len(cmds) {
+		return active
+	}
+	if len(cmds) == 1 {
+		return 0
+	}
+	return -1
+}
+
 // slashHintCommands returns the slash commands to surface in the completion
 // menu beneath the prompt for the current input buffer, plus the index of the
 // command currently selected by an active Tab cycle (-1 when none is selected).
@@ -73,6 +114,20 @@ func (m *model) renderSlashHint(width int) string {
 	line := indent + strings.Join(parts, sep)
 	if truncated {
 		line += m.theme.Muted.Render(" …")
+		return line
+	}
+
+	// Once the user has settled on a single command, append its description on
+	// the same row when there is spare width. A truncated name list already ends
+	// in an ellipsis and has no room, so the gloss is only added to a list that
+	// fully fit.
+	if di := slashHintDescIndex(cmds, active); di >= 0 {
+		if desc := slashCommandDescriptions[cmds[di]]; desc != "" {
+			suffix := " — " + desc
+			if used+len([]rune(suffix)) <= width {
+				line += m.theme.Muted.Render(suffix)
+			}
+		}
 	}
 	return line
 }

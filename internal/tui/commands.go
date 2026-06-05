@@ -100,10 +100,53 @@ func (m *model) sessionPickerBody() string {
 		if title == "" {
 			title = "(untitled)"
 		}
-		lines = append(lines, fmt.Sprintf("%s%s · %d msgs · %s · %s", marker, title, s.MessageCount, relativeTime(s.UpdatedAt, time.Now()), shortSessionID(s.ID)))
+		display := title
+		if m.sessionFilter != "" {
+			display = m.highlightSessionMatch(title, m.sessionFilter)
+		}
+		lines = append(lines, fmt.Sprintf("%s%s · %d msgs · %s · %s", marker, display, s.MessageCount, relativeTime(s.UpdatedAt, time.Now()), shortSessionID(s.ID)))
 	}
 	lines = append(lines, "", "type to fuzzy filter · ↑/↓ to move · home/end to jump · enter to restore · esc to cancel")
 	return strings.Join(lines, "\n")
+}
+
+// highlightSessionMatch accents the runes of title that matched the active
+// filter query, leaving the rest in the default color so the title stays
+// readable beside the muted metadata. It mirrors the matched-rune emphasis the
+// @-file and slash-command menus draw via matchPositions, so a reader can see
+// why a session surfaced under a fuzzy filter rather than scanning the row to
+// guess. The query is matched against the title alone; a query that connected
+// only through a session's id (the substring/subsequence bands in
+// visibleSessions match the title-plus-id haystack) leaves the title unstyled,
+// since there are no title runes to emphasize. An empty query, or a title with
+// no match, returns the title unchanged so the styling is added only where it
+// explains the result.
+func (m *model) highlightSessionMatch(title, query string) string {
+	pos := matchPositions(query, title)
+	if len(pos) == 0 {
+		return title
+	}
+	hit := make(map[int]bool, len(pos))
+	for _, p := range pos {
+		hit[p] = true
+	}
+	runes := []rune(title)
+	var b strings.Builder
+	for i := 0; i < len(runes); {
+		on := hit[i]
+		j := i
+		for j < len(runes) && hit[j] == on {
+			j++
+		}
+		seg := string(runes[i:j])
+		if on {
+			b.WriteString(m.theme.Accent.Render(seg))
+		} else {
+			b.WriteString(seg)
+		}
+		i = j
+	}
+	return b.String()
 }
 
 // handleSessionPickerKey processes navigation and selection while the session

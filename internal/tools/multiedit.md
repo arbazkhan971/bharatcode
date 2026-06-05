@@ -25,6 +25,7 @@ BharatCode rewrites the file once, records the write in the file tracker, and re
 ## Failures
 
 The tool fails before touching disk when:
+- The file has not been read in this session — `view` it first so the edits target its current contents.
 - The file was modified on disk since it was last read (re-view and try again).
 - Any edit's `old` is not found — the error includes a near-match hint for whitespace/indentation mismatches.
 - Any edit's `old` is non-unique without `replace_all` — the count is reported so you can widen the anchor.

@@ -25,6 +25,7 @@ The file is rewritten atomically, BharatCode records the before and after file h
 
 The tool fails when:
 - The path escapes the workspace or arguments are malformed.
+- The file has not been read in this session — `view` it first so the edit targets its current contents.
 - The file was modified on disk since it was last read (re-view the file and try again).
 - `old_string` is not found — the error includes a near-match hint when whitespace or a close substring is detected, so you can correct the text on the next attempt.
 - `old_string` appears more than once without `replace_all` — the error reports the count; widen the anchor rather than using `replace_all`.

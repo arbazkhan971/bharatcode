@@ -17,6 +17,9 @@ func TestEditReplacesUniqueStringAndRecordsWrite(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("hello BharatCode\n"), 0o644))
 
 	tracker := newToolsTestTracker(t, "edit-records")
+	// Record a read so the read-before-edit guard is satisfied (a real session
+	// reaches edit via the view tool, which records the read).
+	require.NoError(t, tracker.RecordRead(ctx, "edit-records", path))
 	tool := newEditTool(Dependencies{
 		FileTracker: tracker,
 		WorkDir:     workDir,
@@ -206,6 +209,65 @@ func TestEditStaleReadSkippedWhenNoTracker(t *testing.T) {
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "namaste\n", string(got))
+}
+
+// TestEditRejectsUnviewedFile verifies the read-before-edit guard: when a
+// tracked session tries to edit an existing file it has never read, the edit is
+// refused with guidance to view first, and the file is left untouched.
+func TestEditRejectsUnviewedFile(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "unviewed.txt")
+	require.NoError(t, os.WriteFile(path, []byte("hello world\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, "edit-unviewed")
+	tool := newEditTool(Dependencies{
+		FileTracker: tracker,
+		WorkDir:     workDir,
+		SessionID:   "edit-unviewed",
+	})
+
+	result, err := tool.Run(ctx, mustJSON(t, map[string]any{
+		"path":       "unviewed.txt",
+		"old_string": "hello",
+		"new_string": "namaste",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "has not been read in this session")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "hello world\n", string(got))
+}
+
+// TestEditAllowsConsecutiveEditsAfterView verifies that once a file is viewed,
+// two edits in a row both succeed: the first write refreshes the read baseline
+// so the second edit is not mistaken for a stale-read conflict.
+func TestEditAllowsConsecutiveEditsAfterView(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "seq.txt")
+	require.NoError(t, os.WriteFile(path, []byte("alpha beta gamma\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, "edit-seq")
+	view := newViewTool(Dependencies{FileTracker: tracker, WorkDir: workDir, SessionID: "edit-seq"})
+	tool := newEditTool(Dependencies{FileTracker: tracker, WorkDir: workDir, SessionID: "edit-seq"})
+
+	_, err := view.Run(ctx, mustJSON(t, map[string]any{"path": "seq.txt"}))
+	require.NoError(t, err)
+
+	r1, err := tool.Run(ctx, mustJSON(t, map[string]any{"path": "seq.txt", "old_string": "alpha", "new_string": "ALPHA"}))
+	require.NoError(t, err)
+	require.False(t, r1.IsError, "first edit after view should succeed: %s", r1.Content)
+
+	r2, err := tool.Run(ctx, mustJSON(t, map[string]any{"path": "seq.txt", "old_string": "gamma", "new_string": "GAMMA"}))
+	require.NoError(t, err)
+	require.False(t, r2.IsError, "second consecutive edit should succeed (baseline refreshed): %s", r2.Content)
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "ALPHA beta GAMMA\n", string(got))
 }
 
 func TestEditResultIncludesUnifiedDiff(t *testing.T) {

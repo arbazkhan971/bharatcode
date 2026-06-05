@@ -14,6 +14,8 @@ var builtinFilters = []*Filter{
 	filterGofmt,
 	filterMake,
 	filterCargo,
+	filterMaven,
+	filterGradle,
 	filterNpmInstall,
 	filterNpmTest,
 	filterPnpmInstall,
@@ -142,6 +144,64 @@ var filterCargo = &Filter{
 	},
 	MaxLines: 80,
 	OnEmpty:  "cargo: ok",
+}
+
+// ---- JVM (Maven / Gradle) -----------------------------------------------
+
+// filterMaven tames Maven build output. Against a cold local repository Maven
+// prints one "Downloading from"/"Downloaded from" line per artifact plus
+// interleaved "Progress (N): ..." byte-count trickle — often hundreds of lines
+// that dwarf the actual build result. It also emits decorative "[INFO] ----"
+// rules and a "Scanning for projects" banner. All of that is stripped; the
+// signal ([ERROR]/[WARNING] lines, BUILD SUCCESS/FAILURE, and the "Tests run:
+// ..." summary) does not match the strip patterns and is preserved. Both the
+// modern "[INFO] "-prefixed and the older bare forms of the download lines are
+// covered.
+var filterMaven = &Filter{
+	Name:         "maven",
+	Description:  "Compact mvn output — strip artifact download/progress noise and decorative rules, keep errors, warnings and the build result",
+	MatchCommand: re(`^(\./)?mvnw?\b`),
+	StripANSI:    true,
+	StripLinesMatching: []*regexp.Regexp{
+		re(`^\s*$`),
+		re(`^(\[INFO\]\s+)?Downloading from\b`),
+		re(`^(\[INFO\]\s+)?Downloaded from\b`),
+		re(`^(\[INFO\]\s+)?Progress\s*\(\d`),
+		re(`^\[INFO\]\s+-{10,}\s*$`),
+		re(`^\[INFO\] Scanning for projects`),
+	},
+	MaxLines: 80,
+	OnEmpty:  "mvn: ok",
+}
+
+// filterGradle tames Gradle build output. Gradle streams a live progress bar
+// ("<====---> 75% EXECUTING"), per-task lines for work that is up to date or
+// skipped, "Download https://..." lines for plugin/dependency resolution, and
+// daemon/welcome chatter. The meaningful lines — "BUILD SUCCESSFUL"/"BUILD
+// FAILED", "FAILURE:", a failing "> Task :test FAILED", and compiler errors —
+// carry a status outside the stripped set (or no "> Task" prefix at all) and so
+// survive.
+var filterGradle = &Filter{
+	Name:         "gradle",
+	Description:  "Compact gradle output — strip progress bar, no-op task lines, download and daemon noise, keep failures and the build result",
+	MatchCommand: re(`^(\./)?gradlew?\b`),
+	StripANSI:    true,
+	StripLinesMatching: []*regexp.Regexp{
+		re(`^\s*$`),
+		re(`^Download https?://`),
+		// Live progress bar lines, e.g. "<=======------> 60% EXECUTING [3s]".
+		re(`%\s+(INITIALIZING|CONFIGURING|EXECUTING|WAITING)\b`),
+		// Per-task lines for work that produced nothing of interest. A real
+		// failure ("> Task :test FAILED") keeps a status outside this set and so
+		// is preserved.
+		re(`^> Task :\S+(\s+(UP-TO-DATE|NO-SOURCE|SKIPPED|FROM-CACHE))?$`),
+		re(`^> Configure project :`),
+		re(`^Starting a Gradle Daemon`),
+		re(`^Welcome to Gradle\b`),
+		re(`^Daemon will be stopped`),
+	},
+	MaxLines: 80,
+	OnEmpty:  "gradle: ok",
 }
 
 // ---- Node.js ecosystem --------------------------------------------------

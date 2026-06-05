@@ -3,6 +3,7 @@ package diff
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -116,13 +117,21 @@ func (v *Viewer) Stat(patch string) string {
 	return out
 }
 
+// statBarWidth caps the number of "+"/"-" cells in a per-file histogram bar.
+// Files whose total change count fits within it get one cell per changed line
+// (so a small review shows its exact shape); larger files are scaled down to
+// this width, matching how git's "--stat" bar stays bounded on wide diffs.
+const statBarWidth = 32
+
 // StatLines renders a multi-line diffstat: the aggregate Stat header followed,
-// when more than one file changed, by one indented row per file showing its path
-// and its own "+A -B" counts, matching the per-file breakdown Claude Code and
-// opencode show above a multi-file review. File paths are left-aligned in a
-// shared column so the counts line up. A single-file or content-free patch
-// returns just the Stat header (or "" when empty), so the common case is
-// unchanged. Unnamed bare hunks are labelled with a muted placeholder.
+// when more than one file changed, by one indented row per file showing its path,
+// its own "+A -B" counts, and a git-style "+++---" histogram bar visualizing the
+// relative size and add/remove ratio of the change, matching the per-file
+// breakdown Claude Code and opencode show above a multi-file review. File paths
+// and counts are left-aligned in shared columns so the bars start at the same
+// place. A single-file or content-free patch returns just the Stat header (or ""
+// when empty), so the common case is unchanged. Unnamed bare hunks are labelled
+// with a muted placeholder.
 func (v *Viewer) StatLines(patch string) string {
 	header := v.Stat(patch)
 	if header == "" {
@@ -133,24 +142,76 @@ func (v *Viewer) StatLines(patch string) string {
 		return header
 	}
 
-	width := 0
+	// Size the path column to the widest name and the count column to the widest
+	// "+A -B" string so every histogram bar begins at the same offset.
+	nameWidth, countWidth, maxTotal := 0, 0, 0
 	for _, f := range files {
-		if n := len([]rune(displayPath(f.Path))); n > width {
-			width = n
+		if n := len([]rune(displayPath(f.Path))); n > nameWidth {
+			nameWidth = n
+		}
+		if n := len(fmt.Sprintf("+%d -%d", f.Added, f.Removed)); n > countWidth {
+			countWidth = n
+		}
+		if t := f.Added + f.Removed; t > maxTotal {
+			maxTotal = t
 		}
 	}
 
 	out := header
 	for _, f := range files {
 		name := displayPath(f.Path)
-		pad := strings.Repeat(" ", width-len([]rune(name)))
-		row := "  " + v.theme.Muted.Render(name+pad+"  ")
+		namePad := strings.Repeat(" ", nameWidth-len([]rune(name)))
+		count := fmt.Sprintf("+%d -%d", f.Added, f.Removed)
+		countPad := strings.Repeat(" ", countWidth-len(count))
+
+		row := "  " + v.theme.Muted.Render(name+namePad+"  ")
 		row += v.theme.DiffAdd.Render(fmt.Sprintf("+%d", f.Added))
 		row += v.theme.Muted.Render(" ")
 		row += v.theme.DiffRemove.Render(fmt.Sprintf("-%d", f.Removed))
+
+		plus, minus := scaledBar(f.Added, f.Removed, maxTotal, statBarWidth)
+		if plus+minus > 0 {
+			row += v.theme.Muted.Render(countPad + "  ")
+			row += v.theme.DiffAdd.Render(strings.Repeat("+", plus))
+			row += v.theme.DiffRemove.Render(strings.Repeat("-", minus))
+		}
 		out += "\n" + row
 	}
 	return out
+}
+
+// scaledBar splits a per-file histogram bar into its "+" (plus) and "-" (minus)
+// cell counts. When the busiest file (maxTotal) already fits within width, every
+// file shows one cell per changed line, so a small review reproduces its exact
+// add/remove shape. On a larger diff each file's total is scaled to width in
+// proportion to maxTotal, and the cells are split between adds and removes by
+// their ratio; a side with any change keeps at least one cell so it never
+// vanishes from the bar.
+func scaledBar(added, removed, maxTotal, width int) (plus, minus int) {
+	total := added + removed
+	if total == 0 || maxTotal == 0 {
+		return 0, 0
+	}
+	cells := total
+	if maxTotal > width {
+		cells = int(math.Round(float64(total) / float64(maxTotal) * float64(width)))
+		if cells < 1 {
+			cells = 1
+		}
+	}
+	plus = int(math.Round(float64(added) / float64(total) * float64(cells)))
+	if added > 0 && plus == 0 {
+		plus = 1
+	}
+	if plus > cells {
+		plus = cells
+	}
+	minus = cells - plus
+	if removed > 0 && minus == 0 && plus > 1 {
+		plus--
+		minus = 1
+	}
+	return plus, minus
 }
 
 // displayPath returns the file name to show in a per-file diffstat row, falling

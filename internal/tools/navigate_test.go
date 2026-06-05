@@ -21,6 +21,7 @@ type fakeNavigate struct {
 	incomingCalls  []lsp.Location
 	outgoingCalls  []lsp.Location
 	hover          string
+	signature      string
 
 	defErr  error
 	typeErr error
@@ -29,6 +30,7 @@ type fakeNavigate struct {
 	inErr   error
 	outErr  error
 	hovErr  error
+	sigErr  error
 
 	lastPath string
 	lastLine int
@@ -68,6 +70,11 @@ func (f *fakeNavigate) OutgoingCalls(_ context.Context, path string, line, col i
 func (f *fakeNavigate) Hover(_ context.Context, path string, line, col int) (string, error) {
 	f.lastPath, f.lastLine, f.lastCol = path, line, col
 	return f.hover, f.hovErr
+}
+
+func (f *fakeNavigate) SignatureHelp(_ context.Context, path string, line, col int) (string, error) {
+	f.lastPath, f.lastLine, f.lastCol = path, line, col
+	return f.signature, f.sigErr
 }
 
 func writeNavFile(t *testing.T, dir string) string {
@@ -386,6 +393,23 @@ func TestNavigateHoverReturnsText(t *testing.T) {
 	require.Equal(t, "func Run(ctx context.Context) error", result.Content)
 }
 
+func TestNavigateSignatureReturnsText(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{signature: "→ Run(ctx context.Context, name string)\n    active parameter: name string\n"}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 5, "column": 9, "action": "signature",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "→ Run(ctx context.Context, name string)\n    active parameter: name string", result.Content)
+	// 1-based coordinates are converted to the 0-based LSP positions.
+	require.Equal(t, 4, src.lastLine)
+	require.Equal(t, 8, src.lastCol)
+}
+
 func TestNavigateEmptyResultsReportDirectly(t *testing.T) {
 	dir := t.TempDir()
 	writeNavFile(t, dir)
@@ -398,6 +422,7 @@ func TestNavigateEmptyResultsReportDirectly(t *testing.T) {
 		{"definition", "No definition found."},
 		{"references", "No references found."},
 		{"hover", "No hover information found."},
+		{"signature", "No signature help found."},
 	} {
 		result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
 			"path": "main.go", "line": 1, "action": tc.action,

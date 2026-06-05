@@ -13,6 +13,10 @@ Call `edit` when BharatCode needs to make one exact text replacement in an exist
 - `new_string` string, required: replacement text to write.
 - `replace_all` boolean, optional: replace every match instead of requiring a unique match (use sparingly).
 
+## Matching
+
+`old_string` is matched exactly first. If an exact match is not found and `old_string` spans two or more lines, BharatCode falls back to whitespace-tolerant matching (line-trimmed, then internal-whitespace-normalized, then first/last-line block anchors for blocks of three or more lines) so indentation drift between your text and the file does not defeat an otherwise-correct edit. A flexible match still has to be unambiguous — a block that maps to more than one location is rejected like a duplicate exact match — and the result notes which strategy matched. Single-line mismatches stay strict so you get a whitespace hint instead. `new_string` is always written verbatim, so include the file's indentation in it.
+
 ## Success
 
 The file is rewritten atomically, BharatCode records the before and after file hashes, and the result reports how many replacements were applied.

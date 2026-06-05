@@ -446,7 +446,11 @@ func (p *scriptedProvider) Stream(ctx context.Context, req llm.Request) (<-chan 
 }
 
 func (p *scriptedProvider) Models() []llm.Model {
-	window := 8192
+	// Default to a large window so tests that do not deliberately exercise
+	// compaction are not coupled to the byte size of the built-in tool
+	// descriptions (which feed the system prompt). Tests that need a tight
+	// window set contextWindow explicitly.
+	window := 1 << 20
 	if p.contextWindow > 0 {
 		window = p.contextWindow
 	}

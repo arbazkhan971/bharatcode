@@ -185,6 +185,33 @@ thread 'tests::it_works' panicked at 'assertion failed: left == right', src/lib.
 	assertFailures(t, got, want)
 }
 
+func TestParseCargoTestFailures_BuildFailed(t *testing.T) {
+	out := `   Compiling demo v0.1.0 (/tmp/demo)
+error[E0425]: cannot find value ` + "`x`" + ` in this scope
+ --> src/lib.rs:8:13
+  |
+8 |     let y = x + 1;
+  |             ^ not found in this scope
+
+error: aborting due to 1 previous error
+
+error: could not compile ` + "`demo`" + ` (lib test) due to 1 previous error`
+	got := parseTestFailures("cargo test", out)
+	want := []testFailure{
+		{Name: "demo (lib test) [build failed]", Detail: "error[E0425]: cannot find value `x` in this scope"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseCargoTestFailures_BuildFailedNoTarget(t *testing.T) {
+	out := "error: could not compile `demo` due to 2 previous errors"
+	got := parseTestFailures("cargo test", out)
+	want := []testFailure{
+		{Name: "demo [build failed]"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseTestFailures_NonTestCommandIgnored(t *testing.T) {
 	// Output contains FAIL/FAILED words but the command is not a test runner.
 	out := "FAILED to connect\n--- FAIL: not a test"

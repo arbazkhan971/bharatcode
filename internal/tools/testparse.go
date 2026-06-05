@@ -230,22 +230,48 @@ var (
 	cargoFailRe = regexp.MustCompile(`^test (\S+) \.\.\. FAILED$`)
 	// "thread 'tests::it_works' panicked at ..." carries the test name.
 	cargoPanicRe = regexp.MustCompile(`^thread '([^']+)' panicked at (.*)$`)
+	// "error: could not compile `crate` (lib test) due to N previous errors" —
+	// the terminal line cargo prints when the crate (or its tests) fail to
+	// compile. No "... FAILED" lines are emitted in this case, so without
+	// separate handling a failed run would surface zero structured failures
+	// (mirroring the Go "[build failed]" path).
+	cargoCompileFailRe = regexp.MustCompile("^error: could not compile `([^`]+)`(?: \\(([^)]+)\\))?")
+	// A rustc diagnostic header at column 0, e.g. "error[E0425]: cannot find
+	// value `x` in this scope". Used as the build failure's detail.
+	cargoCompileErrRe = regexp.MustCompile(`^(error\[E\d+\]: .+)$`)
 )
 
 // parseCargoTestFailures collects "test <name> ... FAILED" lines and attaches
-// the matching "thread '<name>' panicked at ..." detail when present.
+// the matching "thread '<name>' panicked at ..." detail when present. When the
+// crate fails to compile, cargo emits no "... FAILED" lines, so a
+// "could not compile `crate` ..." marker is surfaced as a "[build failed]"
+// entry instead, with the first rustc diagnostic as its detail.
 func parseCargoTestFailures(output string) []testFailure {
 	lines := splitLines(output)
 	panics := map[string]string{}
+	compileErr := ""
 	for _, ln := range lines {
 		if m := cargoPanicRe.FindStringSubmatch(ln); m != nil {
 			panics[m[1]] = strings.TrimSpace(m[2])
+		}
+		if compileErr == "" {
+			if m := cargoCompileErrRe.FindStringSubmatch(ln); m != nil {
+				compileErr = strings.TrimSpace(m[1])
+			}
 		}
 	}
 	var failures []testFailure
 	for _, ln := range lines {
 		if m := cargoFailRe.FindStringSubmatch(ln); m != nil {
 			failures = append(failures, testFailure{Name: m[1], Detail: panics[m[1]]})
+			continue
+		}
+		if m := cargoCompileFailRe.FindStringSubmatch(ln); m != nil {
+			name := m[1]
+			if m[2] != "" {
+				name += " (" + m[2] + ")"
+			}
+			failures = append(failures, testFailure{Name: name + " [build failed]", Detail: compileErr})
 		}
 	}
 	return failures

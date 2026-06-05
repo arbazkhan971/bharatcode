@@ -123,19 +123,26 @@ func (m *model) searchPrev() tea.Model {
 	return m
 }
 
-// scrollToMatch sets chatScroll so the current match line is the last visible
-// line of the chat window. clampChat bounds the value at render time, so an
-// out-of-range request simply pins to the nearest edge. It is a no-op when no
-// search is active.
+// scrollToMatch sets chatScroll so the current match line sits near the middle
+// of the chat window rather than pinned to its last row, keeping the lines that
+// follow the match on screen so the reader sees context on both sides of the hit
+// (the way an editor centers a search result). clampChat bounds the value at
+// render time, so a match near the end simply pins to the bottom and one near
+// the top to the first line. It is a no-op when no search is active.
 func (m *model) scrollToMatch() {
 	if !m.search.active() {
 		return
 	}
 	lines := strings.Split(m.renderedChatBody(), "\n")
 	matchLine := m.search.matches[m.search.current]
-	// chatScroll counts lines up from the bottom; placing the match on the last
-	// visible row means scrolling up by (lastLineIndex - matchLine).
-	m.chatScroll = (len(lines) - 1) - matchLine
+	// chatScroll counts lines hidden below the window. Anchoring the match on the
+	// last visible row scrolls up by (lastLineIndex - matchLine); reserving the
+	// bottom half of the window for the lines after the match means scrolling up
+	// by that much less, leaving the match centered. The reserve stays strictly
+	// below the window height, so the match is always within the window before
+	// clampChat trims the request.
+	below := m.layout.chat.H / 2
+	m.chatScroll = (len(lines) - 1) - matchLine - below
 	if m.chatScroll < 0 {
 		m.chatScroll = 0
 	}

@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -323,6 +324,56 @@ func barStart(row string) int {
 		i--
 	}
 	return i
+}
+
+// TestStatLines_CapsFileRows checks that a review with more files than
+// maxStatFiles lists only that many per-file rows and collapses the rest into a
+// single "… and N more files" summary, while the aggregate header still counts
+// every file.
+func TestStatLines_CapsFileRows(t *testing.T) {
+	t.Parallel()
+
+	const extra = 5
+	var b strings.Builder
+	for i := 0; i < maxStatFiles+extra; i++ {
+		fmt.Fprintf(&b, "--- a/f%02d.go\n+++ b/f%02d.go\n@@ -1,1 +1,1 @@\n-old\n+new\n", i, i)
+	}
+
+	lines := strings.Split(New(styles.Theme{}).StatLines(b.String()), "\n")
+
+	// 1 header + maxStatFiles rows + 1 overflow summary.
+	require.Len(t, lines, 1+maxStatFiles+1)
+	require.Equal(t, fmt.Sprintf("%d files changed, +%d -%d", maxStatFiles+extra, maxStatFiles+extra, maxStatFiles+extra), lines[0])
+	require.Equal(t, fmt.Sprintf("  … and %d more files", extra), lines[len(lines)-1])
+}
+
+// TestStatLines_OverflowSingularNoun checks that an overflow of exactly one file
+// uses the singular noun.
+func TestStatLines_OverflowSingularNoun(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	for i := 0; i < maxStatFiles+1; i++ {
+		fmt.Fprintf(&b, "--- a/f%02d.go\n+++ b/f%02d.go\n@@ -1,1 +1,1 @@\n-old\n+new\n", i, i)
+	}
+
+	lines := strings.Split(New(styles.Theme{}).StatLines(b.String()), "\n")
+	require.Equal(t, "  … and 1 more file", lines[len(lines)-1])
+}
+
+// TestStatLines_NoOverflowAtCap checks that a review with exactly maxStatFiles
+// files lists them all with no summary row.
+func TestStatLines_NoOverflowAtCap(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	for i := 0; i < maxStatFiles; i++ {
+		fmt.Fprintf(&b, "--- a/f%02d.go\n+++ b/f%02d.go\n@@ -1,1 +1,1 @@\n-old\n+new\n", i, i)
+	}
+
+	lines := strings.Split(New(styles.Theme{}).StatLines(b.String()), "\n")
+	require.Len(t, lines, 1+maxStatFiles)
+	require.NotContains(t, lines[len(lines)-1], "more file")
 }
 
 // TestStatLines_EmptyPatch checks that a content-free patch yields no summary.

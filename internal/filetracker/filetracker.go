@@ -265,6 +265,19 @@ func (t *Tracker) RecordWrite(ctx context.Context, sessionID, path string, oldCo
 
 	slog.Debug("Recorded write", "session_id", sessionID, "path", normPath, "op", op)
 
+	// Refresh the session's read baseline to the just-written content. After a
+	// write the session's "last known" state of the file is what it wrote, so a
+	// subsequent edit must compare against that rather than the pre-write read
+	// hash. Without this, a legitimate view→edit→edit (or write→edit) sequence
+	// would trip the stale-read guard on the second mutation even though no
+	// external process touched the file. A genuine out-of-band modification
+	// after the write still differs from afterHash and is correctly flagged.
+	// Best-effort: the change is already committed, so a refresh failure only
+	// risks a spurious (recoverable) conflict on the next edit, never data loss.
+	if err := t.refreshReadBaseline(ctx, sessionID, normPath, afterHash); err != nil {
+		slog.Warn("Refreshing read baseline after write failed", "session_id", sessionID, "path", normPath, "err", err)
+	}
+
 	change := Change{
 		SessionID:  fc.SessionID,
 		Path:       fc.Path,
@@ -425,4 +438,65 @@ func (t *Tracker) HasConflict(ctx context.Context, sessionID, path string) (bool
 	}
 
 	return currentHash != recordedHash, nil
+}
+
+// HasRead reports whether a read has been recorded for (sessionID, path) in
+// this session — i.e. whether the file was viewed (or last written) before an
+// edit is attempted. Unlike the in-memory view tracker used by the write tool,
+// HasRead is backed by the durable read log, so it stays correct across process
+// restarts and resumed sessions. It returns false (nil error) when no read was
+// ever recorded. Callers use it to enforce the read-before-edit invariant.
+func (t *Tracker) HasRead(ctx context.Context, sessionID, path string) (bool, error) {
+	normPath, err := normalizePath(path)
+	if err != nil {
+		return false, err
+	}
+
+	t.mu.RLock()
+	if t.lastReadCache != nil {
+		if sessionMap, ok := t.lastReadCache[sessionID]; ok {
+			if _, found := sessionMap[normPath]; found {
+				t.mu.RUnlock()
+				return true, nil
+			}
+		}
+	}
+	t.mu.RUnlock()
+
+	if _, err := t.queries.GetFileRead(ctx, sqlc.GetFileReadParams{
+		SessionID: sessionID,
+		Path:      normPath,
+	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking read for %s: %w", normPath, err)
+	}
+	return true, nil
+}
+
+// refreshReadBaseline records hash as the session's latest known content for
+// normPath, updating both the durable read log and the in-memory cache. It is
+// the shared write-side counterpart of RecordRead, called after a successful
+// write so HasConflict and HasRead reflect the just-written state.
+func (t *Tracker) refreshReadBaseline(ctx context.Context, sessionID, normPath, hash string) error {
+	if err := t.queries.RecordFileRead(ctx, sqlc.RecordFileReadParams{
+		SessionID: sessionID,
+		Path:      normPath,
+		Hash:      hash,
+		CreatedAt: time.Now().UnixMilli(),
+	}); err != nil {
+		return fmt.Errorf("recording read baseline for %s: %w", normPath, err)
+	}
+
+	t.mu.Lock()
+	if t.lastReadCache == nil {
+		t.lastReadCache = make(map[string]map[string]string)
+	}
+	if _, ok := t.lastReadCache[sessionID]; !ok {
+		t.lastReadCache[sessionID] = make(map[string]string)
+	}
+	t.lastReadCache[sessionID][normPath] = hash
+	t.mu.Unlock()
+	return nil
 }

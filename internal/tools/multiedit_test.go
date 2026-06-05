@@ -18,6 +18,9 @@ func TestMultiEditAppliesSequentialEditsAndRecordsWrite(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("alpha beta gamma\n"), 0o644))
 
 	tracker := newToolsTestTracker(t, "multiedit-records")
+	// Record a read so the read-before-edit guard is satisfied (a real session
+	// reaches multiedit via the view tool, which records the read).
+	require.NoError(t, tracker.RecordRead(ctx, "multiedit-records", path))
 	tool := newMultiEditTool(Dependencies{
 		FileTracker: tracker,
 		WorkDir:     workDir,
@@ -190,6 +193,37 @@ func TestMultiEditStaleReadSkippedWhenNoTracker(t *testing.T) {
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "one beta\n", string(got))
+}
+
+// TestMultiEditRejectsUnviewedFile verifies the read-before-edit guard applies
+// to multiedit too: editing an existing file the tracked session never read is
+// refused, and the file is left untouched.
+func TestMultiEditRejectsUnviewedFile(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "unviewed.txt")
+	require.NoError(t, os.WriteFile(path, []byte("alpha beta\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, "multiedit-unviewed")
+	tool := newMultiEditTool(Dependencies{
+		FileTracker: tracker,
+		WorkDir:     workDir,
+		SessionID:   "multiedit-unviewed",
+	})
+
+	result, err := tool.Run(ctx, mustJSON(t, map[string]any{
+		"path": "unviewed.txt",
+		"edits": []map[string]any{
+			{"old": "alpha", "new": "one"},
+		},
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "has not been read in this session")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "alpha beta\n", string(got))
 }
 
 func TestMultiEditResultIncludesUnifiedDiff(t *testing.T) {

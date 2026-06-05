@@ -88,9 +88,27 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 		return errorResult(err.Error()), nil
 	}
 
-	// Guard against stale reads: if the file changed on disk since the model
-	// last read it, refuse the edit and ask for a re-read.
+	// Guard against blind and stale edits. Both checks live in the same
+	// FileTracker-backed regime that is always wired in real sessions.
 	if t.deps.FileTracker != nil && t.deps.SessionID != "" {
+		// Read-before-edit: refuse to edit an existing file the session has not
+		// read, so the edit targets the file's actual current contents rather
+		// than a guess. Mirrors the write tool's "view before overwrite" guard.
+		// New files (not yet on disk) fall through to the clearer read error.
+		if fsext.Exists(path) {
+			read, readErr := t.deps.FileTracker.HasRead(ctx, t.deps.SessionID, path)
+			if readErr != nil {
+				return errorResult(fmt.Sprintf("checking read history for %s: %v", path, readErr)), nil
+			}
+			if !read {
+				return errorResult(fmt.Sprintf(
+					"file %s has not been read in this session — view the file before editing so the edit applies to its current contents",
+					path,
+				)), nil
+			}
+		}
+		// Stale read: if the file changed on disk since the model last read it,
+		// refuse the edit and ask for a re-read.
 		changed, conflictErr := t.deps.FileTracker.HasConflict(ctx, t.deps.SessionID, path)
 		if conflictErr != nil {
 			return errorResult(fmt.Sprintf("checking file freshness for %s: %v", path, conflictErr)), nil

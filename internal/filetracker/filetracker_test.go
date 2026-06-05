@@ -317,6 +317,108 @@ func TestHasConflict_StaleRead_ReadModifyWrite(t *testing.T) {
 	require.True(t, conflict)
 }
 
+func TestHasRead_FalseWhenUnread_TrueAfterRead(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-1"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	filePath := filepath.Join(t.TempDir(), "read.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("contents"), 0o644))
+	ctx := context.Background()
+
+	read, err := tracker.HasRead(ctx, sid, filePath)
+	require.NoError(t, err)
+	require.False(t, read, "file that was never read must report HasRead=false")
+
+	require.NoError(t, tracker.RecordRead(ctx, sid, filePath))
+
+	read, err = tracker.HasRead(ctx, sid, filePath)
+	require.NoError(t, err)
+	require.True(t, read, "file that was read must report HasRead=true")
+}
+
+// TestHasRead_FromDBAfterCacheReset verifies HasRead consults the durable read
+// log, not just the in-memory cache, so it stays correct across a process
+// restart (simulated by clearing the cache).
+func TestHasRead_FromDBAfterCacheReset(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-1"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	filePath := filepath.Join(t.TempDir(), "read.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("contents"), 0o644))
+	ctx := context.Background()
+	require.NoError(t, tracker.RecordRead(ctx, sid, filePath))
+
+	// Simulate a fresh process: drop the in-memory read cache.
+	tracker.mu.Lock()
+	tracker.lastReadCache = nil
+	tracker.mu.Unlock()
+
+	read, err := tracker.HasRead(ctx, sid, filePath)
+	require.NoError(t, err)
+	require.True(t, read, "read recorded in the DB must survive a cache reset")
+}
+
+// TestRecordWrite_RefreshesReadBaseline verifies that a write updates the
+// session's read baseline to the new content, so a follow-up edit on the file
+// the session itself just wrote is not falsely flagged as a stale-read
+// conflict, while a later external modification still is.
+func TestRecordWrite_RefreshesReadBaseline(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-1"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	filePath := filepath.Join(t.TempDir(), "seq.txt")
+	v1 := []byte("v1")
+	require.NoError(t, os.WriteFile(filePath, v1, 0o644))
+	ctx := context.Background()
+
+	require.NoError(t, tracker.RecordRead(ctx, sid, filePath))
+
+	// The tool writes v2 to disk, then records the write.
+	v2 := []byte("v2")
+	require.NoError(t, os.WriteFile(filePath, v2, 0o644))
+	_, err := tracker.RecordWrite(ctx, sid, filePath, v1, v2)
+	require.NoError(t, err)
+
+	// Disk now matches the written content, so the next edit must NOT conflict.
+	conflict, err := tracker.HasConflict(ctx, sid, filePath)
+	require.NoError(t, err)
+	require.False(t, conflict, "self-write must refresh the baseline so a follow-up edit is allowed")
+
+	// A genuine out-of-band change after the write is still detected.
+	require.NoError(t, os.WriteFile(filePath, []byte("v3 external"), 0o644))
+	conflict, err = tracker.HasConflict(ctx, sid, filePath)
+	require.NoError(t, err)
+	require.True(t, conflict, "an external modification after the write must still conflict")
+}
+
+// TestRecordWrite_CreateMarksRead verifies that creating a file via the tracker
+// records a read baseline for it, so the file the session just wrote can be
+// edited without a separate view (write→edit works).
+func TestRecordWrite_CreateMarksRead(t *testing.T) {
+	database := setupTestDB(t)
+	sid := "session-1"
+	createTestSession(t, database, sid)
+	tracker := NewTracker(database, nil)
+
+	filePath := filepath.Join(t.TempDir(), "created.txt")
+	content := []byte("fresh")
+	require.NoError(t, os.WriteFile(filePath, content, 0o644))
+	ctx := context.Background()
+
+	_, err := tracker.RecordWrite(ctx, sid, filePath, nil, content)
+	require.NoError(t, err)
+
+	read, err := tracker.HasRead(ctx, sid, filePath)
+	require.NoError(t, err)
+	require.True(t, read, "creating a file must record a read baseline for it")
+}
+
 func TestChangedFiles_DedupAndSorted(t *testing.T) {
 	database := setupTestDB(t)
 	sid := "session-1"

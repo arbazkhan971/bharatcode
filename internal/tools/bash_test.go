@@ -23,6 +23,7 @@ func TestRegistryListsShellTools(t *testing.T) {
 	}
 	require.Equal(t, []string{
 		"bash",
+		"codeactions",
 		"diagnostics",
 		"edit",
 		"format",

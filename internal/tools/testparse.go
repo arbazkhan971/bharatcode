@@ -58,6 +58,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseExUnitFailures(output)
 	case runnerTAP:
 		return parseTAPFailures(output)
+	case runnerDeno:
+		return parseDenoTestFailures(output)
 	default:
 		return nil
 	}
@@ -79,6 +81,7 @@ const (
 	runnerGradle
 	runnerExUnit
 	runnerTAP
+	runnerDeno
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -154,6 +157,13 @@ func classifyTestRunner(command string) testRunner {
 		return runnerUnittest
 	case tapRe.MatchString(c):
 		return runnerTAP
+	case strings.Contains(c, "deno test"):
+		// `deno test` runs Deno's built-in test runner, whose console output marks
+		// each failure with a "<name> ... FAILED" line and repeats it as
+		// "<name> => <location>" in the trailing "FAILURES" block. Checked before
+		// the JS runners since a "deno test" invocation carries none of their
+		// substrings, but keeping it explicit guards against future overlap.
+		return runnerDeno
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -957,6 +967,79 @@ func parseTAPFailures(output string) []testFailure {
 // "ok 1 - description" — a passing TAP assertion, used only to bound a failure's
 // YAML diagnostic scan so it does not bleed into the next result.
 var tapOkRe = regexp.MustCompile(`^ok\b`)
+
+var (
+	// "subtract ... FAILED (2ms)" — Deno's per-test outcome line. The test name
+	// (which may contain spaces, since Deno.test takes an arbitrary string) sits
+	// before " ... FAILED"; the trailing " (<time>)" duration marker is optional.
+	// Steps print the same shape indented, and a "<name> ... FAILED (N steps)"
+	// roll-up can appear for a parent test, but matching the unindented top-level
+	// lines is enough to name every failing test.
+	denoFailRe = regexp.MustCompile(`^(.+?) \.\.\. FAILED(?: \(.*\))?$`)
+	// "subtract => ./math_test.ts:6:6" — a failure entry header in the trailing
+	// "ERRORS"/"FAILURES" blocks, pairing a test name with its source location.
+	// Used to attach the assertion/exception message that follows as the detail.
+	denoErrorHeaderRe = regexp.MustCompile(`^(.+?) => (\S+:\d+:\d+)$`)
+	// "error: AssertionError: Values are not equal." — the message line Deno
+	// prints beneath an ERRORS-block header. The text after "error: " is kept as
+	// the detail.
+	denoErrorMsgRe = regexp.MustCompile(`^error: (.*\S)\s*$`)
+)
+
+// parseDenoTestFailures extracts failing tests from `deno test` output. Each
+// "<name> ... FAILED" line names a failed test, in run order. The detail is the
+// "error: <message>" line that follows the test's "<name> => <location>" header
+// in the trailing ERRORS block, when present, so assertion and thrown-exception
+// messages surface alongside the names.
+func parseDenoTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+
+	// First pass: map each test name to the first error message in its ERRORS-block
+	// entry, so the detail can be attached when the "... FAILED" line is emitted.
+	details := map[string]string{}
+	for i := 0; i < len(lines); i++ {
+		m := denoErrorHeaderRe.FindStringSubmatch(strings.TrimSpace(lines[i]))
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if _, ok := details[name]; ok {
+			continue
+		}
+		for j := i + 1; j < len(lines); j++ {
+			if d := denoErrorMsgRe.FindStringSubmatch(strings.TrimSpace(lines[j])); d != nil {
+				details[name] = strings.TrimSpace(d[1])
+				break
+			}
+			// Stop at the next entry header so an entry without a message does not
+			// borrow the following one's.
+			if denoErrorHeaderRe.MatchString(strings.TrimSpace(lines[j])) {
+				break
+			}
+		}
+	}
+
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		// Only top-level (unindented) outcome lines are tests; indented lines are
+		// steps whose failure is already reflected in their parent's roll-up.
+		if ln != strings.TrimLeft(ln, " \t") {
+			continue
+		}
+		m := denoFailRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: details[name]})
+	}
+	return failures
+}
 
 // maxSummarizedFailures bounds how many failed tests the appended summary block
 // lists. A suite that breaks wholesale (a bad import, a renamed symbol) can fail

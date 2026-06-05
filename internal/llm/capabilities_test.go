@@ -48,6 +48,11 @@ func TestInferContextWindow(t *testing.T) {
 		{"ministral-8b-latest", 128_000},
 		{"ministral-3b-2410", 128_000},
 		{"devstral-small-2507", 128_000},
+		// Magistral (Mistral's reasoning line) is 128k and shares no marker with
+		// the other Mistral rules, so it resolves via its own rule, not the family
+		// default (32k) and not "unknown" (0).
+		{"magistral-small-2506", 128_000},
+		{"magistral-medium-latest", 128_000},
 		{"qwen2.5-coder", 32_768},
 		{"deepseek-chat", 65_536},
 		// Amazon Nova (Bedrock): Pro/Lite are 300k, Micro is 128k.

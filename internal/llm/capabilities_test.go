@@ -33,6 +33,12 @@ func TestInferContextWindow(t *testing.T) {
 		{"llama-3.1-70b", 128_000},
 		{"mixtral-8x7b", 32_768},
 		{"mistral-large", 32_768},
+		// Ministral and Devstral ship a 128k window and do not contain the
+		// "mistral" marker, so each needs its own rule rather than the family
+		// default (32k) — or, before these rules existed, "unknown" (0).
+		{"ministral-8b-latest", 128_000},
+		{"ministral-3b-2410", 128_000},
+		{"devstral-small-2507", 128_000},
 		{"qwen2.5-coder", 32_768},
 		{"deepseek-chat", 65_536},
 		// xAI Grok, Perplexity Sonar tiers, Codestral, Kimi and gpt-oss.

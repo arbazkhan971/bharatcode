@@ -129,6 +129,21 @@ func (l *List) LastAssistantText() string {
 	return ""
 }
 
+// FirstUserText returns the raw (unrendered) body of the first user message in
+// the list, or "" when no user message is present. It backs a content-derived
+// session label — the conversation's opening prompt — the way the session
+// switchers in Claude Code and opencode title a conversation by how it began,
+// rather than by an opaque id. The source text is returned (not the styled
+// render) so the caller can trim and truncate it freely.
+func (l *List) FirstUserText() string {
+	for i := range l.items {
+		if l.items[i].role == message.RoleUser {
+			return l.items[i].body
+		}
+	}
+	return ""
+}
+
 // TranscriptText returns the whole visible conversation as plain text, one
 // message per block separated by blank lines. Each block is prefixed with its
 // role (for example "user" or "assistant"). It returns "" when the list is

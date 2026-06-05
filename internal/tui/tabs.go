@@ -23,13 +23,16 @@ type tab struct {
 	chat             *chat.List
 	sessionID        string
 	sessionPersisted bool
-	goal             string
-	goalActive       bool
-	goalIteration    int
-	turn             int
-	queueCounter     int
-	chatScroll       int
-	search           searchState
+	// firstPrompt is the first user prompt submitted in this tab; it titles the
+	// tab in the /tabs listing. Empty until the tab's first turn.
+	firstPrompt   string
+	goal          string
+	goalActive    bool
+	goalIteration int
+	turn          int
+	queueCounter  int
+	chatScroll    int
+	search        searchState
 	// statusModel and statusAgent retain the model/agent labels shown in the
 	// status bar so a tab restored from a different session keeps its identity.
 	statusModel string
@@ -56,6 +59,7 @@ func (m *model) snapshotTab() tab {
 		chat:             m.chat,
 		sessionID:        m.sessionID,
 		sessionPersisted: m.sessionPersisted,
+		firstPrompt:      m.tabFirstPrompt,
 		goal:             m.goal,
 		goalActive:       m.goalActive,
 		goalIteration:    m.goalIteration,
@@ -91,6 +95,7 @@ func (m *model) loadTab(index int) {
 	m.chat = t.chat
 	m.sessionID = t.sessionID
 	m.sessionPersisted = t.sessionPersisted
+	m.tabFirstPrompt = t.firstPrompt
 	m.goal = t.goal
 	m.goalActive = t.goalActive
 	m.goalIteration = t.goalIteration
@@ -252,15 +257,83 @@ func (m *model) handleTabsList() (tea.Model, tea.Cmd) {
 		if i == m.activeTab {
 			marker = "> "
 		}
-		title := "new session"
-		if m.tabPersisted(i) {
-			title = "session " + shortSessionID(m.tabSessionID(i))
-		}
-		lines = append(lines, fmt.Sprintf("%s%d: %s", marker, i+1, title))
+		lines = append(lines, fmt.Sprintf("%s%d: %s", marker, i+1, m.tabTitle(i)))
 	}
 	lines = append(lines, "", "Ctrl+T new · Ctrl+Right/Left switch · Ctrl+W close")
 	m.dialogs.Push(&dialog.Text{DialogID: "tabs", Title: "Tabs", Body: strings.Join(lines, "\n"), Theme: m.theme})
 	return m, nil
+}
+
+// tabTitleMaxLen bounds a content-derived tab title so a long opening prompt
+// does not dominate the /tabs listing.
+const tabTitleMaxLen = 48
+
+// tabTitle returns a human-friendly label for tab index, used in the /tabs
+// listing. It prefers the first line of the tab's opening user prompt — trimmed
+// and truncated — so tabs are distinguishable by what they are about rather than
+// by an opaque session id, matching how the session switchers in Claude Code and
+// opencode title a conversation by its first message. A persisted tab still
+// shows its short session id (in parentheses after a content title, or as the
+// bare "session <id>" when there is no prompt yet) so the id stays available for
+// /sessions; an unpersisted tab with no prompt falls back to "new session".
+func (m *model) tabTitle(index int) string {
+	snippet := firstLineSnippet(m.tabFirstPromptText(index), tabTitleMaxLen)
+	if !m.tabPersisted(index) {
+		if snippet != "" {
+			return snippet
+		}
+		return "new session"
+	}
+	id := shortSessionID(m.tabSessionID(index))
+	if snippet != "" {
+		return snippet + "  (" + id + ")"
+	}
+	return "session " + id
+}
+
+// tabFirstPromptText returns the first user prompt for tab index, preferring the
+// prompt captured when the tab's first turn launched and falling back to the
+// first user message in its restored transcript. For the active tab it reads the
+// live model field, which is authoritative (launchTurn updates it without
+// re-snapshotting the tab); other tabs read their snapshot. A restored session
+// has no captured prompt, so its opening user message backs the title instead.
+func (m *model) tabFirstPromptText(index int) string {
+	prompt := ""
+	if index == m.activeTab {
+		prompt = m.tabFirstPrompt
+	} else if index >= 0 && index < len(m.tabs) {
+		prompt = m.tabs[index].firstPrompt
+	}
+	if prompt != "" {
+		return prompt
+	}
+	if index >= 0 && index < len(m.tabs) && m.tabs[index].chat != nil {
+		return m.tabs[index].chat.FirstUserText()
+	}
+	return ""
+}
+
+// firstLineSnippet reduces s to a single compact line for a tab title: the first
+// non-blank line, with inner runs of whitespace collapsed to single spaces, then
+// truncated to maxLen runes with a trailing ellipsis when cut. It returns "" when
+// s holds no non-blank text. Truncation is rune-wise so a multi-byte character is
+// never split into invalid UTF-8.
+func firstLineSnippet(s string, maxLen int) string {
+	var line string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			line = l
+			break
+		}
+	}
+	line = strings.Join(strings.Fields(line), " ")
+	if line == "" {
+		return ""
+	}
+	if runes := []rune(line); maxLen > 0 && len(runes) > maxLen {
+		return string(runes[:maxLen-1]) + "…"
+	}
+	return line
 }
 
 // parseTabIndex parses a 1-based tab number from s, reporting whether s was a

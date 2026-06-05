@@ -209,8 +209,8 @@ func TestSlashCommandsAllHaveDescriptions(t *testing.T) {
 func TestMatchSlash_PrefixWins(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, []string{"/sessions", "/status", "/save", "/search"}, matchSlash("/s"))
-	require.Equal(t, []string{"/help"}, matchSlash("/help"),
+	require.Equal(t, []string{"/sessions", "/status", "/save", "/search"}, matchSlash(slashCommands, "/s"))
+	require.Equal(t, []string{"/help"}, matchSlash(slashCommands, "/help"),
 		"a fully typed command still returns itself, not a fuzzy expansion")
 }
 
@@ -220,11 +220,11 @@ func TestMatchSlash_PrefixWins(t *testing.T) {
 func TestMatchSlash_FuzzyFallback(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, []string{"/export"}, matchSlash("/port"),
+	require.Equal(t, []string{"/export"}, matchSlash(slashCommands, "/port"),
 		"a subsequence of the name resolves when no prefix matches")
-	require.Equal(t, []string{"/compact"}, matchSlash("/PACT"),
+	require.Equal(t, []string{"/compact"}, matchSlash(slashCommands, "/PACT"),
 		"the fuzzy fallback is case-insensitive")
-	require.Empty(t, matchSlash("/zzz"),
+	require.Empty(t, matchSlash(slashCommands, "/zzz"),
 		"a token that is not even a subsequence still matches nothing")
 }
 
@@ -237,7 +237,7 @@ func TestMatchSlash_FuzzyFallback(t *testing.T) {
 func TestMatchSlash_FuzzyRanksByRelevance(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, []string{"/budget", "/agent", "/export"}, matchSlash("/et"),
+	require.Equal(t, []string{"/budget", "/agent", "/export"}, matchSlash(slashCommands, "/et"),
 		"substring match leads, then subsequence matches by tightest span")
 }
 
@@ -326,7 +326,7 @@ func TestSuggestSlash_OffersClosestCommand(t *testing.T) {
 		"Quit":   "/quit",   // case-insensitive
 	}
 	for input, want := range cases {
-		require.Equal(t, want, suggestSlash(input),
+		require.Equal(t, want, suggestSlash(slashCommands, input),
 			"%q should be corrected to %q", input, want)
 	}
 }
@@ -338,7 +338,7 @@ func TestSuggestSlash_NoSuggestionForDistantOrEmpty(t *testing.T) {
 	t.Parallel()
 
 	for _, input := range []string{"", "deploy", "xyzzy", "a", "go"} {
-		require.Empty(t, suggestSlash(input),
+		require.Empty(t, suggestSlash(slashCommands, input),
 			"%q should not be corrected to any built-in command", input)
 	}
 }
@@ -350,7 +350,7 @@ func TestSuggestSlash_ResultIsKnownCommand(t *testing.T) {
 	t.Parallel()
 
 	for _, input := range []string{"exprot", "statu", "sessons", "compatc"} {
-		if s := suggestSlash(input); s != "" {
+		if s := suggestSlash(slashCommands, input); s != "" {
 			require.Contains(t, slashCommands, s,
 				"suggestion %q for %q must be a real built-in command", s, input)
 		}
@@ -406,4 +406,91 @@ func TestHandleSlash_UnknownCommandNoSuggestionWhenDistant(t *testing.T) {
 	require.True(t, m.dialogs.Contains("error"))
 	require.NotContains(t, plainText(m.dialogs.Render(200)), "Did you mean",
 		"a distant command name must not be corrected to an unrelated one")
+}
+
+// TestSetDynamicCommands_FiltersBuiltinsAndDuplicates asserts the dynamic
+// command list drops blanks, names without a leading slash, names that collide
+// with a built-in (the built-in handler wins at runtime), and duplicates, while
+// preserving the surviving order so the caller controls how recipes and prompts
+// sort after the built-ins.
+func TestSetDynamicCommands_FiltersBuiltinsAndDuplicates(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	st.setDynamicCommands([]string{
+		"/triage", "  ", "noslash", "/help", "/triage", "  /review  ", "/deploy",
+	})
+	require.Equal(t, []string{"/triage", "/review", "/deploy"}, st.dynamicCommands,
+		"blanks, bare names, built-in collisions, and duplicates are dropped; order kept")
+}
+
+// TestCandidates_AppendsDynamicAfterBuiltins asserts candidates returns the
+// built-ins unchanged when no dynamic commands are set, and otherwise the
+// built-ins followed by the dynamic commands.
+func TestCandidates_AppendsDynamicAfterBuiltins(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	require.Equal(t, slashCommands, st.candidates(),
+		"with no dynamic commands the shared built-in slice is returned unchanged")
+
+	st.setDynamicCommands([]string{"/triage"})
+	got := st.candidates()
+	require.Equal(t, len(slashCommands)+1, len(got))
+	require.Equal(t, "/triage", got[len(got)-1], "dynamic commands sort after built-ins")
+	require.Equal(t, slashCommands[0], got[0], "built-ins keep their leading position")
+}
+
+// TestMatchSlash_CompletesDynamicCommand asserts a dynamic recipe/prompt name
+// completes like a built-in: a prefix that only a dynamic command shares resolves
+// to it, both as an exact prefix and via the fuzzy subsequence fallback.
+func TestMatchSlash_CompletesDynamicCommand(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	st.setDynamicCommands([]string{"/triage", "/deploy"})
+	cmds := st.candidates()
+
+	require.Equal(t, []string{"/triage"}, matchSlash(cmds, "/tri"),
+		"a prefix unique to a dynamic command completes to it")
+	require.Equal(t, []string{"/deploy"}, matchSlash(cmds, "/dpl"),
+		"the fuzzy subsequence fallback reaches a dynamic command too")
+}
+
+// TestCompleteSlash_CyclesDynamicCommand asserts Tab completion on an inputState
+// carrying dynamic commands lands on the dynamic match, proving the wiring from
+// completeSlash through candidates reaches recipes and custom prompts.
+func TestCompleteSlash_CyclesDynamicCommand(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	st.setDynamicCommands([]string{"/triage"})
+	got, ok := st.completeSlash("/tri")
+	require.True(t, ok)
+	require.Equal(t, "/triage", got)
+}
+
+// TestSlashHintCommands_SurfacesDynamicCommand asserts the hint dropdown lists a
+// dynamic command for an ambiguous prefix it shares with a built-in, so recipes
+// and custom prompts are as visible while typing as the built-ins.
+func TestSlashHintCommands_SurfacesDynamicCommand(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	st.setDynamicCommands([]string{"/help-me-debug"})
+	cmds, active := slashHintCommands("/help", &st)
+	require.Contains(t, cmds, "/help-me-debug",
+		"a dynamic command sharing the prefix shows in the hint menu")
+	require.Equal(t, -1, active)
+}
+
+// TestSuggestSlash_CorrectsToDynamicCommand asserts the did-you-mean suggester
+// points a likely typo at a dynamic command, not only a built-in.
+func TestSuggestSlash_CorrectsToDynamicCommand(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	st.setDynamicCommands([]string{"/triage"})
+	require.Equal(t, "/triage", suggestSlash(st.candidates(), "trige"),
+		"a one-edit typo of a recipe name is corrected to the recipe")
 }

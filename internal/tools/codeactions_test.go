@@ -98,6 +98,50 @@ func TestCodeActionsListNotesResolvableAction(t *testing.T) {
 	)
 }
 
+func TestCodeActionsMarksPreferredAndDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	// A server marks the canonical fix preferred and may disable an action it
+	// cannot offer in this context; the listing surfaces both so the model can
+	// pick the recommended fix and skip the unavailable one.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Import \"fmt\"", Kind: "quickfix", IsPreferred: true, Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{filepath.Join(dir, "main.go"): {{NewText: "x"}}},
+		}},
+		{Title: "Extract function", Kind: "refactor.extract", Disabled: "selection spans a statement boundary"},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t,
+		"1. Import \"fmt\" [quickfix] (preferred) (edit, 1 file)\n"+
+			"2. Extract function [refactor.extract] (disabled: selection spans a statement boundary)",
+		result.Content,
+	)
+}
+
+func TestCodeActionsApplyRefusesDisabledAction(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Extract function", Kind: "refactor.extract", Disabled: "selection spans a statement boundary", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{filepath.Join(dir, "main.go"): {{NewText: "x"}}},
+		}},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "the server disabled it (selection spans a statement boundary)")
+}
+
 func TestCodeActionsDefaultsRangeToCursor(t *testing.T) {
 	dir := t.TempDir()
 	writeCodeActionsFile(t, dir)

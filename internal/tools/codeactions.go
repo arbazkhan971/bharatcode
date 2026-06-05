@@ -224,6 +224,12 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, path string, orde
 	if title == "" {
 		title = "(untitled action)"
 	}
+	// A server can mark an action unavailable in this context (e.g. "cannot
+	// extract: selection spans a statement boundary"); applying it would be a
+	// no-op or an error, so refuse up front and pass the reason through.
+	if action.Disabled != "" {
+		return errorResult(fmt.Sprintf("cannot apply %q: the server disabled it (%s)", title, action.Disabled)), nil
+	}
 	// Servers that advertise resolveProvider (gopls, rust-analyzer) often return
 	// refactorings with an empty edit and defer computing it to a
 	// codeAction/resolve round-trip. When the chosen action carries no edit but
@@ -424,7 +430,16 @@ func codeActionEntry(a lsp.CodeAction) string {
 	if a.Kind != "" {
 		fmt.Fprintf(&line, " [%s]", a.Kind)
 	}
-	if note := codeActionApplyNote(a); note != "" {
+	// The server's preferred hint marks the canonical fix for the context, so the
+	// model can pick a default without weighing the alternatives.
+	if a.IsPreferred {
+		line.WriteString(" (preferred)")
+	}
+	if a.Disabled != "" {
+		// A disabled action cannot be applied; show why instead of an apply note so
+		// the model does not waste an apply call on it.
+		fmt.Fprintf(&line, " (disabled: %s)", a.Disabled)
+	} else if note := codeActionApplyNote(a); note != "" {
 		fmt.Fprintf(&line, " (%s)", note)
 	}
 	return line.String()

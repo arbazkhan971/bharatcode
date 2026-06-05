@@ -969,6 +969,7 @@ func emptyDefault(value string, fallback string) string {
 func (m *model) slashHelpLines() []string {
 	lines := []string{
 		"/help - list commands",
+		"/keys - show keyboard shortcuts",
 		"/clear - clear visible chat",
 		"/sessions - restore a recent session",
 		"/tab [new|next|prev|close|N] - open or switch session tabs (Ctrl+T new, Ctrl+Right/Left switch)",

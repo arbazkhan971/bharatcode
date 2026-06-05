@@ -765,7 +765,10 @@ func parseHover(raw json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.Join(parts, "\n"), nil
+	// Distinct hover sections (e.g. a signature followed by documentation) are
+	// separated by a blank line so they read as separate markdown blocks rather
+	// than running together on adjacent lines.
+	return strings.Join(parts, "\n\n"), nil
 }
 
 // markupStrings flattens a hover contents value into its constituent strings.
@@ -798,16 +801,26 @@ func markupStrings(raw json.RawMessage) ([]string, error) {
 		}
 		return out, nil
 	default:
-		// MarkupContent ({kind, value}) or MarkedString ({language, value}):
-		// both carry the displayable text in the "value" field.
+		// MarkupContent ({kind, value}) or MarkedString ({language, value}): both
+		// carry the displayable text in the "value" field. A MarkedString with a
+		// language is, per the LSP spec, equivalent to a fenced code block in that
+		// language, so wrap it accordingly; the model then sees the signature as
+		// code rather than as prose merged with any surrounding documentation.
+		// MarkupContent uses "kind" ("markdown"/"plaintext") instead and is already
+		// renderable as-is.
 		var obj struct {
-			Value string `json:"value"`
+			Kind     string `json:"kind"`
+			Language string `json:"language"`
+			Value    string `json:"value"`
 		}
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return nil, fmt.Errorf("parsing hover contents: %w", err)
 		}
 		if obj.Value == "" {
 			return nil, nil
+		}
+		if obj.Kind == "" && obj.Language != "" {
+			return []string{"```" + obj.Language + "\n" + obj.Value + "\n```"}, nil
 		}
 		return []string{obj.Value}, nil
 	}

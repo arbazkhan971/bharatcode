@@ -20,9 +20,16 @@ func TestParseHoverShapes(t *testing.T) {
 			want: "hello",
 		},
 		{
+			name: "markup_content_plaintext",
+			raw:  `{"contents":{"kind":"plaintext","value":"hello"}}`,
+			want: "hello",
+		},
+		{
+			// A MarkedString with a language is, per the LSP spec, equivalent to a
+			// fenced code block in that language, so the value is wrapped in a fence.
 			name: "marked_string_object",
 			raw:  `{"contents":{"language":"go","value":"func F()"}}`,
-			want: "func F()",
+			want: "```go\nfunc F()\n```",
 		},
 		{
 			name: "marked_string_bare",
@@ -30,9 +37,11 @@ func TestParseHoverShapes(t *testing.T) {
 			want: "plain text",
 		},
 		{
+			// Distinct sections are separated by a blank line, and the
+			// language-tagged section is fenced.
 			name: "marked_string_array",
 			raw:  `{"contents":["first",{"language":"go","value":"second"}]}`,
-			want: "first\nsecond",
+			want: "first\n\n```go\nsecond\n```",
 		},
 		{
 			name: "null_result",

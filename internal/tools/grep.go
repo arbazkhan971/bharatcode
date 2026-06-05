@@ -42,6 +42,11 @@ type grepArgs struct {
 	// `.` matches newlines.  Context (before/after/context) is ignored in
 	// this mode.
 	Multiline bool `json:"multiline,omitempty"`
+	// Type filters the search to a language by file type, like rg --type go.
+	// It is a curated, machine-independent superset of the most common
+	// languages (see grepTypeExtensions); combine with Include to narrow
+	// further (both filters must pass).  Empty means no type filter.
+	Type string `json:"type,omitempty"`
 }
 
 var (
@@ -60,7 +65,8 @@ var (
     "context": {"type": "integer", "minimum": 0, "description": "Number of lines of context to show before and after each match (like rg -C). Takes precedence over before/after when set."},
     "before": {"type": "integer", "minimum": 0, "description": "Number of lines to show before each match (like rg -B). Ignored when context is set."},
     "after": {"type": "integer", "minimum": 0, "description": "Number of lines to show after each match (like rg -A). Ignored when context is set."},
-    "multiline": {"type": "boolean", "description": "Match patterns across line boundaries (like rg -U --multiline-dotall); . matches newlines. Context options are ignored in this mode."}
+    "multiline": {"type": "boolean", "description": "Match patterns across line boundaries (like rg -U --multiline-dotall); . matches newlines. Context options are ignored in this mode."},
+    "type": {"type": "string", "description": "Filter to a language by file type, like rg --type go (e.g. go, py, js, ts, rust, java, c, cpp). Combine with include to narrow further."}
   }
 }`)
 )
@@ -103,6 +109,11 @@ func (t *grepTool) Run(ctx context.Context, raw json.RawMessage) (res Result, er
 	}
 	if args.OutputMode != "content" && args.OutputMode != "files_with_matches" && args.OutputMode != "count" {
 		return errorResult("output_mode must be one of content, files_with_matches, or count"), nil
+	}
+	if args.Type = strings.TrimSpace(args.Type); args.Type != "" {
+		if _, ok := resolveGrepType(args.Type); !ok {
+			return errorResult(fmt.Sprintf("unknown type %q; supported types: %s", args.Type, grepTypeNames())), nil
+		}
 	}
 
 	root, err := workspaceRoot(t.deps.WorkDir)
@@ -172,6 +183,14 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 
 	if args.Include != "" {
 		cmdArgs = append(cmdArgs, "--glob", args.Include)
+	}
+	if exts, ok := resolveGrepType(args.Type); ok {
+		// Define a synthetic type from our shared table rather than relying on
+		// rg's built-in defs, so the rg path and Go fallback select identically.
+		for _, e := range exts {
+			cmdArgs = append(cmdArgs, "--type-add", "bcgrep:*."+e)
+		}
+		cmdArgs = append(cmdArgs, "--type", "bcgrep")
 	}
 	cmdArgs = append(cmdArgs, args.Pattern, searchPath)
 
@@ -404,6 +423,7 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 	}
 
 	gitignoreDirs := loadRootGitignore(root)
+	typeSet := grepTypeSet(args.Type)
 	ctxBefore, ctxAfter := contextLines(args)
 	needContext := (ctxBefore > 0 || ctxAfter > 0) && (args.OutputMode == "content" || args.OutputMode == "")
 
@@ -445,6 +465,9 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 			if !ok {
 				return nil
 			}
+		}
+		if !extInTypeSet(entry.Name(), typeSet) {
+			return nil
 		}
 
 		rel := relativeSlash(root, path)
@@ -586,6 +609,7 @@ func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepA
 	}
 
 	gitignoreDirs := loadRootGitignore(root)
+	typeSet := grepTypeSet(args.Type)
 	contentMode := args.OutputMode == "content" || args.OutputMode == ""
 
 	var (
@@ -618,6 +642,9 @@ func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepA
 			if !ok {
 				return nil
 			}
+		}
+		if !extInTypeSet(entry.Name(), typeSet) {
+			return nil
 		}
 
 		data, rerr := os.ReadFile(path)

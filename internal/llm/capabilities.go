@@ -162,6 +162,17 @@ var contextWindowRules = []struct {
 	{"devstral", 128_000},
 	{"mistral", 32_768},
 	{"qwen", 32_768},
+	// Microsoft Phi open-weight line — Phi-3/Phi-3.5 (mini, small, medium, MoE) as
+	// served by hosted providers ship the long-context 128k variant, while Phi-4
+	// shipped a 16k window. The "phi-3"/"phi-4" markers are deliberately specific:
+	// a bare "phi" rule would also match unrelated ids such as the "dolphin"
+	// finetunes, which carry their base model's (Mistral/Llama) window instead.
+	{"phi-4", 16_384},
+	{"phi-3", 128_000},
+	// Databricks DBRX exposes a 32k window.
+	{"dbrx", 32_768},
+	// IBM Granite — the shipping Granite 3.x instruct line exposes a 128k window.
+	{"granite", 128_000},
 	// Google Gemma open-weight line — Gemma 3 lifted the window to 128k while
 	// Gemma 1/2 shipped 8k, so the specific "gemma-3" marker precedes the family.
 	{"gemma-3", 128_000},

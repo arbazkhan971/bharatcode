@@ -96,6 +96,7 @@ func newRootCmd() *cobra.Command {
 		NewDoctorCmd(),
 		newSkillsCmd(),
 		newRecipesCmd(),
+		newEvalCmd(),
 		newCompletionCmd(),
 	)
 	return root

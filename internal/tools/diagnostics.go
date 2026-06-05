@@ -146,6 +146,11 @@ func diagnosticFiles(ctx context.Context, root string) ([]string, error) {
 		".hh": {}, ".hpp": {}, ".js": {}, ".jsx": {}, ".py": {}, ".rs": {},
 		".ts": {}, ".tsx": {},
 	}
+	// Skip dependency and build directories the same way grep and glob do, so a
+	// workspace scan never descends into target/, dist/, node_modules/, etc. and
+	// opens thousands of generated or vendored files into the language servers.
+	// Root .gitignore directory entries extend the built-in set per project.
+	gitignored := loadRootGitignore(root)
 	var paths []string
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -155,11 +160,8 @@ func diagnosticFiles(ctx context.Context, root string) ([]string, error) {
 			return ctx.Err()
 		}
 		if entry.IsDir() {
-			switch entry.Name() {
-			case ".git", "node_modules", "vendor":
-				if path != root {
-					return filepath.SkipDir
-				}
+			if path != root && (ignoredDirs[entry.Name()] || gitignored[entry.Name()]) {
+				return filepath.SkipDir
 			}
 			return nil
 		}

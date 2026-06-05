@@ -229,7 +229,7 @@
     {
       "id": "deepseek-chat",
       "provider": "deepseek",
-      "context_window": 64000,
+      "context_window": 131072,
       "input_price_per_mtok_usd": 0.27,
       "output_price_per_mtok_usd": 1.10,
       "supports_images": false,
@@ -238,7 +238,7 @@
     {
       "id": "deepseek-reasoner",
       "provider": "deepseek",
-      "context_window": 64000,
+      "context_window": 131072,
       "input_price_per_mtok_usd": 0.55,
       "output_price_per_mtok_usd": 2.19,
       "supports_images": false,

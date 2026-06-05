@@ -59,11 +59,12 @@ func (p *openAIResponsesProvider) SupportsImages() bool {
 }
 
 // Stream posts a non-streaming Responses request and emits the parsed output as
-// Start/DeltaText/End events. Tool calling and native streaming are followups;
-// a request carrying tools is rejected so callers do not silently lose them.
+// Start/DeltaText/ToolUse/End events. Native streaming is a followup; a request
+// carrying tools for a model that does not advertise tool support is rejected so
+// callers do not silently lose them.
 func (p *openAIResponsesProvider) Stream(ctx context.Context, req Request) (<-chan Event, error) {
-	if len(req.Tools) > 0 {
-		return nil, fmt.Errorf("responses api tools: %w", ErrUnsupportedFeature)
+	if len(req.Tools) > 0 && !modelSupportsTools(p.models, req.Model) {
+		return nil, fmt.Errorf("model %q tools: %w", req.Model, ErrUnsupportedFeature)
 	}
 	if hasImages(req.Messages) && !modelSupportsImages(p.models, req.Model) {
 		return nil, fmt.Errorf("model %q images: %w", req.Model, ErrUnsupportedFeature)
@@ -118,13 +119,23 @@ func buildResponsesRequest(req Request) (responsesRequest, error) {
 		Stream:       false,
 	}
 	for _, msg := range message.Normalize(req.Messages) {
-		item, ok, err := convertResponsesItem(msg)
+		items, err := convertResponsesItem(msg)
 		if err != nil {
 			return responsesRequest{}, err
 		}
-		if ok {
-			body.Input = append(body.Input, item)
+		body.Input = append(body.Input, items...)
+	}
+	for _, tool := range req.Tools {
+		schema := tool.InputSchema
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
+		body.Tools = append(body.Tools, responsesTool{
+			Type:        "function",
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  schema,
+		})
 	}
 	// Reasoning models reject temperature and accept reasoning_effort instead;
 	// gate both by model id exactly as the chat/completions path does so the
@@ -140,20 +151,26 @@ func buildResponsesRequest(req Request) (responsesRequest, error) {
 	return body, nil
 }
 
-// convertResponsesItem turns one normalized message into a Responses input
-// item. The bool is false when the message carries no representable content
-// (so the caller skips it). Tool blocks are not yet supported on this path.
-func convertResponsesItem(msg message.Message) (responsesInputItem, bool, error) {
+// convertResponsesItem turns one normalized message into zero or more Responses
+// input items. Text/image content becomes a single message item; tool calls and
+// tool results each become their own top-level item (function_call /
+// function_call_output) — in the Responses API these are not message content
+// parts. message.Normalize relabels tool-result blocks onto the user role, so
+// the block switch handles every block type regardless of the message role.
+func convertResponsesItem(msg message.Message) ([]responsesInputItem, error) {
 	switch msg.Role {
-	case message.RoleUser, message.RoleAssistant, message.RoleSystem:
+	case message.RoleUser, message.RoleAssistant, message.RoleSystem, message.RoleTool:
 		// Assistant text is echoed back as output_text; every other role uses
 		// input_text. This keeps multi-turn history representable without a
 		// dedicated content-type per role beyond the input/output split.
 		textType := "input_text"
+		role := string(msg.Role)
 		if msg.Role == message.RoleAssistant {
 			textType = "output_text"
 		}
 		var parts []responsesContentPart
+		var calls []responsesInputItem
+		var results []responsesInputItem
 		for _, block := range msg.Content {
 			switch b := block.(type) {
 			case message.TextBlock:
@@ -166,20 +183,44 @@ func convertResponsesItem(msg message.Message) (responsesInputItem, bool, error)
 					Type:     "input_image",
 					ImageURL: fmt.Sprintf("data:%s;base64,%s", b.MimeType, encoded),
 				})
+			case message.ToolUseBlock:
+				args := string(b.Input)
+				if args == "" {
+					args = "{}"
+				}
+				calls = append(calls, responsesInputItem{
+					Type:      "function_call",
+					CallID:    b.ID,
+					Name:      b.Name,
+					Arguments: args,
+				})
+			case message.ToolResultBlock:
+				results = append(results, responsesInputItem{
+					Type:   "function_call_output",
+					CallID: b.ToolUseID,
+					Output: b.Content,
+				})
 			default:
-				return responsesInputItem{}, false, fmt.Errorf("responses block conversion: %w", ErrUnsupportedFeature)
+				return nil, fmt.Errorf("responses block conversion: %w", ErrUnsupportedFeature)
 			}
 		}
-		if len(parts) == 0 {
-			return responsesInputItem{}, false, nil
+		var items []responsesInputItem
+		if len(parts) > 0 {
+			// A message carrying only tool results has no role-bearing message
+			// item; the RoleTool label is not a valid Responses message role, so
+			// only emit a message item when there is text/image content to carry.
+			if msg.Role == message.RoleTool {
+				role = string(message.RoleUser)
+			}
+			items = append(items, responsesInputItem{Role: role, Content: parts})
 		}
-		return responsesInputItem{Role: string(msg.Role), Content: parts}, true, nil
-	case message.RoleTool:
-		// Tool results require function-call output items; defer to the
-		// chat/completions path until tool calling lands here.
-		return responsesInputItem{}, false, fmt.Errorf("responses tool result: %w", ErrUnsupportedFeature)
+		// Function-call and result items follow the message item so the
+		// assistant's text and its calls keep their original transcript order.
+		items = append(items, calls...)
+		items = append(items, results...)
+		return items, nil
 	default:
-		return responsesInputItem{}, false, fmt.Errorf("role %q responses conversion: %w", msg.Role, ErrUnsupportedFeature)
+		return nil, fmt.Errorf("role %q responses conversion: %w", msg.Role, ErrUnsupportedFeature)
 	}
 }
 
@@ -201,16 +242,34 @@ func emitResponsesResponse(ctx context.Context, data []byte, events chan<- Event
 		}
 		return fmt.Errorf("responses api %s: %s: %w", resp.Status, msg, ErrServer)
 	}
-	for _, item := range resp.Output {
-		if item.Type != "message" {
-			continue
-		}
-		for _, part := range item.Content {
-			if part.Type == "output_text" && part.Text != "" {
-				send(ctx, events, DeltaTextEvent{Text: part.Text})
+	state := newToolCallState()
+	for i, item := range resp.Output {
+		switch item.Type {
+		case "message":
+			for _, part := range item.Content {
+				if part.Type == "output_text" && part.Text != "" {
+					send(ctx, events, DeltaTextEvent{Text: part.Text})
+				}
 			}
+		case "function_call":
+			// The Responses output carries the complete call in one item; replay
+			// it through the shared tool-call state so the emitted events (and the
+			// empty/invalid-argument normalization) match the chat path exactly.
+			// The model addresses the call by call_id in later turns, so that is
+			// the ID we surface rather than the item's own id.
+			idx := i
+			state.applyDelta(ctx, events, openAIToolCallDelta{
+				Index: &idx,
+				ID:    item.CallID,
+				Type:  "function",
+				Function: openAIFunctionDelta{
+					Name:      item.Name,
+					Arguments: item.Arguments,
+				},
+			})
 		}
 	}
+	state.endAll(ctx, events)
 	send(ctx, events, EndEvent{Usage: resp.Usage.toUsage()})
 	return nil
 }

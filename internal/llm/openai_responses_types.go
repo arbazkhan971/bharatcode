@@ -1,5 +1,7 @@
 package llm
 
+import "encoding/json"
+
 // responsesRequest is the POST /v1/responses request body. The Responses API
 // lifts the system prompt to the top-level instructions field and replaces the
 // chat messages array with an input-items array.
@@ -7,6 +9,7 @@ type responsesRequest struct {
 	Model           string               `json:"model"`
 	Instructions    string               `json:"instructions,omitempty"`
 	Input           []responsesInputItem `json:"input"`
+	Tools           []responsesTool      `json:"tools,omitempty"`
 	Stream          bool                 `json:"stream"`
 	Temperature     float64              `json:"temperature,omitempty"`
 	MaxOutputTokens int                  `json:"max_output_tokens,omitempty"`
@@ -22,11 +25,35 @@ type responsesRequest struct {
 	Include []string `json:"include,omitempty"`
 }
 
-// responsesInputItem is one element of the Responses input array. A message
-// item carries a role plus a content array of typed parts.
+// responsesTool describes one callable function for the Responses API. Unlike
+// chat/completions (which nests the schema under a "function" object), the
+// Responses API uses a flat function tool: type plus name/description/parameters
+// at the top level.
+type responsesTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// responsesInputItem is one element of the Responses input array. It is one of
+// three shapes distinguished by Type:
+//   - a message item: Role plus a Content array of typed parts (Type omitted,
+//     which the API treats as "message");
+//   - a function_call item echoing a prior assistant tool call (CallID, Name,
+//     Arguments);
+//   - a function_call_output item carrying a tool result (CallID, Output).
+//
+// All non-message fields are omitempty so a plain message item serializes
+// exactly as before.
 type responsesInputItem struct {
-	Role    string                 `json:"role"`
-	Content []responsesContentPart `json:"content"`
+	Type      string                 `json:"type,omitempty"`
+	Role      string                 `json:"role,omitempty"`
+	Content   []responsesContentPart `json:"content,omitempty"`
+	CallID    string                 `json:"call_id,omitempty"`
+	Name      string                 `json:"name,omitempty"`
+	Arguments string                 `json:"arguments,omitempty"`
+	Output    string                 `json:"output,omitempty"`
 }
 
 // responsesContentPart is one typed content element. Text input uses
@@ -51,13 +78,17 @@ type responsesResponse struct {
 }
 
 // responsesOutputItem is one element of the output[] array. A "message" item
-// holds assistant content; other types (reasoning, tool calls) are skipped.
+// holds assistant content; a "function_call" item holds a model tool call
+// (CallID, Name, Arguments); other types (for example reasoning) are skipped.
 type responsesOutputItem struct {
-	Type    string                 `json:"type"`
-	ID      string                 `json:"id"`
-	Role    string                 `json:"role"`
-	Status  string                 `json:"status"`
-	Content []responsesContentPart `json:"content"`
+	Type      string                 `json:"type"`
+	ID        string                 `json:"id"`
+	Role      string                 `json:"role"`
+	Status    string                 `json:"status"`
+	Content   []responsesContentPart `json:"content"`
+	CallID    string                 `json:"call_id"`
+	Name      string                 `json:"name"`
+	Arguments string                 `json:"arguments"`
 }
 
 // responsesErrorPayload carries a non-null error object from a failed response.

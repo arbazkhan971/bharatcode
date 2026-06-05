@@ -78,6 +78,10 @@ func TestClassifyTestRunner(t *testing.T) {
 		"julia --project=. test/runtests.jl":    runnerJulia,
 		"julia -e 'using Pkg; Pkg.test()'":      runnerJulia,
 		"julia script.jl":                       runnerNone,
+		"sbt test":                              runnerScala,
+		"sbt 'testOnly *CalculatorSpec'":        runnerScala,
+		"./sbt test":                            runnerScala,
+		"echo subtle differences":               runnerNone,
 		"echo rake testing notes":               runnerNone,
 		"ls -la":                                runnerNone,
 		"echo go testing the waters":            runnerNone,
@@ -1310,6 +1314,37 @@ Finished in 0.001s, 3000.0 runs/s, 3000.0 assertions/s.
 
 3 runs, 3 assertions, 0 failures, 0 errors, 0 skips`
 	if got := parseTestFailures("ruby -Itest test/calc_test.rb", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseScalaTestFailures(t *testing.T) {
+	out := `[info] CalculatorSpec:
+[info] Calculator
+[info] - should add two numbers
+[info] - should subtract correctly *** FAILED ***
+[info]   2 did not equal 3 (CalculatorSpec.scala:15)
+[info]   at scala.Predef$.assert(Predef.scala:223)
+[info] - should multiply *** FAILED ***
+[error]   java.lang.ArithmeticException: / by zero (CalculatorSpec.scala:22)
+[info] Run completed in 1 second.
+[info] *** 2 TESTS FAILED ***`
+	got := parseTestFailures("sbt test", out)
+	want := []testFailure{
+		{Name: "should subtract correctly", Detail: "2 did not equal 3 (CalculatorSpec.scala:15)"},
+		{Name: "should multiply", Detail: "java.lang.ArithmeticException: / by zero (CalculatorSpec.scala:22)"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseScalaTestFailures_NoFailures(t *testing.T) {
+	out := `[info] CalculatorSpec:
+[info] Calculator
+[info] - should add two numbers
+[info] - should subtract correctly
+[info] Run completed in 1 second.
+[info] All tests passed.`
+	if got := parseTestFailures("sbt test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

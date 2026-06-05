@@ -43,6 +43,13 @@ var slashCommands = []string{
 // completion cycle. It lives on the model and is mutated only from the key
 // handler on the UI goroutine, so it needs no synchronization.
 type inputState struct {
+	// dynamicCommands holds extra "/name" slash commands contributed at runtime
+	// — the user's recipes and custom prompts — so Tab completion, the hint
+	// dropdown, and the did-you-mean suggester surface them alongside the
+	// built-ins, matching what /help already lists. Names that duplicate a
+	// built-in are dropped by setDynamicCommands so completion never shows the
+	// same command twice.
+	dynamicCommands []string
 	// history is the bounded list of submitted prompts, oldest first.
 	history []string
 	// cursor indexes history during Up/Down recall. It equals len(history)
@@ -140,7 +147,7 @@ func (s *inputState) completeSlash(current string) (string, bool) {
 	if !strings.HasPrefix(current, "/") {
 		return current, false
 	}
-	matches := matchSlash(current)
+	matches := matchSlash(s.candidates(), current)
 	if len(matches) == 0 {
 		return current, false
 	}
@@ -149,18 +156,63 @@ func (s *inputState) completeSlash(current string) (string, bool) {
 	return matches[0], true
 }
 
-// matchSlash returns the slash commands matching prefix, in the canonical order
-// of slashCommands. A leading-prefix match is preferred: an exact match still
-// returns itself so the user sees Tab confirm a fully typed command. Only when
-// no command begins with the prefix does it fall back to a case-insensitive
-// subsequence match on the command name, so a user who types the wrong start —
-// "/exp" finds "/export" as a prefix, but "/port" does not — can still reach the
-// command, matching the fuzzy command palettes of Claude Code and opencode. The
-// fallback never fires while a prefix matches, so prefix completion and the
-// existing Tab cycle are unchanged.
-func matchSlash(prefix string) []string {
+// setDynamicCommands records the runtime-contributed slash commands (recipes and
+// custom prompts), each as a leading-slash name. Blanks, names without a leading
+// slash, names colliding with a built-in (the built-in handler wins at runtime,
+// so listing it twice would mislead), and duplicates are dropped; the surviving
+// order is preserved so the caller controls how dynamic commands sort after the
+// built-ins.
+func (s *inputState) setDynamicCommands(names []string) {
+	builtin := make(map[string]struct{}, len(slashCommands))
+	for _, c := range slashCommands {
+		builtin[c] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || !strings.HasPrefix(n, "/") {
+			continue
+		}
+		if _, dup := builtin[n]; dup {
+			continue
+		}
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	s.dynamicCommands = out
+}
+
+// candidates returns the full set of completion targets: the built-in slash
+// commands followed by any dynamic ones (recipes, custom prompts). With no
+// dynamic commands it returns the shared slashCommands slice unchanged so the
+// common case allocates nothing.
+func (s *inputState) candidates() []string {
+	if len(s.dynamicCommands) == 0 {
+		return slashCommands
+	}
+	out := make([]string, 0, len(slashCommands)+len(s.dynamicCommands))
+	out = append(out, slashCommands...)
+	out = append(out, s.dynamicCommands...)
+	return out
+}
+
+// matchSlash returns the commands matching prefix, in the order of commands. A
+// leading-prefix match is preferred: an exact match still returns itself so the
+// user sees Tab confirm a fully typed command. Only when no command begins with
+// the prefix does it fall back to a case-insensitive subsequence match on the
+// command name, so a user who types the wrong start — "/exp" finds "/export" as
+// a prefix, but "/port" does not — can still reach the command, matching the
+// fuzzy command palettes of Claude Code and opencode. The fallback never fires
+// while a prefix matches, so prefix completion and the existing Tab cycle are
+// unchanged. commands is the candidate set (built-ins plus any dynamic recipes
+// and custom prompts) so user-defined commands complete like the built-ins.
+func matchSlash(commands []string, prefix string) []string {
 	var matches []string
-	for _, cmd := range slashCommands {
+	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, prefix) {
 			matches = append(matches, cmd)
 		}
@@ -173,7 +225,7 @@ func matchSlash(prefix string) []string {
 	if !strings.HasPrefix(prefix, "/") || token == "" {
 		return nil
 	}
-	for _, cmd := range slashCommands {
+	for _, cmd := range commands {
 		name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
 		if isSubsequence(token, name) {
 			matches = append(matches, cmd)
@@ -189,17 +241,19 @@ func matchSlash(prefix string) []string {
 // wrong key — without proposing an unrelated command for a genuinely novel name.
 const maxSuggestDistance = 2
 
-// suggestSlash returns the built-in slash command closest to an unrecognized
-// command name (the bare token, without its leading slash), or "" when none is
-// near enough to be a likely typo. Closeness is Levenshtein edit distance on the
+// suggestSlash returns the slash command closest to an unrecognized command
+// name (the bare token, without its leading slash), or "" when none is near
+// enough to be a likely typo. Closeness is Levenshtein edit distance on the
 // lower-cased name; the nearest command within maxSuggestDistance wins, ties
-// broken by the canonical slashCommands order so the result is deterministic. A
-// suggestion is never offered when the edit distance is as long a leap as simply
-// retyping either name (distance >= either length), so a one- or two-letter stub
-// does not get "corrected" to an unrelated command. This backs
-// the unknown-command dialog's hint, matching how git and the Claude Code /
-// opencode palettes point a mistyped command at its closest real one.
-func suggestSlash(name string) string {
+// broken by the order of commands so the result is deterministic. A suggestion
+// is never offered when the edit distance is as long a leap as simply retyping
+// either name (distance >= either length), so a one- or two-letter stub does not
+// get "corrected" to an unrelated command. This backs the unknown-command
+// dialog's hint, matching how git and the Claude Code / opencode palettes point
+// a mistyped command at its closest real one. commands is the candidate set
+// (built-ins plus any dynamic recipes and custom prompts) so a mistyped recipe
+// name is corrected to the recipe.
+func suggestSlash(commands []string, name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
 		return ""
@@ -207,7 +261,7 @@ func suggestSlash(name string) string {
 	best := ""
 	bestDist := maxSuggestDistance + 1
 	nameLen := len([]rune(name))
-	for _, cmd := range slashCommands {
+	for _, cmd := range commands {
 		target := strings.TrimPrefix(cmd, "/")
 		d := levenshtein(name, target)
 		// Require the edit distance to be strictly less than both names' lengths:

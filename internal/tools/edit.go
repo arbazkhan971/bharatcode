@@ -16,6 +16,7 @@ import (
 // EditTool performs one exact text replacement in an existing file.
 type EditTool struct {
 	deps Dependencies
+	diag editDiagnoser
 }
 
 //go:embed edit.md
@@ -36,7 +37,14 @@ var editSchema = json.RawMessage(`{
 
 // newEditTool constructs the exact replacement tool.
 func newEditTool(deps Dependencies) *EditTool {
-	return &EditTool{deps: deps}
+	t := &EditTool{deps: deps}
+	// Adopt the LSP manager as the post-edit diagnoser only when present: a nil
+	// *lsp.Manager stored in the interface would be a non-nil interface wrapping
+	// a nil pointer, defeating the nil guard in postWriteDiagnostics.
+	if deps.LSP != nil {
+		t.diag = deps.LSP
+	}
+	return t
 }
 
 // Name returns the tool name.
@@ -136,6 +144,10 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 	}
 	if outcome.strategy != "" {
 		metadata["match_strategy"] = outcome.strategy
+	}
+	if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, path); note != "" {
+		content += "\n\n" + note
+		metadata["diagnostics"] = note
 	}
 	return Result{Content: content, Metadata: metadata}, nil
 }

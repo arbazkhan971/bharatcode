@@ -14,6 +14,9 @@ type wireDiagnostic struct {
 	Severity int       `json:"severity,omitempty"`
 	Message  string    `json:"message"`
 	Source   string    `json:"source,omitempty"`
+	// Code is the rule identifier. The LSP spec allows a string or an integer
+	// here, so it is decoded as raw JSON and normalized by codeFromWire.
+	Code json.RawMessage `json:"code,omitempty"`
 }
 
 type wireRange struct {
@@ -57,9 +60,29 @@ func convertDiagnostics(path string, items []wireDiagnostic) []Diagnostic {
 			Severity: severityFromWire(item.Severity),
 			Message:  item.Message,
 			Source:   item.Source,
+			Code:     codeFromWire(item.Code),
 		})
 	}
 	return out
+}
+
+// codeFromWire normalizes an LSP diagnostic "code" to a string. The wire value
+// is either a JSON string ("unused-import") or an integer (2304); both are
+// rendered as plain text. An absent, null, or otherwise undecodable code yields
+// the empty string.
+func codeFromWire(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String()
+	}
+	return ""
 }
 
 func severityFromWire(value int) Severity {

@@ -104,9 +104,7 @@ func postWriteDiagnostics(ctx context.Context, src editDiagnoser, workDir, path 
 			severityString(d.Severity),
 			d.Message,
 		)
-		if d.Source != "" {
-			fmt.Fprintf(&b, " (%s)", d.Source)
-		}
+		b.WriteString(diagnosticTail(d))
 		b.WriteByte('\n')
 	}
 	if truncated > 0 {

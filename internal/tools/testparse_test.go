@@ -42,10 +42,13 @@ func TestClassifyTestRunner(t *testing.T) {
 		"npx tape test/*.js":                  runnerTAP,
 		"deno test":                           runnerDeno,
 		"deno test --allow-read mod_test.ts":  runnerDeno,
+		"swift test":                          runnerSwift,
+		"swift test --filter CalculatorTests": runnerSwift,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
 		"echo plan the upgrade":               runnerNone,
+		"echo swift testing guide":            runnerNone,
 	}
 	for cmd, want := range cases {
 		if got := classifyTestRunner(cmd); got != want {
@@ -736,6 +739,42 @@ func TestParseTestFailures_NonTestCommandIgnored(t *testing.T) {
 	out := "FAILED to connect\n--- FAIL: not a test"
 	if got := parseTestFailures("curl http://x", out); got != nil {
 		t.Errorf("expected nil for non-test command, got %v", got)
+	}
+}
+
+func TestParseSwiftTestFailures_Linux(t *testing.T) {
+	out := `Test Suite 'CalculatorTests' started at 2026-06-05 10:00:00.000
+Test Case 'CalculatorTests.testAddition' started.
+Test Case 'CalculatorTests.testAddition' passed (0.001 seconds).
+Test Case 'CalculatorTests.testSubtraction' started.
+/work/Tests/CalculatorTests/CalculatorTests.swift:22: error: CalculatorTests.testSubtraction : XCTAssertEqual failed: ("3") is not equal to ("4")
+Test Case 'CalculatorTests.testSubtraction' failed (0.002 seconds).
+Test Case 'CalculatorTests.testNoDetail' failed (0.000 seconds).`
+	got := parseTestFailures("swift test", out)
+	want := []testFailure{
+		{Name: "CalculatorTests.testSubtraction", Detail: `XCTAssertEqual failed: ("3") is not equal to ("4")`},
+		{Name: "CalculatorTests.testNoDetail"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseSwiftTestFailures_MacOS(t *testing.T) {
+	out := `Test Case '-[CalculatorTests.CalculatorTests testDivide]' started.
+/work/Tests/CalculatorTests/CalculatorTests.swift:30: error: -[CalculatorTests.CalculatorTests testDivide] : failed - division by zero
+Test Case '-[CalculatorTests.CalculatorTests testDivide]' failed (0.003 seconds).`
+	got := parseTestFailures("swift test --filter CalculatorTests", out)
+	want := []testFailure{
+		{Name: "-[CalculatorTests.CalculatorTests testDivide]", Detail: "failed - division by zero"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseSwiftTestFailures_NoFailures(t *testing.T) {
+	out := `Test Case 'CalculatorTests.testAddition' started.
+Test Case 'CalculatorTests.testAddition' passed (0.001 seconds).
+Test Suite 'All tests' passed at 2026-06-05 10:00:01.000`
+	if got := parseTestFailures("swift test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
 	}
 }
 

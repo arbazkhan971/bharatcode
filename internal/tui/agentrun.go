@@ -82,6 +82,7 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.chat.Reindex(userStreamID)
 	m.running = true
 	m.turnStartedAt = m.now
+	m.currentActivity = ""
 	// Inline any @-file references so the model sees their contents, while the
 	// chat bubble above keeps the user's original text. Resolution is scoped to
 	// the workspace root; unresolved mentions are left untouched.
@@ -197,12 +198,19 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 	streamID := m.assistantStreamID()
 	switch ev.Kind {
 	case agent.EventLLMResponse:
+		// Fresh model text means the agent is thinking again, not inside a tool;
+		// clear the activity so the status bar reverts to "working".
+		m.currentActivity = ""
 		if text := assistantText(ev.Message); text != "" {
 			m.chat.Stream(streamID, text)
 		}
 	case agent.EventToolCalled:
+		// Surface the running tool's name in the status bar so a long turn reads
+		// as "Bash"/"Edit" rather than a bare "working".
+		m.currentActivity = ev.ToolName
 		m.chat.Stream(streamID, "\n[tool: "+ev.ToolName+"]\n")
 	case agent.EventToolResult:
+		m.currentActivity = ""
 		m.chat.Stream(streamID, "[done: "+ev.ToolName+"]\n")
 	case agent.EventLoopDetected:
 		if text := assistantText(ev.Message); text != "" {
@@ -236,6 +244,7 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	m.running = false
 	m.turnStartedAt = time.Time{}
+	m.currentActivity = ""
 	m.chat.FinishStream(m.assistantStreamID())
 	m.chat.Reindex(m.assistantStreamID())
 

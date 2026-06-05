@@ -101,6 +101,61 @@ func (p *anthropicProvider) Stream(ctx context.Context, req Request) (<-chan Eve
 	return events, nil
 }
 
+// CountTokens reports the prompt token count for req using Anthropic's native
+// /v1/messages/count_tokens endpoint, satisfying the TokenCounter interface. It
+// builds the same system/messages/tools payload Stream would send (so the system
+// prompt, tools, and inline images are all counted, including the prompt-cache
+// markers, which count_tokens accepts) but drops the inference-only fields the
+// endpoint rejects: max_tokens, stream, and temperature. Callers should fall
+// back to EstimateMessageTokens on a non-nil error, since this performs a
+// network round trip.
+func (p *anthropicProvider) CountTokens(ctx context.Context, req Request) (int, error) {
+	apiKey := ""
+	if p.apiKeyEnv != "" {
+		apiKey = os.Getenv(p.apiKeyEnv)
+		if apiKey == "" {
+			return 0, fmt.Errorf("reading %s: %w", p.apiKeyEnv, ErrAuth)
+		}
+	}
+
+	full, err := p.buildAnthropicRequest(req)
+	if err != nil {
+		return 0, fmt.Errorf("building provider request: %w", err)
+	}
+	// count_tokens does not run inference, so the output cap, streaming flag, and
+	// sampling temperature are irrelevant (and rejected by the endpoint). Carry
+	// only the fields that determine prompt size; the thinking config is preserved
+	// because enabling extended thinking changes the counted prompt.
+	body := anthropicCountTokensRequest{
+		Model:    full.Model,
+		System:   full.System,
+		Messages: full.Messages,
+		Tools:    full.Tools,
+		Thinking: full.Thinking,
+	}
+
+	headers := map[string]string{
+		"Content-Type":      "application/json",
+		"Accept":            "application/json",
+		"anthropic-version": anthropicVersion,
+	}
+	if apiKey != "" {
+		headers["x-api-key"] = apiKey
+	}
+
+	resp, err := postJSONWithHeaders(ctx, p.client, p.baseURL+"/messages/count_tokens", headers, body)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var out anthropicCountTokensResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, fmt.Errorf("decoding provider response: %w", err)
+	}
+	return out.InputTokens, nil
+}
+
 func (p *anthropicProvider) readResponse(ctx context.Context, resp *http.Response, model string, events chan<- Event) {
 	defer close(events)
 	defer resp.Body.Close()
@@ -440,6 +495,24 @@ type anthropicRequest struct {
 	Temperature float64                `json:"temperature,omitempty"`
 	Thinking    *anthropicThinking     `json:"thinking,omitempty"`
 	Stream      bool                   `json:"stream"`
+}
+
+// anthropicCountTokensRequest is the body of a /v1/messages/count_tokens call.
+// It mirrors the inference request's prompt-shaping fields (system, messages,
+// tools, thinking) but omits the inference-only fields (max_tokens, stream,
+// temperature) the endpoint does not accept.
+type anthropicCountTokensRequest struct {
+	Model    string                 `json:"model"`
+	System   []anthropicSystemBlock `json:"system,omitempty"`
+	Messages []anthropicMessage     `json:"messages"`
+	Tools    []anthropicTool        `json:"tools,omitempty"`
+	Thinking *anthropicThinking     `json:"thinking,omitempty"`
+}
+
+// anthropicCountTokensResponse carries the prompt token total reported by the
+// count_tokens endpoint.
+type anthropicCountTokensResponse struct {
+	InputTokens int `json:"input_tokens"`
 }
 
 // anthropicThinking enables extended thinking on a Messages request. The only

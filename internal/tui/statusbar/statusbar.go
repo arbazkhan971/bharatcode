@@ -72,10 +72,28 @@ func (b Bar) Render(width int) string {
 		scroll = " · " + b.Scroll
 	}
 	line := fmt.Sprintf("%s · %s · session %s · up %s%s%s%s%s%s%s", b.Model, b.Agent, shortID(b.SessionID), util.HumanDuration(now.Sub(started)), working, mode, yolo, goal, search, scroll)
-	if len([]rune(line)) > width && width > 0 {
-		line = string([]rune(line)[:width])
+	return b.Theme.Status.Render(truncateLine(line, width))
+}
+
+// truncateLine clamps line to at most width runes. When a line is cut short an
+// ellipsis replaces its final visible rune, so the reader can tell trailing
+// segments (live progress, search position, scroll offset) were hidden rather
+// than mistaking the clipped text for the whole bar — matching the ellipsis the
+// diff viewer adds to clamped lines. A non-positive width leaves the line
+// untouched (the caller treats width 0 as "unbounded"); at width 1 there is no
+// room for both content and a marker, so the lone cell becomes the ellipsis.
+func truncateLine(line string, width int) string {
+	if width <= 0 {
+		return line
 	}
-	return b.Theme.Status.Render(line)
+	runes := []rune(line)
+	if len(runes) <= width {
+		return line
+	}
+	if width == 1 {
+		return "…"
+	}
+	return string(runes[:width-1]) + "…"
 }
 
 func shortID(id string) string {

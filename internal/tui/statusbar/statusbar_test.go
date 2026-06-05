@@ -69,3 +69,32 @@ func TestScrollSegment(t *testing.T) {
 	bar.Scroll = "↓ 12 below"
 	require.Contains(t, bar.Render(160), "↓ 12 below", "a set Scroll must surface its segment")
 }
+
+// TestTruncateMarksClip asserts a status line wider than the window is clipped
+// to exactly width runes and ends in an ellipsis, signalling that trailing
+// segments were hidden rather than silently dropped.
+func TestTruncateMarksClip(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "hello", truncateLine("hello", 10), "a line within width is unchanged")
+	require.Equal(t, "hello", truncateLine("hello", 5), "a line exactly at width keeps its last rune")
+
+	got := truncateLine("hello world", 8)
+	require.Equal(t, 8, len([]rune(got)), "the clipped line occupies exactly width runes")
+	require.Equal(t, "hello w…", got, "the final rune becomes an ellipsis")
+
+	require.Equal(t, "…", truncateLine("hello", 1), "at width 1 the lone cell is the ellipsis")
+	require.Equal(t, "hello", truncateLine("hello", 0), "a non-positive width is treated as unbounded")
+}
+
+// TestRenderClipsWideBar asserts Render routes through the ellipsis truncation,
+// so a long line surfaces the marker and a non-positive width stays unbounded.
+func TestRenderClipsWideBar(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{Theme: styles.Default(), Model: "some-very-long-model-name", Agent: "coder", SessionID: "abcdef123456", StartedAt: start, Now: start, Scroll: "↓ 12 below"}
+
+	require.Contains(t, bar.Render(20), "…", "a bar wider than the window is marked as clipped")
+	require.NotContains(t, bar.Render(0), "…", "an unbounded render adds no marker")
+}

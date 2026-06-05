@@ -261,7 +261,7 @@ func (m *model) handleDiff() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	patch := unifiedPatch(diffs)
-	rendered := diff.New(m.theme).RenderUnified(patch, max(1, m.width-6))
+	rendered := diff.New(m.theme).RenderUnifiedNumbered(patch, max(1, m.width-6))
 	m.dialogs.Push(&dialog.Text{DialogID: "diff", Title: "Diff", Body: rendered, Theme: m.theme})
 	return m, nil
 }

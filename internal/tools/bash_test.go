@@ -25,6 +25,7 @@ func TestRegistryListsShellTools(t *testing.T) {
 		"bash",
 		"diagnostics",
 		"edit",
+		"format",
 		"glob",
 		"grep",
 		"job_kill",

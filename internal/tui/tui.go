@@ -795,8 +795,13 @@ func (m *model) renderMain() string {
 		parts = append(parts, tabBar)
 	}
 	m.status.Search = m.search.statusSegment()
+	// clampChat finalizes m.chatScroll (clamping it to the scrollable range), so
+	// the scroll indicator is computed from it afterwards to reflect the window
+	// actually shown.
+	chatView := m.clampChat(chatBody, chatH)
+	m.status.Scroll = scrollStatus(m.chatScroll)
 	parts = append(parts,
-		m.clampChat(chatBody, chatH),
+		chatView,
 		clampHeight(input, m.layout.input.H),
 		m.status.Render(m.width),
 		m.footer.Render(m.width),
@@ -835,6 +840,24 @@ func (m *model) clampChat(s string, height int) string {
 	end := len(lines) - m.chatScroll
 	start := end - height
 	return strings.Join(lines[start:end], "\n")
+}
+
+// scrollStatus returns the status-bar segment describing scrollback position
+// when the chat view is scrolled up from the newest output, e.g. "↓ 12 below".
+// scroll is m.chatScroll: the number of lines hidden below the window (0 when
+// anchored to the bottom). It is empty at the bottom, so the segment appears
+// only while the user is reading history and signals that newer lines exist
+// below — the cue Claude Code and opencode give so a scrolled-up reader knows
+// they are not viewing the latest output.
+func scrollStatus(scroll int) string {
+	if scroll <= 0 {
+		return ""
+	}
+	noun := "lines"
+	if scroll == 1 {
+		noun = "line"
+	}
+	return fmt.Sprintf("↓ %d %s below", scroll, noun)
 }
 
 func (m *model) pushModelPicker() {

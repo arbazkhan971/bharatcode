@@ -16,6 +16,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
+	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -171,6 +172,48 @@ func TestKeymap_CtrlP_OpensModelPicker(t *testing.T) {
 	m := newSizedModel(t)
 	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'p', Mod: tea.ModCtrl}))
 	require.True(t, m.dialogs.Contains("model_picker"))
+}
+
+// TestScrollStatus_OnlyWhenScrolledUp asserts the scroll segment is empty at the
+// bottom (the common case keeps the status bar unchanged) and reports the count
+// of newer lines hidden below once the view is scrolled up, with singular/plural
+// agreement.
+func TestScrollStatus_OnlyWhenScrolledUp(t *testing.T) {
+	t.Parallel()
+
+	require.Empty(t, scrollStatus(0), "an anchored view must add no scroll segment")
+	require.Empty(t, scrollStatus(-3), "a clamped-negative offset must add no segment")
+	require.Equal(t, "↓ 1 line below", scrollStatus(1))
+	require.Equal(t, "↓ 12 lines below", scrollStatus(12))
+}
+
+// TestScrollStatus_SurfacesInStatusBar drives the rendered view: at rest the
+// status bar shows no scroll segment, and after wheeling up into history it
+// reports how many newer lines sit below, so a scrolled-up reader sees they are
+// not viewing the latest output.
+func TestScrollStatus_SurfacesInStatusBar(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	lines := make([]string, 0, 80)
+	for i := 0; i < 80; i++ {
+		lines = append(lines, uniqueLine(i))
+	}
+	appendMsg(m, "u1", message.RoleUser, strings.Join(lines, "\n"))
+
+	rendered := func() string { return stripANSI(m.renderMain()) }
+	require.NotContains(t, rendered(), "below",
+		"a bottom-anchored view must show no scroll indicator")
+
+	for i := 0; i < len(lines); i++ {
+		_, _ = m.Update(wheel(tea.MouseWheelUp))
+		if m.chatScroll > 0 {
+			break
+		}
+	}
+	require.Greater(t, m.chatScroll, 0, "wheel-up must scroll into history")
+	require.Contains(t, rendered(), "below",
+		"a scrolled-up view must report the newer lines hidden below")
 }
 
 func TestStyles_NoHardcodedHex(t *testing.T) {

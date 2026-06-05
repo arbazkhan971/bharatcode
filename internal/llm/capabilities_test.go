@@ -51,6 +51,11 @@ func TestInferContextWindow(t *testing.T) {
 		// marker, so the specific rule must win over the family default (32k).
 		{"mistral-large-latest", 128_000},
 		{"mistral-large-2411", 128_000},
+		// Mistral Medium 3 and Mistral NeMo ship a 128k window; their ids carry the
+		// "mistral" marker, so the specific rules must win over the family default (32k).
+		{"mistral-medium-latest", 128_000},
+		{"mistral-medium-2505", 128_000},
+		{"open-mistral-nemo", 128_000},
 		// A bare Mistral model with no more specific marker still resolves to the
 		// 32k family default.
 		{"mistral-small-latest", 32_768},
@@ -70,6 +75,9 @@ func TestInferContextWindow(t *testing.T) {
 		// and the Qwen3 2507 instruct line 128k. Both ids carry the "qwen" marker, so
 		// the specific rules must win over the family default rather than fall to 32k.
 		{"qwen3-coder-480b-a35b-instruct", 262_144},
+		// Qwen3-Max (Alibaba's flagship) ships a 256k native window, above the 128k
+		// Qwen3 instruct default; its id carries "qwen3", so its rule must win.
+		{"qwen3-max", 262_144},
 		{"qwen3-235b-a22b-instruct-2507", 131_072},
 		{"qwen3-32b", 131_072},
 		// Qwen2.x ids still resolve to the conservative 32k family default.

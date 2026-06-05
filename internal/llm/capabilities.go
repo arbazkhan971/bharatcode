@@ -197,13 +197,20 @@ var contextWindowRules = []struct {
 	// carries the "mistral" marker, so this specific rule must precede the
 	// family one to avoid falling through to 32k.
 	{"mistral-large", 128_000},
+	// Mistral Medium 3 (mistral-medium-latest) and Mistral NeMo
+	// (open-mistral-nemo) both ship a 128k window, four times the 32k Mistral
+	// 7B/8x7B family default. Both ids carry the "mistral" marker, so these
+	// specific rules must precede the family one to avoid falling through to 32k.
+	{"mistral-medium", 128_000},
+	{"mistral-nemo", 128_000},
 	{"mistral", 32_768},
 	// Alibaba Qwen — the Qwen3 generation lifted the window well past the 32k
-	// Qwen2.x default: the Qwen3-Coder line ships a 256k native window (extendable
-	// to 1M) and the Qwen3 2507 instruct refresh a 128k window, while the original
-	// Qwen3 release and the whole Qwen2.x line stay at 32k. All carry the "qwen"
-	// marker, so the specific "qwen3-coder"/"qwen3" rules must precede the family
-	// one to avoid falling through to 32k.
+	// Qwen2.x default: the Qwen3-Max flagship and Qwen3-Coder line ship a 256k
+	// native window (extendable to 1M) and the Qwen3 2507 instruct refresh a 128k
+	// window, while the original Qwen3 release and the whole Qwen2.x line stay at
+	// 32k. All carry the "qwen" marker, so the specific "qwen3-max"/"qwen3-coder"/
+	// "qwen3" rules must precede the family one to avoid falling through to 32k.
+	{"qwen3-max", 262_144},
 	{"qwen3-coder", 262_144},
 	{"qwen3", 131_072},
 	{"qwen", 32_768},

@@ -31,6 +31,75 @@ func TestInjectSkills(t *testing.T) {
 	require.Less(t, strings.Index(got, "Use the read tool"), strings.Index(got, "<available_skills>"))
 }
 
+func TestInjectRecipes(t *testing.T) {
+	base := "SYSTEM PROMPT BODY"
+
+	// Empty summaries leave the base prompt untouched.
+	require.Equal(t, base, injectRecipes(base, ""))
+	require.Equal(t, base, injectRecipes(base, "   \n  "))
+
+	// Non-empty summaries are appended under the section header, preceded by
+	// the usage instructions explaining what a recipe is.
+	got := injectRecipes(base, "<available_recipes>\n  <recipe><name>ship</name></recipe>\n</available_recipes>")
+	require.True(t, strings.HasPrefix(got, base))
+	require.Contains(t, got, availableRecipesHeader)
+	require.Contains(t, got, "<available_recipes>")
+	require.Contains(t, got, "Recipes are saved, parameterized prompts the user can run with /<name>.")
+	// The usage line appears before the recipes block itself.
+	require.Less(t, strings.Index(got, "Recipes are saved"), strings.Index(got, "<available_recipes>"))
+}
+
+func TestRenderPromptRecipesRenderAsXML(t *testing.T) {
+	workdir := t.TempDir()
+	recipesRoot := filepath.Join(workdir, ".bharatcode", "recipes")
+	writeRecipeFixture(t, recipesRoot, "ship", `{"title":"Ship It","description":"Cut a release","prompt":"do the release"}`)
+
+	// Hermetic skills (none) and recipes (only our fixture dir).
+	restoreSkills := skillSearchDirs
+	skillSearchDirs = func(string) []string { return []string{filepath.Join(workdir, "no-such-dir")} }
+	t.Cleanup(func() { skillSearchDirs = restoreSkills })
+	restoreRecipes := recipeSearchDirs
+	recipeSearchDirs = func(string) []string { return []string{recipesRoot} }
+	t.Cleanup(func() { recipeSearchDirs = restoreRecipes })
+
+	out := renderInWorkdir(t, workdir)
+
+	// Recipes render as an <available_recipes> XML block keyed by file stem.
+	require.Contains(t, out, availableRecipesHeader)
+	require.Contains(t, out, "<available_recipes>")
+	require.Contains(t, out, "</available_recipes>")
+	require.Contains(t, out, "<name>ship</name>")
+	require.Contains(t, out, "<title>Ship It</title>")
+	require.Contains(t, out, "<description>Cut a release</description>")
+	// The usage instruction prefixes the block.
+	require.Contains(t, out, "Recipes are saved, parameterized prompts the user can run with /<name>.")
+}
+
+func TestRenderPromptNoRecipesNoSection(t *testing.T) {
+	workdir := t.TempDir()
+
+	restoreSkills := skillSearchDirs
+	skillSearchDirs = func(string) []string { return []string{filepath.Join(workdir, "no-such-dir")} }
+	t.Cleanup(func() { skillSearchDirs = restoreSkills })
+	restoreRecipes := recipeSearchDirs
+	recipeSearchDirs = func(string) []string { return []string{filepath.Join(workdir, "no-such-dir")} }
+	t.Cleanup(func() { recipeSearchDirs = restoreRecipes })
+
+	out := renderInWorkdir(t, workdir)
+
+	// With no recipes discovered, the section must be absent entirely.
+	require.NotContains(t, out, availableRecipesHeader)
+	require.NotContains(t, out, "<available_recipes>")
+}
+
+// writeRecipeFixture writes a single *.recipe.json file named name under
+// recipesRoot, creating the directory tree as needed.
+func writeRecipeFixture(t *testing.T, recipesRoot, name, content string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(recipesRoot, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(recipesRoot, name+".recipe.json"), []byte(content), 0o644))
+}
+
 func TestRenderPromptSkillsRenderAsXMLWithLocation(t *testing.T) {
 	workdir := t.TempDir()
 	skillsRoot := filepath.Join(workdir, ".bharatcode", "skills")

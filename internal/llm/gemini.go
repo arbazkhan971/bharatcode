@@ -18,6 +18,11 @@ import (
 // request (for example .../v1beta/models/gemini-2.0-flash:streamGenerateContent).
 const defaultGeminiBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 
+// defaultGeminiMaxTokens is the visible-answer allowance reserved on top of a
+// thinking budget when a caller's explicit maxOutputTokens would otherwise leave
+// no room for output after the reasoning pass. See buildGeminiRequest.
+const defaultGeminiMaxTokens = 8192
+
 // geminiProvider speaks Google's native Generative Language API
 // (generateContent / streamGenerateContent) rather than the OpenAI-compatible
 // shim. It maps BharatCode's provider-independent Request onto Gemini's
@@ -338,6 +343,16 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 		out.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
 			IncludeThoughts: true,
 			ThinkingBudget:  &req.Thinking.BudgetTokens,
+		}
+		// On Gemini 2.5 the thinking tokens are carved out of the same
+		// maxOutputTokens allowance and billed as output, so a positive cap at or
+		// below the budget leaves no room for a visible answer (the model spends
+		// the whole allowance reasoning and the candidate comes back empty or
+		// truncated). Lift the cap to the budget plus a full default allowance,
+		// mirroring the Anthropic path. A zero cap is left untouched so the model's
+		// own (much larger) default applies.
+		if out.GenerationConfig.MaxOutputTokens > 0 && out.GenerationConfig.MaxOutputTokens <= req.Thinking.BudgetTokens {
+			out.GenerationConfig.MaxOutputTokens = req.Thinking.BudgetTokens + defaultGeminiMaxTokens
 		}
 	}
 

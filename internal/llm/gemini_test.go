@@ -506,6 +506,64 @@ func TestGeminiEmitsThinkingConfigForSupportedModel(t *testing.T) {
 	require.Equal(t, 2048, *tc.ThinkingBudget)
 }
 
+func TestGeminiLiftsMaxOutputTokensAboveThinkingBudget(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-2.5-flash", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	// A cap below the thinking budget would leave no room for a visible answer.
+	events, err := provider.Stream(context.Background(), Request{
+		Model:     "gemini-2.5-flash",
+		Messages:  []message.Message{textMsg("think")},
+		MaxTokens: 1000,
+		Thinking:  &ThinkingConfig{BudgetTokens: 4096},
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig)
+	require.Equal(t, 4096+defaultGeminiMaxTokens, captured.GenerationConfig.MaxOutputTokens,
+		"maxOutputTokens must be lifted above the thinking budget")
+}
+
+func TestGeminiKeepsMaxOutputTokensAboveThinkingBudget(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-2.5-flash", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	// A cap already comfortably above the budget is left untouched.
+	events, err := provider.Stream(context.Background(), Request{
+		Model:     "gemini-2.5-flash",
+		Messages:  []message.Message{textMsg("think")},
+		MaxTokens: 16384,
+		Thinking:  &ThinkingConfig{BudgetTokens: 4096},
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig)
+	require.Equal(t, 16384, captured.GenerationConfig.MaxOutputTokens,
+		"an explicit cap above the budget must be preserved")
+}
+
 func TestGeminiOmitsThinkingConfigForUnsupportedModel(t *testing.T) {
 	var rawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

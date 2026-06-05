@@ -913,7 +913,45 @@ func (m *model) slashHelpLines() []string {
 			lines = append(lines, "/"+e.Name+" - "+title)
 		}
 	}
+	// Append registered custom prompts (the pi-style /name slash commands) so
+	// they are as discoverable as built-ins and recipes. The frontmatter
+	// description and argument hint, when present, document each command; with
+	// no description we fall back to the first line of the template.
+	if m.deps.Prompts != nil {
+		for _, p := range m.deps.Prompts.List() {
+			label := "/" + p.Name
+			if p.ArgumentHint != "" {
+				label += " " + p.ArgumentHint
+			}
+			desc := p.Description
+			if desc == "" {
+				desc = firstNonEmptyLine(p.Template)
+			}
+			if desc != "" {
+				label += " - " + desc
+			}
+			lines = append(lines, label)
+		}
+	}
 	return lines
+}
+
+// firstNonEmptyLine returns the first non-blank line of s, trimmed and
+// truncated to a single help-listing line. It backs the /help description for
+// custom prompts that declare no frontmatter description.
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		const maxLen = 60
+		if len(line) > maxLen {
+			return line[:maxLen-1] + "…"
+		}
+		return line
+	}
+	return ""
 }
 
 func clampHeight(s string, height int) string {

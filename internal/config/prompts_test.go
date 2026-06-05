@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -256,6 +257,118 @@ func TestLoadPromptRegistryMissingDirIsNotError(t *testing.T) {
 	reg, err := LoadPromptRegistry(missing)
 	require.NoError(t, err)
 	require.Empty(t, reg.Names())
+}
+
+func TestLoadPromptRegistryParsesFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "triage.md"),
+		[]byte("---\ndescription: Triage a flaky test\nargument-hint: <test-name>\n---\nTriage {{input}} with care"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	p, ok := reg.Get("triage")
+	require.True(t, ok)
+	require.Equal(t, "Triage a flaky test", p.Description)
+	require.Equal(t, "<test-name>", p.ArgumentHint)
+	// The frontmatter is stripped, so the template is just the body and renders
+	// without seeing the metadata lines.
+	require.Equal(t, "Triage {{input}} with care", p.Template)
+
+	out, err := reg.Render("triage", map[string]string{"input": "bug 42"})
+	require.NoError(t, err)
+	require.Equal(t, "Triage bug 42 with care", out)
+}
+
+func TestLoadPromptRegistryFrontmatterAcceptsArgumentHintSynonymAndQuotes(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "review.md"),
+		[]byte("---\nDescription: \"Review a file\"\nargument_hint: '<file>'\n---\nReview {{input}}"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	p, ok := reg.Get("review")
+	require.True(t, ok)
+	// Keys are case-insensitive and surrounding quotes are stripped.
+	require.Equal(t, "Review a file", p.Description)
+	// argument_hint is accepted as a synonym for argument-hint.
+	require.Equal(t, "<file>", p.ArgumentHint)
+}
+
+func TestLoadPromptRegistryNoFrontmatterLeavesBodyIntact(t *testing.T) {
+	dir := t.TempDir()
+	// A document whose first content is a horizontal rule mid-text, plus a
+	// plain prompt, must not be mistaken for frontmatter.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "plain.md"),
+		[]byte("Summarise {{input}}\n\n---\n\nThanks"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	p, ok := reg.Get("plain")
+	require.True(t, ok)
+	require.Empty(t, p.Description)
+	require.Empty(t, p.ArgumentHint)
+	require.Equal(t, "Summarise {{input}}\n\n---\n\nThanks", p.Template)
+}
+
+func TestLoadPromptRegistryUnclosedFenceIsNotFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	// An opening fence with no closing fence must not swallow the body.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "weird.md"),
+		[]byte("---\ndescription: never closed\nbody text {{input}}"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	p, ok := reg.Get("weird")
+	require.True(t, ok)
+	require.Empty(t, p.Description)
+	require.Contains(t, p.Template, "body text {{input}}")
+	require.Contains(t, p.Template, "description: never closed")
+}
+
+func TestPromptRegistryListSortsAndCarriesMetadata(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "beta.md"),
+		[]byte("---\ndescription: B\n---\nbody"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "alpha.md"),
+		[]byte("just a body"),
+		0o644,
+	))
+
+	reg, err := LoadPromptRegistry(dir)
+	require.NoError(t, err)
+
+	list := reg.List()
+	require.Len(t, list, 2)
+	require.Equal(t, "alpha", list[0].Name)
+	require.Equal(t, "beta", list[1].Name)
+	require.Equal(t, "B", list[1].Description)
+}
+
+func TestParseFrontmatterEmptyOpeningFenceVariants(t *testing.T) {
+	// CRLF line endings around the fences must still be recognised.
+	meta, body := parseFrontmatter("---\r\ndescription: hi\r\n---\r\nbody")
+	require.Equal(t, "hi", meta["description"])
+	require.Equal(t, "body", strings.TrimSpace(body))
 }
 
 func TestLoadPromptRegistryLaterDirOverridesEarlier(t *testing.T) {

@@ -733,6 +733,15 @@ func (m *model) renderMain() string {
 	if m.focus == focusInput {
 		input += "▌"
 	}
+	// Surface the slash-completion menu beneath the prompt so the commands Tab
+	// would cycle through are discoverable without pressing it. It occupies one
+	// of the input region's spare rows, so the layout height is unchanged, and
+	// renders nothing for a non-slash buffer.
+	if m.focus == focusInput {
+		if hint := m.renderSlashHint(m.width); hint != "" {
+			input += "\n" + hint
+		}
+	}
 
 	// The tab bar is rendered between the header and the chat when more than one
 	// tab is open. With a single tab it is empty and the row is omitted, so the

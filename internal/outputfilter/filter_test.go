@@ -518,6 +518,78 @@ func TestBuiltinGitStatus(t *testing.T) {
 	runBuiltinCases(t, cases)
 }
 
+func TestBuiltinMaven(t *testing.T) {
+	cases := []filterCase{
+		{
+			name: "strips download/progress noise and rules, keeps result and tests",
+			cmd:  "mvn -B test",
+			input: "[INFO] Scanning for projects...\n" +
+				"[INFO] ------------------------------------------------------------------------\n" +
+				"Downloading from central: https://repo.maven.org/foo/1.0/foo-1.0.jar\n" +
+				"[INFO] Progress (1): 4.1/12 kB\n" +
+				"Downloaded from central: https://repo.maven.org/foo/1.0/foo-1.0.jar (12 kB at 30 kB/s)\n" +
+				"[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0\n" +
+				"[INFO] BUILD SUCCESS\n",
+			expected: "[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0\n[INFO] BUILD SUCCESS",
+		},
+		{
+			name: "keeps errors and the failure result",
+			cmd:  "./mvnw clean install",
+			input: "Downloading from central: https://repo.maven.org/bar/2.0/bar-2.0.pom\n" +
+				"[ERROR] /src/Main.java:[10,5] cannot find symbol\n" +
+				"[INFO] BUILD FAILURE\n",
+			expected: "[ERROR] /src/Main.java:[10,5] cannot find symbol\n[INFO] BUILD FAILURE",
+		},
+		{
+			name: "on_empty when only download noise",
+			cmd:  "mvn dependency:resolve",
+			input: "[INFO] Scanning for projects...\n" +
+				"Downloading from central: https://repo.maven.org/a/a.jar\n" +
+				"[INFO] Progress (1): 1.0/2 kB\n" +
+				"Downloaded from central: https://repo.maven.org/a/a.jar (2 kB at 10 kB/s)\n",
+			expected: "mvn: ok",
+		},
+	}
+	runBuiltinCases(t, cases)
+}
+
+func TestBuiltinGradle(t *testing.T) {
+	cases := []filterCase{
+		{
+			name: "strips progress bar, no-op tasks and downloads, keeps result",
+			cmd:  "./gradlew build",
+			input: "Starting a Gradle Daemon\n" +
+				"Download https://plugins.gradle.org/foo/foo.jar\n" +
+				"<=======------> 60% EXECUTING [3s]\n" +
+				"> Task :compileJava\n" +
+				"> Task :processResources UP-TO-DATE\n" +
+				"> Task :test\n" +
+				"\n" +
+				"BUILD SUCCESSFUL in 12s\n",
+			expected: "BUILD SUCCESSFUL in 12s",
+		},
+		{
+			name: "keeps failing task and BUILD FAILED",
+			cmd:  "gradle test",
+			input: "> Task :compileJava\n" +
+				"> Task :test FAILED\n" +
+				"FAILURE: Build failed with an exception.\n" +
+				"BUILD FAILED in 4s\n",
+			expected: "> Task :test FAILED\nFAILURE: Build failed with an exception.\nBUILD FAILED in 4s",
+		},
+		{
+			name: "on_empty when only daemon and progress noise",
+			cmd:  "./gradlew assemble",
+			input: "Welcome to Gradle 8.5!\n" +
+				"Starting a Gradle Daemon\n" +
+				"<------------> 0% INITIALIZING [0s]\n" +
+				"> Task :clean UP-TO-DATE\n",
+			expected: "gradle: ok",
+		},
+	}
+	runBuiltinCases(t, cases)
+}
+
 // runBuiltinCases runs a slice of filterCase against the shared Engine.
 func runBuiltinCases(t *testing.T, cases []filterCase) {
 	t.Helper()

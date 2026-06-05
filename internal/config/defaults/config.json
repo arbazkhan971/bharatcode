@@ -164,6 +164,15 @@
       ]
     },
     {
+      "name": "zai",
+      "type": "openai_compatible",
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "api_key_env": "ZAI_API_KEY",
+      "models": [
+        "glm-4.6"
+      ]
+    },
+    {
       "name": "sarvam",
       "type": "openai_compatible",
       "base_url": "https://api.sarvam.ai/v1",
@@ -405,6 +414,15 @@
       "context_window": 128000,
       "input_price_per_mtok_usd": 0.38,
       "output_price_per_mtok_usd": 0.40,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "glm-4.6",
+      "provider": "zai",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 0.60,
+      "output_price_per_mtok_usd": 2.20,
       "supports_images": false,
       "supports_tools": true
     },

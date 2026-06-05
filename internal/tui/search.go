@@ -150,31 +150,41 @@ func (m *model) scrollToMatch() {
 	}
 }
 
-// highlightCurrentMatch returns body with the active search term emphasized on
-// the current match line, so the reader sees exactly what matched within the
-// line scrollToMatch centers — the way an editor reverse-highlights a search
-// hit. body must be the rendered chat body whose line space search.matches
-// indexes (the same space renderedChatBody produces), so the match index lands
-// on the intended line. It is a no-op when no search is active.
+// highlightMatches returns body with the active search term emphasized on every
+// match line, so the reader sees all occurrences at once — the way an editor
+// marks every hit — with the current match drawn in the solid reverse-video
+// Match style and the others underlined in MatchOther so the active one still
+// stands out. body must be the rendered chat body whose line space
+// search.matches indexes (the same space renderedChatBody produces), so each
+// match index lands on its intended line. It is a no-op when no search is
+// active.
 //
 // Markdown-rendered assistant lines carry ANSI styling; splicing a highlight
 // span into them would corrupt the existing escapes, so only plain lines are
 // highlighted. A styled line keeps its color without the inline emphasis — the
 // match is still centered either way — so the feature degrades gracefully
-// rather than risk garbling the transcript.
-func (m *model) highlightCurrentMatch(body string) string {
+// rather than risk garbling the transcript. A stale index past the end of the
+// current body (e.g. after the transcript shrank) is skipped rather than
+// panicking.
+func (m *model) highlightMatches(body string) string {
 	if !m.search.active() || m.search.term == "" {
 		return body
 	}
 	lines := strings.Split(body, "\n")
-	idx := m.search.matches[m.search.current]
-	if idx < 0 || idx >= len(lines) {
-		return body
+	current := m.search.matches[m.search.current]
+	for _, idx := range m.search.matches {
+		if idx < 0 || idx >= len(lines) {
+			continue
+		}
+		if strings.ContainsRune(lines[idx], '\x1b') {
+			continue
+		}
+		style := m.theme.MatchOther
+		if idx == current {
+			style = m.theme.Match
+		}
+		lines[idx] = highlightTerm(lines[idx], m.search.term, style)
 	}
-	if strings.ContainsRune(lines[idx], '\x1b') {
-		return body
-	}
-	lines[idx] = highlightTerm(lines[idx], m.search.term, m.theme.Match)
 	return strings.Join(lines, "\n")
 }
 

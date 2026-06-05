@@ -351,6 +351,15 @@ func emitOpenAIResponse(ctx context.Context, data []byte, events chan<- Event) e
 		return fmt.Errorf("decoding provider response: %w", err)
 	}
 	for _, choice := range resp.Choices {
+		// Surface a reasoning model's thinking before its answer, matching the
+		// streaming path's order and field precedence: prefer reasoning_content,
+		// fall back to reasoning, never emit both, so a relay that echoes one into
+		// the other does not double the ThinkingEvent.
+		if reasoning := choice.Message.ReasoningContent; reasoning != "" {
+			send(ctx, events, ThinkingEvent{Text: reasoning})
+		} else if choice.Message.Reasoning != "" {
+			send(ctx, events, ThinkingEvent{Text: choice.Message.Reasoning})
+		}
 		if choice.Message.Content != "" {
 			send(ctx, events, DeltaTextEvent{Text: choice.Message.Content})
 		}

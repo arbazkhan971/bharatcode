@@ -188,6 +188,99 @@ func TestOpenAIStreamSurfacesReasoning(t *testing.T) {
 	}
 }
 
+// bufferedJSONProvider stands up an httptest server that replies to the
+// chat-completions endpoint with the given non-streamed JSON body (Content-Type
+// application/json), and returns a wired openai-compatible provider. It mirrors
+// sseStreamProvider for the buffered path the provider falls back to when a
+// relay returns a single JSON completion instead of an SSE stream.
+func bufferedJSONProvider(t *testing.T, body string) Provider {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("TEST_API_KEY", "test-key")
+
+	cfg := testConfig("deepseek", config.ProviderOpenAICompatible, server.URL+"/v1")
+	cfg.Providers[0].APIKeyEnv = "TEST_API_KEY"
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	provider, err := reg.Get("deepseek")
+	require.NoError(t, err)
+	return provider
+}
+
+// TestOpenAIBufferedResponseSurfacesReasoning proves that a buffered (non-SSE)
+// completion still surfaces a reasoning model's thinking text as a ThinkingEvent
+// preceding the answer, under both field names (reasoning_content for DeepSeek's
+// direct API, reasoning for OpenRouter's normalized field). Without this the
+// buffered fallback path would drop the thinking the streaming path surfaces.
+func TestOpenAIBufferedResponseSurfacesReasoning(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+	}{
+		{"deepseek reasoning_content", "reasoning_content"},
+		{"openrouter reasoning", "reasoning"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(
+				`{"choices":[{"message":{"%s":"thinking hard","content":"answer"}}],"usage":{"prompt_tokens":5,"completion_tokens":3}}`,
+				tc.field,
+			)
+			provider := bufferedJSONProvider(t, body)
+			events, err := provider.Stream(context.Background(), streamRequest())
+			require.NoError(t, err)
+			got := collectEvents(events)
+
+			think, ok := findEvent[ThinkingEvent](got)
+			require.True(t, ok, "expected a ThinkingEvent from the buffered response")
+			require.Equal(t, "thinking hard", think.Text)
+
+			// Thinking precedes the answer text, matching the streaming order.
+			lastThinkIdx, firstTextIdx := -1, -1
+			for i, ev := range got {
+				switch ev.(type) {
+				case ThinkingEvent:
+					lastThinkIdx = i
+				case DeltaTextEvent:
+					if firstTextIdx == -1 {
+						firstTextIdx = i
+					}
+				}
+			}
+			require.Less(t, lastThinkIdx, firstTextIdx, "thinking must precede the answer text")
+
+			text, ok := findEvent[DeltaTextEvent](got)
+			require.True(t, ok, "expected a DeltaTextEvent for the answer")
+			require.Equal(t, "answer", text.Text)
+		})
+	}
+}
+
+// TestOpenAIBufferedResponseReasoningContentTakesPrecedence proves that when a
+// buffered response carries the same thinking text in both reasoning_content and
+// reasoning (a relay echoing one into the other), the provider emits exactly one
+// ThinkingEvent rather than duplicating it, matching the streaming path.
+func TestOpenAIBufferedResponseReasoningContentTakesPrecedence(t *testing.T) {
+	body := `{"choices":[{"message":{"reasoning_content":"once","reasoning":"once","content":"answer"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	provider := bufferedJSONProvider(t, body)
+	events, err := provider.Stream(context.Background(), streamRequest())
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	var count int
+	for _, ev := range got {
+		if te, ok := ev.(ThinkingEvent); ok {
+			count++
+			require.Equal(t, "once", te.Text)
+		}
+	}
+	require.Equal(t, 1, count, "duplicated reasoning fields must not double the ThinkingEvent")
+}
+
 // TestOpenAIStreamReasoningContentTakesPrecedence proves that when a single
 // chunk carries the same thinking text in both reasoning_content and reasoning
 // (a relay that echoes one into the other), the provider emits exactly one

@@ -88,7 +88,11 @@ func TestGoalRun_IteratesUntilCap(t *testing.T) {
 			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
 		})
 	}
-	provider := &scriptedProvider{scripts: scripts}
+	// A large context window keeps the whole transcript in budget so automatic
+	// compaction never fires; otherwise its summarization Stream calls would be
+	// counted alongside the goal iterations and make this assertion depend on
+	// the system-prompt/tool-schema size rather than the iteration cap itself.
+	provider := &scriptedProvider{scripts: scripts, contextWindow: 1 << 20}
 
 	h := newAgentHarness(t, provider)
 	m := h.model
@@ -407,6 +411,11 @@ type scriptedProvider struct {
 	scripts [][]llm.Event
 	callN   int
 	lastReq llm.Request
+	// contextWindow overrides the reported model context window when > 0.
+	// Tests that must not trip automatic compaction (which would issue extra
+	// summarization Stream calls and consume scripts) set this large so the
+	// history always fits regardless of system-prompt or tool-schema size.
+	contextWindow int
 }
 
 func (p *scriptedProvider) Name() string { return "fake" }
@@ -437,7 +446,11 @@ func (p *scriptedProvider) Stream(ctx context.Context, req llm.Request) (<-chan 
 }
 
 func (p *scriptedProvider) Models() []llm.Model {
-	return []llm.Model{{ID: "fake-model", Provider: "fake", ContextWindow: 8192, SupportsTools: true}}
+	window := 8192
+	if p.contextWindow > 0 {
+		window = p.contextWindow
+	}
+	return []llm.Model{{ID: "fake-model", Provider: "fake", ContextWindow: window, SupportsTools: true}}
 }
 
 func (p *scriptedProvider) SupportsTools() bool  { return true }

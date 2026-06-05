@@ -10,6 +10,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestSearchStatusSegment asserts the status-bar segment is empty until a search
+// is active and then tracks the 1-based current match position as navigation
+// advances and wraps.
+func TestSearchStatusSegment(t *testing.T) {
+	t.Parallel()
+
+	var s searchState
+	require.Equal(t, "", s.statusSegment(), "an inert search must contribute no segment")
+
+	s = searchState{term: "x", matches: []int{3, 7, 11}, current: 0}
+	require.Equal(t, "search 1/3", s.statusSegment(), "a fresh search reports the first of N matches")
+
+	s.current = 2
+	require.Equal(t, "search 3/3", s.statusSegment(), "advancing must move the 1-based position")
+}
+
 // matchLine returns a distinct, searchable line that carries the search needle,
 // tagged with n so each match is individually identifiable in the rendered view.
 func matchLine(n int) string {

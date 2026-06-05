@@ -3,10 +3,12 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/arbazkhan971/bharatcode/internal/tui/chat"
 	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
 	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/charmbracelet/lipgloss/v2"
 )
 
 // searchState holds the in-progress scrollback search. It is inert by default
@@ -146,6 +148,87 @@ func (m *model) scrollToMatch() {
 	if m.chatScroll < 0 {
 		m.chatScroll = 0
 	}
+}
+
+// highlightCurrentMatch returns body with the active search term emphasized on
+// the current match line, so the reader sees exactly what matched within the
+// line scrollToMatch centers — the way an editor reverse-highlights a search
+// hit. body must be the rendered chat body whose line space search.matches
+// indexes (the same space renderedChatBody produces), so the match index lands
+// on the intended line. It is a no-op when no search is active.
+//
+// Markdown-rendered assistant lines carry ANSI styling; splicing a highlight
+// span into them would corrupt the existing escapes, so only plain lines are
+// highlighted. A styled line keeps its color without the inline emphasis — the
+// match is still centered either way — so the feature degrades gracefully
+// rather than risk garbling the transcript.
+func (m *model) highlightCurrentMatch(body string) string {
+	if !m.search.active() || m.search.term == "" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	idx := m.search.matches[m.search.current]
+	if idx < 0 || idx >= len(lines) {
+		return body
+	}
+	if strings.ContainsRune(lines[idx], '\x1b') {
+		return body
+	}
+	lines[idx] = highlightTerm(lines[idx], m.search.term, m.theme.Match)
+	return strings.Join(lines, "\n")
+}
+
+// highlightTerm wraps every case-insensitive occurrence of term in line with
+// style, leaving the rest untouched. Matching is rune-wise (via unicode
+// case-folding) so multi-byte content is never split mid-rune and a fold that
+// changes a string's byte length never misaligns the offsets. An empty term, or
+// a line with no occurrence, is returned unchanged so the common case allocates
+// nothing beyond the scan.
+func highlightTerm(line, term string, style lipgloss.Style) string {
+	tr := []rune(term)
+	if len(tr) == 0 {
+		return line
+	}
+	lr := []rune(line)
+	if !containsFold(lr, tr) {
+		return line
+	}
+	var b strings.Builder
+	for i := 0; i < len(lr); {
+		if matchesFold(lr[i:], tr) {
+			b.WriteString(style.Render(string(lr[i : i+len(tr)])))
+			i += len(tr)
+			continue
+		}
+		b.WriteRune(lr[i])
+		i++
+	}
+	return b.String()
+}
+
+// matchesFold reports whether the leading runes of s equal sub under Unicode
+// case folding.
+func matchesFold(s, sub []rune) bool {
+	if len(s) < len(sub) {
+		return false
+	}
+	for k := range sub {
+		if unicode.ToLower(s[k]) != unicode.ToLower(sub[k]) {
+			return false
+		}
+	}
+	return true
+}
+
+// containsFold reports whether sub occurs anywhere in s under case folding, so
+// highlightTerm can skip the allocating rewrite when there is nothing to mark.
+func containsFold(s, sub []rune) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if matchesFold(s[i:], sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // renderedChatBody returns the chat transcript rendered at the current chat

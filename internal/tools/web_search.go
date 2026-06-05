@@ -19,7 +19,9 @@ type webSearchTool struct {
 }
 
 type webSearchArgs struct {
-	Query string `json:"query"`
+	Query          string   `json:"query"`
+	AllowedDomains []string `json:"allowed_domains"`
+	BlockedDomains []string `json:"blocked_domains"`
 }
 
 var (
@@ -31,7 +33,9 @@ var (
   "additionalProperties": false,
   "required": ["query"],
   "properties": {
-    "query": {"type": "string", "description": "Search query to send to the web provider."}
+    "query": {"type": "string", "description": "Search query to send to the web provider."},
+    "allowed_domains": {"type": "array", "items": {"type": "string"}, "description": "Only include results whose host is (a subdomain of) one of these domains."},
+    "blocked_domains": {"type": "array", "items": {"type": "string"}, "description": "Never include results whose host is (a subdomain of) one of these domains."}
   }
 }`)
 )
@@ -94,7 +98,7 @@ func (t *webSearchTool) Run(ctx context.Context, raw json.RawMessage) (res Resul
 		return Result{}, fmt.Errorf("reading search response: %w", err)
 	}
 
-	results := parseSearchResults(string(body))
+	results := filterSearchResults(parseSearchResults(string(body)), args.AllowedDomains, args.BlockedDomains)
 	if len(results) == 0 {
 		return Result{Content: "No search results found."}, nil
 	}
@@ -162,6 +166,84 @@ func cleanSearchText(value string) string {
 	value = regexp.MustCompile(`(?is)<[^>]+>`).ReplaceAllString(value, " ")
 	value = html.UnescapeString(value)
 	return strings.Join(strings.Fields(value), " ")
+}
+
+// filterSearchResults keeps only the results whose host satisfies the optional
+// allow/block lists. An empty allowed list permits every host; a non-empty one
+// restricts to hosts that are (or are subdomains of) a listed domain. The
+// blocked list always wins: a host matching it is dropped even if it was
+// allowed. When both lists are empty the input is returned unchanged.
+func filterSearchResults(results []searchResult, allowed, blocked []string) []searchResult {
+	allowList := normalizeDomains(allowed)
+	blockList := normalizeDomains(blocked)
+	if len(allowList) == 0 && len(blockList) == 0 {
+		return results
+	}
+	out := results[:0:0]
+	for _, r := range results {
+		host := resultHost(r.URL)
+		if len(allowList) > 0 && !hostInDomains(host, allowList) {
+			continue
+		}
+		if len(blockList) > 0 && hostInDomains(host, blockList) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// normalizeDomains lowercases each domain, strips any scheme/path and a leading
+// "www." so callers can pass "https://www.example.com/" or "example.com"
+// interchangeably, and drops blanks.
+func normalizeDomains(domains []string) []string {
+	var out []string
+	for _, d := range domains {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" {
+			continue
+		}
+		if strings.Contains(d, "://") {
+			if parsed, err := url.Parse(d); err == nil && parsed.Host != "" {
+				d = parsed.Host
+			}
+		}
+		if i := strings.IndexByte(d, '/'); i >= 0 {
+			d = d[:i]
+		}
+		if h, _, ok := strings.Cut(d, ":"); ok {
+			d = h
+		}
+		d = strings.TrimPrefix(d, "www.")
+		if d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// resultHost returns the lowercased host of a result URL with any port removed,
+// or "" when the URL has no parseable host.
+func resultHost(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+// hostInDomains reports whether host equals or is a subdomain of any listed
+// domain. An empty host never matches.
+func hostInDomains(host string, domains []string) bool {
+	if host == "" {
+		return false
+	}
+	for _, d := range domains {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 func cleanSearchURL(value string) string {

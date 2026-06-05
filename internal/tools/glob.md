@@ -11,11 +11,14 @@ Arguments:
 
 What success looks like:
 
-The result is a lexicographically sorted list of workspace-relative file paths,
-one per line. Paths use forward slashes so the model sees the same shape across
-operating systems. Paths matched by the workspace `.gitignore` (and the `.git`
-directory) are skipped, so vendored and build output such as `node_modules` or
-`dist` never appears — the same filtering `ls` and `grep` apply.
+The result is a list of workspace-relative file paths, one per line, ordered by
+modification time with the most recently changed files first (paths sharing a
+timestamp fall back to lexicographic order). The files you most likely care
+about — the ones just edited — surface at the top. Paths use forward slashes so
+the model sees the same shape across operating systems. Paths matched by the
+workspace `.gitignore` (and the `.git` directory) are skipped, so vendored and
+build output such as `node_modules` or `dist` never appears — the same filtering
+`ls` and `grep` apply.
 
 Failure cases:
 

@@ -216,15 +216,27 @@ func looksLikeGoTestJSON(output string) bool {
 }
 
 // parseGoTestJSONFailures extracts failing tests from a `go test -json` stream.
-// A test fails when it receives an "Action":"fail" event carrying a Test name
-// (package-level fail events, which omit Test, are skipped — their individual
-// tests already reported). The detail is the first assertion ("file.go:line:")
-// or panic line seen in that test's "output" events, mirroring the text parser.
-// Failing tests are returned in first-seen order for deterministic output.
+// A test fails when it receives an "Action":"fail" event carrying a Test name.
+// The detail is the first assertion ("file.go:line:") or panic line seen in that
+// test's "output" events, mirroring the text parser. Failing tests are returned
+// in first-seen order for deterministic output.
+//
+// A package-level "fail" event (no Test) usually accompanies its individual test
+// failures and is ignored — but when the package failed without any test failing
+// and its output carried a compiler diagnostic, it is a build failure. Those are
+// surfaced as a "pkg [build failed]" entry after the test failures, matching the
+// text parser's handling of "FAIL pkg [build failed]" (which `-json` never emits).
 func parseGoTestJSONFailures(output string) []testFailure {
 	var order []string
 	failed := map[string]bool{}
 	detail := map[string]string{}
+	// Per-package state for surfacing build failures: the count of failed tests
+	// (to suppress the package entry once individual tests reported), the first
+	// compiler diagnostic seen, and the order packages first failed in.
+	testsInPkg := map[string]int{}
+	compileErrByPkg := map[string]string{}
+	pkgFailed := map[string]bool{}
+	var pkgOrder []string
 	for _, ln := range splitLines(output) {
 		ln = strings.TrimSpace(ln)
 		if !strings.HasPrefix(ln, "{") {
@@ -237,6 +249,15 @@ func parseGoTestJSONFailures(output string) []testFailure {
 		switch ev.Action {
 		case "output":
 			if ev.Test == "" {
+				// Package-scoped output: capture the first compiler diagnostic in
+				// case this package turns out to be a build failure.
+				if ev.Package != "" {
+					if _, ok := compileErrByPkg[ev.Package]; !ok {
+						if d := goCompileErrFromOutput(ev.Output); d != "" {
+							compileErrByPkg[ev.Package] = d
+						}
+					}
+				}
 				continue
 			}
 			if _, ok := detail[ev.Test]; ok {
@@ -247,7 +268,14 @@ func parseGoTestJSONFailures(output string) []testFailure {
 			}
 		case "fail":
 			if ev.Test == "" {
-				continue // package-level fail, not an individual test
+				if ev.Package != "" && !pkgFailed[ev.Package] {
+					pkgFailed[ev.Package] = true
+					pkgOrder = append(pkgOrder, ev.Package)
+				}
+				continue
+			}
+			if ev.Package != "" {
+				testsInPkg[ev.Package]++
 			}
 			if !failed[ev.Test] {
 				failed[ev.Test] = true
@@ -258,6 +286,18 @@ func parseGoTestJSONFailures(output string) []testFailure {
 	var failures []testFailure
 	for _, name := range order {
 		failures = append(failures, testFailure{Name: name, Detail: detail[name]})
+	}
+	// Append build failures for packages that failed without any individual test
+	// failing and whose output carried a compiler diagnostic.
+	for _, pkg := range pkgOrder {
+		if testsInPkg[pkg] > 0 {
+			continue
+		}
+		ce := compileErrByPkg[pkg]
+		if ce == "" {
+			continue // failed for some other reason already reported via its tests
+		}
+		failures = append(failures, testFailure{Name: pkg + " [build failed]", Detail: ce})
 	}
 	return failures
 }
@@ -273,6 +313,18 @@ func goDetailFromOutput(out string) string {
 	}
 	if p := goPanicRe.FindStringSubmatch(strings.TrimSpace(line)); p != nil {
 		return "panic: " + strings.TrimSpace(p[1])
+	}
+	return ""
+}
+
+// goCompileErrFromOutput pulls a compiler diagnostic ("./foo.go:10:2: ...") out
+// of a single package-scoped "output" event, reusing the text parser's matcher
+// so JSON and verbose build failures yield identical detail. Returns "" when the
+// line is not a compiler diagnostic (e.g. the "# pkg" header or a FAIL line).
+func goCompileErrFromOutput(out string) string {
+	line := strings.TrimRight(out, "\r\n")
+	if goCompileErrRe.MatchString(line) {
+		return strings.TrimSpace(line)
 	}
 	return ""
 }

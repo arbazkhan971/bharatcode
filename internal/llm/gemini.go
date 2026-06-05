@@ -205,6 +205,13 @@ func (s *geminiStreamState) handle(ctx context.Context, ev sseEvent, events chan
 		s.usage = chunk.UsageMetadata.toUsage()
 	}
 
+	// A prompt rejected by Gemini's safety filters returns no candidates and a
+	// promptFeedback.blockReason instead of an error object, which would
+	// otherwise end the stream with no output and no error.
+	if chunk.PromptFeedback != nil && chunk.PromptFeedback.BlockReason != "" {
+		return fmt.Errorf("provider blocked prompt: %s", chunk.PromptFeedback.BlockReason)
+	}
+
 	for _, cand := range chunk.Candidates {
 		for _, part := range cand.Content.Parts {
 			if part.FunctionCall != nil {
@@ -227,8 +234,29 @@ func (s *geminiStreamState) handle(ctx context.Context, ev sseEvent, events chan
 				send(ctx, events, DeltaTextEvent{Text: part.Text})
 			}
 		}
+		// A candidate whose generation was cut short by a safety filter, the
+		// recitation guard, or a malformed call reports the reason in
+		// finishReason. Any text already emitted above stays; the error stops the
+		// turn so the caller does not treat a truncated answer as complete.
+		if reason := strings.ToUpper(strings.TrimSpace(cand.FinishReason)); geminiBlockingFinishReasons[reason] {
+			return fmt.Errorf("provider stopped generation: %s", reason)
+		}
 	}
 	return nil
+}
+
+// geminiBlockingFinishReasons lists candidate finishReason values that mean
+// Gemini aborted generation rather than completing it. STOP (normal) and
+// MAX_TOKENS (hit the output cap) complete a turn and are intentionally absent,
+// so only a genuinely blocked or malformed response surfaces as a stream error.
+var geminiBlockingFinishReasons = map[string]bool{
+	"SAFETY":                  true,
+	"RECITATION":              true,
+	"BLOCKLIST":               true,
+	"PROHIBITED_CONTENT":      true,
+	"SPII":                    true,
+	"MALFORMED_FUNCTION_CALL": true,
+	"OTHER":                   true,
 }
 
 // classifyGeminiStreamError maps a Gemini mid-stream error object onto a
@@ -504,8 +532,16 @@ type geminiStreamChunk struct {
 		Content      geminiContent `json:"content"`
 		FinishReason string        `json:"finishReason"`
 	} `json:"candidates"`
-	UsageMetadata *geminiUsageMetadata `json:"usageMetadata"`
-	Error         *geminiErrorBody     `json:"error"`
+	UsageMetadata  *geminiUsageMetadata  `json:"usageMetadata"`
+	PromptFeedback *geminiPromptFeedback `json:"promptFeedback"`
+	Error          *geminiErrorBody      `json:"error"`
+}
+
+// geminiPromptFeedback carries the verdict of Gemini's input safety filters.
+// A non-empty BlockReason (for example SAFETY or BLOCKLIST) means the prompt was
+// rejected before any candidate was generated.
+type geminiPromptFeedback struct {
+	BlockReason string `json:"blockReason"`
 }
 
 type geminiUsageMetadata struct {

@@ -295,6 +295,100 @@ func TestGeminiClassifiesStreamErrorAsRetryable(t *testing.T) {
 	require.ErrorIs(t, streamErr, ErrRateLimit)
 }
 
+func TestGeminiSurfacesBlockingFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A safety-filtered response streams the partial text it managed to
+		// produce and then reports finishReason SAFETY with no error object.
+		_, _ = io.WriteString(w, geminiSSE(
+			`{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]},"finishReason":"SAFETY"}]}`,
+		))
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.NoError(t, err)
+	collected := collectEvents(events)
+
+	var text strings.Builder
+	var streamErr error
+	for _, ev := range collected {
+		switch e := ev.(type) {
+		case DeltaTextEvent:
+			text.WriteString(e.Text)
+		case ErrorEvent:
+			streamErr = e.Err
+		}
+	}
+	require.Equal(t, "partial", text.String(), "text emitted before the block must still surface")
+	require.Error(t, streamErr, "a SAFETY finishReason must end the turn with an error")
+	require.Contains(t, streamErr.Error(), "SAFETY")
+}
+
+func TestGeminiAllowsMaxTokensFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// MAX_TOKENS is a normal completion (the output cap was reached), not a
+		// block, so it must not be turned into a stream error.
+		_, _ = io.WriteString(w, geminiSSE(
+			`{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"MAX_TOKENS"}]}`,
+		))
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.NoError(t, err)
+	collected := collectEvents(events)
+
+	for _, ev := range collected {
+		_, isErr := ev.(ErrorEvent)
+		require.False(t, isErr, "MAX_TOKENS must not produce a terminal error")
+	}
+}
+
+func TestGeminiSurfacesPromptBlock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A prompt rejected up front returns no candidates, only a
+		// promptFeedback.blockReason.
+		_, _ = io.WriteString(w, geminiSSE(
+			`{"promptFeedback":{"blockReason":"BLOCKLIST"}}`,
+		))
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.NoError(t, err)
+	collected := collectEvents(events)
+
+	var streamErr error
+	for _, ev := range collected {
+		if e, ok := ev.(ErrorEvent); ok {
+			streamErr = e.Err
+		}
+	}
+	require.Error(t, streamErr, "a blocked prompt must surface as a stream error")
+	require.Contains(t, streamErr.Error(), "BLOCKLIST")
+}
+
 func TestGeminiToolResponsePassesThroughJSONObject(t *testing.T) {
 	// A JSON-object result is forwarded unchanged; a bare string is wrapped.
 	obj := geminiToolResponse(`{"temp":32}`, false)

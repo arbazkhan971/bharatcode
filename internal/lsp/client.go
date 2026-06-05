@@ -112,6 +112,9 @@ func (c *client) initialize(ctx context.Context) error {
 				"formatting": map[string]any{
 					"dynamicRegistration": false,
 				},
+				"rangeFormatting": map[string]any{
+					"dynamicRegistration": false,
+				},
 				"codeAction": map[string]any{
 					"dynamicRegistration": false,
 				},

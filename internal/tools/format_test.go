@@ -13,15 +13,23 @@ import (
 )
 
 type fakeFormat struct {
-	edits []lsp.TextEdit
-	err   error
+	edits      []lsp.TextEdit
+	rangeEdits []lsp.TextEdit
+	err        error
 
-	lastPath string
+	lastPath  string
+	lastRange lsp.Range
 }
 
 func (f *fakeFormat) Format(_ context.Context, path string) ([]lsp.TextEdit, error) {
 	f.lastPath = path
 	return f.edits, f.err
+}
+
+func (f *fakeFormat) FormatRange(_ context.Context, path string, rng lsp.Range) ([]lsp.TextEdit, error) {
+	f.lastPath = path
+	f.lastRange = rng
+	return f.rangeEdits, f.err
 }
 
 func writeFormatFile(t *testing.T, dir, contents string) string {
@@ -65,6 +73,71 @@ func TestFormatAppliesEditsAndWritesFile(t *testing.T) {
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "package main\nfunc f() {}\n", string(got))
+}
+
+func TestFormatRangeFormatsOnlyTheSpan(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFormatFile(t, dir, "package main\nfunc  f(){}\nfunc  g(){}\n")
+	src := &fakeFormat{rangeEdits: []lsp.TextEdit{
+		// Reformat just the second line, leaving g untouched.
+		{
+			Range: lsp.Range{
+				Start: lsp.Position{Line: 1, Character: 0},
+				End:   lsp.Position{Line: 2, Character: 0},
+			},
+			NewText: "func f() {}\n",
+		},
+	}}
+	tool := &formatTool{source: src, deps: Dependencies{WorkDir: dir}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go", "line": 2}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, path, src.lastPath)
+
+	// The whole-file formatter must not have been consulted; the request carried
+	// the single-line span (0-based, end at the start of the following line).
+	require.Equal(t, lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 0},
+		End:   lsp.Position{Line: 2, Character: 0},
+	}, src.lastRange)
+	require.Contains(t, result.Content, "formatted main.go:2")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package main\nfunc f() {}\nfunc  g(){}\n", string(got))
+}
+
+func TestFormatRangeSpansMultipleLines(t *testing.T) {
+	dir := t.TempDir()
+	writeFormatFile(t, dir, "package main\nfunc  f(){}\nfunc  g(){}\n")
+	src := &fakeFormat{rangeEdits: []lsp.TextEdit{
+		{Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}, End: lsp.Position{Line: 0, Character: 0}}, NewText: ""},
+	}}
+	tool := &formatTool{source: src, deps: Dependencies{WorkDir: dir}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go", "line": 2, "end_line": 3}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The span covers lines 2..3 (0-based 1..2); the end addresses the start of
+	// the line after the last selected one.
+	require.Equal(t, lsp.Range{
+		Start: lsp.Position{Line: 1, Character: 0},
+		End:   lsp.Position{Line: 3, Character: 0},
+	}, src.lastRange)
+	require.Contains(t, result.Content, "main.go:2-3")
+}
+
+func TestFormatRangeAlreadyFormattedReportsSpan(t *testing.T) {
+	dir := t.TempDir()
+	writeFormatFile(t, dir, "package main\n")
+	tool := &formatTool{source: &fakeFormat{}, deps: Dependencies{WorkDir: dir}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go", "line": 1}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "main.go:1 is already formatted.", result.Content)
 }
 
 func TestFormatAppliesMultipleEditsInOrder(t *testing.T) {

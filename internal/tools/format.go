@@ -20,6 +20,7 @@ import (
 // *lsp.Manager satisfies it; tests substitute a fake.
 type FormatSource interface {
 	Format(ctx context.Context, path string) ([]lsp.TextEdit, error)
+	FormatRange(ctx context.Context, path string, rng lsp.Range) ([]lsp.TextEdit, error)
 }
 
 type formatTool struct {
@@ -28,7 +29,9 @@ type formatTool struct {
 }
 
 type formatArgs struct {
-	Path string `json:"path"`
+	Path    string `json:"path"`
+	Line    int    `json:"line,omitempty"`
+	EndLine int    `json:"end_line,omitempty"`
 }
 
 var schemaFormat = json.RawMessage(`{
@@ -40,6 +43,16 @@ var schemaFormat = json.RawMessage(`{
     "path": {
       "type": "string",
       "description": "Workspace-relative path to the file to reformat in place."
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based first line to reformat. Omit to format the whole file; provide it (optionally with end_line) to reformat only a span, leaving the rest untouched."
+    },
+    "end_line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based last line of the span to reformat. Defaults to line (a single line). Ignored unless line is set."
     }
   }
 }`)
@@ -96,12 +109,36 @@ func (t *formatTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 		return errorResult(err.Error()), nil
 	}
 
-	edits, err := t.source.Format(ctx, path)
+	// A line selects range formatting (reformat just that span); without one the
+	// whole document is formatted.
+	scope := args.Path
+	var edits []lsp.TextEdit
+	if args.Line > 0 {
+		endLine := args.EndLine
+		if endLine < args.Line {
+			endLine = args.Line
+		}
+		// LSP positions are 0-based. The end position addresses the start of the
+		// line after the last selected one so the whole final line (including its
+		// trailing newline) is covered; servers clamp it to EOF on the last line.
+		rng := lsp.Range{
+			Start: lsp.Position{Line: args.Line - 1, Character: 0},
+			End:   lsp.Position{Line: endLine, Character: 0},
+		}
+		if endLine == args.Line {
+			scope = fmt.Sprintf("%s:%d", args.Path, args.Line)
+		} else {
+			scope = fmt.Sprintf("%s:%d-%d", args.Path, args.Line, endLine)
+		}
+		edits, err = t.source.FormatRange(ctx, path, rng)
+	} else {
+		edits, err = t.source.Format(ctx, path)
+	}
 	if err != nil {
-		return Result{}, fmt.Errorf("formatting %s: %w", args.Path, err)
+		return Result{}, fmt.Errorf("formatting %s: %w", scope, err)
 	}
 	if len(edits) == 0 {
-		return Result{Content: fmt.Sprintf("%s is already formatted.", args.Path)}, nil
+		return Result{Content: fmt.Sprintf("%s is already formatted.", scope)}, nil
 	}
 
 	oldContent, err := os.ReadFile(path)
@@ -113,7 +150,7 @@ func (t *formatTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 		return errorResult(fmt.Sprintf("applying formatting edits to %s: %v", args.Path, err)), nil
 	}
 	if newText == string(oldContent) {
-		return Result{Content: fmt.Sprintf("%s is already formatted.", args.Path)}, nil
+		return Result{Content: fmt.Sprintf("%s is already formatted.", scope)}, nil
 	}
 
 	if err := fsext.AtomicWrite(path, []byte(newText), 0o644); err != nil {
@@ -123,7 +160,7 @@ func (t *formatTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 		return Result{}, err
 	}
 
-	content := fmt.Sprintf("formatted %s (%d edit(s))", args.Path, len(edits))
+	content := fmt.Sprintf("formatted %s (%d edit(s))", scope, len(edits))
 	metadata := map[string]any{"path": path, "edits": len(edits)}
 	// Surface a unified diff of the reformatting so the model can see exactly
 	// what changed, mirroring the edit tool's output shaping.

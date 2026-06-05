@@ -313,6 +313,33 @@ func (c *client) format(ctx context.Context, path string) ([]TextEdit, error) {
 	return parseFormatting(result)
 }
 
+// formatRange issues a textDocument/rangeFormatting request for the given range
+// and returns the edits the server would apply to reformat just that span. The
+// response shape is identical to whole-document formatting (a flat array of
+// TextEdit), so parseFormatting is reused. The options field is required by the
+// LSP spec; servers override these with their own configuration, so the values
+// only need to be present and valid.
+func (c *client) formatRange(ctx context.Context, path string, rng Range) ([]TextEdit, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/rangeFormatting", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"range": map[string]any{
+			"start": map[string]any{"line": rng.Start.Line, "character": rng.Start.Character},
+			"end":   map[string]any{"line": rng.End.Line, "character": rng.End.Character},
+		},
+		"options": map[string]any{
+			"tabSize":      4,
+			"insertSpaces": false,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting range formatting: %w", err)
+	}
+	return parseFormatting(result)
+}
+
 // parseFormatting extracts the edits of a textDocument/formatting response. The
 // result is a flat array of TextEdit ({range, newText}) or null, so it is
 // normalized into []TextEdit.

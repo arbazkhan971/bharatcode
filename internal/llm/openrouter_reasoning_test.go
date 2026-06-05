@@ -49,6 +49,29 @@ func TestOpenRouterReasoning(t *testing.T) {
 	require.Equal(t, "low", r.Effort)
 	require.Zero(t, r.MaxTokens)
 
+	// An effort is lowercased to match OpenRouter's lowercase labels, so a
+	// differently-cased value still reaches the API as a valid effort.
+	r = openRouterReasoning(Request{ReasoningEffort: "High"})
+	require.NotNil(t, r)
+	require.Equal(t, "high", r.Effort)
+
+	// The "auto"/"dynamic" labels mean "let the model size its own reasoning",
+	// which has no OpenRouter effort value, so they enable reasoning at the
+	// upstream default instead of being sent as an effort OpenRouter would reject.
+	for _, label := range []string{"auto", "dynamic", "AUTO", " dynamic "} {
+		r = openRouterReasoning(Request{ReasoningEffort: label})
+		require.NotNil(t, r, label)
+		require.True(t, r.Enabled, label)
+		require.Empty(t, r.Effort, label)
+		require.Zero(t, r.MaxTokens, label)
+	}
+
+	// A positive budget still wins over an "auto" effort and is sent as max_tokens.
+	r = openRouterReasoning(Request{Thinking: &ThinkingConfig{BudgetTokens: 1024}, ReasoningEffort: "auto"})
+	require.NotNil(t, r)
+	require.Equal(t, 1024, r.MaxTokens)
+	require.False(t, r.Enabled)
+
 	// Nothing configured (or only whitespace effort) leaves reasoning unset so the
 	// model's own default applies rather than reasoning being force-enabled.
 	require.Nil(t, openRouterReasoning(Request{}))
@@ -111,6 +134,17 @@ func TestOpenRouterStreamSetsReasoningFromEffort(t *testing.T) {
 		req.ReasoningEffort = "high"
 	})
 	require.Contains(t, string(body), `"reasoning":{"effort":"high"}`)
+}
+
+// TestOpenRouterStreamSetsReasoningEnabledFromAuto proves an "auto" effort is
+// forwarded as reasoning.enabled (the upstream's own default budget) rather than
+// as an effort label OpenRouter would reject.
+func TestOpenRouterStreamSetsReasoningEnabledFromAuto(t *testing.T) {
+	body := openRouterWireBody(t, "/openrouter.ai/api/v1", "google/gemini-2.5-pro", func(req *Request) {
+		req.ReasoningEffort = "auto"
+	})
+	require.Contains(t, string(body), `"reasoning":{"enabled":true}`)
+	require.NotContains(t, string(body), `"effort"`)
 }
 
 // TestOpenRouterStreamExcludesOpenAIReasoningModel proves an OpenAI o-series model

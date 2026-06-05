@@ -123,6 +123,41 @@ func TestSlashSessions_TypeToFilterNarrowsAndRestores(t *testing.T) {
 	require.Equal(t, "", m.sessionFilter, "the filter must reset once a session is restored")
 }
 
+// TestSlashSessions_HomeEndJumpToEnds asserts the session picker's Home/End
+// bindings jump the cursor to the first and last visible rows, mirroring the
+// chat's Home/End (oldest/newest) navigation, and that they are bounded so a
+// repeated press cannot walk the cursor out of range.
+func TestSlashSessions_HomeEndJumpToEnds(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	for _, title := range []string{"alpha", "bravo", "charlie", "delta"} {
+		_ = seedSession(t, h.repo, title, "work on "+title)
+	}
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+	last := len(m.visibleSessions()) - 1
+	require.Greater(t, last, 0, "need several sessions to navigate")
+
+	// Move off the first row, then End jumps to the last row.
+	_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	require.Equal(t, 1, m.sessionCursor)
+	_, _ = m.Update(keySpecial("end", tea.KeyEnd))
+	require.Equal(t, last, m.sessionCursor, "End must jump to the last row")
+
+	// A second End is a bounded no-op (never past the last row).
+	_, _ = m.Update(keySpecial("end", tea.KeyEnd))
+	require.Equal(t, last, m.sessionCursor, "End must not walk past the last row")
+
+	// Home jumps back to the first row, and a repeat stays put.
+	_, _ = m.Update(keySpecial("home", tea.KeyHome))
+	require.Equal(t, 0, m.sessionCursor, "Home must jump to the first row")
+	_, _ = m.Update(keySpecial("home", tea.KeyHome))
+	require.Equal(t, 0, m.sessionCursor, "Home must not move below the first row")
+}
+
 // TestRelativeTime_CoarsensWithGap asserts the session-switcher last-active
 // label coarsens granularity as the gap widens and never reads as a negative or
 // empty age for a fresh or future timestamp.

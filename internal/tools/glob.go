@@ -86,6 +86,13 @@ func (t *globTool) Run(ctx context.Context, raw json.RawMessage) (res Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	// Honor .gitignore so glob skips vendored/build directories (node_modules,
+	// dist, …) the same way ls and grep (rg) already do. Without this, glob is
+	// the lone file-discovery tool that floods the model with ignored paths.
+	patterns, err := ignorePatterns(root, nil)
+	if err != nil {
+		return Result{}, err
+	}
 	var matches []string
 	err = filepath.WalkDir(base, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -94,14 +101,21 @@ func (t *globTool) Run(ctx context.Context, raw json.RawMessage) (res Result, er
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		relRoot := relativeSlash(root, path)
 		if entry.IsDir() {
 			if entry.Name() == ".git" && path != base {
 				return filepath.SkipDir
 			}
+			// Prune ignored directories entirely so we never descend into them.
+			if path != base && ignored(relRoot, entry.Name(), true, patterns) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if ignored(relRoot, entry.Name(), false, patterns) {
 			return nil
 		}
 		relBase := relativeSlash(base, path)
-		relRoot := relativeSlash(root, path)
 		if re.MatchString(relBase) || re.MatchString(relRoot) {
 			matches = append(matches, relRoot)
 		}

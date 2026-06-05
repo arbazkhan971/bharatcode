@@ -728,10 +728,10 @@ func flattenDocumentSymbol(path string, raw json.RawMessage) ([]Symbol, error) {
 	if err := json.Unmarshal(raw, &node); err != nil {
 		return nil, fmt.Errorf("parsing document symbol: %w", err)
 	}
-	return appendDocumentSymbol(nil, path, "", node), nil
+	return appendDocumentSymbol(nil, path, "", 0, node), nil
 }
 
-func appendDocumentSymbol(out []Symbol, path, container string, node wireDocumentSymbol) []Symbol {
+func appendDocumentSymbol(out []Symbol, path, container string, depth int, node wireDocumentSymbol) []Symbol {
 	out = append(out, Symbol{
 		Name:          node.Name,
 		Kind:          SymbolKind(node.Kind),
@@ -739,9 +739,10 @@ func appendDocumentSymbol(out []Symbol, path, container string, node wireDocumen
 		Range:         convertRange(node.Range),
 		ContainerName: container,
 		Detail:        node.Detail,
+		Depth:         depth,
 	})
 	for _, child := range node.Children {
-		out = appendDocumentSymbol(out, path, node.Name, child)
+		out = appendDocumentSymbol(out, path, node.Name, depth+1, child)
 	}
 	return out
 }

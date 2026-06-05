@@ -90,6 +90,13 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 
 	query := strings.TrimSpace(args.Query)
 
+	// A full document outline (a path with no query) is rendered as an indented
+	// tree so the file's structure — methods under their class, fields under their
+	// struct — reads at a glance, matching how goose/opencode surface outlines. A
+	// workspace search or a filtered outline stays flat: their results are not a
+	// contiguous hierarchy, so indentation would misrepresent the nesting.
+	tree := strings.TrimSpace(args.Path) != "" && query == ""
+
 	var symbols []lsp.Symbol
 	if strings.TrimSpace(args.Path) != "" {
 		path, rerr := resolveWorkspacePath(root, args.Path)
@@ -140,6 +147,11 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 		if rel, err := filepath.Rel(root, s.Path); err == nil && !strings.HasPrefix(rel, "..") {
 			path = filepath.ToSlash(rel)
 		}
+		// In tree mode indent each entry by its nesting depth so children sit
+		// beneath their parent; otherwise the list is flat.
+		if tree && s.Depth > 0 {
+			b.WriteString(strings.Repeat("  ", s.Depth))
+		}
 		fmt.Fprintf(
 			&b, "%s:%d:%d: %s %s",
 			path,
@@ -154,7 +166,10 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 		if s.Detail != "" {
 			fmt.Fprintf(&b, " %s", s.Detail)
 		}
-		if s.ContainerName != "" {
+		// The "(in container)" suffix is redundant in tree mode, where indentation
+		// already places the symbol beneath its container, so it is only shown in
+		// the flat renderings (workspace search, filtered outline).
+		if s.ContainerName != "" && !tree {
 			fmt.Fprintf(&b, " (in %s)", s.ContainerName)
 		}
 		b.WriteByte('\n')

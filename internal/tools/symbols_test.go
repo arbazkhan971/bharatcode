@@ -82,8 +82,9 @@ func TestSymbolsDocumentOutlineRendersDetail(t *testing.T) {
 		{Name: "Add", Kind: lsp.Function, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2}}, Detail: "func(a int, b int) int"},
 		// A symbol without a detail keeps the bare "kind name" form.
 		{Name: "Server", Kind: lsp.Struct, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8}}},
-		// Detail and container both present: detail precedes the "(in ...)" suffix.
-		{Name: "Run", Kind: lsp.Method, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 12}}, Detail: "func() error", ContainerName: "Server"},
+		// A nested method (depth 1) is indented beneath its container rather than
+		// carrying a redundant "(in Server)" suffix; its detail still renders.
+		{Name: "Run", Kind: lsp.Method, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 12}}, Detail: "func() error", ContainerName: "Server", Depth: 1},
 	}}
 	tool := &symbolsTool{source: src, workDir: dir}
 
@@ -93,8 +94,56 @@ func TestSymbolsDocumentOutlineRendersDetail(t *testing.T) {
 	require.Equal(t,
 		"main.go:3:1: function Add func(a int, b int) int\n"+
 			"main.go:9:1: struct Server\n"+
-			"main.go:13:1: method Run func() error (in Server)",
+			"  main.go:13:1: method Run func() error",
 		result.Content)
+}
+
+func TestSymbolsDocumentOutlineRendersNestedTree(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	// A struct with two fields and a method that nests a closure: depth drives the
+	// indentation so the outline reads as the file's structure.
+	src := &fakeSymbols{document: []lsp.Symbol{
+		{Name: "Server", Kind: lsp.Struct, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2}}, Depth: 0},
+		{Name: "Addr", Kind: lsp.Field, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 3}}, ContainerName: "Server", Depth: 1},
+		{Name: "Port", Kind: lsp.Field, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 4}}, ContainerName: "Server", Depth: 1},
+		{Name: "Run", Kind: lsp.Method, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8}}, ContainerName: "Server", Depth: 1},
+		{Name: "handle", Kind: lsp.Function, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 9}}, ContainerName: "Run", Depth: 2},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t,
+		"main.go:3:1: struct Server\n"+
+			"  main.go:4:1: field Addr\n"+
+			"  main.go:5:1: field Port\n"+
+			"  main.go:9:1: method Run\n"+
+			"    main.go:10:1: function handle",
+		result.Content)
+}
+
+func TestSymbolsFilteredOutlineStaysFlat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	// A filtered outline (path + query) is not a contiguous hierarchy, so the
+	// matched symbol keeps the flat "(in container)" form instead of an indent
+	// that would dangle without its parent.
+	src := &fakeSymbols{document: []lsp.Symbol{
+		{Name: "Server", Kind: lsp.Struct, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2}}, Depth: 0},
+		{Name: "Run", Kind: lsp.Method, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8}}, ContainerName: "Server", Depth: 1},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go", "query": "run"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "main.go:9:1: method Run (in Server)", result.Content)
 }
 
 func TestSymbolsWorkspaceRequiresQuery(t *testing.T) {

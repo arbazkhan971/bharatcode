@@ -170,6 +170,11 @@ type Symbol struct {
 	// such as "func(x int) error" (gopls) or "i32" (rust-analyzer). It is empty
 	// for workspace symbols, whose wire shape carries no detail.
 	Detail string
+	// Depth is the symbol's nesting level within a hierarchical document-symbol
+	// response: 0 for a top-level construct, 1 for a method of a top-level class,
+	// and so on. It lets a consumer render the outline as an indented tree.
+	// Workspace symbols are flat and always report depth 0.
+	Depth int
 }
 
 // WorkspaceEdit describes the file edits a rename produces, keyed by file path.

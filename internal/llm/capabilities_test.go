@@ -173,6 +173,45 @@ func TestInferContextWindow(t *testing.T) {
 	}
 }
 
+// TestInferAnthropicMaxOutput verifies the per-model output-cap heuristic that
+// drives the Anthropic provider's default max_tokens, including the specific
+// markers that must win over their broader family prefix and the unknown-id
+// fallthrough to zero.
+func TestInferAnthropicMaxOutput(t *testing.T) {
+	cases := []struct {
+		id   string
+		want int
+	}{
+		// Opus 4.5 lifted its output cap to 64k; its id carries the "claude-opus-4"
+		// marker, so the specific rule must win over the 32k family rule.
+		{"claude-opus-4-5", 64_000},
+		{"claude-opus-4-5-20251101", 64_000},
+		{"claude-opus-4-20250514", 32_000},
+		{"claude-opus-4-1", 32_000},
+		{"claude-sonnet-4-20250514", 64_000},
+		{"claude-sonnet-4-5", 64_000},
+		{"claude-haiku-4-5", 64_000},
+		{"claude-3-7-sonnet-20250219", 64_000},
+		// The 3.5 line (Sonnet and Haiku) caps at 8k output.
+		{"claude-3-5-sonnet-20241022", 8_192},
+		{"claude-3-5-haiku-20241022", 8_192},
+		// Case-insensitive and whitespace-tolerant.
+		{"  CLAUDE-SONNET-4-5  ", 64_000},
+		// Older Claude 3 and unknown ids fall through to zero, leaving the caller on
+		// the conservative flat default.
+		{"claude-3-opus-20240229", 0},
+		{"gpt-4o", 0},
+		{"", 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			require.Equal(t, tc.want, inferAnthropicMaxOutput(tc.id),
+				"inferAnthropicMaxOutput(%q)", tc.id)
+		})
+	}
+}
+
 // TestModelSupportsGeminiThinking verifies the native-thinking gate recognizes
 // the Gemini 2.5 family and the Gemini 3 line while rejecting older models and
 // ids absent from the configured catalog.

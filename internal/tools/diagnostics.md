@@ -20,7 +20,9 @@ and the per-severity counts, e.g. `3 diagnostics across 2 files (2 errors, 1
 warning):`. Beneath it is a sorted list of diagnostics formatted as
 `path:line:column: severity: message`. When the language server supplies them, a
 rule code follows in brackets and the reporting source in parentheses, e.g.
-`main.rs:3:9: error: cannot find value `x` [E0425] (rustc)`.
+`main.rs:3:9: error: cannot find value `x` [E0425] (rustc)`. When the offending
+source line can be read it is shown, trimmed, indented beneath the message so you
+see the code at fault without a separate view.
 
 Failure cases:
 

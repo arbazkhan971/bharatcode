@@ -123,6 +123,98 @@ func TestOpenAIStreamAssemblesMultiChunkToolCall(t *testing.T) {
 	require.Equal(t, `{"query":"bharat"}`, assembled.String())
 }
 
+// TestOpenAIStreamSurfacesReasoning proves a reasoning model's thinking text
+// surfaces as ThinkingEvents under both field names the OpenAI-compatible
+// dialect uses in the wild: reasoning_content (DeepSeek's direct API) and
+// reasoning (the field OpenRouter normalizes every upstream reasoning model
+// into). Without reading the latter, routing a reasoning model through
+// OpenRouter would drop its thinking stream silently while the answer still
+// flowed, so this pins both paths.
+func TestOpenAIStreamSurfacesReasoning(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+	}{
+		{"deepseek reasoning_content", "reasoning_content"},
+		{"openrouter reasoning", "reasoning"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sse := strings.Join([]string{
+				fmt.Sprintf(`data: {"choices":[{"delta":{"%s":"thinking "}}]}`, tc.field),
+				"",
+				fmt.Sprintf(`data: {"choices":[{"delta":{"%s":"hard"}}]}`, tc.field),
+				"",
+				`data: {"choices":[{"delta":{"content":"answer"}}]}`,
+				"",
+				`data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}`,
+				"",
+				"data: [DONE]",
+				"",
+			}, "\n")
+
+			provider, _ := sseStreamProvider(t, sse)
+			events, err := provider.Stream(context.Background(), streamRequest())
+			require.NoError(t, err)
+			got := collectEvents(events)
+
+			// Both reasoning deltas surface as ThinkingEvents, in order, and the
+			// answer text stays a DeltaTextEvent -- never conflated with thinking.
+			var thinking strings.Builder
+			lastThinkIdx, firstTextIdx := -1, -1
+			for i, ev := range got {
+				switch e := ev.(type) {
+				case ThinkingEvent:
+					thinking.WriteString(e.Text)
+					lastThinkIdx = i
+				case DeltaTextEvent:
+					if firstTextIdx == -1 {
+						firstTextIdx = i
+					}
+				}
+			}
+			require.Equal(t, "thinking hard", thinking.String(), "reasoning deltas must surface verbatim")
+
+			text, ok := findEvent[DeltaTextEvent](got)
+			require.True(t, ok, "expected a DeltaTextEvent for the answer")
+			require.Equal(t, "answer", text.Text)
+
+			// Reasoning precedes the answer, matching the wire order.
+			require.NotEqual(t, -1, lastThinkIdx, "expected at least one ThinkingEvent")
+			require.Less(t, lastThinkIdx, firstTextIdx, "thinking must precede the answer text")
+
+			_, hasErr := findEvent[ErrorEvent](got)
+			require.False(t, hasErr, "clean reasoning stream must not emit an ErrorEvent")
+		})
+	}
+}
+
+// TestOpenAIStreamReasoningContentTakesPrecedence proves that when a single
+// chunk carries the same thinking text in both reasoning_content and reasoning
+// (a relay that echoes one into the other), the provider emits exactly one
+// ThinkingEvent rather than duplicating the text.
+func TestOpenAIStreamReasoningContentTakesPrecedence(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"once","reasoning":"once"}}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+
+	provider, _ := sseStreamProvider(t, sse)
+	events, err := provider.Stream(context.Background(), streamRequest())
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	var count int
+	for _, ev := range got {
+		if te, ok := ev.(ThinkingEvent); ok {
+			count++
+			require.Equal(t, "once", te.Text)
+		}
+	}
+	require.Equal(t, 1, count, "duplicated reasoning fields must not double the ThinkingEvent")
+}
+
 // TestOpenAIStreamEndUsageFromFinalChunk proves the terminal EndEvent carries
 // the prompt/completion token counts from the provider's final usage chunk
 // (not zero), and that EndEvent is the very last event emitted -- after the

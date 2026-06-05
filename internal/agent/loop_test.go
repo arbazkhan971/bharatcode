@@ -179,6 +179,25 @@ func TestCoordinatorWiresSkillToolIntoAgents(t *testing.T) {
 	}
 }
 
+func TestCoordinatorWiresMCPResourcesToolIntoAgents(t *testing.T) {
+	// No MCP client is configured, yet the read-only "mcp_resources" tool must
+	// still be registered so the task agent's allow-list (which includes it) does
+	// not fail Loop tool validation, and so the coder agent can call it.
+	coord, err := NewCoordinator(nil, Dependencies{
+		Tools:     tools.NewRegistry(tools.Dependencies{}),
+		Sessions:  testRepo(t),
+		Providers: map[string]llm.Provider{"fake": &scriptProvider{}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, coord.Start(context.Background()))
+
+	for _, name := range []string{"coder", "task"} {
+		loop, err := coord.Agent(name)
+		require.NoError(t, err, "agent %q", name)
+		require.True(t, hasLLMTool(loop, "mcp_resources"), "agent %q must expose mcp_resources", name)
+	}
+}
+
 func hasLLMTool(loop *Loop, name string) bool {
 	for _, tool := range loop.llmTools() {
 		if tool.Name == name {

@@ -13,6 +13,8 @@ Noise filtering: for successful commands (exit 0), BharatCode runs the output th
 
 Failure handling: on non-zero exit, output is never filtered — all error lines are preserved verbatim. A hard cap of 500 lines is applied if exceeded: the head and tail are kept and the middle is elided with a `[N lines truncated]` notice, so a build/test failure summary at the end of the output always survives.
 
+Wide-line capping: independent of the line-count cap, any single output line longer than 2000 characters is truncated on a character boundary with a `… [N characters truncated]` marker. This keeps a pathological line — a minified bundle, a one-line JSON response, a build emitting one enormous line — from dominating the result on its own. Pipe such output through `jq`, `head -c`, or `fold` if you need the full content.
+
 Truncation: each of stdout and stderr is captured up to roughly 10 MB; output beyond that is dropped and a `[truncated, N bytes]` marker is appended. To stay well under that limit and keep results focused, narrow your commands with `head`, `tail`, `grep`, or `sed -n "<start>,<end>p"` rather than dumping whole files.
 
 Failure cases include malformed arguments, a missing command argument, permission denial, unavailable shell support, timeout, a non-zero exit status, or context cancellation.

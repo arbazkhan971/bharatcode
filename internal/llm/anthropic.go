@@ -368,6 +368,19 @@ func (p *anthropicProvider) buildAnthropicRequest(req Request) (anthropicRequest
 		if n := len(tools); n > 0 {
 			tools[n-1].CacheControl = ephemeralCacheControl()
 		}
+		// Mark a rolling breakpoint on the last block of the final message so the
+		// whole conversation prefix is cached, not just the static system/tools
+		// prefix. On the next turn the appended content extends the prefix and the
+		// previously cached history is read back instead of re-billed at full
+		// price, which is the dominant cost in a long multi-turn agent loop. This
+		// is the third of Anthropic's four permitted breakpoints (system + tools +
+		// history); a marker on a prefix below the model's minimum cacheable size
+		// is ignored by the API rather than rejected, so a short first turn is safe.
+		if n := len(messages); n > 0 {
+			if blocks := messages[n-1].Content; len(blocks) > 0 {
+				blocks[len(blocks)-1].CacheControl = ephemeralCacheControl()
+			}
+		}
 	}
 
 	maxTokens := req.MaxTokens
@@ -552,6 +565,10 @@ type anthropicContentBlock struct {
 	Content   string                `json:"content,omitempty"`
 	IsError   bool                  `json:"is_error,omitempty"`
 	Source    *anthropicImageSource `json:"source,omitempty"`
+	// CacheControl marks this block as a prompt-cache breakpoint, used to cache
+	// the conversation prefix on the last block of the final message. It is omitted
+	// unless prompt caching is enabled and this is the rolling history breakpoint.
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 // anthropicImageSource carries inline base64 image data for an image content

@@ -28,9 +28,11 @@ const defaultGeminiMaxTokens = 8192
 // 2.5 model into native thinking with the same "low"/"medium"/"high" knob the
 // OpenAI reasoning models use, instead of having to pick a raw token count. The
 // chosen budgets sit inside the range both Flash (0–24576) and Pro (128–32768)
-// accept, so the same effort is valid across the 2.5 family. An empty or
-// unrecognized label returns 0, which leaves thinking unconfigured (the model's
-// own default applies).
+// accept, so the same effort is valid across the 2.5 family. The "auto" and
+// "dynamic" labels map to -1, Gemini's sentinel for dynamic thinking: the model
+// sizes its own reasoning per request instead of being held to a fixed budget.
+// An empty or unrecognized label returns 0, which leaves thinking unconfigured
+// (the model's own default applies).
 // geminiSafetyCategories lists the harm categories Gemini scores on both the
 // prompt and the response. The agent relaxes every category to BLOCK_NONE (see
 // geminiSafetySettings) so that legitimate software-engineering content — shell
@@ -68,6 +70,10 @@ func geminiThinkingBudgetForEffort(effort string) int {
 		return 8192
 	case "high":
 		return 16384
+	case "auto", "dynamic":
+		// -1 is Gemini's sentinel for dynamic thinking: the model decides how
+		// many tokens to spend reasoning, rather than being pinned to a budget.
+		return -1
 	default:
 		return 0
 	}
@@ -409,12 +415,15 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 	// IncludeThoughts asks the API for thought summaries, which the stream
 	// surfaces as ThinkingEvents.
 	budget := 0
-	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
+	if req.Thinking != nil && req.Thinking.BudgetTokens != 0 {
 		budget = req.Thinking.BudgetTokens
 	} else {
 		budget = geminiThinkingBudgetForEffort(req.ReasoningEffort)
 	}
-	if budget > 0 && modelSupportsGeminiThinking(p.models, req.Model) {
+	// A positive budget pins reasoning to a token cap; -1 selects dynamic
+	// thinking (the model sizes its own reasoning). Both configure thinkingConfig;
+	// only an unset (0) budget leaves it off.
+	if budget != 0 && modelSupportsGeminiThinking(p.models, req.Model) {
 		if out.GenerationConfig == nil {
 			out.GenerationConfig = &geminiGenerationConfig{}
 		}
@@ -428,8 +437,9 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 		// the whole allowance reasoning and the candidate comes back empty or
 		// truncated). Lift the cap to the budget plus a full default allowance,
 		// mirroring the Anthropic path. A zero cap is left untouched so the model's
-		// own (much larger) default applies.
-		if out.GenerationConfig.MaxOutputTokens > 0 && out.GenerationConfig.MaxOutputTokens <= budget {
+		// own (much larger) default applies. Dynamic thinking (-1) has no fixed
+		// budget to reserve room beyond, so the cap is left as configured.
+		if budget > 0 && out.GenerationConfig.MaxOutputTokens > 0 && out.GenerationConfig.MaxOutputTokens <= budget {
 			out.GenerationConfig.MaxOutputTokens = budget + defaultGeminiMaxTokens
 		}
 	}

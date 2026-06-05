@@ -99,6 +99,7 @@ func NewRegistry(deps Dependencies) *Registry {
 	r.Register(newEditTool(deps))
 	r.Register(newMultiEditTool(deps))
 	r.Register(newWriteTool(deps))
+	r.Register(newNotebookEditTool(deps))
 	r.Register(newGrepTool(deps))
 	r.Register(newGlobTool(deps))
 	r.Register(newLSTool(deps))

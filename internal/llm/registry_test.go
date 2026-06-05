@@ -398,6 +398,38 @@ func TestDefaultConfigBuildsHealthyRegistry(t *testing.T) {
 	require.Greater(t, openAICompatibleCount, 0, "default config should register openai_compatible providers")
 }
 
+// TestRegistryInfersGLMContextWindow proves a GLM-4.6 model added without an
+// explicit context_window still gets a real budget from the family heuristic
+// (200k, the window GLM-4.6 lifted to) rather than zero ("unknown"). This is the
+// integration the Z.AI default preset relies on: NewRegistry falls back to
+// inferContextWindow when ContextWindow is unset, so a user who adds glm-4.6 to a
+// z.ai-style openai_compatible provider gets correct compaction/overflow budgets.
+func TestRegistryInfersGLMContextWindow(t *testing.T) {
+	cfg := &config.Config{
+		Providers: []config.Provider{{
+			Name:    "zai",
+			Type:    config.ProviderOpenAICompatible,
+			BaseURL: "https://api.z.ai/api/paas/v4",
+			Models:  []string{"glm-4.6"},
+		}},
+		Models: []config.Model{{
+			ID:            "glm-4.6",
+			Provider:      "zai",
+			SupportsTools: true,
+			// ContextWindow intentionally omitted to exercise the heuristic.
+		}},
+		Ledger: config.LedgerConfig{Currency: "INR", UsdInrRate: 83.5},
+	}
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	models := reg.ListModels()
+	require.Len(t, models, 1)
+	require.Equal(t, "glm-4.6", models[0].ID)
+	require.Equal(t, 200_000, models[0].ContextWindow)
+}
+
 func collectEvents(events <-chan Event) []Event {
 	var out []Event
 	for event := range events {

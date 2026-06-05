@@ -51,6 +51,12 @@ type grepArgs struct {
 	// the default smart-case behaviour.  Use it to match a mixed-case pattern
 	// regardless of case (e.g. find "http" given the pattern "HTTP").
 	CaseInsensitive bool `json:"case_insensitive,omitempty"`
+	// OnlyMatching prints only the matched (non-empty) part of each line, one
+	// match per output row (like rg -o / --only-matching), instead of the whole
+	// line.  It applies to content mode only and is ignored in multiline mode so
+	// the rg and Go-fallback paths stay consistent; context options do not apply
+	// when it is set.
+	OnlyMatching bool `json:"only_matching,omitempty"`
 }
 
 var (
@@ -71,7 +77,8 @@ var (
     "after": {"type": "integer", "minimum": 0, "description": "Number of lines to show after each match (like rg -A). Ignored when context is set."},
     "multiline": {"type": "boolean", "description": "Match patterns across line boundaries (like rg -U --multiline-dotall); . matches newlines. Context options are ignored in this mode."},
     "type": {"type": "string", "description": "Filter to a language by file type, like rg --type go (e.g. go, py, js, ts, rust, java, c, cpp). Combine with include to narrow further."},
-    "case_insensitive": {"type": "boolean", "description": "Force case-insensitive matching (like rg -i), overriding the default smart-case behaviour."}
+    "case_insensitive": {"type": "boolean", "description": "Force case-insensitive matching (like rg -i), overriding the default smart-case behaviour."},
+    "only_matching": {"type": "boolean", "description": "Print only the matched (non-empty) parts of each line, one match per row (like rg -o). Content mode only; ignored in multiline mode and context options do not apply."}
   }
 }`)
 )
@@ -174,6 +181,12 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 		cmdArgs = append(cmdArgs, "--line-number")
 		// Cap matches per file so a single huge file doesn't dominate.
 		cmdArgs = append(cmdArgs, "--max-count", "100")
+		// -o prints only the matched substrings, one per line.  It is a
+		// content-mode-only concern (the cap/-l/-c branches never reach here)
+		// and is suppressed in multiline mode to keep the Go fallback aligned.
+		if args.OnlyMatching && !args.Multiline {
+			cmdArgs = append(cmdArgs, "--only-matching")
+		}
 	}
 
 	if args.Multiline {
@@ -181,6 +194,9 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 		// match across them.  Context lines are not combined with
 		// multiline mode (so the rg and Go paths stay consistent).
 		cmdArgs = append(cmdArgs, "--multiline", "--multiline-dotall")
+	} else if onlyMatchingContent(args) {
+		// -o supersedes context (rg emits no context lines with --only-matching);
+		// skip the context flags so both paths render identically.
 	} else {
 		// Context lines: -C takes precedence over -A/-B (rg semantics).
 		ctxBefore, ctxAfter := contextLines(args)
@@ -313,6 +329,14 @@ func hasUpper(pattern string) bool {
 	return false
 }
 
+// onlyMatchingContent reports whether the request should print only matched
+// substrings (rg -o).  It is honoured only in content mode and only when not
+// multiline, so the rg path and the Go fallback select the same behaviour.
+func onlyMatchingContent(args grepArgs) bool {
+	return args.OnlyMatching && !args.Multiline &&
+		(args.OutputMode == "content" || args.OutputMode == "")
+}
+
 // contextLines resolves before/after line counts from the three context
 // fields.  When args.Context > 0 it overrides both Before and After (same
 // precedence as rg -C vs -A/-B).
@@ -442,7 +466,11 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 	gitignoreDirs := loadRootGitignore(root)
 	typeSet := grepTypeSet(args.Type)
 	ctxBefore, ctxAfter := contextLines(args)
-	needContext := (ctxBefore > 0 || ctxAfter > 0) && (args.OutputMode == "content" || args.OutputMode == "")
+	onlyMatching := onlyMatchingContent(args)
+	// -o supersedes context: matched substrings are emitted standalone, so the
+	// context-window path is bypassed entirely when only_matching is set.
+	needContext := !onlyMatching && (ctxBefore > 0 || ctxAfter > 0) &&
+		(args.OutputMode == "content" || args.OutputMode == "")
 
 	var (
 		matches   []grepFileResult
@@ -538,7 +566,24 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 			for scanner.Scan() {
 				lineNo++
 				line := scanner.Text()
-				if re.MatchString(line) {
+				if onlyMatching {
+					// Emit each non-empty matched substring on its own row,
+					// mirroring rg -o.  Empty matches (possible with patterns
+					// like "a*") are skipped, exactly as rg does.
+					for _, m := range re.FindAllString(line, -1) {
+						if m == "" {
+							continue
+						}
+						fm.count++
+						if totalRows < grepMatchCap {
+							fm.lines = append(fm.lines, fmt.Sprintf("%s:%d:%s", rel, lineNo, m))
+							totalRows++
+							if totalRows >= grepMatchCap {
+								fileCapped = true
+							}
+						}
+					}
+				} else if re.MatchString(line) {
 					fm.count++
 					if args.OutputMode == "content" || args.OutputMode == "" {
 						if totalRows < grepMatchCap {

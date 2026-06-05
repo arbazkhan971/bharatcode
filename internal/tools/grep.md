@@ -16,6 +16,7 @@ Arguments:
 - `after` integer, optional: number of lines to show after each match (like `rg -A`). Ignored when `context` is set.
 - `multiline` boolean, optional: match patterns that span line boundaries (like `rg -U --multiline-dotall`); `.` matches newlines. Context options are ignored in this mode.
 - `case_insensitive` boolean, optional: force case-insensitive matching (like `rg -i`), overriding the default smart-case behaviour.
+- `only_matching` boolean, optional: print only the matched (non-empty) parts of each line, one match per row (like `rg -o`), instead of the whole line. Content mode only; ignored in `multiline` mode and `context`/`before`/`after` do not apply.
 
 What success looks like:
 
@@ -49,6 +50,20 @@ printed as `path:line:content`, exactly as ripgrep prints it. The `context`,
 `before`, and `after` options are ignored when `multiline` is set, so the
 ripgrep and Go-fallback paths stay consistent. Multiline reads whole files
 into memory, so prefer `include`/`path` scoping on large trees.
+
+Only-matching output:
+
+Set `only_matching: true` to print just the substring each match covers rather
+than the whole line, the analogue of ripgrep's `-o`/`--only-matching`. Output
+stays `path:line:content`, but `content` is the matched text alone, and a line
+with several matches yields one row per match (all sharing that line number).
+Empty matches — which patterns like `x*` can produce at many positions — are
+dropped, exactly as ripgrep does. This is a `content`-mode concern: it has no
+effect on `files_with_matches` or `count`, is ignored when `multiline` is set,
+and supersedes `context`/`before`/`after` (no context rows are emitted). Both
+the ripgrep path and the Go fallback render identically. Use it to extract a
+clean list of identifiers, versions, or tokens — e.g. `func \w+` to list every
+function name without the surrounding signature.
 
 Type filter:
 

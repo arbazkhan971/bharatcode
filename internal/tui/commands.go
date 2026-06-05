@@ -323,6 +323,10 @@ func (m *model) handleRegistryPrompt(name string, args string) (handled bool, mo
 		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Prompt error", Body: err.Error(), Theme: m.theme})
 		return true, m, nil
 	}
+	// Splice in any !`cmd` inline shell substitutions so the template can embed
+	// live repository state (git status, branch, test output) at invocation
+	// time, matching Claude Code / pi custom-command behaviour.
+	rendered = expandBangCommands(rendered, m.runBangCommand)
 	model, cmd = m.startRun(rendered)
 	return true, model, cmd
 }

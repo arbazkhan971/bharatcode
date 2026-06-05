@@ -49,6 +49,41 @@ func postJSON(ctx context.Context, client *http.Client, url string, apiKey strin
 	return postJSONWithHeaders(ctx, client, url, headers, body)
 }
 
+// azureOpenAIHostSuffix marks Azure OpenAI endpoints. Azure authenticates an API
+// key through the "api-key" request header, unlike every other OpenAI-dialect
+// provider, which uses the "Authorization: Bearer" scheme. The deployment-scoped
+// base URL (".../openai/deployments/<name>?api-version=...") always carries this
+// host, so the base URL alone selects the auth scheme.
+const azureOpenAIHostSuffix = ".openai.azure.com"
+
+// isAzureOpenAI reports whether baseURL points at an Azure OpenAI endpoint. The
+// match is a case-insensitive substring scan so it also recognizes the
+// sovereign-cloud hosts (".openai.azure.us", ".openai.azure.cn") that share the
+// "openai.azure" marker but differ in their top-level domain.
+func isAzureOpenAI(baseURL string) bool {
+	lower := strings.ToLower(baseURL)
+	return strings.Contains(lower, azureOpenAIHostSuffix) ||
+		strings.Contains(lower, ".openai.azure.")
+}
+
+// postOpenAIJSON POSTs body to an OpenAI-dialect endpoint, selecting the API-key
+// auth scheme by host: Azure OpenAI takes the key in the "api-key" header while
+// every other provider uses the "Authorization: Bearer" scheme of postJSON. An
+// empty key sends neither, matching postJSON for keyless local endpoints (Ollama,
+// LM Studio). baseURL drives the scheme choice and url is the concrete request
+// target; they differ only in tests, where url points at a local stub.
+func postOpenAIJSON(ctx context.Context, client *http.Client, baseURL, url, apiKey string, body any) (*http.Response, error) {
+	if apiKey != "" && isAzureOpenAI(baseURL) {
+		headers := map[string]string{
+			"Content-Type": "application/json",
+			"Accept":       "text/event-stream",
+			"api-key":      apiKey,
+		}
+		return postJSONWithHeaders(ctx, client, url, headers, body)
+	}
+	return postJSON(ctx, client, url, apiKey, body)
+}
+
 // postJSONWithHeaders encodes body as JSON and POSTs it to url with the given
 // headers, retrying transient failures using retryBackoff. It honors a
 // Retry-After header when present, re-sends the body on each attempt, and

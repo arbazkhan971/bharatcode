@@ -226,6 +226,21 @@ func TestBuiltinGoBuild(t *testing.T) {
 			input:    "\n",
 			expected: "go build: ok",
 		},
+		{
+			name: "strips cold-cache download noise, keeps errors",
+			cmd:  "go build ./...",
+			input: "go: downloading github.com/foo/bar v1.2.3\n" +
+				"go: downloading golang.org/x/sys v0.1.0\n" +
+				"./cmd/main.go:10:5: undefined: Foo\n",
+			expected: "./cmd/main.go:10:5: undefined: Foo",
+		},
+		{
+			name: "on_empty when only download noise",
+			cmd:  "go build ./...",
+			input: "go: downloading github.com/foo/bar v1.2.3\n" +
+				"go: extracting github.com/foo/bar v1.2.3\n",
+			expected: "go build: ok",
+		},
 	}
 	runBuiltinCases(t, cases)
 }
@@ -266,6 +281,40 @@ func TestBuiltinGoVet(t *testing.T) {
 			cmd:      "go vet ./...",
 			input:    "\n\n",
 			expected: "go vet: ok",
+		},
+	}
+	runBuiltinCases(t, cases)
+}
+
+func TestBuiltinGoMod(t *testing.T) {
+	cases := []filterCase{
+		{
+			name: "tidy keeps dependency changes, drops downloads",
+			cmd:  "go mod tidy",
+			input: "go: downloading github.com/foo/bar v1.2.3\n" +
+				"go: downloading golang.org/x/sys v0.1.0\n" +
+				"go: added github.com/foo/bar v1.2.3\n" +
+				"go: removed example.com/old v0.9.0\n",
+			expected: "go: added github.com/foo/bar v1.2.3\ngo: removed example.com/old v0.9.0",
+		},
+		{
+			name: "download with only progress fires on_empty",
+			cmd:  "go mod download",
+			input: "go: downloading github.com/foo/bar v1.2.3\n" +
+				"go: downloading golang.org/x/sys v0.1.0\n",
+			expected: "go mod: ok",
+		},
+		{
+			name:     "go get keeps upgrade line",
+			cmd:      "go get github.com/foo/bar@latest",
+			input:    "go: downloading github.com/foo/bar v1.3.0\ngo: upgraded github.com/foo/bar v1.2.3 => v1.3.0\n",
+			expected: "go: upgraded github.com/foo/bar v1.2.3 => v1.3.0",
+		},
+		{
+			name:     "keeps resolution errors",
+			cmd:      "go mod download",
+			input:    "go: downloading github.com/foo/bar v1.2.3\ngo: github.com/foo/bar@v1.2.3: reading github.com/foo/bar/go.mod: 404 Not Found\n",
+			expected: "go: github.com/foo/bar@v1.2.3: reading github.com/foo/bar/go.mod: 404 Not Found",
 		},
 	}
 	runBuiltinCases(t, cases)

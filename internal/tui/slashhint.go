@@ -1,6 +1,23 @@
 package tui
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
+
+// overflowSuffix formats the trailing indicator a one-row completion menu
+// appends when not every match fits, reporting how many matches were dropped
+// so the count is visible rather than a bare ellipsis. When hidden is not
+// positive the plain ellipsis is used, so a rounding mismatch never shows a
+// "+0" or negative count. This is shared by the slash-command and @-file menus
+// so both communicate overflow the same way, matching how Claude Code and
+// opencode show the remaining-match count.
+func overflowSuffix(hidden int) string {
+	if hidden <= 0 {
+		return " …"
+	}
+	return " … +" + strconv.Itoa(hidden)
+}
 
 // slashCommandDescriptions maps a built-in slash command to a terse one-line
 // summary surfaced in the completion menu once the selection narrows to a
@@ -132,7 +149,7 @@ func (m *model) renderSlashHint(width int) string {
 
 	line := indent + strings.Join(parts, sep)
 	if truncated {
-		line += m.theme.Muted.Render(" …")
+		line += m.theme.Muted.Render(overflowSuffix(len(cmds) - len(parts)))
 		return line
 	}
 

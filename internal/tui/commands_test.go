@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
@@ -120,6 +121,48 @@ func TestSlashSessions_TypeToFilterNarrowsAndRestores(t *testing.T) {
 
 	require.Equal(t, bumpID, m.sessionID, "enter must restore the filtered session")
 	require.Equal(t, "", m.sessionFilter, "the filter must reset once a session is restored")
+}
+
+// TestRelativeTime_CoarsensWithGap asserts the session-switcher last-active
+// label coarsens granularity as the gap widens and never reads as a negative or
+// empty age for a fresh or future timestamp.
+func TestRelativeTime_CoarsensWithGap(t *testing.T) {
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		then time.Time
+		want string
+	}{
+		{"zero timestamp", time.Time{}, "just now"},
+		{"future timestamp", now.Add(time.Hour), "just now"},
+		{"seconds ago", now.Add(-30 * time.Second), "just now"},
+		{"minutes ago", now.Add(-5 * time.Minute), "5m ago"},
+		{"hours ago", now.Add(-3 * time.Hour), "3h ago"},
+		{"days ago", now.Add(-2 * 24 * time.Hour), "2d ago"},
+		{"weeks ago", now.Add(-3 * 7 * 24 * time.Hour), "3w ago"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, relativeTime(tc.then, now))
+		})
+	}
+}
+
+// TestSlashSessions_ShowsLastActiveColumn asserts the session picker body
+// includes a relative last-active label for each row, so a returning user can
+// see at a glance which session is the most recent.
+func TestSlashSessions_ShowsLastActiveColumn(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	_ = seedSession(t, h.repo, "Recent work", "fix the parser")
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "just now", "a freshly-seeded session row must carry a relative last-active label")
 }
 
 // TestSlashFork_CreatesAndSwitchesToNewSession is the /fork contract test: it

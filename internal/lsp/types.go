@@ -4,6 +4,8 @@ package lsp
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // Severity is the diagnostic severity reported by a language server.
@@ -253,6 +255,26 @@ var defaultLanguageSpecs = []languageSpec{
 		rootFiles:  []string{"compile_commands.json", "compile_flags.txt", ".git"},
 		languageID: "c",
 	},
+}
+
+// DefaultExtensions returns the file extensions (lowercased, leading dot,
+// deduplicated and sorted) covered by the built-in language servers. It is the
+// fallback source of truth for callers that need the supported-extension set
+// without a live Manager (whose SupportedExtensions also folds in configured
+// servers), keeping every such list derived from defaultLanguageSpecs.
+func DefaultExtensions() []string {
+	set := make(map[string]struct{})
+	for _, spec := range defaultLanguageSpecs {
+		for ext := range spec.extension {
+			set[strings.ToLower(ext)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for ext := range set {
+		out = append(out, ext)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func extSet(exts ...string) map[string]struct{} {

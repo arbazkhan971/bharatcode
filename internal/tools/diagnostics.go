@@ -22,6 +22,11 @@ type DiagnosticSource interface {
 type diagnosticsTool struct {
 	source  DiagnosticSource
 	workDir string
+	// exts is the set of file extensions a workspace-wide scan opens, derived
+	// from the LSP manager's configured language servers so the two never drift.
+	// Empty when no manager is present (Run errors before scanning in that case);
+	// diagnosticFiles falls back to the default set defensively.
+	exts map[string]struct{}
 }
 
 type diagnosticsArgs struct {
@@ -57,8 +62,21 @@ func newDiagnosticsTool(deps Dependencies) Tool {
 	// Only adopt the source when the manager is actually present.
 	if deps.LSP != nil {
 		t.source = deps.LSP
+		// Derive the workspace-scan extension set from the manager's configured
+		// language servers so adding a language in one place is enough.
+		t.exts = extSetFromList(deps.LSP.SupportedExtensions())
 	}
 	return t
+}
+
+// extSetFromList turns a slice of extensions into a lookup set, lowercasing each
+// so the scan matches regardless of how the path or spec cased the extension.
+func extSetFromList(exts []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(exts))
+	for _, ext := range exts {
+		set[strings.ToLower(ext)] = struct{}{}
+	}
+	return set
 }
 
 func (t *diagnosticsTool) Name() string {
@@ -102,7 +120,7 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		}
 		paths = []string{path}
 	} else {
-		paths, err = diagnosticFiles(ctx, root)
+		paths, err = diagnosticFiles(ctx, root, t.exts)
 		if err != nil {
 			return Result{}, err
 		}
@@ -294,11 +312,13 @@ func pluralize(word string, n int) string {
 	return word + "s"
 }
 
-func diagnosticFiles(ctx context.Context, root string) ([]string, error) {
-	exts := map[string]struct{}{
-		".c": {}, ".cc": {}, ".cpp": {}, ".cxx": {}, ".go": {}, ".h": {},
-		".hh": {}, ".hpp": {}, ".js": {}, ".jsx": {}, ".py": {}, ".rs": {},
-		".ts": {}, ".tsx": {},
+func diagnosticFiles(ctx context.Context, root string, exts map[string]struct{}) ([]string, error) {
+	// The LSP manager supplies the extension set in production so the scan tracks
+	// the configured language servers. Fall back to the default servers' set when
+	// none was provided (e.g. a direct unit-test call) so the walk still has a
+	// target list rather than matching nothing.
+	if len(exts) == 0 {
+		exts = extSetFromList(lsp.DefaultExtensions())
 	}
 	// Skip dependency and build directories the same way grep and glob do, so a
 	// workspace scan never descends into target/, dist/, node_modules/, etc. and

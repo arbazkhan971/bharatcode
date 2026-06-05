@@ -565,6 +565,106 @@ func TestGeminiEmitsThinkingConfigForSupportedModel(t *testing.T) {
 	require.Equal(t, 2048, *tc.ThinkingBudget)
 }
 
+func TestGeminiDerivesThinkingBudgetFromReasoningEffort(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-2.5-flash", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	// No explicit Thinking budget: the configured reasoning_effort must drive
+	// thinkingConfig so a Gemini user gets parity with the OpenAI effort knob.
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-2.5-flash",
+		Messages:        []message.Message{textMsg("think")},
+		ReasoningEffort: "high",
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig, "reasoning_effort must produce a generationConfig")
+	tc := captured.GenerationConfig.ThinkingConfig
+	require.NotNil(t, tc, "reasoning_effort must produce a thinkingConfig on a supported model")
+	require.True(t, tc.IncludeThoughts)
+	require.NotNil(t, tc.ThinkingBudget)
+	require.Equal(t, 16384, *tc.ThinkingBudget, "high effort must map to the high budget")
+}
+
+func TestGeminiThinkingBudgetWinsOverReasoningEffort(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-2.5-flash", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	// An explicit budget takes precedence over the effort-derived one.
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-2.5-flash",
+		Messages:        []message.Message{textMsg("think")},
+		ReasoningEffort: "low",
+		Thinking:        &ThinkingConfig{BudgetTokens: 2048},
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig)
+	tc := captured.GenerationConfig.ThinkingConfig
+	require.NotNil(t, tc)
+	require.NotNil(t, tc.ThinkingBudget)
+	require.Equal(t, 2048, *tc.ThinkingBudget, "explicit budget must win over effort")
+}
+
+func TestGeminiOmitsThinkingConfigForEffortOnUnsupportedModel(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	// gemini-2.0-flash predates thinkingConfig; an effort label must not smuggle
+	// a thinkingConfig onto it any more than an explicit budget would.
+	cfg := geminiThinkingConfigFor(t, "gemini-2.0-flash", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-2.0-flash",
+		Messages:        []message.Message{textMsg("think")},
+		ReasoningEffort: "high",
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	if captured.GenerationConfig != nil {
+		require.Nil(t, captured.GenerationConfig.ThinkingConfig, "unsupported model must not carry a thinkingConfig")
+	}
+}
+
+func TestGeminiThinkingBudgetForEffort(t *testing.T) {
+	require.Equal(t, 0, geminiThinkingBudgetForEffort(""))
+	require.Equal(t, 0, geminiThinkingBudgetForEffort("bogus"))
+	require.Equal(t, 4096, geminiThinkingBudgetForEffort("low"))
+	require.Equal(t, 8192, geminiThinkingBudgetForEffort("medium"))
+	require.Equal(t, 16384, geminiThinkingBudgetForEffort("HIGH"), "match must be case-insensitive")
+}
+
 func TestGeminiLiftsMaxOutputTokensAboveThinkingBudget(t *testing.T) {
 	var rawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

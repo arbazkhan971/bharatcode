@@ -12,7 +12,10 @@ Arguments:
 What success looks like:
 
 The result contains readable page text with headings, link text, and list items.
-Script and style content is stripped before the text is returned to the model.
+Code in `<pre>` blocks is preserved verbatim inside fenced code blocks (its
+indentation and line breaks intact), and inline `<code>` is wrapped in backticks,
+so documentation examples survive instead of being flattened. Script and style
+content is stripped before the text is returned to the model.
 
 Failure cases:
 

@@ -153,7 +153,7 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if err != nil {
 			return Result{}, fmt.Errorf("finding references at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No references found."), nil
+		return referencesResult(root, locs), nil
 	case "hover":
 		text, err := t.source.Hover(ctx, path, line0, col0)
 		if err != nil {
@@ -178,7 +178,39 @@ func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
 	if len(locs) == 0 {
 		return Result{Content: emptyMsg}
 	}
+	body, _ := renderLocations(root, locs)
+	return Result{Content: body}
+}
 
+// referencesResult renders reference locations like locationsResult but prefixes
+// a summary line ("N reference(s) across M file(s):") so the model sees the
+// scope of a symbol's usage before scanning the list, matching how goose and
+// opencode surface reference searches. An empty input reports no references.
+func referencesResult(root string, locs []lsp.Location) Result {
+	if len(locs) == 0 {
+		return Result{Content: "No references found."}
+	}
+	body, files := renderLocations(root, locs)
+	refs := strings.Count(body, "\n") + 1
+	header := fmt.Sprintf("%d %s across %d %s:",
+		refs, plural(refs, "reference", "references"),
+		files, plural(files, "file", "files"))
+	return Result{Content: header + "\n" + body}
+}
+
+// plural returns singular when n == 1 and plural otherwise.
+func plural(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
+}
+
+// renderLocations sorts and deduplicates locs, returning the formatted entry
+// list (one `path:line:column[: source]` per line, no trailing newline) and the
+// number of distinct files those entries span. Callers guarantee locs is
+// non-empty.
+func renderLocations(root string, locs []lsp.Location) (string, int) {
 	sort.Slice(locs, func(i, j int) bool {
 		if locs[i].Path != locs[j].Path {
 			return locs[i].Path < locs[j].Path
@@ -190,6 +222,7 @@ func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
 	})
 
 	lineCache := map[string][]string{}
+	files := map[string]struct{}{}
 	var b strings.Builder
 	var last string
 	for _, l := range locs {
@@ -202,6 +235,7 @@ func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
 			continue
 		}
 		last = entry
+		files[l.Path] = struct{}{}
 		b.WriteString(entry)
 		if snippet := sourceLine(lineCache, l.Path, l.Range.Start.Line); snippet != "" {
 			b.WriteString(": ")
@@ -210,7 +244,7 @@ func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
 		b.WriteByte('\n')
 	}
 
-	return Result{Content: strings.TrimRight(b.String(), "\n")}
+	return strings.TrimRight(b.String(), "\n"), len(files)
 }
 
 // sourceLine returns the trimmed text of the zero-based line in path, reading

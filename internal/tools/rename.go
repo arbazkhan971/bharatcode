@@ -33,6 +33,7 @@ type renameArgs struct {
 	Line    int    `json:"line"`
 	Column  int    `json:"column,omitempty"`
 	NewName string `json:"new_name"`
+	Preview bool   `json:"preview,omitempty"`
 }
 
 var schemaRename = json.RawMessage(`{
@@ -58,6 +59,10 @@ var schemaRename = json.RawMessage(`{
     "new_name": {
       "type": "string",
       "description": "The new identifier to rename the symbol to, across every reference the language server finds."
+    },
+    "preview": {
+      "type": "boolean",
+      "description": "When true, compute and show the diff of every file the rename would touch without writing anything to disk. Use it to inspect a wide-reaching rename before committing; re-run with preview omitted (or false) to apply."
     }
   }
 }`)
@@ -123,8 +128,11 @@ func (t *renameTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 	if !isInsideWorkDir(path, t.deps.WorkDir) {
 		return errorResult("path is outside the workspace: " + path), nil
 	}
-	if err := t.checkPermission(ctx, path, raw); err != nil {
-		return errorResult(err.Error()), nil
+	// A preview writes nothing, so it does not need write permission.
+	if !args.Preview {
+		if err := t.checkPermission(ctx, path, raw); err != nil {
+			return errorResult(err.Error()), nil
+		}
 	}
 
 	// LSP positions are 0-based; the model speaks the 1-based coordinates that
@@ -137,15 +145,18 @@ func (t *renameTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 		return Result{Content: "No rename performed: the language server reported no edits (the symbol may not be renamable)."}, nil
 	}
 
-	return t.applyWorkspaceEdit(ctx, edit, args.NewName)
+	return t.applyWorkspaceEdit(ctx, edit, args.NewName, args.Preview)
 }
 
 // applyWorkspaceEdit applies every file change in edit, writing each file
 // atomically and recording the write so later reads see the change. Files are
 // processed in sorted path order so the summary is deterministic. Before
 // touching anything it validates that every target stays inside the workspace,
-// failing the whole rename rather than applying a partial set.
-func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceEdit, newName string) (Result, error) {
+// failing the whole rename rather than applying a partial set. When preview is
+// true it computes and reports the same per-file diffs but writes nothing,
+// records nothing, and skips the post-write diagnostics re-check, so the model
+// can inspect a wide-reaching rename before committing.
+func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceEdit, newName string, preview bool) (Result, error) {
 	paths := make([]string, 0, len(edit.Changes))
 	for p := range edit.Changes {
 		paths = append(paths, p)
@@ -190,17 +201,23 @@ func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceE
 		return Result{Content: "No rename performed: the edits left every file unchanged."}, nil
 	}
 
-	for _, u := range updates {
-		if err := fsext.AtomicWrite(u.path, u.newContent, 0o644); err != nil {
-			return Result{}, fmt.Errorf("writing file %s: %w", u.path, err)
-		}
-		if err := t.recordWrite(ctx, u.path, u.oldContent, u.newContent); err != nil {
-			return Result{}, err
+	if !preview {
+		for _, u := range updates {
+			if err := fsext.AtomicWrite(u.path, u.newContent, 0o644); err != nil {
+				return Result{}, fmt.Errorf("writing file %s: %w", u.path, err)
+			}
+			if err := t.recordWrite(ctx, u.path, u.oldContent, u.newContent); err != nil {
+				return Result{}, err
+			}
 		}
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "renamed to %q: %d edit(s) across %d file(s)\n", newName, totalEdits, len(updates))
+	if preview {
+		fmt.Fprintf(&b, "preview: renaming to %q would make %d edit(s) across %d file(s) (nothing written)\n", newName, totalEdits, len(updates))
+	} else {
+		fmt.Fprintf(&b, "renamed to %q: %d edit(s) across %d file(s)\n", newName, totalEdits, len(updates))
+	}
 	diffs := make(map[string]string, len(updates))
 	for _, u := range updates {
 		rel := u.path
@@ -217,6 +234,9 @@ func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceE
 	}
 
 	metadata := map[string]any{"files": len(updates), "edits": totalEdits}
+	if preview {
+		metadata["preview"] = true
+	}
 	if len(diffs) > 0 {
 		metadata["diffs"] = diffs
 	}
@@ -224,7 +244,8 @@ func (t *renameTool) applyWorkspaceEdit(ctx context.Context, edit lsp.WorkspaceE
 	// A rename can introduce errors (a name collision, a now-shadowed symbol),
 	// so re-check each touched file and surface the problems, as edit/write do.
 	// Files are processed in the same sorted-path order for deterministic output.
-	if t.diag != nil {
+	// A preview wrote nothing, so there is nothing new to re-check.
+	if t.diag != nil && !preview {
 		var notes []string
 		for _, u := range updates {
 			if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, u.path); note != "" {

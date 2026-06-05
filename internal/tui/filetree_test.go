@@ -198,3 +198,148 @@ func TestFiletreePanel_FocusedNavigation_DoesNotEditInput(t *testing.T) {
 	require.True(t, m.filetree.visible)
 	require.False(t, m.filetree.focused)
 }
+
+func TestFiletreeFilter_NarrowsListingAndConsumesKeys(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "beta.go", "")
+	writeFile(t, root, "pkg/gamma.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+	require.Equal(t, []string{"alpha.go", "beta.go", "pkg/gamma.go"}, m.filetree.files)
+
+	// "/" enters quick-filter mode without editing the input buffer.
+	_, _ = m.Update(keyText("/"))
+	require.True(t, m.filetree.filtering)
+	require.Empty(t, m.input.String())
+
+	// Typed characters narrow the listing instead of reaching the prompt.
+	_, _ = m.Update(keyText("a"))
+	_, _ = m.Update(keyText("l"))
+	require.Equal(t, "al", m.filetree.filter)
+	require.Equal(t, []string{"alpha.go"}, m.filetree.files)
+	require.Empty(t, m.input.String())
+
+	// The active filter is shown in the rendered panel.
+	require.Contains(t, m.renderMain(), "/al")
+
+	// Backspace trims the filter and widens the result set again.
+	_, _ = m.Update(keySpecial("backspace", tea.KeyBackspace))
+	require.Equal(t, "a", m.filetree.filter)
+	require.Equal(t, []string{"alpha.go", "beta.go", "pkg/gamma.go"}, m.filetree.files)
+}
+
+func TestFiletreeFilter_EnterConfirmsAndArrowsNavigate(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "album.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("al"))
+	require.Equal(t, []string{"album.go", "alpha.go"}, m.filetree.files)
+
+	// Enter leaves capture mode but keeps the filter applied.
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+	require.False(t, m.filetree.filtering)
+	require.Equal(t, "al", m.filetree.filter)
+	require.Equal(t, []string{"album.go", "alpha.go"}, m.filetree.files)
+
+	// The panel still owns navigation: Down moves the cursor within the filtered
+	// view rather than submitting or editing the prompt.
+	require.Equal(t, 0, m.filetree.cursor)
+	_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	require.Equal(t, 1, m.filetree.cursor)
+	require.Equal(t, "alpha.go", m.filetree.selected())
+}
+
+func TestFiletreeFilter_EscClearsBeforeClosingPanel(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "beta.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("alpha"))
+	require.Equal(t, []string{"alpha.go"}, m.filetree.files)
+
+	// First Esc leaves capture mode and clears the filter, restoring the full
+	// listing while keeping the panel open.
+	_, _ = m.Update(keySpecial("esc", tea.KeyEsc))
+	require.False(t, m.filetree.filtering)
+	require.Empty(t, m.filetree.filter)
+	require.Equal(t, []string{"alpha.go", "beta.go"}, m.filetree.files)
+	require.True(t, m.filetree.visible)
+
+	// A second Esc, with no filter to clear, falls through to close the panel.
+	_, _ = m.Update(keySpecial("esc", tea.KeyEsc))
+	require.False(t, m.filetree.visible)
+}
+
+func TestFiletreeFilter_NoMatchShowsNote(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("zzz"))
+	require.Empty(t, m.filetree.files)
+	require.Contains(t, m.renderMain(), "(no matches)")
+}
+
+func TestFiletreeFilter_ReopeningClearsStaleFilter(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "beta.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("alpha"))
+	require.Equal(t, []string{"alpha.go"}, m.filetree.files)
+
+	// Close and reopen: the panel comes back on the full, unfiltered listing.
+	_, _ = m.Update(ctrlKey('f'))
+	_, _ = m.Update(ctrlKey('f'))
+	require.Empty(t, m.filetree.filter)
+	require.False(t, m.filetree.filtering)
+	require.Equal(t, []string{"alpha.go", "beta.go"}, m.filetree.files)
+}
+
+func TestFilterFiles_RanksAndPreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	files := []string{"alpha.go", "beta.go", "pkg/alarm.go"}
+
+	// Empty filter returns the listing unchanged.
+	require.Equal(t, files, filterFiles("", files))
+
+	// A base-name prefix ("al" → alpha.go, alarm.go) outranks a non-match (beta).
+	got := filterFiles("al", files)
+	require.Equal(t, []string{"alpha.go", "pkg/alarm.go"}, got)
+
+	// No match yields an empty slice.
+	require.Empty(t, filterFiles("zzz", files))
+}

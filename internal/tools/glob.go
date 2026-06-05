@@ -166,11 +166,19 @@ func sortGlobMatches(matches []globMatch) {
 }
 
 func globRegexp(pattern string) (*regexp.Regexp, error) {
+	// Brace alternation ({a,b,c}) is honored only when braces are well-formed;
+	// otherwise '{', '}' and ',' fall through to literal matching. This mirrors
+	// ripgrep/doublestar, where an unmatched brace is just a literal character,
+	// and lets common patterns such as **/*.{ts,tsx} match.
+	braces := bracesBalanced(pattern)
+
 	var b strings.Builder
 	b.WriteString("^")
+	depth := 0
 	for i := 0; i < len(pattern); i++ {
 		ch := pattern[i]
-		if ch == '*' {
+		switch {
+		case ch == '*':
 			if i+1 < len(pattern) && pattern[i+1] == '*' {
 				i++
 				if i+1 < len(pattern) && pattern[i+1] == '/' {
@@ -182,13 +190,19 @@ func globRegexp(pattern string) (*regexp.Regexp, error) {
 			} else {
 				b.WriteString("[^/]*")
 			}
-			continue
-		}
-		if ch == '?' {
+		case ch == '?':
 			b.WriteString("[^/]")
-			continue
+		case braces && ch == '{':
+			depth++
+			b.WriteString("(?:")
+		case braces && ch == '}' && depth > 0:
+			depth--
+			b.WriteString(")")
+		case braces && ch == ',' && depth > 0:
+			b.WriteString("|")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(ch)))
 		}
-		b.WriteString(regexp.QuoteMeta(string(ch)))
 	}
 	b.WriteString("$")
 	re, err := regexp.Compile(b.String())
@@ -196,4 +210,26 @@ func globRegexp(pattern string) (*regexp.Regexp, error) {
 		return nil, fmt.Errorf("compiling glob pattern: %w", err)
 	}
 	return re, nil
+}
+
+// bracesBalanced reports whether pattern contains at least one brace group and
+// every '{' has a matching '}' with no stray closer appearing first. Only then
+// does globRegexp treat braces as alternation; an unbalanced or absent brace is
+// left to literal matching so a pattern like "a}b" or "file{" is not misread.
+func bracesBalanced(pattern string) bool {
+	depth := 0
+	seen := false
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '{':
+			depth++
+			seen = true
+		case '}':
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	return seen && depth == 0
 }

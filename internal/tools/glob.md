@@ -1,8 +1,9 @@
 When to call this tool
 
 Use `glob` when BharatCode needs to discover files by name or extension before
-reading, editing, or searching them. It supports ordinary glob characters and
-`**` for recursive workspace matches.
+reading, editing, or searching them. It supports ordinary glob characters,
+`**` for recursive workspace matches, and brace alternation such as
+`**/*.{ts,tsx}` to match any of several extensions in one pattern.
 
 Arguments:
 

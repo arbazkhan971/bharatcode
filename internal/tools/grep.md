@@ -17,6 +17,8 @@ Arguments:
 - `multiline` boolean, optional: match patterns that span line boundaries (like `rg -U --multiline-dotall`); `.` matches newlines. Context options are ignored in this mode.
 - `case_insensitive` boolean, optional: force case-insensitive matching (like `rg -i`), overriding the default smart-case behaviour.
 - `only_matching` boolean, optional: print only the matched (non-empty) parts of each line, one match per row (like `rg -o`), instead of the whole line. Content mode only; ignored in `multiline` mode and `context`/`before`/`after` do not apply.
+- `offset` integer, optional: skip the first N result entries before `head_limit` is applied, like piping through `tail -n +N`. Pages through results across every `output_mode`. Defaults to `0` (skip nothing).
+- `head_limit` integer, optional: cap the output to the first N result entries after `offset`, like piping through `head -N`, across every `output_mode`. Defaults to `0` (no extra limit beyond the built-in match cap).
 
 What success looks like:
 
@@ -86,6 +88,21 @@ ends with a `[results capped: showing first N matches]` notice. To stay under
 the cap, narrow with `include`, scope `path` to a subtree, or switch
 `output_mode` to `count` or `files_with_matches` before requesting full
 content.
+
+Paging with offset and head_limit:
+
+`offset` and `head_limit` window the rendered result entries, the analogue of
+piping ripgrep through `tail -n +offset | head -N`. They apply to every
+`output_mode`, counting output lines — matches, context, and `--` separators in
+content mode; one line per file in `files_with_matches`/`count` mode. `offset`
+skips that many leading entries (0-based) and `head_limit` keeps at most N after
+the skip. When the window trims the output the trailing notice becomes
+`[showing entries X-Y of Z]` and replaces any cap notice (whose count would no
+longer describe what is shown); when the window covers everything, an existing
+cap notice is left intact. A negative `offset` or `head_limit` returns an error,
+and an `offset` past the last entry returns a short "no results in window"
+message rather than empty output. Both the ripgrep path and the Go fallback page
+identically.
 
 Binary and ignored files:
 

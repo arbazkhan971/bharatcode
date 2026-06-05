@@ -293,9 +293,23 @@ func (m *model) renderFiletree(width, height int) string {
 			name := f.files[i]
 			// Clamp the raw text before styling so ANSI codes are not counted or
 			// sliced through.
-			row := clampLine("  "+name, width)
-			if i == f.cursor {
+			clamped := clampLine("  "+name, width)
+			row := clamped
+			switch {
+			case i == f.cursor:
 				row = m.theme.Accent.Render(clampLine("> "+name, width))
+			case f.filter != "":
+				// Emphasize the runes the quick-filter matched, the way the @-file
+				// picker does, so a narrowed listing shows why each entry survived.
+				// The two-column indent is kept muted and the name is highlighted
+				// against the active filter token; a too-narrow clamp that loses the
+				// indent falls back to a plain muted row.
+				runes := []rune(clamped)
+				if len(runes) > 2 {
+					row = m.theme.Muted.Render(string(runes[:2])) + m.highlightMatch(string(runes[2:]), f.filter)
+				} else {
+					row = m.theme.Muted.Render(clamped)
+				}
 			}
 			b.WriteString(row)
 			b.WriteByte('\n')

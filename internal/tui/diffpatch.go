@@ -89,8 +89,12 @@ func editDiffsFromToolUse(use message.ToolUseBlock) []editDiff {
 
 // unifiedPatch renders the before/after diffs as a single unified-diff-format
 // string suitable for diff.Viewer.RenderUnified. Each diff contributes a file
-// header and one hunk where removed lines are prefixed with "-" and added lines
-// with "+". The output is plain text; styling is applied by the viewer.
+// header and one hunk computed as a real line-level diff: lines common to both
+// sides render as unchanged context (a leading space), and only the lines that
+// differ are marked removed ("-") or added ("+"). This matches how Claude Code
+// and opencode show an edit — the surrounding code stays put and the eye lands
+// on the changed lines — rather than blanket-replacing the whole fragment. The
+// output is plain text; styling is applied by the viewer.
 func unifiedPatch(diffs []editDiff) string {
 	var b strings.Builder
 	for _, d := range diffs {
@@ -103,14 +107,111 @@ func unifiedPatch(diffs []editDiff) string {
 		before := splitLines(d.Before)
 		after := splitLines(d.After)
 		fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", len(before), len(after))
-		for _, line := range before {
-			b.WriteString("-" + line + "\n")
-		}
-		for _, line := range after {
-			b.WriteString("+" + line + "\n")
+		for _, line := range diffLines(before, after) {
+			b.WriteString(line + "\n")
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// diffLines computes a line-level unified diff between before and after,
+// returning each line prefixed with " " (unchanged context), "-" (removed), or
+// "+" (added). It uses a longest-common-subsequence backtrace so the lines the
+// two sides share are emitted once as context and only the genuinely changed
+// lines carry a +/- marker. Within a contiguous change block every removed line
+// is emitted before the added lines that replaced it, the ordering the diff
+// viewer's word-level pairing expects.
+func diffLines(before, after []string) []string {
+	lcs := lcsTable(before, after)
+
+	// Backtrace from the full sequences toward the origin, recording each step.
+	// Walking back produces the diff in reverse, so the result is flipped once at
+	// the end.
+	var rev []string
+	i, j := len(before), len(after)
+	for i > 0 && j > 0 {
+		switch {
+		case before[i-1] == after[j-1]:
+			rev = append(rev, " "+before[i-1])
+			i--
+			j--
+		case lcs[i-1][j] >= lcs[i][j-1]:
+			rev = append(rev, "-"+before[i-1])
+			i--
+		default:
+			rev = append(rev, "+"+after[j-1])
+			j--
+		}
+	}
+	for i > 0 {
+		rev = append(rev, "-"+before[i-1])
+		i--
+	}
+	for j > 0 {
+		rev = append(rev, "+"+after[j-1])
+		j--
+	}
+
+	// Reverse into forward order, then normalize each change block so removed
+	// lines precede added lines (the backtrace can interleave them).
+	out := make([]string, len(rev))
+	for k, line := range rev {
+		out[len(rev)-1-k] = line
+	}
+	return orderChangeBlocks(out)
+}
+
+// lcsTable builds the dynamic-programming table whose cell [i][j] holds the
+// length of the longest common subsequence of before[:i] and after[:j]. The
+// backtrace in diffLines reads it to choose, at each step, whether a line was
+// kept, removed, or added.
+func lcsTable(before, after []string) [][]int {
+	rows, cols := len(before)+1, len(after)+1
+	table := make([][]int, rows)
+	for i := range table {
+		table[i] = make([]int, cols)
+	}
+	for i := 1; i < rows; i++ {
+		for j := 1; j < cols; j++ {
+			if before[i-1] == after[j-1] {
+				table[i][j] = table[i-1][j-1] + 1
+			} else if table[i-1][j] >= table[i][j-1] {
+				table[i][j] = table[i-1][j]
+			} else {
+				table[i][j] = table[i][j-1]
+			}
+		}
+	}
+	return table
+}
+
+// orderChangeBlocks rewrites each maximal run of changed lines so its removed
+// ("-") lines all come before its added ("+") lines, leaving context (" ")
+// lines in place. The LCS backtrace can emit an add before a remove within one
+// block; grouping removes ahead of adds gives the diff viewer the
+// remove-then-add adjacency it relies on to pair modified lines for word-level
+// emphasis, and reads the way git presents a replaced block.
+func orderChangeBlocks(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		if strings.HasPrefix(lines[i], " ") {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+		var removed, added []string
+		for i < len(lines) && !strings.HasPrefix(lines[i], " ") {
+			if strings.HasPrefix(lines[i], "-") {
+				removed = append(removed, lines[i])
+			} else {
+				added = append(added, lines[i])
+			}
+			i++
+		}
+		out = append(out, removed...)
+		out = append(out, added...)
+	}
+	return out
 }
 
 // splitLines splits s into lines, returning an empty slice for empty input so a

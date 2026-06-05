@@ -93,11 +93,16 @@ var (
 	goFailRe = regexp.MustCompile(`^\s*--- FAIL: (\S+)`)
 	// An indented "file_test.go:42: message" detail line under a FAIL marker.
 	goDetailRe = regexp.MustCompile(`^\s+(\S+\.go:\d+:.*)$`)
+	// A "panic: message" line, emitted (at column 0) when a test panics rather
+	// than failing an assertion. A trailing " [recovered]" is the testing
+	// framework's marker, not part of the message, so it is dropped.
+	goPanicRe = regexp.MustCompile(`^panic: (.*?)(?: \[recovered\])?$`)
 )
 
 // parseGoTestFailures handles `go test` verbose/non-verbose output. Each
-// "--- FAIL:" line names a failed test; the first following indented
-// "file.go:line:" line (before the next "---" marker or a dedent) is its detail.
+// "--- FAIL:" line names a failed test; the detail is the first following
+// indented "file.go:line:" line or "panic:" line (before the next "---" marker),
+// so both assertion failures and panics surface a message.
 func parseGoTestFailures(output string) []testFailure {
 	lines := splitLines(output)
 	var failures []testFailure
@@ -113,6 +118,10 @@ func parseGoTestFailures(output string) []testFailure {
 			}
 			if d := goDetailRe.FindStringSubmatch(lines[j]); d != nil {
 				f.Detail = strings.TrimSpace(d[1])
+				break
+			}
+			if p := goPanicRe.FindStringSubmatch(lines[j]); p != nil {
+				f.Detail = "panic: " + strings.TrimSpace(p[1])
 				break
 			}
 		}

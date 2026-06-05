@@ -216,6 +216,45 @@ func TestGeminiRequestWireFormat(t *testing.T) {
 	require.Equal(t, "get_weather", captured.Tools[0].FunctionDeclarations[0].Name)
 }
 
+func TestGeminiRelaxesSafetySettings(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+
+	// Every scored harm category rides as BLOCK_NONE so legitimate engineering
+	// content is not dropped with a SAFETY finishReason.
+	require.NotEmpty(t, captured.SafetySettings, "request must carry relaxed safety settings")
+	thresholds := make(map[string]string, len(captured.SafetySettings))
+	for _, s := range captured.SafetySettings {
+		thresholds[s.Category] = s.Threshold
+	}
+	for _, category := range []string{
+		"HARM_CATEGORY_HARASSMENT",
+		"HARM_CATEGORY_HATE_SPEECH",
+		"HARM_CATEGORY_SEXUALLY_EXPLICIT",
+		"HARM_CATEGORY_DANGEROUS_CONTENT",
+	} {
+		require.Equal(t, "BLOCK_NONE", thresholds[category], "category %s must be relaxed", category)
+	}
+}
+
 func TestGeminiConvertsImageBlockToInlineData(t *testing.T) {
 	var rawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

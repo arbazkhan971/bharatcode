@@ -589,6 +589,38 @@ func TestDynamicSlashNames_RecipesThenPrompts(t *testing.T) {
 		"recipes are listed first, then custom prompts, each as a /name command")
 }
 
+// TestDynamicSlashDescriptions_RecipeTitleAndPromptDescription asserts the gloss
+// map picks a recipe's title and a custom prompt's frontmatter description, keyed
+// by /name, and falls back to the prompt template's first line when no description
+// is declared. Commands with no usable text are omitted so the completion menu
+// never appends a bare "— ". Nil registries contribute nothing.
+func TestDynamicSlashDescriptions_RecipeTitleAndPromptDescription(t *testing.T) {
+	t.Parallel()
+
+	require.Empty(t, dynamicSlashDescriptions(Dependencies{}),
+		"with no registries there are no descriptions")
+
+	recipeDir := t.TempDir()
+	writeRecipeFile(t, recipeDir, "deploy", recipe.Recipe{Title: "Deploy the app", Prompt: "ship it"})
+	recipes, err := recipe.NewRegistry(recipeDir)
+	require.NoError(t, err)
+
+	promptDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(promptDir, "triage.md"),
+		[]byte("---\ndescription: sort the open issues\n---\nTriage {{input}}"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(promptDir, "note.md"),
+		[]byte("Jot a quick {{input}}"), 0o644))
+	prompts, err := config.LoadPromptRegistry(promptDir)
+	require.NoError(t, err)
+
+	got := dynamicSlashDescriptions(Dependencies{Recipes: recipes, Prompts: prompts})
+	require.Equal(t, "Deploy the app", got["/deploy"], "a recipe is described by its title")
+	require.Equal(t, "sort the open issues", got["/triage"],
+		"a custom prompt is described by its frontmatter description")
+	require.Equal(t, "Jot a quick {{input}}", got["/note"],
+		"with no description the prompt's first template line is used")
+}
+
 // writeRecipeFile writes a recipe JSON file to dir and returns its path.
 func writeRecipeFile(t *testing.T, dir, name string, r recipe.Recipe) {
 	t.Helper()

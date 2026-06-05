@@ -173,6 +173,44 @@ func TestRenderSlashHint_NarrowedShowsDescription(t *testing.T) {
 		"the narrowed single match carries its description")
 }
 
+// TestSlashDescription_PrefersBuiltinThenDynamic asserts the gloss lookup
+// returns the built-in table entry first and falls back to a dynamic command's
+// captured description, so recipes and custom prompts are described inline like
+// the built-ins while a name overlap still resolves to the built-in.
+func TestSlashDescription_PrefersBuiltinThenDynamic(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.inputHistory.setDynamicDescriptions(map[string]string{
+		"/triage": "sort the open issues",
+		"/diff":   "a dynamic gloss that must not win",
+	})
+
+	require.Equal(t, "sort the open issues", m.slashDescription("/triage"),
+		"a dynamic command is described by its captured gloss")
+	require.Equal(t, "show the latest edit diff", m.slashDescription("/diff"),
+		"the built-in table wins over a like-named dynamic command")
+	require.Empty(t, m.slashDescription("/unknown"),
+		"an undescribed command has no gloss")
+}
+
+// TestRenderSlashHint_NarrowedShowsDynamicDescription asserts that narrowing to a
+// single dynamic recipe/prompt command renders its captured gloss on the same
+// row, the way a built-in's description is shown.
+func TestRenderSlashHint_NarrowedShowsDynamicDescription(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.inputHistory.setDynamicCommands([]string{"/triage"})
+	m.inputHistory.setDynamicDescriptions(map[string]string{"/triage": "sort the open issues"})
+
+	typeString(t, m, "/triag")
+	view := stripANSI(m.viewString())
+	require.Contains(t, view, "triage")
+	require.Contains(t, view, "sort the open issues",
+		"the narrowed dynamic command carries its captured description")
+}
+
 // TestRenderSlashHint_AmbiguousHasNoDescription asserts that while several
 // commands still match, no single description is shown — the menu is just the
 // name list.

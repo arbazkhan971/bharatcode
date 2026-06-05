@@ -81,6 +81,17 @@ func (p *openAICompatibleProvider) Stream(ctx context.Context, req Request) (<-c
 	if err != nil {
 		return nil, fmt.Errorf("building provider request: %w", err)
 	}
+	// OpenRouter proxies models from many upstreams (Anthropic, Gemini, Grok,
+	// DeepSeek), most of which are not OpenAI reasoning models and so are never
+	// matched by the reasoning_effort/max_completion_tokens path in
+	// buildOpenAIRequest. OpenRouter exposes a single `reasoning` object that
+	// enables extended thinking for any of them, so set it here for OpenRouter
+	// when a thinking budget or effort is configured. The OpenAI o-series keeps
+	// its native path (reasoning_effort), so it is excluded to avoid sending two
+	// competing reasoning controls.
+	if isOpenRouter(p.baseURL) && !isReasoningModel(req.Model) {
+		body.Reasoning = openRouterReasoning(req)
+	}
 	resp, err := postJSON(ctx, p.client, appendPath(p.baseURL, "/chat/completions"), apiKey, body)
 	if err != nil {
 		return nil, err
@@ -160,6 +171,30 @@ func (p *openAICompatibleProvider) handleStreamChunk(ctx context.Context, data s
 	// single terminal EndEvent after the tool calls are closed out.
 	if chunk.Usage != nil {
 		*usage = chunk.Usage.toUsage()
+	}
+	return nil
+}
+
+// isOpenRouter reports whether baseURL points at OpenRouter, whose unified
+// `reasoning` request parameter and cross-provider model namespace warrant a few
+// OpenRouter-specific tweaks on the otherwise generic openai_compatible path.
+// The match is on the host substring so a custom path prefix or trailing slash
+// in the configured base_url does not defeat it.
+func isOpenRouter(baseURL string) bool {
+	return strings.Contains(strings.ToLower(baseURL), "openrouter.ai")
+}
+
+// openRouterReasoning maps a request's configured thinking budget or reasoning
+// effort onto OpenRouter's `reasoning` object. A positive thinking budget takes
+// precedence and is sent as max_tokens; otherwise a non-empty effort is sent as
+// effort. When neither is configured it returns nil so the field is omitted and
+// the model's own default applies rather than reasoning being force-enabled.
+func openRouterReasoning(req Request) *openAIReasoning {
+	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
+		return &openAIReasoning{MaxTokens: req.Thinking.BudgetTokens}
+	}
+	if effort := strings.TrimSpace(req.ReasoningEffort); effort != "" {
+		return &openAIReasoning{Effort: effort}
 	}
 	return nil
 }

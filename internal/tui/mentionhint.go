@@ -67,6 +67,21 @@ func isMentionChar(r rune) bool {
 // subsequence match, with lexical order breaking ties (the listing is already
 // sorted, so the stable sort preserves it).
 func mentionMatches(token, root string) []string {
+	all := rankedMentions(token, root)
+	if len(all) > maxMentionHints {
+		all = all[:maxMentionHints]
+	}
+	return all
+}
+
+// rankedMentions returns every workspace-relative file matching the in-progress
+// token, best-first and uncapped — the full ordering mentionMatches then caps at
+// maxMentionHints. Exposing the uncapped result lets the picker report how many
+// matches exist beyond the displayed cap, so a broad token in a large workspace
+// shows a true "+N more" count rather than implying only maxMentionHints files
+// qualify. The ordering is identical to mentionMatches's, so the displayed prefix
+// stays consistent with the count.
+func rankedMentions(token, root string) []string {
 	files := listWorkspaceFiles(root)
 	if token == "" {
 		// A bare "@" has no token to score, so order by depth then length: a
@@ -74,9 +89,6 @@ func mentionMatches(token, root string) []string {
 		// that merely sorts earlier lexically, matching how Claude Code reveals
 		// the workspace for a bare "@".
 		sort.SliceStable(files, func(i, j int) bool { return shallowerFirst(files[i], files[j]) })
-		if len(files) > maxMentionHints {
-			files = files[:maxMentionHints]
-		}
 		return files
 	}
 
@@ -111,9 +123,6 @@ func mentionMatches(token, root string) []string {
 	out := make([]string, 0, len(matched))
 	for _, m := range matched {
 		out = append(out, m.path)
-		if len(out) >= maxMentionHints {
-			break
-		}
 	}
 	return out
 }
@@ -473,8 +482,19 @@ func (m *model) renderMentionHint(width int) string {
 	}
 
 	line := indent + strings.Join(parts, sep)
-	if truncated {
-		line += m.theme.Muted.Render(overflowSuffix(len(files) - len(parts)))
+
+	// Report the overflow against the true match total, not the displayed cap.
+	// During a Tab cycle the universe is the already-capped match list, so its
+	// length is the total; while browsing, recompute the uncapped count so a token
+	// that matches more files than maxMentionHints shows how many more exist —
+	// otherwise the menu silently implies only the cap's worth of files qualify.
+	total := len(files)
+	if active < 0 {
+		total = len(rankedMentions(token, m.workspaceRoot))
+	}
+	hidden := total - len(parts)
+	if truncated || hidden > 0 {
+		line += m.theme.Muted.Render(overflowSuffix(hidden))
 	}
 	return line
 }

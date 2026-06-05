@@ -10,11 +10,19 @@ Arguments:
 - `path` string, optional: workspace-relative file or directory. Defaults to the workspace root.
 - `include` string, optional: file-name glob such as `*.go` to narrow the search.
 - `output_mode` string, optional: `content`, `files_with_matches`, or `count`.
+- `context` integer, optional: number of lines to show before **and** after each match (like `rg -C`). Takes precedence over `before`/`after` when all three are set.
+- `before` integer, optional: number of lines to show before each match (like `rg -B`). Ignored when `context` is set.
+- `after` integer, optional: number of lines to show after each match (like `rg -A`). Ignored when `context` is set.
 
 What success looks like:
 
-The result is a stable text list. Content mode returns `path:line:content`;
-file mode returns one matching path per line; count mode returns `path:count`.
+The result is a stable text list. Content mode returns `path:line:content` for
+matching lines and `path-line-content` for context lines (the `-` separator
+distinguishes context from matches, mirroring ripgrep `--no-heading` output).
+File mode returns one matching path per line; count mode returns `path:count`.
+When context windows from adjacent matches overlap they are merged into a single
+group. Non-adjacent groups are separated by `--` on its own line, exactly as
+ripgrep prints them.
 
 Smart-case matching:
 
@@ -23,6 +31,13 @@ When the pattern is entirely lowercase the search is case-insensitive, so
 the pattern contains any uppercase letter the search is case-sensitive and
 exact. This mirrors ripgrep's `--smart-case` behaviour and applies on both
 the rg path and the Go fallback.
+
+Multiline patterns:
+
+Patterns are single-line by default, matching ripgrep's default behaviour.
+The regex engine (Go `regexp` or rg) matches within individual lines; a
+pattern that spans a newline will not match. Use separate `grep` calls or
+a `view` call followed by manual inspection for cross-line analysis.
 
 Match cap:
 
@@ -41,6 +56,15 @@ following directories are always skipped: `.git`, `node_modules`, `vendor`,
 at the workspace root (e.g. `build/`) are skipped by the Go fallback. These
 exclusions apply regardless of whether ripgrep is installed, so results are
 consistent on any machine.
+
+Gitignore support level:
+
+The Go fallback honours `.gitignore` at the workspace root only. It recognises
+plain directory-name entries and patterns ending in `/` (e.g. `dist/`,
+`node_modules`). Glob patterns (`*.log`), negation rules (`!keep`), and
+`.gitignore` files nested inside subdirectories are not evaluated by the
+fallback — they are honoured in full when ripgrep (`rg`) is installed.
+Do not rely on nested `.gitignore` exclusions when `rg` is absent.
 
 Failure cases:
 

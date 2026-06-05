@@ -7,9 +7,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/arbazkhan971/bharatcode/internal/outputfilter"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/shell"
 )
+
+// filterEngine is a package-level singleton; all filter regexes are compiled
+// once at startup. The Engine is goroutine-safe (read-only after init).
+var filterEngine = outputfilter.NewEngine()
 
 type bashTool struct {
 	permission *permission.Checker
@@ -126,19 +131,107 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 	}, nil
 }
 
+// formatJob assembles the combined stdout+stderr, optionally noise-filters the
+// output (success-only), prepends an exit-code/status header, and returns the
+// final content string that goes into Result.Content.
+//
+// Filtering policy:
+//   - On success (exit 0, status Completed): run through the outputfilter Engine;
+//     filter noise lines and cap length.  A one-line "[filtered by <name>]" notice
+//     is injected when the engine matched.
+//   - On failure (non-zero exit or non-Completed status): never filter — all error
+//     output is passed through verbatim.  Length is still capped at 500 lines to
+//     prevent runaway logs, with a clear truncation notice.
 func formatJob(job shell.Job) string {
-	out := ""
+	// Merge stdout and stderr exactly as before (stderr gets "stderr:" prefix).
+	combined := ""
 	if job.Stdout != "" {
-		out += job.Stdout
+		combined = job.Stdout
 	}
 	if job.Stderr != "" {
-		if out != "" {
-			out += "\n"
+		if combined != "" {
+			combined += "\n"
 		}
-		out += "stderr:\n" + job.Stderr
+		combined += "stderr:\n" + job.Stderr
 	}
-	if out == "" {
-		out = fmt.Sprintf("status: %s, exit_code: %d", job.Status, job.ExitCode)
+
+	// One-line header: always present so the model knows the exit status without
+	// having to infer it from the output text.
+	header := fmt.Sprintf("[exit %d | %s]", job.ExitCode, job.Status)
+
+	if combined == "" {
+		return header
 	}
+
+	succeeded := job.ExitCode == 0 && job.Status == shell.StatusCompleted
+
+	var body string
+	if succeeded {
+		// Attempt noise filtering for successful commands.
+		filtered, filterName, matched := filterEngine.Apply(job.Command, combined)
+		if matched {
+			// Prepend a compact filter notice so the model knows lines may be absent.
+			notice := fmt.Sprintf("[filtered by outputfilter/%s]", filterName)
+			if filtered == "" {
+				body = notice
+			} else {
+				body = notice + "\n" + filtered
+			}
+		} else {
+			body = capOutput(combined, 500)
+		}
+	} else {
+		// Failure: preserve all output; only apply a hard length cap with notice.
+		body = capOutput(combined, 500)
+	}
+
+	return header + "\n" + body
+}
+
+// capOutput caps output to maxLines lines, appending a notice when truncated.
+func capOutput(output string, maxLines int) string {
+	lines := splitLines(output)
+	if len(lines) <= maxLines {
+		return output
+	}
+	dropped := len(lines) - maxLines
+	truncated := joinLines(lines[:maxLines])
+	return truncated + fmt.Sprintf("\n[%d more lines truncated]", dropped)
+}
+
+// splitLines splits s on "\n" without including a spurious empty element for a
+// trailing newline.
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	// strings.Split("a\n","\\n") returns ["a",""] — trim before splitting.
+	if len(s) > 0 && s[len(s)-1] == '\n' {
+		s = s[:len(s)-1]
+	}
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	out = append(out, s[start:])
 	return out
+}
+
+func joinLines(lines []string) string {
+	total := 0
+	for _, l := range lines {
+		total += len(l) + 1
+	}
+	buf := make([]byte, 0, total)
+	for i, l := range lines {
+		if i > 0 {
+			buf = append(buf, '\n')
+		}
+		buf = append(buf, l...)
+	}
+	return string(buf)
 }

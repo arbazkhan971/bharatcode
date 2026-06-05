@@ -31,6 +31,12 @@ type grepArgs struct {
 	Path       string `json:"path,omitempty"`
 	Include    string `json:"include,omitempty"`
 	OutputMode string `json:"output_mode,omitempty"`
+	// Context lines — mirrors rg -C / -A / -B.  Context takes precedence over
+	// Before/After when both are set (same semantics as rg).  Only meaningful
+	// for output_mode "content" (ignored for files_with_matches / count).
+	Context int `json:"context,omitempty"`
+	Before  int `json:"before,omitempty"`
+	After   int `json:"after,omitempty"`
 }
 
 var (
@@ -45,7 +51,10 @@ var (
     "pattern": {"type": "string", "description": "Regular expression to search for."},
     "path": {"type": "string", "description": "Workspace-relative file or directory to search."},
     "include": {"type": "string", "description": "Optional file glob such as *.go."},
-    "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"], "description": "Shape of the search results."}
+    "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"], "description": "Shape of the search results."},
+    "context": {"type": "integer", "minimum": 0, "description": "Number of lines of context to show before and after each match (like rg -C). Takes precedence over before/after when set."},
+    "before": {"type": "integer", "minimum": 0, "description": "Number of lines to show before each match (like rg -B). Ignored when context is set."},
+    "after": {"type": "integer", "minimum": 0, "description": "Number of lines to show after each match (like rg -A). Ignored when context is set."}
   }
 }`)
 )
@@ -137,6 +146,15 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 		cmdArgs = append(cmdArgs, "--line-number")
 		// Cap matches per file so a single huge file doesn't dominate.
 		cmdArgs = append(cmdArgs, "--max-count", "100")
+	}
+
+	// Context lines: -C takes precedence over -A/-B (rg semantics).
+	ctxBefore, ctxAfter := contextLines(args)
+	if ctxBefore > 0 {
+		cmdArgs = append(cmdArgs, "--before-context", fmt.Sprintf("%d", ctxBefore))
+	}
+	if ctxAfter > 0 {
+		cmdArgs = append(cmdArgs, "--after-context", fmt.Sprintf("%d", ctxAfter))
 	}
 
 	if args.Include != "" {
@@ -246,6 +264,113 @@ func compileSmartCase(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(pattern)
 }
 
+// contextLines resolves before/after line counts from the three context
+// fields.  When args.Context > 0 it overrides both Before and After (same
+// precedence as rg -C vs -A/-B).
+func contextLines(args grepArgs) (before, after int) {
+	if args.Context > 0 {
+		return args.Context, args.Context
+	}
+	return args.Before, args.After
+}
+
+// grepFileLines reads the file at path into a slice of raw text lines.
+// It returns nil when the file is binary (contains a NUL in the first 8 KB)
+// or cannot be opened/read.
+func grepFileLines(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	probe := make([]byte, 8192)
+	n, _ := f.Read(probe)
+	if isBinaryChunk(probe[:n]) {
+		return nil
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		return nil
+	}
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if scanner.Err() != nil {
+		return nil
+	}
+	return lines
+}
+
+// buildContextOutput renders file lines + context into the output format used
+// by content mode.  It mirrors rg's output:
+//   - matching lines: "rel:lineNo:text"
+//   - context lines:  "rel-lineNo-text"
+//   - groups separated by "--" when there is a gap between context windows
+//
+// Only lines within [0, len(allLines)) are emitted.  The returned formatted
+// lines are already ready to be appended to the output; count is the number
+// of true match lines found (for cap accounting).
+func buildContextOutput(rel string, allLines []string, re *regexp.Regexp, ctxBefore, ctxAfter int) (formatted []string, matchCount int) {
+	type interval struct{ lo, hi int } // inclusive, 0-based
+
+	// Collect match positions.
+	var matchSet []int
+	for i, line := range allLines {
+		if re.MatchString(line) {
+			matchSet = append(matchSet, i)
+		}
+	}
+	if len(matchSet) == 0 {
+		return nil, 0
+	}
+	matchCount = len(matchSet)
+
+	// Build merged context windows.
+	isMatch := make(map[int]bool, len(matchSet))
+	for _, m := range matchSet {
+		isMatch[m] = true
+	}
+
+	var windows []interval
+	for _, m := range matchSet {
+		lo := m - ctxBefore
+		if lo < 0 {
+			lo = 0
+		}
+		hi := m + ctxAfter
+		if hi >= len(allLines) {
+			hi = len(allLines) - 1
+		}
+		// Merge with the previous window if they overlap or are adjacent.
+		if len(windows) > 0 && lo <= windows[len(windows)-1].hi+1 {
+			if hi > windows[len(windows)-1].hi {
+				windows[len(windows)-1].hi = hi
+			}
+		} else {
+			windows = append(windows, interval{lo, hi})
+		}
+	}
+
+	for wi, win := range windows {
+		// Emit "--" group separator between non-adjacent context windows (rg style).
+		if wi > 0 {
+			formatted = append(formatted, "--")
+		}
+		for i := win.lo; i <= win.hi; i++ {
+			lineNo := i + 1 // 1-based
+			if isMatch[i] {
+				formatted = append(formatted, fmt.Sprintf("%s:%d:%s", rel, lineNo, allLines[i]))
+			} else {
+				formatted = append(formatted, fmt.Sprintf("%s-%d-%s", rel, lineNo, allLines[i]))
+			}
+		}
+	}
+	return formatted, matchCount
+}
+
 func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (string, error) {
 	re, err := compileSmartCase(args.Pattern)
 	if err != nil {
@@ -253,10 +378,12 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 	}
 
 	gitignoreDirs := loadRootGitignore(root)
+	ctxBefore, ctxAfter := contextLines(args)
+	needContext := (ctxBefore > 0 || ctxAfter > 0) && (args.OutputMode == "content" || args.OutputMode == "")
 
 	type fileMatch struct {
 		path  string
-		lines []string
+		lines []string // formatted output lines (content mode)
 		count int
 	}
 
@@ -300,52 +427,76 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 			}
 		}
 
-		f, err := os.Open(path)
-		if err != nil {
-			// Non-fatal: skip unreadable files.
-			return nil //nolint:nilerr
-		}
-		defer f.Close()
-
-		// Binary detection: read up to 8 KB and look for a NUL byte.
-		probe := make([]byte, 8192)
-		n, _ := f.Read(probe)
-		if isBinaryChunk(probe[:n]) {
-			return nil
-		}
-		// Seek back to the start for the line scanner.
-		if _, err := f.Seek(0, 0); err != nil {
-			return nil //nolint:nilerr
-		}
-
 		rel := relativeSlash(root, path)
 		var fm fileMatch
 		fm.path = rel
-		scanner := bufio.NewScanner(f)
-		lineNo := 0
-		fileCapped := false
-		for scanner.Scan() {
-			lineNo++
-			line := scanner.Text()
-			if re.MatchString(line) {
-				fm.count++
-				// In content mode, stop adding lines from this file once the
-				// global cap is hit so we never exceed it within one file.
-				if args.OutputMode == "content" || args.OutputMode == "" {
-					if totalRows < grepMatchCap {
-						fm.lines = append(fm.lines, fmt.Sprintf("%s:%d:%s", rel, lineNo, line))
-						totalRows++
-						if totalRows >= grepMatchCap {
-							fileCapped = true
+
+		if needContext {
+			// Context mode: read the whole file into memory so we can look
+			// forward and backward around each match.
+			allLines := grepFileLines(path)
+			if allLines == nil {
+				return nil
+			}
+			formatted, cnt := buildContextOutput(rel, allLines, re, ctxBefore, ctxAfter)
+			fm.count = cnt
+			if fm.count == 0 {
+				return nil
+			}
+			// Apply cap: only take as many formatted lines as the budget allows.
+			// Separator lines ("--") do not count toward the cap.
+			for _, fl := range formatted {
+				if totalRows >= grepMatchCap {
+					capped = true
+					break
+				}
+				fm.lines = append(fm.lines, fl)
+				if fl != "--" {
+					totalRows++
+				}
+			}
+		} else {
+			// No context: stream line by line (memory-efficient path).
+			f, ferr := os.Open(path)
+			if ferr != nil {
+				return nil //nolint:nilerr
+			}
+			defer f.Close()
+
+			probe := make([]byte, 8192)
+			n, _ := f.Read(probe)
+			if isBinaryChunk(probe[:n]) {
+				return nil
+			}
+			if _, err := f.Seek(0, 0); err != nil {
+				return nil //nolint:nilerr
+			}
+
+			scanner := bufio.NewScanner(f)
+			lineNo := 0
+			fileCapped := false
+			for scanner.Scan() {
+				lineNo++
+				line := scanner.Text()
+				if re.MatchString(line) {
+					fm.count++
+					if args.OutputMode == "content" || args.OutputMode == "" {
+						if totalRows < grepMatchCap {
+							fm.lines = append(fm.lines, fmt.Sprintf("%s:%d:%s", rel, lineNo, line))
+							totalRows++
+							if totalRows >= grepMatchCap {
+								fileCapped = true
+							}
 						}
 					}
 				}
 			}
+			if scanner.Err() != nil {
+				return nil //nolint:nilerr
+			}
+			_ = fileCapped
 		}
-		if scanErr := scanner.Err(); scanErr != nil {
-			// Non-fatal: skip files we can't fully read.
-			return nil //nolint:nilerr
-		}
+
 		if fm.count > 0 {
 			matches = append(matches, fm)
 		}
@@ -358,7 +509,7 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 				return capErr
 			}
 		default:
-			if fileCapped || totalRows >= grepMatchCap {
+			if capped || totalRows >= grepMatchCap {
 				capped = true
 				return capErr
 			}

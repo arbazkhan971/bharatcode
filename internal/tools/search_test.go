@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -166,6 +167,167 @@ func TestGrepFallbackGitignoreRespected(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.IsError)
 	require.Equal(t, "No matches found.", result.Content, ".gitignore dir must be skipped")
+}
+
+// TestGrepContextLinesSymmetric verifies that context=N returns N lines before
+// and after each match, with match lines formatted as "path:line:text" and
+// context lines as "path-line-text" (rg --no-heading compatible).
+func TestGrepContextLinesSymmetric(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Join([]string{
+		"line one",
+		"line two",
+		"MATCH HERE",
+		"line four",
+		"line five",
+	}, "\n") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file.txt"), []byte(content), 0o644))
+
+	forceFallback(t)
+	tool := newGrepTool(Dependencies{WorkDir: dir})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "MATCH HERE",
+		"context": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// Context line before match (line 2)
+	require.Contains(t, result.Content, "file.txt-2-line two", "expected context line before match")
+	// The match line itself (line 3)
+	require.Contains(t, result.Content, "file.txt:3:MATCH HERE", "expected match line")
+	// Context line after match (line 4)
+	require.Contains(t, result.Content, "file.txt-4-line four", "expected context line after match")
+
+	// Lines outside the context window must not appear.
+	require.NotContains(t, result.Content, "line one", "line 1 is outside context window")
+	require.NotContains(t, result.Content, "line five", "line 5 is outside context window")
+}
+
+// TestGrepContextLinesBeforeAfter verifies that separate before/after fields
+// work independently and asymmetrically.
+func TestGrepContextLinesBeforeAfter(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Join([]string{
+		"alpha",
+		"beta",
+		"FIND",
+		"gamma",
+		"delta",
+	}, "\n") + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "words.txt"), []byte(content), 0o644))
+
+	forceFallback(t)
+	tool := newGrepTool(Dependencies{WorkDir: dir})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "FIND",
+		"before":  2,
+		"after":   0,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// Two lines before the match.
+	require.Contains(t, result.Content, "words.txt-1-alpha")
+	require.Contains(t, result.Content, "words.txt-2-beta")
+	// The match itself.
+	require.Contains(t, result.Content, "words.txt:3:FIND")
+	// Nothing after the match.
+	require.NotContains(t, result.Content, "gamma")
+	require.NotContains(t, result.Content, "delta")
+}
+
+// TestGrepContextOverridesBeforeAfter checks that context=N takes precedence
+// over before/after when all three are set.
+func TestGrepContextOverridesBeforeAfter(t *testing.T) {
+	dir := t.TempDir()
+	content := "a\nb\nTARGET\nd\ne\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f.txt"), []byte(content), 0o644))
+
+	forceFallback(t)
+	tool := newGrepTool(Dependencies{WorkDir: dir})
+	// context=1 overrides before=0, after=0 — should still show 1 line each side.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "TARGET",
+		"context": 1,
+		"before":  0,
+		"after":   0,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "f.txt-2-b", "context=1 should show line before")
+	require.Contains(t, result.Content, "f.txt:3:TARGET")
+	require.Contains(t, result.Content, "f.txt-4-d", "context=1 should show line after")
+}
+
+// TestGrepContextSeparatorBetweenGroups checks that non-adjacent context windows
+// are separated by "--" just like rg output.
+func TestGrepContextSeparatorBetweenGroups(t *testing.T) {
+	dir := t.TempDir()
+	// Two matches far enough apart that their context windows don't touch.
+	var sb strings.Builder
+	for i := 1; i <= 10; i++ {
+		if i == 2 || i == 9 {
+			sb.WriteString("MATCH\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("line%d\n", i))
+		}
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "g.txt"), []byte(sb.String()), 0o644))
+
+	forceFallback(t)
+	tool := newGrepTool(Dependencies{WorkDir: dir})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "MATCH",
+		"context": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Both matches present.
+	require.Contains(t, result.Content, "g.txt:2:MATCH")
+	require.Contains(t, result.Content, "g.txt:9:MATCH")
+	// Group separator between them.
+	require.Contains(t, result.Content, "\n--\n", "non-adjacent groups must be separated by --")
+}
+
+// TestGrepContextNoContextNoChange verifies that when context/before/after are
+// all zero the output is identical to the baseline (no separator lines injected).
+func TestGrepContextNoContextNoChange(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "plain.go"), []byte("package main\nfunc Foo() {}\n"), 0o644))
+
+	forceFallback(t)
+	tool := newGrepTool(Dependencies{WorkDir: dir})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "func Foo",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "plain.go:2:func Foo() {}", result.Content)
+	require.NotContains(t, result.Content, "--")
+}
+
+// TestGrepContextMergesOverlappingWindows verifies that overlapping context
+// windows from adjacent matches are merged into a single group (no spurious
+// separator inserted).
+func TestGrepContextMergesOverlappingWindows(t *testing.T) {
+	dir := t.TempDir()
+	// Matches on lines 2 and 4 with context=2 — windows overlap.
+	content := "a\nMATCH\nc\nMATCH\ne\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "overlap.txt"), []byte(content), 0o644))
+
+	forceFallback(t)
+	tool := newGrepTool(Dependencies{WorkDir: dir})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"pattern": "MATCH",
+		"context": 2,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Should be one merged group — no separator.
+	require.NotContains(t, result.Content, "\n--\n", "overlapping windows must merge into one group")
+	require.Contains(t, result.Content, "overlap.txt:2:MATCH")
+	require.Contains(t, result.Content, "overlap.txt:4:MATCH")
 }
 
 func TestGlobMatchesRecursiveGoFiles(t *testing.T) {

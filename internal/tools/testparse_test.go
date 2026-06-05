@@ -336,6 +336,34 @@ func TestParseJestFailures(t *testing.T) {
 	assertFailures(t, got, want)
 }
 
+func TestParseJestFailures_WithDetail(t *testing.T) {
+	out := ` FAIL  ./calc.test.js
+  Calculator
+    ✓ adds correctly (2 ms)
+    ✕ subtracts correctly (3 ms)
+    ✕ multiplies
+
+  ● Calculator › subtracts correctly
+
+    expect(received).toBe(expected)
+
+    Expected: 1
+    Received: 5
+
+      8 |   expect(sub(3, 2)).toBe(1);
+
+  ● Calculator › multiplies
+
+    TypeError: mul is not a function
+`
+	got := parseTestFailures("npm test", out)
+	want := []testFailure{
+		{Name: "subtracts correctly", Detail: "expect(received).toBe(expected)"},
+		{Name: "multiplies", Detail: "TypeError: mul is not a function"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseCargoTestFailures(t *testing.T) {
 	out := `running 2 tests
 test tests::ok ... ok

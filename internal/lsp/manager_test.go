@@ -296,6 +296,65 @@ func TestReferencesReturnsLocations(t *testing.T) {
 	require.NoError(t, manager.Shutdown(ctx))
 }
 
+func TestIncomingCallsReturnsCallerLocations(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	locations, err := manager.IncomingCalls(ctx, source, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, locations, 1)
+	// The uri carries the prepared item's data field, proving prepare's item was
+	// forwarded verbatim to callHierarchy/incomingCalls.
+	require.Equal(t, "/token-123.go", locations[0].Path)
+	// The selectionRange (line 5) is preferred over the full range.
+	require.Equal(t, Range{
+		Start: Position{Line: 5, Character: 4},
+		End:   Position{Line: 5, Character: 10},
+	}, locations[0].Range)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
+func TestOutgoingCallsReturnsCalleeLocations(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	locations, err := manager.OutgoingCalls(ctx, source, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, locations, 1)
+	require.Equal(t, "/token-123.go", locations[0].Path)
+	require.Equal(t, Range{
+		Start: Position{Line: 7, Character: 4},
+		End:   Position{Line: 7, Character: 10},
+	}, locations[0].Range)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
 func TestRenameReturnsEdits(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -753,6 +812,62 @@ func runFakeLSPServer() {
 						},
 					},
 				}),
+			})
+		case "textDocument/prepareCallHierarchy":
+			var params struct {
+				TextDocument struct {
+					URI string `json:"uri"`
+				} `json:"textDocument"`
+			}
+			_ = json.Unmarshal(msg.Params, &params)
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result: mustRaw([]map[string]any{{
+					"name":           "Target",
+					"kind":           12,
+					"uri":            params.TextDocument.URI,
+					"range":          fakeRange(),
+					"selectionRange": fakeRange(),
+					// data must survive the round-trip back to the call request.
+					"data": "token-123",
+				}}),
+			})
+		case "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls":
+			// Echo the prepared item's data back so the test can assert it was
+			// forwarded verbatim, and surface the caller/callee under from/to.
+			var params struct {
+				Item struct {
+					Data string `json:"data"`
+				} `json:"item"`
+			}
+			_ = json.Unmarshal(msg.Params, &params)
+			field := "from"
+			line := 5
+			if msg.Method == "callHierarchy/outgoingCalls" {
+				field = "to"
+				line = 7
+			}
+			item := map[string]any{
+				"name": "Caller",
+				"kind": 12,
+				"uri":  "file:///" + params.Item.Data + ".go",
+				"range": map[string]any{
+					"start": map[string]any{"line": line, "character": 0},
+					"end":   map[string]any{"line": line + 3, "character": 0},
+				},
+				"selectionRange": map[string]any{
+					"start": map[string]any{"line": line, "character": 4},
+					"end":   map[string]any{"line": line, "character": 10},
+				},
+			}
+			_ = writePayload(os.Stdout, responseMessage{
+				JSONRPC: jsonRPCVersion,
+				ID:      *msg.ID,
+				Result: mustRaw([]map[string]any{{
+					field:        item,
+					"fromRanges": []map[string]any{fakeRange()},
+				}}),
 			})
 		case "textDocument/documentSymbol":
 			// Answer with hierarchical DocumentSymbol nodes (no location uri),

@@ -20,6 +20,8 @@ type NavigateSource interface {
 	TypeDefinition(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	Implementation(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	References(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
+	IncomingCalls(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
+	OutgoingCalls(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	Hover(ctx context.Context, path string, line, col int) (string, error)
 }
 
@@ -57,8 +59,8 @@ var schemaNavigate = json.RawMessage(`{
     },
     "action": {
       "type": "string",
-      "enum": ["definition", "type_definition", "implementation", "references", "hover"],
-      "description": "definition: jump to where the symbol is declared. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. hover: the language server's type/signature/doc for the symbol. Defaults to definition."
+      "enum": ["definition", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls", "hover"],
+      "description": "definition: jump to where the symbol is declared. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. incoming_calls: list the functions that call this one (callers). outgoing_calls: list the functions this one calls (callees). hover: the language server's type/signature/doc for the symbol. Defaults to definition."
     }
   }
 }`)
@@ -154,6 +156,18 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 			return Result{}, fmt.Errorf("finding references at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
 		return referencesResult(root, locs), nil
+	case "incoming_calls":
+		locs, err := t.source.IncomingCalls(ctx, path, line0, col0)
+		if err != nil {
+			return Result{}, fmt.Errorf("finding callers at %s:%d:%d: %w", args.Path, args.Line, col, err)
+		}
+		return locationsResult(root, locs, "No callers found."), nil
+	case "outgoing_calls":
+		locs, err := t.source.OutgoingCalls(ctx, path, line0, col0)
+		if err != nil {
+			return Result{}, fmt.Errorf("finding callees at %s:%d:%d: %w", args.Path, args.Line, col, err)
+		}
+		return locationsResult(root, locs, "No callees found."), nil
 	case "hover":
 		text, err := t.source.Hover(ctx, path, line0, col0)
 		if err != nil {
@@ -164,7 +178,7 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		}
 		return Result{Content: strings.TrimRight(text, "\n")}, nil
 	default:
-		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, type_definition, implementation, references, or hover)", action)), nil
+		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, type_definition, implementation, references, incoming_calls, outgoing_calls, or hover)", action)), nil
 	}
 }
 

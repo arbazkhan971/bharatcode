@@ -91,6 +91,72 @@ func (c *client) references(ctx context.Context, path string, line, col int) ([]
 	return parseReferences(result)
 }
 
+// prepareCallHierarchy issues a textDocument/prepareCallHierarchy request for
+// the position and returns the raw CallHierarchyItem objects the server
+// resolves it to. The items are returned unparsed so they can be handed back to
+// the server verbatim on the follow-up incomingCalls/outgoingCalls request:
+// some servers stash resolution state in fields (e.g. `data`) a reparsed subset
+// would drop. A nil slice means the symbol is not a call-hierarchy target.
+func (c *client) prepareCallHierarchy(ctx context.Context, path string, line, col int) ([]json.RawMessage, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/prepareCallHierarchy", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"position":     map[string]any{"line": line, "character": col},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("preparing call hierarchy: %w", err)
+	}
+	if len(result) == 0 || string(result) == "null" {
+		return nil, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(result, &items); err != nil {
+		return nil, fmt.Errorf("parsing call hierarchy items: %w", err)
+	}
+	return items, nil
+}
+
+// incomingCalls resolves the call-hierarchy item at the position and asks
+// callHierarchy/incomingCalls for each, returning the locations of the calling
+// symbols (the `from` item of each call — i.e. who calls this). A nil slice
+// means the symbol is not callable or has no callers.
+func (c *client) incomingCalls(ctx context.Context, path string, line, col int) ([]Location, error) {
+	return c.callHierarchy(ctx, path, line, col, "callHierarchy/incomingCalls", "from")
+}
+
+// outgoingCalls resolves the call-hierarchy item at the position and asks
+// callHierarchy/outgoingCalls for each, returning the locations of the called
+// symbols (the `to` item of each call — i.e. what this calls). A nil slice
+// means the symbol is not callable or makes no calls.
+func (c *client) outgoingCalls(ctx context.Context, path string, line, col int) ([]Location, error) {
+	return c.callHierarchy(ctx, path, line, col, "callHierarchy/outgoingCalls", "to")
+}
+
+// callHierarchy runs the two-step call-hierarchy protocol: prepare the item(s)
+// at the position, then issue method for each and extract the target item named
+// by field ("from" for incoming, "to" for outgoing) as a Location.
+func (c *client) callHierarchy(ctx context.Context, path string, line, col int, method, field string) ([]Location, error) {
+	items, err := c.prepareCallHierarchy(ctx, path, line, col)
+	if err != nil {
+		return nil, err
+	}
+	var out []Location
+	for _, item := range items {
+		result, err := c.request(ctx, method, map[string]any{"item": item})
+		if err != nil {
+			return nil, fmt.Errorf("requesting %s: %w", method, err)
+		}
+		locs, err := parseCallHierarchyCalls(result, field)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, locs...)
+	}
+	return out, nil
+}
+
 // documentSymbol issues a textDocument/documentSymbol request and returns the
 // symbols the server reports for the file. The path is supplied so symbols can
 // carry it, since a DocumentSymbol response omits the document uri.
@@ -715,6 +781,72 @@ type wireLocation struct {
 type wireLocationLink struct {
 	TargetURI   string    `json:"targetUri"`
 	TargetRange wireRange `json:"targetRange"`
+}
+
+// wireCallHierarchyItem mirrors the subset of an LSP CallHierarchyItem we
+// surface: the symbol's name and the location of its declaration. We jump to
+// the selectionRange (the symbol name) when present, falling back to the full
+// range (the whole declaration) for servers that omit it.
+type wireCallHierarchyItem struct {
+	Name           string     `json:"name"`
+	URI            string     `json:"uri"`
+	Range          wireRange  `json:"range"`
+	SelectionRange *wireRange `json:"selectionRange"`
+}
+
+// parseCallHierarchyCalls extracts the locations of the target items from a
+// callHierarchy/incomingCalls or .../outgoingCalls response. Each element is a
+// {from|to: CallHierarchyItem, fromRanges: Range[]} object; field selects the
+// item to surface ("from" for callers, "to" for callees). A null or empty
+// response yields a nil slice.
+func parseCallHierarchyCalls(raw json.RawMessage, field string) ([]Location, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("parsing call hierarchy calls: %w", err)
+	}
+	out := make([]Location, 0, len(items))
+	for _, item := range items {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(item, &obj); err != nil {
+			return nil, fmt.Errorf("parsing call hierarchy call: %w", err)
+		}
+		target, ok := obj[field]
+		if !ok {
+			continue
+		}
+		loc, ok, err := parseCallHierarchyItem(target)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, loc)
+		}
+	}
+	return out, nil
+}
+
+// parseCallHierarchyItem converts one CallHierarchyItem into a Location pointing
+// at the symbol's name. It reports ok=false when the item carries no uri.
+func parseCallHierarchyItem(raw json.RawMessage) (Location, bool, error) {
+	var item wireCallHierarchyItem
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return Location{}, false, fmt.Errorf("parsing call hierarchy item: %w", err)
+	}
+	if item.URI == "" {
+		return Location{}, false, nil
+	}
+	path, err := uriToPath(item.URI)
+	if err != nil {
+		return Location{}, false, fmt.Errorf("parsing call hierarchy item uri: %w", err)
+	}
+	rng := item.Range
+	if item.SelectionRange != nil {
+		rng = *item.SelectionRange
+	}
+	return Location{Path: path, Range: convertRange(rng)}, true, nil
 }
 
 // parseDefinition extracts the locations of a textDocument/definition response.

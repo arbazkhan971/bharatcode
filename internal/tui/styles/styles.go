@@ -86,6 +86,12 @@ type Theme struct {
 	// builds on the accent color with reverse video so the term reads as a solid
 	// block.
 	Match lipgloss.Style
+	// MatchOther emphasizes the term on the other on-screen matches — every hit
+	// that is not the current one — so a reader can see all occurrences at once
+	// the way an editor draws every match, with only the active one reverse-
+	// highlighted. It underlines in the accent color so these read as secondary
+	// to the solid reverse-video current match.
+	MatchOther lipgloss.Style
 }
 
 // palette is the set of raw colors a theme is built from.
@@ -136,6 +142,7 @@ func build(p palette) Theme {
 		// diff without competing with the accent-colored hunk markers.
 		DiffHeader: muted.Bold(true),
 		Match:      accent.Reverse(true),
+		MatchOther: accent.Underline(true),
 	}
 }
 

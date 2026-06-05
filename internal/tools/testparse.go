@@ -68,6 +68,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseMochaFailures(output)
 	case runnerCTest:
 		return parseCTestFailures(output)
+	case runnerPlaywright:
+		return parsePlaywrightFailures(output)
 	default:
 		return nil
 	}
@@ -94,6 +96,7 @@ const (
 	runnerBun
 	runnerMocha
 	runnerCTest
+	runnerPlaywright
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -220,6 +223,14 @@ func classifyTestRunner(command string) testRunner {
 		// invocation carries none of their substrings, but kept explicit to guard
 		// against future overlap.
 		return runnerCTest
+	case strings.Contains(c, "playwright test"):
+		// `playwright test`/`npx playwright test` drives Playwright's runner, whose
+		// list/line reporters close with numbered "  N) <file>:<line> › <title>"
+		// failure headers (each padded with box-drawing dashes) followed by the
+		// error message — a shape none of the other JS runners share. Checked before
+		// the jest runners since a "playwright test" invocation carries none of their
+		// substrings, but kept explicit to guard against future overlap.
+		return runnerPlaywright
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1332,6 +1343,60 @@ func parseCTestFailures(output string) []testFailure {
 		}
 		seen[name] = true
 		failures = append(failures, testFailure{Name: name, Detail: strings.TrimSpace(m[2])})
+	}
+	return failures
+}
+
+var (
+	// "  1) example.spec.ts:7:1 › get started link ─────────" — the numbered
+	// header that opens each entry in Playwright's detailed failure section. The
+	// captured group is the test title ("<file>:<line>:<col> › <name>", with an
+	// optional "[project] › " prefix), which `playwright test <file>:<line>`
+	// re-runs. Playwright pads the header with a run of box-drawing dashes
+	// ("─", U+2500); the trailing "(?:\s*─+)?" trims them off the title.
+	playwrightHeaderRe = regexp.MustCompile(`^\s*\d+\) (.+?)(?:\s*─+)?\s*$`)
+	// The trailing "─"-dash decoration Playwright also appends to the failed-test
+	// names in its closing "N failed" summary block, stripped so those lines (when
+	// used as a fallback) match the header form.
+	playwrightDashRe = regexp.MustCompile(`\s*─+\s*$`)
+)
+
+// parsePlaywrightFailures extracts failing tests from Playwright's list/line
+// reporter output (`playwright test`). Each entry in the detailed failure
+// section opens with a "  N) <file>:<line> › <title> ──────" header; the detail
+// is the first non-empty line beneath it — the assertion or thrown-exception
+// message (e.g. "Error: expect(received).toHaveTitle(expected)") — located
+// before the next numbered header so an entry without a body does not borrow the
+// following one's. The trailing box-drawing dashes Playwright pads the header
+// with are trimmed from the name.
+func parsePlaywrightFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := playwrightHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(playwrightDashRe.ReplaceAllString(m[1], ""))
+		// A genuine Playwright failure header names a test location ("file › title");
+		// a bare "1) note" line elsewhere in the output lacks the " › " separator and
+		// is skipped so it is not mistaken for a failing test.
+		if name == "" || !strings.Contains(name, "›") || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if playwrightHeaderRe.MatchString(lines[j]) {
+				break
+			}
+			if t := strings.TrimSpace(lines[j]); t != "" {
+				f.Detail = t
+				break
+			}
+		}
+		failures = append(failures, f)
 	}
 	return failures
 }

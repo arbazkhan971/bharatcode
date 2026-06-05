@@ -23,6 +23,8 @@ func TestClassifyTestRunner(t *testing.T) {
 		"bin/rspec":                           runnerRSpec,
 		"vendor/bin/phpunit":                  runnerPHPUnit,
 		"phpunit --filter testFoo":            runnerPHPUnit,
+		"dotnet test":                         runnerDotnet,
+		"dotnet test ./MyApp.sln -v normal":   runnerDotnet,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
@@ -424,6 +426,41 @@ Failed asserting that 3 matches expected 4.
 	want := []testFailure{
 		{Name: "MathTest::testAdd with data set #0 (1, 2, 4)", Detail: "Failed asserting that 3 matches expected 4."},
 	}
+	assertFailures(t, got, want)
+}
+
+func TestParseDotnetTestFailures(t *testing.T) {
+	out := `Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+  Passed MyApp.Tests.CalcTests.Sub [2 ms]
+  Failed MyApp.Tests.CalcTests.Add [4 ms]
+  Error Message:
+   Assert.Equal() Failure: Values differ
+   Expected: 5
+   Actual:   4
+  Stack Trace:
+     at MyApp.Tests.CalcTests.Add() in /src/CalcTests.cs:line 12
+
+  Failed MyApp.Tests.CalcTests.Div(a: 1, b: 0) [< 1 ms]
+  Error Message:
+   System.DivideByZeroException : Attempted to divide by zero.
+  Stack Trace:
+     at MyApp.Calc.Div(Int32 a, Int32 b)
+
+Failed!  - Failed:     2, Passed:     1, Skipped:     0, Total:     3`
+	got := parseTestFailures("dotnet test", out)
+	want := []testFailure{
+		{Name: "MyApp.Tests.CalcTests.Add", Detail: "Assert.Equal() Failure: Values differ"},
+		{Name: "MyApp.Tests.CalcTests.Div(a: 1, b: 0)", Detail: "System.DivideByZeroException : Attempted to divide by zero."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseDotnetTestFailures_NoDetail(t *testing.T) {
+	out := `  Failed Suite.Tests.Lonely [3 ms]
+Failed!  - Failed:     1, Passed:     0, Skipped:     0, Total:     1`
+	got := parseTestFailures("dotnet test ./MyApp.sln", out)
+	want := []testFailure{{Name: "Suite.Tests.Lonely"}}
 	assertFailures(t, got, want)
 }
 

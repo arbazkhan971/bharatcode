@@ -398,6 +398,45 @@ func TestDefaultConfigBuildsHealthyRegistry(t *testing.T) {
 	require.Greater(t, openAICompatibleCount, 0, "default config should register openai_compatible providers")
 }
 
+// TestDefaultConfigProviderModelsHaveCatalogEntries asserts that every model id
+// each provider lists in the embedded default config resolves to a catalog
+// entry exposed by the registry. The two are linked only by convention — a
+// provider's Models slice is a list of ids, and NewRegistry attaches metadata
+// (context window, pricing, tool/image support) only for ids that also appear
+// in the top-level Models catalog. A provider that names a model with no
+// matching catalog entry therefore wires up with no usable metadata for it, and
+// the model never surfaces in ListModels. config.Validate does not catch this
+// (it only checks the reverse direction: catalog -> provider), so this test
+// guards the default config against that silent gap. It is fully offline.
+func TestDefaultConfigProviderModelsHaveCatalogEntries(t *testing.T) {
+	cfg := config.Default()
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	catalog := make(map[string]bool)
+	for _, m := range reg.ListModels() {
+		catalog[m.ID] = true
+	}
+
+	var checked int
+	for _, prov := range cfg.Providers {
+		if prov.Disabled {
+			continue
+		}
+		for _, id := range prov.Models {
+			require.Truef(t, catalog[id],
+				"provider %q lists model %q with no matching catalog entry; add it to the top-level \"models\" array",
+				prov.Name, id)
+			checked++
+		}
+	}
+
+	// Guard against a vacuous pass: the default config is expected to list
+	// models on its providers, so the loop must have asserted on at least one.
+	require.Greater(t, checked, 0, "default config providers should list models")
+}
+
 // TestRegistryInfersGLMContextWindow proves a GLM-4.6 model added without an
 // explicit context_window still gets a real budget from the family heuristic
 // (200k, the window GLM-4.6 lifted to) rather than zero ("unknown"). This is the

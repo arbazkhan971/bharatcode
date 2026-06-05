@@ -227,6 +227,15 @@
       "supports_tools": true
     },
     {
+      "id": "gpt-5.5",
+      "provider": "codex",
+      "context_window": 400000,
+      "input_price_per_mtok_usd": 0.00,
+      "output_price_per_mtok_usd": 0.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
       "id": "deepseek-chat",
       "provider": "deepseek",
       "context_window": 131072,

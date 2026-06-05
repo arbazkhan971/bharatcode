@@ -47,6 +47,25 @@ FAIL	github.com/x/y	0.123s`
 	assertFailures(t, got, want)
 }
 
+func TestParseGoTestFailures_Panic(t *testing.T) {
+	out := `=== RUN   TestPanics
+--- FAIL: TestPanics (0.00s)
+panic: boom [recovered]
+	panic: boom
+
+goroutine 19 [running]:
+testing.tRunner.func1.2(...)
+=== RUN   TestAssert
+--- FAIL: TestAssert (0.00s)
+    assert_test.go:7: expected 1, got 2`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestPanics", Detail: "panic: boom"},
+		{Name: "TestAssert", Detail: "assert_test.go:7: expected 1, got 2"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseGoTestNoFailures(t *testing.T) {
 	out := "ok  \tgithub.com/x/y\t0.123s\n"
 	if got := parseTestFailures("go test ./...", out); got != nil {

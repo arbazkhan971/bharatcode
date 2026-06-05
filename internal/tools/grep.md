@@ -18,6 +18,7 @@ Arguments:
 - `case_insensitive` boolean, optional: force case-insensitive matching (like `rg -i`), overriding the default smart-case behaviour.
 - `only_matching` boolean, optional: print only the matched (non-empty) parts of each line, one match per row (like `rg -o`), instead of the whole line. Content mode only; ignored in `multiline` mode and `context`/`before`/`after` do not apply.
 - `word` boolean, optional: match whole words only (like `rg -w`/`--word-regexp`); the pattern must be bounded by word boundaries, so `id` will not match `width` or `hidden`.
+- `fixed_strings` boolean, optional: treat the pattern as a literal string rather than a regex (like `rg -F`/`--fixed-strings`), so metacharacters like `( ) [ ] . * + ? $ | \` match themselves. Use it to search for literal code such as `arr[i]` or `fmt.Sprintf(` without escaping.
 - `offset` integer, optional: skip the first N result entries before `head_limit` is applied, like piping through `tail -n +N`. Pages through results across every `output_mode`. Defaults to `0` (skip nothing).
 - `head_limit` integer, optional: cap the output to the first N result entries after `offset`, like piping through `head -N`, across every `output_mode`. Defaults to `0` (no extra limit beyond the built-in match cap).
 
@@ -76,6 +77,17 @@ then matches the identifier `id` but not `width`, `hidden`, or `idle`. On the
 Go fallback this is implemented as ripgrep documents `-w` — wrapping the pattern
 in `\b(?:…)\b` — so both paths agree, and it composes with `case_insensitive`,
 `only_matching`, and `multiline`.
+
+Fixed-string (literal) matching:
+
+Set `fixed_strings: true` to treat the pattern as a literal string rather than a
+regular expression, the analogue of ripgrep's `-F`/`--fixed-strings`. Regex
+metacharacters — `( ) [ ] . * + ? $ ^ | \` — then match themselves, so you can
+search for `fmt.Sprintf(`, `arr[i]`, or `$PATH` without escaping each one. On the
+Go fallback this is implemented as ripgrep documents `-F` — escaping the pattern
+with the regex engine's quote rules — so both paths agree, and it composes with
+`case_insensitive`, `word`, `only_matching`, and `multiline`. Smart-case still
+applies: an all-lowercase literal matches case-insensitively.
 
 Type filter:
 

@@ -45,7 +45,8 @@ What success looks like:
 When listing, a numbered list of actions, each showing its title, kind (e.g.
 `quickfix`, `source.organizeImports`, `refactor.extract`) when the server
 reports one, and a note of how it would take effect — an inline edit, a
-server-side command, or both.
+server-side command, both, or `resolve to apply` for a refactoring the server
+computes lazily (still applyable; `apply` resolves it first).
 
 When applying, a summary line plus a unified diff per file the action changed.
 If the applied action left any errors or warnings behind, the re-checked

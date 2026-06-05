@@ -95,6 +95,39 @@ func TestSlashSearch_FindsMatchesAndPositionsViewport(t *testing.T) {
 		"/search must scroll the first match into the visible window")
 }
 
+// TestSearchCentersMatchWithContextBelow asserts a match landed on by search is
+// positioned with the following lines still visible, rather than pinned to the
+// last row of the window, so the reader sees context after the hit as well as
+// before it.
+func TestSearchCentersMatchWithContextBelow(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	chatH := m.layout.chat.H
+	require.Greater(t, chatH, 2, "the window must be tall enough to show context below a centered match")
+
+	// One match squarely in the middle of a transcript far taller than the
+	// viewport, so there is ample content both above and below it to reveal.
+	hit := 2 * chatH
+	total := chatH * 4
+	seedScrollableTranscript(m, total, []int{hit})
+
+	rendered := func() string { return stripANSI(m.renderMain()) }
+
+	m.input.WriteString("/search ZZNEEDLE")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	require.Contains(t, rendered(), matchLine(0), "the match itself must be visible")
+	// The lines immediately after the match are filler tagged by index; with the
+	// match centered they remain on screen. Pinning the match to the bottom row
+	// would scroll all of them out of view.
+	require.Contains(t, rendered(), "filler-"+lineSuffix(hit+1),
+		"the line right after the match must stay visible (context below the hit)")
+	require.Contains(t, rendered(), "filler-"+lineSuffix(hit+chatH/2-1),
+		"context several lines below the match must be visible when it is centered")
+}
+
 // TestSearchNextPrev_CyclesThroughMatches asserts the next/prev keys walk the
 // matches in order and wrap around at both ends, repositioning the viewport so
 // the active match is visible at each step.

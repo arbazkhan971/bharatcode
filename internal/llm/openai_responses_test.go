@@ -219,8 +219,9 @@ func TestResponsesProviderMapsOutputAndUsage(t *testing.T) {
 // TestResponsesProviderReasoningGating asserts the reasoning-vs-normal param
 // gating on the wire: a reasoning model omits temperature and forwards the
 // effort nested under the Responses API "reasoning" object (not the
-// chat/completions top-level reasoning_effort), while a normal model sends
-// temperature and never emits a reasoning object.
+// chat/completions top-level reasoning_effort) alongside an "auto" summary
+// request, while a normal model sends temperature and never emits a reasoning
+// object.
 func TestResponsesProviderReasoningGating(t *testing.T) {
 	t.Run("reasoning model omits temperature and nests effort under reasoning", func(t *testing.T) {
 		provider, _, gotBody := responsesProvider(t, "o3-mini", cannedResponsesReply)
@@ -238,15 +239,18 @@ func TestResponsesProviderReasoningGating(t *testing.T) {
 		require.NotContains(t, string(*gotBody), `"reasoning_effort"`)
 		var probe struct {
 			Reasoning *struct {
-				Effort string `json:"effort"`
+				Effort  string `json:"effort"`
+				Summary string `json:"summary"`
 			} `json:"reasoning"`
 		}
 		require.NoError(t, json.Unmarshal(*gotBody, &probe))
 		require.NotNil(t, probe.Reasoning)
 		require.Equal(t, "high", probe.Reasoning.Effort)
+		// An auto summary is requested so the model's reasoning streams back.
+		require.Equal(t, "auto", probe.Reasoning.Summary)
 	})
 
-	t.Run("reasoning model without effort omits the reasoning object", func(t *testing.T) {
+	t.Run("reasoning model without effort still requests an auto summary", func(t *testing.T) {
 		provider, _, gotBody := responsesProvider(t, "o3-mini", cannedResponsesReply)
 
 		_, err := provider.Stream(context.Background(), Request{
@@ -255,7 +259,19 @@ func TestResponsesProviderReasoningGating(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		require.NotContains(t, string(*gotBody), `"reasoning"`)
+		// The reasoning object is still emitted to carry the summary request, but
+		// no blank effort is sent when none is configured.
+		require.NotContains(t, string(*gotBody), `"effort"`)
+		var probe struct {
+			Reasoning *struct {
+				Effort  string `json:"effort"`
+				Summary string `json:"summary"`
+			} `json:"reasoning"`
+		}
+		require.NoError(t, json.Unmarshal(*gotBody, &probe))
+		require.NotNil(t, probe.Reasoning)
+		require.Empty(t, probe.Reasoning.Effort)
+		require.Equal(t, "auto", probe.Reasoning.Summary)
 	})
 
 	t.Run("normal model sends temperature and omits the reasoning object", func(t *testing.T) {

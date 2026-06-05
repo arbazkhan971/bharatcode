@@ -28,11 +28,16 @@ type responsesRequest struct {
 	Include []string `json:"include,omitempty"`
 }
 
-// responsesReasoning is the Responses API "reasoning" object. Only Effort is
-// populated today ("low", "medium", "high", and gpt-5's "minimal"); the API
-// reads it as the per-request hidden-reasoning budget for a reasoning model.
+// responsesReasoning is the Responses API "reasoning" object. Effort is the
+// per-request hidden-reasoning budget ("low", "medium", "high", and gpt-5's
+// "minimal"). Summary asks the API to stream a natural-language summary of the
+// model's reasoning ("auto", "concise", "detailed"); the request builder sets
+// "auto" for every reasoning model so the hidden reasoning surfaces as
+// response.reasoning_summary_text.delta events. Both are omitempty so an unset
+// field is dropped.
 type responsesReasoning struct {
-	Effort string `json:"effort,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // responsesTool describes one callable function for the Responses API. Unlike

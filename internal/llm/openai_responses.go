@@ -155,12 +155,15 @@ func buildResponsesRequest(req Request) (responsesRequest, error) {
 	// Reasoning models reject temperature and accept a reasoning budget instead;
 	// gate both by model id exactly as the chat/completions path does so the
 	// API never sees a param it would reject. The Responses API nests the effort
-	// under a "reasoning" object (not a top-level reasoning_effort), so only emit
-	// it when an effort is configured to avoid sending an empty object.
+	// under a "reasoning" object (not a top-level reasoning_effort). Summary
+	// "auto" is requested unconditionally for reasoning models so the model's
+	// hidden reasoning streams back as response.reasoning_summary_text.delta
+	// events (mapped to ThinkingEvents); without it the Responses API emits no
+	// summary and the reasoning is invisible, mirroring Gemini's IncludeThoughts
+	// and Anthropic's thinking opt-ins. Effort is added only when configured, so
+	// an empty effort is simply dropped from the object rather than sent blank.
 	if isReasoningModel(req.Model) {
-		if req.ReasoningEffort != "" {
-			body.Reasoning = &responsesReasoning{Effort: req.ReasoningEffort}
-		}
+		body.Reasoning = &responsesReasoning{Effort: req.ReasoningEffort, Summary: "auto"}
 	} else {
 		body.Temperature = req.Temperature
 	}

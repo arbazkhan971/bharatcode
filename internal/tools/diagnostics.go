@@ -133,9 +133,7 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 			severityString(d.Severity),
 			d.Message,
 		)
-		if d.Source != "" {
-			fmt.Fprintf(&b, " (%s)", d.Source)
-		}
+		b.WriteString(diagnosticTail(d))
 		b.WriteByte('\n')
 	}
 
@@ -175,6 +173,21 @@ func diagnosticFiles(ctx context.Context, root string) ([]string, error) {
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+// diagnosticTail renders the trailing annotations shown after a diagnostic's
+// message: the rule code in brackets and the reporting source in parentheses,
+// each emitted only when present. The leading space keeps it appendable to a
+// message line, e.g. " [E0425] (rustc)".
+func diagnosticTail(d lsp.Diagnostic) string {
+	var b strings.Builder
+	if d.Code != "" {
+		fmt.Fprintf(&b, " [%s]", d.Code)
+	}
+	if d.Source != "" {
+		fmt.Fprintf(&b, " (%s)", d.Source)
+	}
+	return b.String()
 }
 
 func severityString(severity lsp.Severity) string {

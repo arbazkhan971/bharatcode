@@ -81,7 +81,9 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	// chat bubble above keeps the user's original text. Resolution is scoped to
 	// the workspace root; unresolved mentions are left untouched.
 	expanded, _ := expandFileMentions(prompt, m.workspaceRoot)
-	return m.runAgent(expanded), nil
+	// Re-inject the active goal as a persistent frame on every turn so the
+	// model stays anchored to it; the bubble above stays free of the frame.
+	return m.runAgent(m.frameForAgent(expanded)), nil
 }
 
 // ensureSession creates a persisted session row the first time the user runs a

@@ -138,6 +138,77 @@ func TestGoalRun_StopsOnCompletionSignal(t *testing.T) {
 	require.Contains(t, m.dialogs.Render(120), "Goal complete")
 }
 
+// TestGoalFrame_ReinjectedAcrossTurnsButNotInChat is the backlog #6 contract:
+// once a goal is set, every agent turn carries it as an active frame, yet the
+// frame never leaks into the user's chat bubble.
+func TestGoalFrame_ReinjectedAcrossTurnsButNotInChat(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{llm.DeltaTextEvent{Text: "turn one"}, llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}}},
+		{llm.DeltaTextEvent{Text: "turn two"}, llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}}},
+	}}
+
+	h := newAgentHarness(t, provider)
+	m := h.model
+	m.goal = "keep the build green"
+
+	h.submit(t, "first message")
+	h.drain(t, func() bool { return !m.running })
+
+	got := allUserText(provider.lastRequest().Messages)
+	require.Contains(t, got, "<active-goal>", "first turn must carry the goal frame to the agent")
+	require.Contains(t, got, "keep the build green", "frame must include the goal text")
+	require.Contains(t, got, "first message", "user prompt must still reach the agent")
+
+	h.submit(t, "second message")
+	h.drain(t, func() bool { return !m.running })
+
+	got2 := allUserText(provider.lastRequest().Messages)
+	require.Contains(t, got2, "<active-goal>", "the goal frame must be re-injected on the next turn too")
+	require.Contains(t, got2, "second message")
+
+	// The frame is agent-facing only; the chat must show the plain prompts.
+	rendered := plainText(m.chat.Render(200))
+	require.Contains(t, rendered, "first message")
+	require.Contains(t, rendered, "second message")
+	require.NotContains(t, rendered, "active-goal", "the goal frame must not leak into the chat bubble")
+}
+
+// TestGoalFrame_AbsentWhenNoGoal confirms turns are untouched when no goal is
+// set, so the frame is strictly opt-in.
+func TestGoalFrame_AbsentWhenNoGoal(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{llm.DeltaTextEvent{Text: "ok"}, llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}}},
+	}}
+
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	h.submit(t, "just a message")
+	h.drain(t, func() bool { return !m.running })
+
+	got := allUserText(provider.lastRequest().Messages)
+	require.NotContains(t, got, "active-goal", "no goal set means no frame")
+	require.Contains(t, got, "just a message")
+}
+
+// allUserText concatenates the text of every user message in order, so a test
+// can assert what the agent loop actually received this turn.
+func allUserText(msgs []message.Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if m.Role != message.RoleUser {
+			continue
+		}
+		for _, blk := range m.Content {
+			if tb, ok := blk.(message.TextBlock); ok {
+				b.WriteString(tb.Text)
+				b.WriteByte('\n')
+			}
+		}
+	}
+	return b.String()
+}
+
 // --- harness -------------------------------------------------------------
 
 type agentHarness struct {

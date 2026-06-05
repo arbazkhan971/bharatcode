@@ -46,6 +46,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseCargoTestFailures(output)
 	case runnerRSpec:
 		return parseRSpecFailures(output)
+	case runnerPHPUnit:
+		return parsePHPUnitFailures(output)
 	default:
 		return nil
 	}
@@ -61,6 +63,7 @@ const (
 	runnerCargo
 	runnerRSpec
 	runnerUnittest
+	runnerPHPUnit
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -88,6 +91,11 @@ func classifyTestRunner(command string) testRunner {
 		return runnerGo
 	case rspecRe.MatchString(c):
 		return runnerRSpec
+	case strings.Contains(c, "phpunit"):
+		// "phpunit", "vendor/bin/phpunit", "php artisan test" wrappers all carry
+		// the binary name; matching it before the JS/Python runners avoids any
+		// overlap (none of those substrings appear in a phpunit invocation).
+		return runnerPHPUnit
 	case strings.Contains(c, "pytest"), strings.Contains(c, "py.test"):
 		return runnerPytest
 	// `python -m unittest` (and `unittest discover`) print a "FAIL:"/"ERROR:"
@@ -547,6 +555,52 @@ func parseRSpecFailures(output string) []testFailure {
 			seen[f.Name] = true
 			failures = append(failures, f)
 		}
+	}
+	return failures
+}
+
+// "1) App\Tests\MyTest::testSomething" — the numbered header of an entry in
+// PHPUnit's "There was 1 failure:"/"There were N errors:" report. PHPUnit
+// numbers the Failures and Errors blocks separately, each restarting at 1, so
+// the test id (not the number) keys deduplication. The id is "Class::method",
+// optionally followed by a data-set descriptor ("with data set #0 (...)").
+var phpunitHeaderRe = regexp.MustCompile(`^\d+\) (\S+::\S+.*)$`)
+
+// parsePHPUnitFailures extracts failing tests from PHPUnit's text report. Each
+// failure or error block opens with a "N) Class::method" header; the detail is
+// the first non-empty line beneath it, which carries the assertion message
+// ("Failed asserting that ...") or the thrown exception ("RuntimeException:
+// boom"). The trailing "/path/File.php:line" location and surrounding blanks are
+// skipped. A test appearing in both blocks (impossible in practice, but cheap to
+// guard) is reported once.
+func parsePHPUnitFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := phpunitHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		// The message sits on the first non-empty line after the header. Stop at
+		// the next numbered header so a block whose entry has no message body does
+		// not borrow the following entry's message.
+		for j := i + 1; j < len(lines); j++ {
+			if phpunitHeaderRe.MatchString(lines[j]) {
+				break
+			}
+			if t := strings.TrimSpace(lines[j]); t != "" {
+				f.Detail = t
+				break
+			}
+		}
+		failures = append(failures, f)
 	}
 	return failures
 }

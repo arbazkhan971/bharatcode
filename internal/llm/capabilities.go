@@ -84,6 +84,46 @@ func modelSupportsThinking(models []Model, id string) bool {
 	return false
 }
 
+// anthropic1MContextSubstrings lists case-insensitive markers in Anthropic
+// model ids whose models can serve the 1M-token context window behind the
+// context-1m beta. Only the Claude Sonnet 4 line (claude-sonnet-4 and
+// claude-sonnet-4-5) offers it today; the Opus and Haiku lines stay at the
+// standard 200k window, so enabling the beta for them would be a no-op at best.
+var anthropic1MContextSubstrings = []string{
+	"claude-sonnet-4",
+}
+
+// anthropic1MContextThreshold is the standard Claude context window. A configured
+// 1M-capable model whose context_window exceeds it is read as a request to use
+// the larger window, which modelSupportsAnthropic1MContext unlocks via the
+// context-1m beta header.
+const anthropic1MContextThreshold = 200_000
+
+// anthropic1MContextBeta is the anthropic-beta token that opts a request into the
+// 1M-token context window on the Claude Sonnet 4 line.
+const anthropic1MContextBeta = "context-1m-2025-08-07"
+
+// modelSupportsAnthropic1MContext reports whether the configured model named by
+// id is a 1M-capable Claude model the user has opted into the larger window for,
+// by setting a context_window above the standard 200k. The beta is gated on that
+// explicit config rather than enabled by default because the portion of a request
+// above 200k input tokens bills at a premium long-context rate, so a user must
+// ask for it. The model-id match is an approximate substring scan, mirroring the
+// other Anthropic capability checks.
+func modelSupportsAnthropic1MContext(models []Model, id string) bool {
+	model, ok := findModel(models, id)
+	if !ok || model.ContextWindow <= anthropic1MContextThreshold {
+		return false
+	}
+	lid := strings.ToLower(strings.TrimSpace(id))
+	for _, marker := range anthropic1MContextSubstrings {
+		if strings.Contains(lid, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // geminiThinkingModelSubstrings lists case-insensitive markers in Gemini model
 // ids whose models support the native thinkingConfig (the Gemini 2.5 family and
 // the Gemini 3 line, which reasons by default). The Gemini provider only emits

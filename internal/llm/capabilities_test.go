@@ -210,6 +210,54 @@ func TestModelSupportsGeminiThinking(t *testing.T) {
 	}
 }
 
+// TestModelSupportsAnthropic1MContext verifies the 1M-context beta is gated on
+// both a 1M-capable Claude Sonnet 4 id and an opted-in context_window above the
+// standard 200k window.
+func TestModelSupportsAnthropic1MContext(t *testing.T) {
+	cases := []struct {
+		name   string
+		models []Model
+		id     string
+		want   bool
+	}{
+		{
+			name:   "sonnet 4 with 1M window opts in",
+			models: []Model{{ID: "claude-sonnet-4-5", ContextWindow: 1_000_000}},
+			id:     "claude-sonnet-4-5",
+			want:   true,
+		},
+		{
+			name:   "sonnet 4 base id with 1M window opts in",
+			models: []Model{{ID: "claude-sonnet-4-20250514", ContextWindow: 1_000_000}},
+			id:     "claude-sonnet-4-20250514",
+			want:   true,
+		},
+		{
+			name:   "sonnet 4 at standard window stays off",
+			models: []Model{{ID: "claude-sonnet-4-5", ContextWindow: 200_000}},
+			id:     "claude-sonnet-4-5",
+			want:   false,
+		},
+		{
+			name:   "opus is not 1M-capable even with large window",
+			models: []Model{{ID: "claude-opus-4-1", ContextWindow: 1_000_000}},
+			id:     "claude-opus-4-1",
+			want:   false,
+		},
+		{
+			name:   "unknown model id is off",
+			models: []Model{{ID: "claude-sonnet-4-5", ContextWindow: 1_000_000}},
+			id:     "claude-sonnet-4-5-missing",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, modelSupportsAnthropic1MContext(tc.models, tc.id))
+		})
+	}
+}
+
 // TestNewRegistryInfersContextWindow verifies the registry fills a missing
 // context_window from the model-id heuristic while leaving an explicit value
 // untouched.

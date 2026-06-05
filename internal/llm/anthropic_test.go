@@ -120,6 +120,62 @@ func TestAnthropicStreamsTextToolAndUsage(t *testing.T) {
 	require.Equal(t, "user", captured.Messages[0].Role)
 }
 
+// TestAnthropicSends1MContextBeta verifies the provider opts into the 1M-token
+// context window via the anthropic-beta header when a 1M-capable Sonnet 4 model
+// is configured with a context_window above the standard 200k, and omits the
+// header for a model left at the standard window.
+func TestAnthropicSends1MContextBeta(t *testing.T) {
+	cases := []struct {
+		name          string
+		contextWindow int
+		wantBeta      string
+	}{
+		{name: "opted into 1M window", contextWindow: 1_000_000, wantBeta: anthropic1MContextBeta},
+		{name: "standard window omits beta", contextWindow: 200_000, wantBeta: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBeta string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBeta = r.Header.Get("anthropic-beta")
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, "event: message_start\n"+
+					"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n")
+				fmt.Fprint(w, "event: message_stop\n"+
+					"data: {\"type\":\"message_stop\"}\n\n")
+			}))
+			defer server.Close()
+			t.Setenv("ANTHROPIC_TEST_KEY", "test-key")
+
+			cfg := testConfig("anthropic", config.ProviderAnthropic, server.URL+"/v1")
+			cfg.Providers[0].APIKeyEnv = "ANTHROPIC_TEST_KEY"
+			cfg.Providers[0].Models = []string{"claude-sonnet-4-5"}
+			cfg.Models = []config.Model{{
+				ID:            "claude-sonnet-4-5",
+				Provider:      "anthropic",
+				ContextWindow: tc.contextWindow,
+				SupportsTools: true,
+			}}
+			reg, err := NewRegistry(cfg)
+			require.NoError(t, err)
+			provider, err := reg.Get("anthropic")
+			require.NoError(t, err)
+
+			events, err := provider.Stream(context.Background(), Request{
+				Model: "claude-sonnet-4-5",
+				Messages: []message.Message{{
+					Role:    message.RoleUser,
+					Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+				}},
+			})
+			require.NoError(t, err)
+			collectEvents(events)
+
+			require.Equal(t, tc.wantBeta, gotBeta)
+		})
+	}
+}
+
 func TestAnthropicConvertsToolResultHistory(t *testing.T) {
 	var captured anthropicRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -61,6 +61,17 @@ func (p *anthropicProvider) SupportsImages() bool {
 	return supportsImages(p.models)
 }
 
+// betaHeader returns the value for the anthropic-beta request header given the
+// target model, or "" when no beta features apply. Today the only opt-in is the
+// 1M-token context window on the Claude Sonnet 4 line, enabled when the user has
+// configured a context_window above the standard 200k for that model.
+func (p *anthropicProvider) betaHeader(model string) string {
+	if modelSupportsAnthropic1MContext(p.models, model) {
+		return anthropic1MContextBeta
+	}
+	return ""
+}
+
 func (p *anthropicProvider) Stream(ctx context.Context, req Request) (<-chan Event, error) {
 	if len(req.Tools) > 0 && !modelSupportsTools(p.models, req.Model) {
 		return nil, fmt.Errorf("model %q tools: %w", req.Model, ErrUnsupportedFeature)
@@ -89,6 +100,9 @@ func (p *anthropicProvider) Stream(ctx context.Context, req Request) (<-chan Eve
 	}
 	if apiKey != "" {
 		headers["x-api-key"] = apiKey
+	}
+	if beta := p.betaHeader(req.Model); beta != "" {
+		headers["anthropic-beta"] = beta
 	}
 
 	resp, err := postJSONWithHeaders(ctx, p.client, p.baseURL+"/messages", headers, body)
@@ -141,6 +155,11 @@ func (p *anthropicProvider) CountTokens(ctx context.Context, req Request) (int, 
 	}
 	if apiKey != "" {
 		headers["x-api-key"] = apiKey
+	}
+	// count_tokens must run with the same beta surface as inference so the 1M
+	// window is reflected when the prompt exceeds the standard 200k.
+	if beta := p.betaHeader(req.Model); beta != "" {
+		headers["anthropic-beta"] = beta
 	}
 
 	resp, err := postJSONWithHeaders(ctx, p.client, p.baseURL+"/messages/count_tokens", headers, body)

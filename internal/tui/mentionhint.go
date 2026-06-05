@@ -68,6 +68,11 @@ func isMentionChar(r rune) bool {
 func mentionMatches(token, root string) []string {
 	files := listWorkspaceFiles(root)
 	if token == "" {
+		// A bare "@" has no token to score, so order by depth then length: a
+		// top-level README or main.go surfaces ahead of a deeply-nested file
+		// that merely sorts earlier lexically, matching how Claude Code reveals
+		// the workspace for a bare "@".
+		sort.SliceStable(files, func(i, j int) bool { return shallowerFirst(files[i], files[j]) })
 		if len(files) > maxMentionHints {
 			files = files[:maxMentionHints]
 		}
@@ -92,11 +97,7 @@ func mentionMatches(token, root string) []string {
 		// Within a score band, prefer shallower paths, then shorter ones, so a
 		// top-level file outranks a deeply-nested namesake. The stable sort then
 		// leaves the original lexical order for remaining ties.
-		di, dj := strings.Count(matched[i].path, "/"), strings.Count(matched[j].path, "/")
-		if di != dj {
-			return di < dj
-		}
-		return len(matched[i].path) < len(matched[j].path)
+		return shallowerFirst(matched[i].path, matched[j].path)
 	})
 	out := make([]string, 0, len(matched))
 	for _, m := range matched {
@@ -106,6 +107,17 @@ func mentionMatches(token, root string) []string {
 		}
 	}
 	return out
+}
+
+// shallowerFirst reports whether path a should sort ahead of b purely on shape:
+// fewer path segments first, then shorter overall. Callers apply it as a stable
+// tie-break, so paths of equal depth and length keep their existing (lexical)
+// order.
+func shallowerFirst(a, b string) bool {
+	if da, db := strings.Count(a, "/"), strings.Count(b, "/"); da != db {
+		return da < db
+	}
+	return len(a) < len(b)
 }
 
 // mentionScore rates how well a lower-cased path matches a lower-cased token,

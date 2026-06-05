@@ -84,9 +84,20 @@ func slashHintCommands(buffer string, st *inputState) (cmds []string, active int
 // The list is truncated token-by-token to fit width, appending an ellipsis when
 // not every match fits, so the menu never spills past one row.
 func (m *model) renderSlashHint(width int) string {
-	cmds, active := slashHintCommands(m.input.String(), &m.inputHistory)
+	buffer := m.input.String()
+	cmds, active := slashHintCommands(buffer, &m.inputHistory)
 	if len(cmds) == 0 || width <= 0 {
 		return ""
+	}
+
+	// Outside an active Tab cycle the buffer is the search token; highlight the
+	// command-name runes it matched so the user can see why each entry qualified —
+	// especially under the fuzzy subsequence fallback, where the matched letters
+	// are scattered. During a cycle the buffer holds the selected command, so the
+	// token is suppressed and the active entry is accented whole instead.
+	var token string
+	if active < 0 {
+		token = strings.TrimPrefix(buffer, "/")
 	}
 
 	const sep = "  "
@@ -106,9 +117,12 @@ func (m *model) renderSlashHint(width int) string {
 			break
 		}
 		used += next
-		if i == active {
+		switch {
+		case i == active:
 			parts = append(parts, m.theme.Accent.Render(name))
-		} else {
+		case token != "":
+			parts = append(parts, m.highlightMatch(name, token))
+		default:
 			parts = append(parts, m.theme.Muted.Render(name))
 		}
 	}

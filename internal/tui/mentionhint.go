@@ -283,6 +283,16 @@ func matchPositions(token, path string) []int {
 // styled span so the output stays compact. With no match (or an empty token) the
 // whole name is muted, matching the menu's default look.
 func (m *model) highlightMention(name, token string) string {
+	return m.highlightMatch(name, token)
+}
+
+// highlightMatch renders name with the runes that matchPositions reports as
+// matching token accented and the rest muted, coalescing adjacent same-class
+// runes into one styled span so the output stays compact. With no match (or an
+// empty token) the whole name is muted, matching each menu's default look. It is
+// shared by the @-file picker and the slash-command menu so both emphasize the
+// characters that connected the search to a candidate.
+func (m *model) highlightMatch(name, token string) string {
 	pos := matchPositions(token, name)
 	if len(pos) == 0 {
 		return m.theme.Muted.Render(name)

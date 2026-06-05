@@ -63,6 +63,55 @@ func CheckProviders(cfg *config.Config) error {
 	)
 }
 
+// CheckMCPServers verifies every enabled MCP server in cfg is reachable without
+// leaving the machine, the second precondition for offline mode. A remote MCP
+// server is an egress channel just like a remote LLM provider: the agent's tool
+// arguments (which can contain source code) are sent to whatever URL the server
+// lives at. Network transports ("http", "sse") are therefore required to point
+// at a loopback URL; a "stdio" server runs as a local child process over pipes
+// and is always allowed. Disabled servers are ignored. As with CheckProviders,
+// every offender is named so the user can fix them all at once, and the check
+// fails closed: an http/sse server with a missing or unparseable URL is rejected.
+func CheckMCPServers(cfg *config.Config) error {
+	if cfg == nil {
+		return nil
+	}
+	var offenders []string
+	for _, m := range cfg.MCP {
+		if m.Disabled {
+			continue
+		}
+		if !mcpServerIsLocal(m) {
+			offenders = append(offenders, fmt.Sprintf("%q (%s -> %s)", m.Name, m.Transport, describeMCPEndpoint(m)))
+		}
+	}
+	if len(offenders) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"offline mode rejects non-localhost MCP servers: %s; point their url at a loopback address, use a stdio transport, or disable these servers",
+		strings.Join(offenders, ", "),
+	)
+}
+
+// mcpServerIsLocal reports whether MCP server m can be reached without network
+// egress. A stdio server talks to a local child process over pipes; an http or
+// sse server must dial a loopback URL.
+func mcpServerIsLocal(m config.MCPServer) bool {
+	if strings.EqualFold(strings.TrimSpace(m.Transport), "stdio") {
+		return true
+	}
+	return isLoopbackURL(m.URL)
+}
+
+// describeMCPEndpoint renders the endpoint shown in the rejection message.
+func describeMCPEndpoint(m config.MCPServer) string {
+	if url := strings.TrimSpace(m.URL); url != "" {
+		return url
+	}
+	return "no url"
+}
+
 // providerIsLocal reports whether p's effective endpoint is a loopback address.
 func providerIsLocal(p config.Provider) bool {
 	// codex_oauth always talks to OpenAI's remote Codex backend; its BaseURL only

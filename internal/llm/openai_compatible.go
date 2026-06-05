@@ -186,17 +186,26 @@ func isOpenRouter(baseURL string) bool {
 
 // openRouterReasoning maps a request's configured thinking budget or reasoning
 // effort onto OpenRouter's `reasoning` object. A positive thinking budget takes
-// precedence and is sent as max_tokens; otherwise a non-empty effort is sent as
-// effort. When neither is configured it returns nil so the field is omitted and
-// the model's own default applies rather than reasoning being force-enabled.
+// precedence and is sent as max_tokens; otherwise a configured effort is sent as
+// effort. The provider-independent "auto"/"dynamic" effort labels mean "let the
+// model size its own reasoning" and have no OpenRouter effort value, so they map
+// to enabled:true (reasoning on, upstream default budget) rather than being sent
+// verbatim, which OpenRouter would 400 on. The effort is lowercased so a value
+// like "High" matches OpenRouter's lowercase labels. When neither a budget nor
+// an effort is configured it returns nil so the field is omitted and the model's
+// own default applies rather than reasoning being force-enabled.
 func openRouterReasoning(req Request) *openAIReasoning {
 	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
 		return &openAIReasoning{MaxTokens: req.Thinking.BudgetTokens}
 	}
-	if effort := strings.TrimSpace(req.ReasoningEffort); effort != "" {
+	switch effort := strings.ToLower(strings.TrimSpace(req.ReasoningEffort)); effort {
+	case "":
+		return nil
+	case "auto", "dynamic":
+		return &openAIReasoning{Enabled: true}
+	default:
 		return &openAIReasoning{Effort: effort}
 	}
-	return nil
 }
 
 func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error) {

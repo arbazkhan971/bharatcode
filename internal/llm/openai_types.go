@@ -33,18 +33,22 @@ type openAIChatRequest struct {
 
 // openAIReasoning is OpenRouter's reasoning request object. At most one of
 // Effort ("low"/"medium"/"high"), MaxTokens (a thinking-token budget), or
-// Enabled (turn reasoning on at the upstream's own default) is set per request;
+// Enabled (toggle reasoning at the upstream's own default) is set per request;
 // all are omitempty so the unused ones drop out of the body. An empty object
 // would enable provider-default reasoning, so the builder leaves Reasoning nil
 // unless a budget or effort was configured.
 type openAIReasoning struct {
 	Effort    string `json:"effort,omitempty"`
 	MaxTokens int    `json:"max_tokens,omitempty"`
-	// Enabled turns reasoning on without pinning an effort label or token budget,
-	// letting the upstream apply its own default. It carries the "auto"/"dynamic"
-	// effort intent, which has no OpenRouter effort label (sending effort:"auto"
-	// would 400).
-	Enabled bool `json:"enabled,omitempty"`
+	// Enabled toggles reasoning without pinning an effort label or token budget.
+	// A true value carries the "auto"/"dynamic" effort intent (let the upstream
+	// size its own reasoning), which has no OpenRouter effort label (sending
+	// effort:"auto" would 400); a false value carries the "none" intent (turn
+	// reasoning off), which likewise has no OpenRouter effort label (sending
+	// effort:"none" would 400). It is a pointer so an explicit false is emitted
+	// as enabled:false rather than dropped by omitempty, which would leave the
+	// upstream's default reasoning in place — the opposite of what "none" asks.
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // openAIStreamOptions toggles streaming extras. IncludeUsage asks the provider

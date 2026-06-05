@@ -87,6 +87,9 @@ const (
 	// CLI's stored ChatGPT subscription token. It talks to OpenAI's private
 	// Codex backend; unsupported and outside OpenAI's third-party terms.
 	ProviderCodexOAuth ProviderType = "codex_oauth"
+	// ProviderGemini is for Google's native Generative Language API
+	// (generateContent / streamGenerateContent) used by Gemini models.
+	ProviderGemini ProviderType = "gemini"
 )
 
 // Provider describes one LLM endpoint. APIKeyEnv names an

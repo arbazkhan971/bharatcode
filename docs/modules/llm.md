@@ -50,6 +50,7 @@ Subpackage layout — one concrete `Provider` implementation per file:
 
 - `internal/llm/anthropic/` — Anthropic Messages API (Claude 3.5/3.7/4 Sonnet, Opus, Haiku)
 - `internal/llm/openai/` — OpenAI Chat Completions and Responses API
+- `internal/llm/gemini/` — Google Generative Language API (Gemini, native `generateContent` with tools, vision, and thinking)
 - `internal/llm/deepseek/` — DeepSeek API (V3, R1)
 - `internal/llm/moonshot/` — Moonshot Kimi K2
 - `internal/llm/groq/` — Groq (OpenAI-compatible)

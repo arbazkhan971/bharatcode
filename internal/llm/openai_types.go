@@ -119,12 +119,28 @@ type openAIUsage struct {
 	PromptCacheMissTokens   int `json:"prompt_cache_miss_tokens"`
 	CacheReadInputTokens    int `json:"cache_read_input_tokens"`
 	CacheCreationInputToken int `json:"cache_creation_input_tokens"`
+	// PromptTokensDetails carries the OpenAI-standard cache breakdown. Native
+	// OpenAI (and spec-compliant relays such as OpenRouter, Groq, Together) do
+	// not emit the flat cache fields above; they report prompt-cache hits only
+	// under prompt_tokens_details.cached_tokens, which is a subset already
+	// counted in PromptTokens.
+	PromptTokensDetails *openAIPromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// openAIPromptTokensDetails is the nested cache breakdown of the OpenAI Chat
+// Completions usage object. Only the cached-token count is consumed; audio and
+// other modality fields are ignored.
+type openAIPromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 func (u openAIUsage) toUsage() Usage {
 	cacheRead := u.CacheReadInputTokens
 	if cacheRead == 0 {
 		cacheRead = u.PromptCacheHitTokens
+	}
+	if cacheRead == 0 && u.PromptTokensDetails != nil {
+		cacheRead = u.PromptTokensDetails.CachedTokens
 	}
 	cacheWrite := u.CacheCreationInputToken
 	if cacheWrite == 0 {

@@ -295,6 +295,65 @@ func TestGeminiClassifiesStreamErrorAsRetryable(t *testing.T) {
 	require.ErrorIs(t, streamErr, ErrRateLimit)
 }
 
+func TestGeminiClassifiesTerminalStreamErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		chunk   string
+		wantErr error
+	}{
+		{
+			// A bad or missing key surfaces mid-stream as UNAUTHENTICATED; it must
+			// map to ErrAuth so the caller reports a credential failure rather than
+			// a generic, retried error.
+			name:    "unauthenticated maps to auth",
+			chunk:   `{"error":{"code":401,"status":"UNAUTHENTICATED","message":"API key not valid"}}`,
+			wantErr: ErrAuth,
+		},
+		{
+			// A project without access to the model arrives as PERMISSION_DENIED,
+			// which is likewise an auth condition.
+			name:    "permission denied maps to auth",
+			chunk:   `{"error":{"code":403,"status":"PERMISSION_DENIED","message":"caller does not have permission"}}`,
+			wantErr: ErrAuth,
+		},
+		{
+			// An unknown model id is reported as NOT_FOUND, matching the pre-stream
+			// HTTP classification of a 404.
+			name:    "not found maps to model not found",
+			chunk:   `{"error":{"code":404,"status":"NOT_FOUND","message":"models/test-model is not found"}}`,
+			wantErr: ErrModelNotFound,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, geminiSSE(tc.chunk))
+			}))
+			defer server.Close()
+
+			cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+			provider := geminiProviderFor(t, cfg)
+
+			events, err := provider.Stream(context.Background(), Request{
+				Model:    "test-model",
+				Messages: []message.Message{textMsg("hi")},
+			})
+			require.NoError(t, err)
+			collected := collectEvents(events)
+
+			var streamErr error
+			for _, ev := range collected {
+				if e, ok := ev.(ErrorEvent); ok {
+					streamErr = e.Err
+				}
+			}
+			require.Error(t, streamErr)
+			require.ErrorIs(t, streamErr, tc.wantErr)
+		})
+	}
+}
+
 func TestGeminiClassifiesContextOverflowStreamError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

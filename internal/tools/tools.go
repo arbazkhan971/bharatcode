@@ -71,6 +71,10 @@ type Dependencies struct {
 	TodoBus     *pubsub.Topic[TodoEvent]
 	WorkDir     string
 	SessionID   string
+	// Offline, when true, withholds the network-egress tools (web_fetch,
+	// web_search) from the registry so the agent has no way to send code or
+	// prompts off the machine. It backs BharatCode's sovereignty offline mode.
+	Offline bool
 }
 
 // Registry stores the available tools by name.
@@ -105,8 +109,12 @@ func NewRegistry(deps Dependencies) *Registry {
 	r.Register(newCodeActionsTool(deps))
 	r.Register(newFormatTool(deps))
 	r.Register(newRenameTool(deps))
-	r.Register(newWebFetchTool(deps))
-	r.Register(newWebSearchTool(deps))
+	// In offline mode the egress tools are withheld entirely: their absence is
+	// the enforcement, so the agent cannot reach them even by name.
+	if !deps.Offline {
+		r.Register(newWebFetchTool(deps))
+		r.Register(newWebSearchTool(deps))
+	}
 	r.Register(newJobOutputTool(deps))
 	r.Register(newJobKillTool(deps))
 	return r

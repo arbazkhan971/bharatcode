@@ -284,6 +284,23 @@ func TestBashTailOutputSurvivesLineCap(t *testing.T) {
 	require.Contains(t, result.Content, "lines truncated")
 }
 
+func TestRegistryOfflineWithholdsEgressTools(t *testing.T) {
+	deps := shellDeps(t, nil)
+	deps.Offline = true
+	registry := NewRegistry(deps)
+	for _, name := range []string{"web_fetch", "web_search"} {
+		if _, ok := registry.Get(name); ok {
+			t.Errorf("offline registry exposes egress tool %q", name)
+		}
+	}
+	// Non-egress tools remain available.
+	for _, name := range []string{"bash", "edit", "view"} {
+		if _, ok := registry.Get(name); !ok {
+			t.Errorf("offline registry is missing core tool %q", name)
+		}
+	}
+}
+
 func shellDeps(t *testing.T, cfg *config.Config) Dependencies {
 	t.Helper()
 	if cfg == nil {

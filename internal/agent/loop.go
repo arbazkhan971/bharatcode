@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -109,6 +111,47 @@ type hookFirer interface {
 	Fire(ctx context.Context, event hooks.Event, payload any) (hooks.Decision, error)
 }
 
+// verifyHookSource is the subset of *hooks.Engine that provides verify
+// commands for edited files. It is an interface so tests can inject a fake;
+// *hooks.Engine satisfies it. A nil verifyHookSource means no verify commands
+// are configured and verification is always skipped.
+type verifyHookSource interface {
+	MatchingVerifiers(filePath string) []hooks.VerifySpec
+}
+
+// verifyRunner executes a single verify command in a subprocess and returns
+// its combined stdout+stderr output. A non-zero exit code is returned as an
+// error so the caller can distinguish success from verification failure.
+// It is an interface so tests can inject a deterministic fake.
+type verifyRunner interface {
+	RunVerify(ctx context.Context, command, cwd string, timeout time.Duration) (output string, err error)
+}
+
+// execVerifyRunner is the default verifyRunner that runs commands through
+// /bin/sh -c, mirroring how the hooks engine executes user commands.
+type execVerifyRunner struct{}
+
+func (execVerifyRunner) RunVerify(ctx context.Context, command, cwd string, timeout time.Duration) (string, error) {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command) //nolint:gosec
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		// Return output alongside the error so the caller can include it in
+		// the tool result shown to the model.
+		return out.String(), err
+	}
+	return out.String(), nil
+}
+
 // Config bundles the dependencies a Loop needs.
 type Config struct {
 	Name          string
@@ -151,6 +194,16 @@ type Config struct {
 	// varying per turn. It defaults to ComplexityUnset, leaving the Router to
 	// derive complexity from each turn. It is ignored when Router is nil.
 	RouteHint TurnComplexity
+	// VerifyHooks supplies verify commands that run after a successful
+	// write-class tool execution. When nil, verification is disabled and the
+	// loop behaves exactly as before. *hooks.Engine satisfies this interface;
+	// a test fake may be injected instead.
+	VerifyHooks verifyHookSource
+	// VerifyRunner executes verify commands. When nil it defaults to the
+	// execVerifyRunner, which runs commands through /bin/sh -c. Tests may
+	// inject a deterministic fake to control verify outcomes without forking
+	// real subprocesses.
+	VerifyRunner verifyRunner
 }
 
 // Loop runs a single named agent for one session at a time.
@@ -666,6 +719,16 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			result := l.runTool(runCtx, sessionID, call)
 			l.fireFileEditHook(runCtx, sessionID, call, result)
 
+			// Run any verify_command configured on matching FileEdit hooks. When
+			// verification fails, override the result with the synthesized error
+			// so the model sees the failure. The original tool result is
+			// discarded: the verify output is more actionable than the success
+			// message from the write itself. When verification is not configured
+			// (the common case), verifyResult is nil and result is unchanged.
+			if verifyResult := l.runVerifyCommands(runCtx, call, result); verifyResult != nil {
+				result = *verifyResult
+			}
+
 			// Record the executed (call,result) pair. A true return means the recent
 			// history oscillates A,B,A,B — a distinct futile pattern the predictive
 			// check cannot see because the calls differ each step.
@@ -1082,6 +1145,62 @@ func (l *Loop) fireFileEditHook(ctx context.Context, sessionID string, call pend
 		return
 	}
 	l.fireHook(ctx, hooks.FileEdit, hooks.FileEditPayload{Path: args.Path, SessionID: sessionID})
+}
+
+// runVerifyCommands runs any verify_command entries from FileEdit hooks that
+// match the edited file path. It is called after a write-class tool succeeds.
+// On a non-write tool, a failed write, or when no verify hooks are configured,
+// it is a no-op and returns nil. When a verify command exits non-zero it returns
+// a synthesized error result (IsError=true) containing the command output so
+// the model sees the failure and can re-edit or explain; on success it returns
+// nil. The method uses the Loop's configured VerifyRunner, falling back to
+// execVerifyRunner when none is set.
+func (l *Loop) runVerifyCommands(ctx context.Context, call pendingToolCall, result tools.Result) *tools.Result {
+	if _, ok := writeClassTools[call.Name]; !ok {
+		return nil
+	}
+	if result.IsError {
+		return nil
+	}
+	if l.cfg.VerifyHooks == nil {
+		return nil
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(call.Input, &args); err != nil || args.Path == "" {
+		return nil
+	}
+
+	specs := l.cfg.VerifyHooks.MatchingVerifiers(args.Path)
+	if len(specs) == 0 {
+		return nil
+	}
+
+	runner := l.cfg.VerifyRunner
+	if runner == nil {
+		runner = execVerifyRunner{}
+	}
+
+	for _, spec := range specs {
+		output, err := runner.RunVerify(ctx, spec.Command, spec.Cwd, spec.Timeout)
+		if err != nil {
+			slog.Info("Verify command failed",
+				slog.String("command", spec.Command),
+				slog.String("file", args.Path),
+				slog.String("error", err.Error()),
+			)
+			content := fmt.Sprintf("verify_command failed for %s:\n$ %s\n%s\nerror: %s",
+				args.Path, spec.Command, output, err.Error())
+			r := tools.Result{Content: content, IsError: true}
+			return &r
+		}
+		slog.Debug("Verify command passed",
+			slog.String("command", spec.Command),
+			slog.String("file", args.Path),
+		)
+	}
+	return nil
 }
 
 func textMessage(sessionID string, role message.Role, text string) message.Message {

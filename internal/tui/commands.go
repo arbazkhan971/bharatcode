@@ -33,6 +33,7 @@ func (m *model) openSessionPicker() (tea.Model, tea.Cmd) {
 	}
 	m.sessionCandidates = sessions
 	m.sessionCursor = 0
+	m.sessionFilter = ""
 	m.dialogs.Push(&dialog.Text{
 		DialogID: "sessions",
 		Title:    "Sessions",
@@ -42,10 +43,39 @@ func (m *model) openSessionPicker() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// visibleSessions returns the picker rows that match the live filter query,
+// in candidate order. An empty query returns every candidate. Matching is a
+// case-insensitive substring test against the session title and short id, so
+// typing part of either narrows the list (mirroring the session switchers in
+// Claude Code and opencode).
+func (m *model) visibleSessions() []session.Session {
+	if m.sessionFilter == "" {
+		return m.sessionCandidates
+	}
+	q := strings.ToLower(m.sessionFilter)
+	out := make([]session.Session, 0, len(m.sessionCandidates))
+	for _, s := range m.sessionCandidates {
+		hay := strings.ToLower(s.Title + " " + shortSessionID(s.ID))
+		if strings.Contains(hay, q) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // sessionPickerBody renders the session list with a cursor marker and a hint.
+// When a filter query is active it is echoed above the list, and an empty
+// result set is reported so the user knows the query matched nothing.
 func (m *model) sessionPickerBody() string {
-	lines := make([]string, 0, len(m.sessionCandidates)+2)
-	for i, s := range m.sessionCandidates {
+	visible := m.visibleSessions()
+	lines := make([]string, 0, len(visible)+4)
+	if m.sessionFilter != "" {
+		lines = append(lines, "Filter: "+m.sessionFilter, "")
+	}
+	if len(visible) == 0 {
+		lines = append(lines, "(no sessions match)")
+	}
+	for i, s := range visible {
 		marker := "  "
 		if i == m.sessionCursor {
 			marker = "> "
@@ -56,7 +86,7 @@ func (m *model) sessionPickerBody() string {
 		}
 		lines = append(lines, fmt.Sprintf("%s%s · %d msgs · %s", marker, title, s.MessageCount, shortSessionID(s.ID)))
 	}
-	lines = append(lines, "", "↑/↓ to move · enter to restore · esc to cancel")
+	lines = append(lines, "", "type to filter · ↑/↓ to move · enter to restore · esc to cancel")
 	return strings.Join(lines, "\n")
 }
 
@@ -65,24 +95,48 @@ func (m *model) sessionPickerBody() string {
 // (other than enter/esc) falls through to the dialog's own handler.
 func (m *model) handleSessionPickerKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.Cmd) {
 	switch msg.String() {
-	case "up", "k":
+	case "up":
 		if m.sessionCursor > 0 {
 			m.sessionCursor--
 			m.refreshSessionPicker()
 		}
 		return true, nil
-	case "down", "j":
-		if m.sessionCursor < len(m.sessionCandidates)-1 {
+	case "down":
+		if m.sessionCursor < len(m.visibleSessions())-1 {
 			m.sessionCursor++
 			m.refreshSessionPicker()
 		}
 		return true, nil
+	case "backspace":
+		// Backspace edits the live filter rather than dismissing the picker.
+		if m.sessionFilter != "" {
+			r := []rune(m.sessionFilter)
+			m.sessionFilter = string(r[:len(r)-1])
+			m.sessionCursor = 0
+			m.refreshSessionPicker()
+		}
+		return true, nil
 	case "enter":
-		chosen := m.sessionCandidates[m.sessionCursor]
+		visible := m.visibleSessions()
+		if len(visible) == 0 {
+			// Nothing matches the filter; keep the picker open rather than
+			// restoring an arbitrary session.
+			return true, nil
+		}
+		chosen := visible[m.sessionCursor]
 		m.dialogs.Pop()
 		m.sessionCandidates = nil
+		m.sessionFilter = ""
 		return true, m.restoreSession(chosen.ID)
 	default:
+		// A printable keypress extends the filter query. Anything else (esc,
+		// etc.) falls through to the dialog's own handler.
+		if text := msg.Key().Text; text != "" {
+			m.sessionFilter += text
+			m.sessionCursor = 0
+			m.refreshSessionPicker()
+			return true, nil
+		}
 		return false, nil
 	}
 }

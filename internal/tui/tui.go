@@ -166,9 +166,12 @@ type model struct {
 	goalIteration int
 
 	// Session picker state. sessionCandidates holds the listed sessions while
-	// the /sessions picker is open; sessionCursor is the highlighted row.
+	// the /sessions picker is open; sessionCursor is the highlighted row within
+	// the currently visible (filtered) rows; sessionFilter is the live
+	// type-to-filter query narrowing the list by title or id.
 	sessionCandidates []session.Session
 	sessionCursor     int
+	sessionFilter     string
 
 	// exportDir is the directory /export writes transcript files into. It is
 	// empty by default, in which case exports land in the current working

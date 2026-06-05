@@ -46,28 +46,37 @@ func (m *model) openSessionPicker() (tea.Model, tea.Cmd) {
 
 // visibleSessions returns the picker rows that match the live filter query.
 // An empty query returns every candidate in candidate (recency) order. A query
-// is matched case-insensitively against the session title and short id: rows
-// whose haystack contains the query as a substring rank first, then rows it
+// is matched case-insensitively against the session title and short id in three
+// ranked bands: rows whose title begins with the query rank first, then rows
+// whose title-and-id haystack contains the query as a substring, then rows it
 // matches only as a scattered subsequence (so "psr" finds "Parser refactor").
-// Within each band the original recency order is preserved, mirroring the fuzzy
-// session switchers in Claude Code and opencode and the @-file picker's own
-// substring-before-subsequence ranking.
+// Leading the title-prefix band ahead of a mid-string substring mirrors the
+// @-file picker's base-name-prefix tier, so typing the start of a session's name
+// surfaces it first rather than burying it under an older session that merely
+// contains those letters. Within each band the original recency order is
+// preserved, matching the fuzzy session switchers in Claude Code and opencode.
 func (m *model) visibleSessions() []session.Session {
 	if m.sessionFilter == "" {
 		return m.sessionCandidates
 	}
 	q := strings.ToLower(m.sessionFilter)
-	var substr, subseq []session.Session
+	var prefix, substr, subseq []session.Session
 	for _, s := range m.sessionCandidates {
-		hay := strings.ToLower(s.Title + " " + shortSessionID(s.ID))
+		title := strings.ToLower(s.Title)
+		hay := title + " " + strings.ToLower(shortSessionID(s.ID))
 		switch {
+		case strings.HasPrefix(title, q):
+			prefix = append(prefix, s)
 		case strings.Contains(hay, q):
 			substr = append(substr, s)
 		case isSubsequence(q, hay):
 			subseq = append(subseq, s)
 		}
 	}
-	return append(substr, subseq...)
+	out := make([]session.Session, 0, len(prefix)+len(substr)+len(subseq))
+	out = append(out, prefix...)
+	out = append(out, substr...)
+	return append(out, subseq...)
 }
 
 // sessionPickerBody renders the session list with a cursor marker and a hint.

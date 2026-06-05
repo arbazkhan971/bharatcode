@@ -148,6 +148,39 @@ func TestStatLines_EmptyPatch(t *testing.T) {
 	require.Equal(t, "", New(styles.Theme{}).StatLines(""))
 }
 
+// TestUnified_TruncatesWithEllipsis checks that a line wider than the render
+// width is clipped with a trailing ellipsis (not silently cut) and that the
+// result still fits within the width, so a reviewer can tell content was
+// dropped.
+func TestUnified_TruncatesWithEllipsis(t *testing.T) {
+	t.Parallel()
+
+	patch := "+abcdefghij\n"
+	got := New(styles.Theme{}).RenderUnified(patch, 5)
+	require.Equal(t, "+abc…", got)
+	require.Equal(t, 5, len([]rune(got)))
+}
+
+// TestUnified_NoTruncationWhenFits checks that a line at or under the width is
+// left untouched, so the ellipsis only appears when content is actually lost.
+func TestUnified_NoTruncationWhenFits(t *testing.T) {
+	t.Parallel()
+
+	patch := "+abc\n"
+	got := New(styles.Theme{}).RenderUnified(patch, 5)
+	require.Equal(t, "+abc", got)
+}
+
+// TestUnified_TruncateWidthOne checks the degenerate width-1 case yields a lone
+// ellipsis rather than panicking or dropping the marker.
+func TestUnified_TruncateWidthOne(t *testing.T) {
+	t.Parallel()
+
+	patch := "+abc\n"
+	got := New(styles.Theme{}).RenderUnified(patch, 1)
+	require.Equal(t, "…", got)
+}
+
 // TestUnifiedHeader_StyledDistinctly checks that file-boundary metadata lines
 // (---, +++, diff --git, index) are rendered with the header style and not
 // mistaken for added/removed content, so file boundaries stand out in a

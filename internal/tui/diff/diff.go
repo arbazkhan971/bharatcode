@@ -309,12 +309,22 @@ func (v *Viewer) styleLine(line string) string {
 	}
 }
 
-// clampWidth truncates line to at most width runes.
+// clampWidth truncates line to at most width runes. When a line is cut short, an
+// ellipsis replaces the final visible rune so a reviewer can tell the row was
+// truncated rather than mistaking the clipped text for the whole line, matching
+// how Claude Code and opencode mark wrapped-off diff content. The result still
+// occupies exactly width runes so the gutter and column alignment are unchanged.
+// At width 1 there is no room for both content and a marker, so the lone cell
+// becomes the ellipsis.
 func clampWidth(line string, width int) string {
-	if len([]rune(line)) > width {
-		return string([]rune(line)[:width])
+	runes := []rune(line)
+	if len(runes) <= width {
+		return line
 	}
-	return line
+	if width <= 1 {
+		return "…"
+	}
+	return string(runes[:width-1]) + "…"
 }
 
 // isDiffHeader reports whether line is unified-diff file-boundary metadata

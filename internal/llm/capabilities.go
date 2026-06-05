@@ -157,7 +157,9 @@ var contextWindowRules = []struct {
 	// xAI Grok — Grok 4 and the grok-code coding line lifted the window to 256k,
 	// while the grok-2/3 line stays at 131k. Both ids carry the "grok" marker, so
 	// the specific "grok-4"/"grok-code" rules must precede the family one to avoid
-	// falling through to 131k.
+	// falling through to 131k. The grok-4-fast line lifted the window again to 2M;
+	// its id also carries the "grok-4" marker, so its rule must precede grok-4's.
+	{"grok-4-fast", 2_000_000},
 	{"grok-4", 256_000},
 	{"grok-code", 256_000},
 	{"grok", 131_072},

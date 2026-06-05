@@ -492,6 +492,29 @@ func TestBinaryPath_FallsBackToASideForDeletedBlob(t *testing.T) {
 	require.Equal(t, "", binaryPath("not a binary line"))
 }
 
+// TestStatLines_DeletedFileNamedByPreImage proves a deleted file — whose "+++"
+// header is "/dev/null" — is listed under its real pre-image ("---") name rather
+// than as "/dev/null", the way git's "--stat" names a removed file. Its removed
+// lines are still counted, and a co-changed file in the same patch is unaffected.
+func TestStatLines_DeletedFileNamedByPreImage(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/gone.go b/gone.go\ndeleted file mode 100644\nindex abc1234..0000000\n--- a/gone.go\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n" +
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+
+	files := fileStats(patch)
+	require.Len(t, files, 2)
+	require.Equal(t, "gone.go", files[0].Path)
+	require.Equal(t, 2, files[0].Removed)
+	require.Equal(t, 0, files[0].Added)
+	require.Equal(t, "main.go", files[1].Path)
+
+	// The rendered row carries the real name, never "/dev/null".
+	got := New(styles.Theme{}).StatLines(patch, 0)
+	require.Contains(t, got, "gone.go")
+	require.NotContains(t, got, "/dev/null")
+}
+
 // TestUnified_TruncatesWithEllipsis checks that a line wider than the render
 // width is clipped with a trailing ellipsis (not silently cut) and that the
 // result still fits within the width, so a reviewer can tell content was

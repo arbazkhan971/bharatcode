@@ -363,6 +363,10 @@ func diffStat(patch string) (files, added, removed int) {
 // Such metadata is realized lazily, only when the block ends without a "+++"
 // header, so a rename or binary change that also carries text content is counted
 // once by its "+++" rather than twice.
+//
+// A deletion's "+++" header is "/dev/null" — that post-image side carries no real
+// name — so the file is instead named by its "---" pre-image path, the way git's
+// "--stat" lists a removed file under the name it had rather than as "/dev/null".
 func fileStats(patch string) []FileStat {
 	var files []FileStat
 	cur := -1
@@ -377,11 +381,16 @@ func fileStats(patch string) []FileStat {
 	// and/or a binary marker, neither of which emits a "+++" header.
 	var pendingPath string
 	var pendingBinary, sawContent bool
+	// oldPath holds the most recent "---" (pre-image) path, used to name a
+	// deletion whose "+++" header is "/dev/null" — that side carries no real
+	// name, so the diffstat would otherwise label a deleted file "/dev/null"
+	// instead of the file that was removed.
+	var oldPath string
 	flushMeta := func() {
 		if !sawContent && (pendingBinary || pendingPath != "") {
 			files = append(files, FileStat{Path: pendingPath, Binary: pendingBinary})
 		}
-		pendingPath, pendingBinary, sawContent = "", false, false
+		pendingPath, pendingBinary, sawContent, oldPath = "", false, false, ""
 	}
 
 	for _, line := range strings.Split(patch, "\n") {
@@ -395,11 +404,19 @@ func fileStats(patch string) []FileStat {
 			if p := binaryPath(line); p != "" {
 				pendingPath = p
 			}
+		case strings.HasPrefix(line, "---"):
+			// Pre-image path: remembered so a deletion's "/dev/null" post-image
+			// can still be named by the file that was removed. Not content.
+			oldPath = cleanDiffPath(line[len("---"):])
 		case strings.HasPrefix(line, "+++"):
-			files = append(files, FileStat{Path: cleanDiffPath(line[len("+++"):])})
+			p := cleanDiffPath(line[len("+++"):])
+			if p == "/dev/null" && oldPath != "" {
+				p = oldPath
+			}
+			files = append(files, FileStat{Path: p})
 			cur = len(files) - 1
 			sawContent = true
-		case strings.HasPrefix(line, "---"), strings.HasPrefix(line, "index "), strings.HasPrefix(line, "@@"):
+		case strings.HasPrefix(line, "index "), strings.HasPrefix(line, "@@"):
 			// File-boundary or hunk metadata: not counted as content.
 		case strings.HasPrefix(line, "+"):
 			ensureBare()

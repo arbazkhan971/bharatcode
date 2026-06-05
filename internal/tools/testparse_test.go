@@ -8,59 +8,61 @@ import (
 
 func TestClassifyTestRunner(t *testing.T) {
 	cases := map[string]testRunner{
-		"go test ./...":                        runnerGo,
-		"GOFLAGS=-count=1 go test -run X ./p":  runnerGo,
-		"pytest -q tests/":                     runnerPytest,
-		"python -m py.test":                    runnerPytest,
-		"python -m unittest test_mod":          runnerUnittest,
-		"python -m unittest discover":          runnerUnittest,
-		"npm test":                             runnerJest,
-		"npm run test -- --ci":                 runnerJest,
-		"yarn test":                            runnerJest,
-		"pnpm test":                            runnerJest,
-		"npx vitest run":                       runnerJest,
-		"npx jest src/":                        runnerJest,
-		"cargo test":                           runnerCargo,
-		"cargo test --release foo":             runnerCargo,
-		"rspec":                                runnerRSpec,
-		"bundle exec rspec spec/foo_spec.rb":   runnerRSpec,
-		"bin/rspec":                            runnerRSpec,
-		"vendor/bin/phpunit":                   runnerPHPUnit,
-		"phpunit --filter testFoo":             runnerPHPUnit,
-		"dotnet test":                          runnerDotnet,
-		"dotnet test ./MyApp.sln -v normal":    runnerDotnet,
-		"mvn test":                             runnerMaven,
-		"mvn -q verify -Dtest=FooTest":         runnerMaven,
-		"./mvnw test":                          runnerMaven,
-		"gradle test":                          runnerGradle,
-		"./gradlew test --tests FooTest":       runnerGradle,
-		"gradlew check":                        runnerGradle,
-		"mix test":                             runnerExUnit,
-		"mix test test/foo_test.exs:12":        runnerExUnit,
-		"node --test":                          runnerTAP,
-		"node --test test/*.js":                runnerTAP,
-		"npx tape test/*.js":                   runnerTAP,
-		"bats test/":                           runnerTAP,
-		"bats test.bats":                       runnerTAP,
-		"npx bats tests/":                      runnerTAP,
-		"echo acrobats perform":                runnerNone,
-		"deno test":                            runnerDeno,
-		"deno test --allow-read mod_test.ts":   runnerDeno,
-		"swift test":                           runnerSwift,
-		"swift test --filter CalculatorTests":  runnerSwift,
-		"bun test":                             runnerBun,
-		"bun test ./math.test.ts":              runnerBun,
-		"bun run test":                         runnerNone,
-		"mocha":                                runnerMocha,
-		"npx mocha test/*.js":                  runnerMocha,
-		"ctest":                                runnerCTest,
-		"ctest -R '^Foo$' --output-on-failure": runnerCTest,
-		"cmake --build . && ctest":             runnerCTest,
-		"ls -la":                               runnerNone,
-		"echo go testing the waters":           runnerNone,
-		"echo rspecs are great":                runnerNone,
-		"echo plan the upgrade":                runnerNone,
-		"echo swift testing guide":             runnerNone,
+		"go test ./...":                         runnerGo,
+		"GOFLAGS=-count=1 go test -run X ./p":   runnerGo,
+		"pytest -q tests/":                      runnerPytest,
+		"python -m py.test":                     runnerPytest,
+		"python -m unittest test_mod":           runnerUnittest,
+		"python -m unittest discover":           runnerUnittest,
+		"npm test":                              runnerJest,
+		"npm run test -- --ci":                  runnerJest,
+		"yarn test":                             runnerJest,
+		"pnpm test":                             runnerJest,
+		"npx vitest run":                        runnerJest,
+		"npx jest src/":                         runnerJest,
+		"cargo test":                            runnerCargo,
+		"cargo test --release foo":              runnerCargo,
+		"rspec":                                 runnerRSpec,
+		"bundle exec rspec spec/foo_spec.rb":    runnerRSpec,
+		"bin/rspec":                             runnerRSpec,
+		"vendor/bin/phpunit":                    runnerPHPUnit,
+		"phpunit --filter testFoo":              runnerPHPUnit,
+		"dotnet test":                           runnerDotnet,
+		"dotnet test ./MyApp.sln -v normal":     runnerDotnet,
+		"mvn test":                              runnerMaven,
+		"mvn -q verify -Dtest=FooTest":          runnerMaven,
+		"./mvnw test":                           runnerMaven,
+		"gradle test":                           runnerGradle,
+		"./gradlew test --tests FooTest":        runnerGradle,
+		"gradlew check":                         runnerGradle,
+		"mix test":                              runnerExUnit,
+		"mix test test/foo_test.exs:12":         runnerExUnit,
+		"node --test":                           runnerTAP,
+		"node --test test/*.js":                 runnerTAP,
+		"npx tape test/*.js":                    runnerTAP,
+		"bats test/":                            runnerTAP,
+		"bats test.bats":                        runnerTAP,
+		"npx bats tests/":                       runnerTAP,
+		"echo acrobats perform":                 runnerNone,
+		"deno test":                             runnerDeno,
+		"deno test --allow-read mod_test.ts":    runnerDeno,
+		"swift test":                            runnerSwift,
+		"swift test --filter CalculatorTests":   runnerSwift,
+		"bun test":                              runnerBun,
+		"bun test ./math.test.ts":               runnerBun,
+		"bun run test":                          runnerNone,
+		"mocha":                                 runnerMocha,
+		"npx mocha test/*.js":                   runnerMocha,
+		"ctest":                                 runnerCTest,
+		"ctest -R '^Foo$' --output-on-failure":  runnerCTest,
+		"cmake --build . && ctest":              runnerCTest,
+		"playwright test":                       runnerPlaywright,
+		"npx playwright test e2e/login.spec.ts": runnerPlaywright,
+		"ls -la":                                runnerNone,
+		"echo go testing the waters":            runnerNone,
+		"echo rspecs are great":                 runnerNone,
+		"echo plan the upgrade":                 runnerNone,
+		"echo swift testing guide":              runnerNone,
 	}
 	for cmd, want := range cases {
 		if got := classifyTestRunner(cmd); got != want {
@@ -1007,6 +1009,51 @@ func TestParseCTestFailures_NoFailures(t *testing.T) {
 
 100% tests passed, 0 tests failed out of 1`
 	if got := parseTestFailures("ctest", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParsePlaywrightFailures(t *testing.T) {
+	out := `Running 3 tests using 1 worker
+
+  ✓  1 example.spec.ts:3:1 › has title (1.2s)
+  ✘  2 example.spec.ts:7:1 › get started link (0.5s)
+  ✘  3 [firefox] › nav.spec.ts:4:1 › navigation works (0.3s)
+
+
+  1) example.spec.ts:7:1 › get started link ──────────────────────────────────
+
+    Error: expect(received).toHaveTitle(expected)
+
+    Expected pattern: /Playwright/
+        at example.spec.ts:8:5
+
+  2) [firefox] › nav.spec.ts:4:1 › navigation works ──────────────────────────
+
+    TimeoutError: locator.click: Timeout 30000ms exceeded.
+
+
+  2 failed
+    example.spec.ts:7:1 › get started link ─────────────────────────────────────
+    [firefox] › nav.spec.ts:4:1 › navigation works ─────────────────────────────
+  1 passed (2.0s)`
+	got := parseTestFailures("npx playwright test", out)
+	want := []testFailure{
+		{Name: "example.spec.ts:7:1 › get started link", Detail: "Error: expect(received).toHaveTitle(expected)"},
+		{Name: "[firefox] › nav.spec.ts:4:1 › navigation works", Detail: "TimeoutError: locator.click: Timeout 30000ms exceeded."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParsePlaywrightFailures_NoFailures(t *testing.T) {
+	// A clean run prints no numbered "N)" failure headers, so the inline progress
+	// lines must not be mistaken for failures.
+	out := `Running 1 test using 1 worker
+
+  ✓  1 example.spec.ts:3:1 › has title (1.2s)
+
+  1 passed (2.0s)`
+	if got := parseTestFailures("playwright test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

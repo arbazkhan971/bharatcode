@@ -202,7 +202,7 @@ func (m *model) renderFiletree(width, height int) string {
 		return clampHeight(b.String(), height)
 	}
 	patch := unifiedPatch(diffs)
-	b.WriteString(diff.New(m.theme).RenderUnified(patch, max(1, width)))
+	b.WriteString(diff.New(m.theme).RenderUnifiedNumbered(patch, max(1, width)))
 	return clampHeight(b.String(), height)
 }
 

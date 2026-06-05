@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -101,6 +102,74 @@ func TestFiletreePanel_SelectingEditedFile_RendersDiff(t *testing.T) {
 	require.Contains(t, out, "Diff: beta.go")
 	require.Contains(t, out, "old line")
 	require.Contains(t, out, "new line")
+}
+
+func TestFiletreeScrollStart_KeepsCursorVisible(t *testing.T) {
+	t.Parallel()
+
+	// Few files relative to the window: no scrolling, always start at the top.
+	require.Equal(t, 0, filetreeScrollStart(0, 3, 10))
+	require.Equal(t, 0, filetreeScrollStart(2, 3, 10))
+
+	// A cursor near the top pins the window to the top.
+	require.Equal(t, 0, filetreeScrollStart(1, 100, 10))
+
+	// A mid-listing cursor centres the window.
+	require.Equal(t, 45, filetreeScrollStart(50, 100, 10))
+
+	// A cursor near the bottom clamps the window to the end (it never runs past
+	// the final entry).
+	require.Equal(t, 90, filetreeScrollStart(99, 100, 10))
+	require.Equal(t, 90, filetreeScrollStart(95, 100, 10))
+}
+
+func TestFiletreeListingRows_ReservesRoomForDiff(t *testing.T) {
+	t.Parallel()
+
+	// The listing takes roughly half the panel, leaving the rest for the diff.
+	require.Equal(t, 9, filetreeListingRows(20, 100))
+	// A short listing never claims more rows than it has files.
+	require.Equal(t, 3, filetreeListingRows(20, 3))
+	// Tiny panels still yield at least one row.
+	require.Equal(t, 1, filetreeListingRows(1, 100))
+}
+
+func TestFiletreeTitle_ShowsPosition(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "Files", filetreeTitle(0, 0))
+	require.Equal(t, "Files (1/5)", filetreeTitle(0, 5))
+	require.Equal(t, "Files (5/5)", filetreeTitle(4, 5))
+}
+
+func TestFiletreePanel_LongListing_KeepsCursorOnScreen(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	// Enough files that the listing must be windowed within the panel.
+	for i := 0; i < 80; i++ {
+		writeFile(t, root, fmt.Sprintf("file%02d.go", i), "package main\n")
+	}
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+	require.Len(t, m.filetree.files, 80)
+
+	// Walk the cursor deep into the listing, past where an unwindowed render
+	// would have pushed it off the top.
+	for i := 0; i < 60; i++ {
+		_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	}
+	require.Equal(t, 60, m.filetree.cursor)
+
+	out := m.renderMain()
+	sel := m.filetree.selected()
+	// The selected file (marked with "> ") is still rendered, and the position
+	// indicator and a "more above" marker confirm the listing scrolled.
+	require.Contains(t, out, "> "+sel)
+	require.Contains(t, out, "Files (61/80)")
+	require.Contains(t, out, "more")
 }
 
 func TestFiletreePanel_FocusedNavigation_DoesNotEditInput(t *testing.T) {

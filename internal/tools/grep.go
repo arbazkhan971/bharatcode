@@ -57,6 +57,11 @@ type grepArgs struct {
 	// the rg and Go-fallback paths stay consistent; context options do not apply
 	// when it is set.
 	OnlyMatching bool `json:"only_matching,omitempty"`
+	// Word restricts matches to whole words (like rg -w / --word-regexp): the
+	// pattern must be surrounded by word boundaries, so searching "id" no longer
+	// matches "width" or "hidden". On the Go fallback this is the documented
+	// equivalent of wrapping the pattern in \b…\b, keeping both paths aligned.
+	Word bool `json:"word,omitempty"`
 	// Offset skips the first N result entries before HeadLimit is applied, the
 	// analogue of piping ripgrep through `tail -n +N` (0-based skip count). It
 	// pages through results across every output_mode. Zero (the default) skips
@@ -92,6 +97,7 @@ var (
     "type": {"type": "string", "description": "Filter to a language by file type, like rg --type go (e.g. go, py, js, ts, rust, java, c, cpp). Combine with include to narrow further."},
     "case_insensitive": {"type": "boolean", "description": "Force case-insensitive matching (like rg -i), overriding the default smart-case behaviour."},
     "only_matching": {"type": "boolean", "description": "Print only the matched (non-empty) parts of each line, one match per row (like rg -o). Content mode only; ignored in multiline mode and context options do not apply."},
+    "word": {"type": "boolean", "description": "Match whole words only (like rg -w / --word-regexp): the pattern must be bounded by word boundaries, so \"id\" will not match \"width\" or \"hidden\"."},
     "offset": {"type": "integer", "minimum": 0, "description": "Skip the first N result entries before applying head_limit (like piping through tail -n +N). Pages through results across every output_mode. Defaults to 0."},
     "head_limit": {"type": "integer", "minimum": 0, "description": "Cap output to the first N result entries after offset (like piping through head -N), across every output_mode. Defaults to 0 (no extra limit beyond the built-in match cap)."}
   }
@@ -246,6 +252,9 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 	if args.CaseInsensitive {
 		cmdArgs = append(cmdArgs, "--ignore-case")
 	}
+	if args.Word {
+		cmdArgs = append(cmdArgs, "--word-regexp")
+	}
 
 	switch args.OutputMode {
 	case "files_with_matches":
@@ -387,11 +396,24 @@ func loadRootGitignore(root string) map[string]bool {
 // if it contains any uppercase letter, it is compiled verbatim (exact case).
 // When ignoreCase is true the match is always case-insensitive, overriding
 // smart-case (mirrors rg -i).
-func compileSmartCase(pattern string, ignoreCase bool) (*regexp.Regexp, error) {
+func compileSmartCase(pattern string, ignoreCase, word bool) (*regexp.Regexp, error) {
+	flags := ""
 	if ignoreCase || !hasUpper(pattern) {
-		return regexp.Compile("(?i)" + pattern)
+		flags = "(?i)"
 	}
-	return regexp.Compile(pattern)
+	return regexp.Compile(flags + wordWrap(pattern, word))
+}
+
+// wordWrap reproduces ripgrep's --word-regexp on the Go fallback path. rg
+// documents -w as equivalent to surrounding the pattern with \b, so we wrap it
+// in a non-capturing group (\b(?:…)\b) to keep alternations and trailing
+// operators bounded as a unit. Smart-case detection still runs against the
+// original pattern, since the boundaries add no letters of their own.
+func wordWrap(pattern string, word bool) string {
+	if !word {
+		return pattern
+	}
+	return `\b(?:` + pattern + `)\b`
 }
 
 // hasUpper reports whether pattern contains an ASCII uppercase letter, the
@@ -534,7 +556,7 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 		return runGoGrepMultiline(ctx, root, searchPath, args)
 	}
 
-	re, err := compileSmartCase(args.Pattern, args.CaseInsensitive)
+	re, err := compileSmartCase(args.Pattern, args.CaseInsensitive, args.Word)
 	if err != nil {
 		return "", fmt.Errorf("compiling grep pattern: %w", err)
 	}
@@ -741,7 +763,7 @@ func renderGrepResults(matches []grepFileResult, outputMode string, capped bool)
 // span several lines.  In content mode every line a match touches is emitted as
 // "path:lineNo:text" (mirroring rg -U output); context options do not apply.
 func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepArgs) (string, error) {
-	re, err := compileMultilineSmartCase(args.Pattern, args.CaseInsensitive)
+	re, err := compileMultilineSmartCase(args.Pattern, args.CaseInsensitive, args.Word)
 	if err != nil {
 		return "", fmt.Errorf("compiling grep pattern: %w", err)
 	}
@@ -860,12 +882,12 @@ func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepA
 // flag (?s) lets `.` cross newlines, and smart-case adds (?i) when the pattern
 // is all-lowercase — mirroring compileSmartCase plus rg --multiline-dotall.
 // When ignoreCase is true the (?i) flag is always added, overriding smart-case.
-func compileMultilineSmartCase(pattern string, ignoreCase bool) (*regexp.Regexp, error) {
+func compileMultilineSmartCase(pattern string, ignoreCase, word bool) (*regexp.Regexp, error) {
 	flags := "(?s)"
 	if ignoreCase || !hasUpper(pattern) {
 		flags = "(?is)"
 	}
-	return regexp.Compile(flags + pattern)
+	return regexp.Compile(flags + wordWrap(pattern, word))
 }
 
 // offsetToLine returns the 0-based line index containing byte offset off,

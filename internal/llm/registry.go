@@ -73,7 +73,11 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 			continue
 		}
 		name := strings.ToLower(p.Name)
-		client := newRetryingClient(timeout)
+		// Per-provider custom headers (OpenRouter attribution, Azure api-key, proxy
+		// tokens) are injected at the transport layer so every provider dialect
+		// honors them without re-plumbing its own header map. Empty headers leave
+		// the client untouched.
+		client := withExtraHeaders(newRetryingClient(timeout), p.Headers)
 		models := append([]Model(nil), modelsByProvider[name]...)
 
 		var provider Provider

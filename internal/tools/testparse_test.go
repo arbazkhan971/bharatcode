@@ -58,6 +58,12 @@ func TestClassifyTestRunner(t *testing.T) {
 		"cmake --build . && ctest":              runnerCTest,
 		"playwright test":                       runnerPlaywright,
 		"npx playwright test e2e/login.spec.ts": runnerPlaywright,
+		"rails test":                            runnerMinitest,
+		"rails test test/models/user_test.rb":   runnerMinitest,
+		"rake test":                             runnerMinitest,
+		"bundle exec rake test TEST=test/x.rb":  runnerMinitest,
+		"ruby -Itest test/calculator_test.rb":   runnerMinitest,
+		"echo rake testing notes":               runnerNone,
 		"ls -la":                                runnerNone,
 		"echo go testing the waters":            runnerNone,
 		"echo rspecs are great":                 runnerNone,
@@ -1054,6 +1060,66 @@ func TestParsePlaywrightFailures_NoFailures(t *testing.T) {
 
   1 passed (2.0s)`
 	if got := parseTestFailures("playwright test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseMinitestFailures(t *testing.T) {
+	out := `Run options: --seed 4242
+
+# Running:
+
+.F.E
+
+Finished in 0.001234s, 3242.5 runs/s, 1621.2 assertions/s.
+
+  1) Failure:
+CalculatorTest#test_addition [test/calculator_test.rb:8]:
+Expected: 5
+  Actual: 4
+
+  2) Error:
+CalculatorTest#test_division:
+ZeroDivisionError: divided by 0
+    test/calculator_test.rb:12:in ` + "`/'" + `
+
+4 runs, 2 assertions, 1 failures, 1 errors, 0 skips`
+	got := parseTestFailures("rails test", out)
+	want := []testFailure{
+		{Name: "CalculatorTest#test_addition", Detail: "Expected: 5"},
+		{Name: "CalculatorTest#test_division", Detail: "ZeroDivisionError: divided by 0"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseMinitestFailures_LocationFallback(t *testing.T) {
+	// When a failure block carries no message line beneath the id, the bracketed
+	// source location is used as the detail.
+	out := `  1) Failure:
+WidgetTest#test_renders [test/widget_test.rb:20]:
+
+  2) Failure:
+WidgetTest#test_hides [test/widget_test.rb:30]:
+Expected false to be truthy.`
+	got := parseTestFailures("rake test", out)
+	want := []testFailure{
+		{Name: "WidgetTest#test_renders", Detail: "test/widget_test.rb:20"},
+		{Name: "WidgetTest#test_hides", Detail: "Expected false to be truthy."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseMinitestFailures_NoFailures(t *testing.T) {
+	out := `Run options: --seed 1
+
+# Running:
+
+...
+
+Finished in 0.001s, 3000.0 runs/s, 3000.0 assertions/s.
+
+3 runs, 3 assertions, 0 failures, 0 errors, 0 skips`
+	if got := parseTestFailures("ruby -Itest test/calc_test.rb", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

@@ -13,7 +13,9 @@ What success looks like:
 
 The result is a lexicographically sorted list of workspace-relative file paths,
 one per line. Paths use forward slashes so the model sees the same shape across
-operating systems.
+operating systems. Paths matched by the workspace `.gitignore` (and the `.git`
+directory) are skipped, so vendored and build output such as `node_modules` or
+`dist` never appears — the same filtering `ls` and `grep` apply.
 
 Failure cases:
 

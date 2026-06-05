@@ -13,9 +13,12 @@ type responsesRequest struct {
 	Stream          bool                 `json:"stream"`
 	Temperature     float64              `json:"temperature,omitempty"`
 	MaxOutputTokens int                  `json:"max_output_tokens,omitempty"`
-	// ReasoningEffort is sent only for OpenAI reasoning models when the request
-	// specifies one; it is omitted for non-reasoning models and when empty.
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Reasoning carries the reasoning controls for OpenAI reasoning models. Unlike
+	// chat/completions (which takes a top-level "reasoning_effort" string), the
+	// Responses API nests the effort under a "reasoning" object, so a top-level
+	// reasoning_effort field is silently ignored. It is omitted for non-reasoning
+	// models and when no effort is configured.
+	Reasoning *responsesReasoning `json:"reasoning,omitempty"`
 	// Store controls server-side response retention. The ChatGPT Codex backend
 	// requires store=false; the pointer keeps the field omitted (default
 	// behavior) for the standard OpenAI Responses path.
@@ -23,6 +26,13 @@ type responsesRequest struct {
 	// Include requests extra output fields (for example
 	// "reasoning.encrypted_content" on the Codex backend). Omitted when empty.
 	Include []string `json:"include,omitempty"`
+}
+
+// responsesReasoning is the Responses API "reasoning" object. Only Effort is
+// populated today ("low", "medium", "high", and gpt-5's "minimal"); the API
+// reads it as the per-request hidden-reasoning budget for a reasoning model.
+type responsesReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 // responsesTool describes one callable function for the Responses API. Unlike

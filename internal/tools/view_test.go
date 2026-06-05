@@ -4,8 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/arbazkhan971/bharatcode/internal/db"
 	"github.com/arbazkhan971/bharatcode/internal/db/sqlc"
@@ -123,6 +125,47 @@ func TestViewTruncationFallsBackForOversizedLine(t *testing.T) {
 	require.Contains(t, out, "sed -n")
 	require.Contains(t, out, "head -c")
 	require.NotContains(t, out, "offset=")
+}
+
+func TestTruncateLine(t *testing.T) {
+	// Lines at or under the cap are returned verbatim, including the boundary.
+	require.Equal(t, "short", truncateLine("short", 2000))
+	require.Equal(t, "abcde", truncateLine("abcde", 5))
+	// A non-positive cap disables truncation.
+	require.Equal(t, "abcde", truncateLine("abcde", 0))
+
+	// Over the cap: the kept prefix is exactly max characters and the marker
+	// reports how many were elided.
+	long := strings.Repeat("a", 2500)
+	got := truncateLine(long, maxViewLineLength)
+	require.True(t, strings.HasPrefix(got, strings.Repeat("a", maxViewLineLength)))
+	require.Contains(t, got, "… [500 characters truncated]")
+	require.NotContains(t, got, strings.Repeat("a", maxViewLineLength+1))
+
+	// The cut counts runes, not bytes, and lands on a rune boundary.
+	multi := strings.Repeat("é", 10)
+	cut := truncateLine(multi, 4)
+	require.True(t, utf8.ValidString(cut))
+	require.True(t, strings.HasPrefix(cut, strings.Repeat("é", 4)))
+	require.Contains(t, cut, "[6 characters truncated]")
+}
+
+func TestViewTruncatesLongLineInsteadOfFallback(t *testing.T) {
+	// A minified one-liner far wider than 2000 chars stays viewable: the line is
+	// truncated in place rather than dead-ending at the sed fallback.
+	ctx := context.Background()
+	workDir := t.TempDir()
+	wide := strings.Repeat("x", maxViewLineLength+800)
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "bundle.js"), []byte(wide+"\n"), 0o644))
+
+	tool := newViewTool(Dependencies{WorkDir: workDir, SessionID: "view-wide"})
+	result, err := tool.Run(ctx, mustJSON(t, map[string]any{"path": "bundle.js"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "1 | "+strings.Repeat("x", maxViewLineLength))
+	require.Contains(t, result.Content, "… [800 characters truncated]")
+	require.NotContains(t, result.Content, "sed -n")
+	require.NotContains(t, result.Content, "exceeds")
 }
 
 func newToolsTestTracker(t *testing.T, sessionID string) *filetracker.Tracker {

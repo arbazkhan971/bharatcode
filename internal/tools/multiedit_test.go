@@ -191,3 +191,26 @@ func TestMultiEditStaleReadSkippedWhenNoTracker(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "one beta\n", string(got))
 }
+
+func TestMultiEditResultIncludesUnifiedDiff(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "multi.txt")
+	require.NoError(t, os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o644))
+
+	tool := newMultiEditTool(Dependencies{WorkDir: workDir, SessionID: "multiedit-diff"})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "multi.txt",
+		"edits": []map[string]any{
+			{"old": "alpha", "new": "ALPHA"},
+			{"old": "gamma", "new": "GAMMA"},
+		},
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "@@")
+	require.Contains(t, result.Content, "-alpha")
+	require.Contains(t, result.Content, "+ALPHA")
+	require.Contains(t, result.Content, "-gamma")
+	require.Contains(t, result.Content, "+GAMMA")
+	require.NotEmpty(t, result.Metadata["diff"])
+}

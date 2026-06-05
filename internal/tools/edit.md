@@ -19,7 +19,7 @@ Call `edit` when BharatCode needs to make one exact text replacement in an exist
 
 ## Success
 
-The file is rewritten atomically, BharatCode records the before and after file hashes, and the result reports how many replacements were applied. When a language server is configured for the file, the result also lists any errors and warnings it reports for the edited file — fix the errors before moving on.
+The file is rewritten atomically, BharatCode records the before and after file hashes, and the result reports how many replacements were applied along with a compact unified diff of the changed lines so you can see exactly what changed. When a language server is configured for the file, the result also lists any errors and warnings it reports for the edited file — fix the errors before moving on.
 
 ## Failures
 

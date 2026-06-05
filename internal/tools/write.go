@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/arbazkhan971/bharatcode/internal/diffutil"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/util/fsext"
 )
@@ -110,6 +111,14 @@ func (t *WriteTool) Run(ctx context.Context, args json.RawMessage) (res Result, 
 	metadata := map[string]any{
 		"path":  path,
 		"bytes": len(newContent),
+	}
+	// Show a diff only when overwriting: a new file's diff would just echo the
+	// content the model already provided.
+	if exists {
+		if d := diffutil.Unified(string(oldContent), in.Content); d != "" {
+			content += "\n\n" + d
+			metadata["diff"] = d
+		}
 	}
 	if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, path); note != "" {
 		content += "\n\n" + note

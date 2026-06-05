@@ -20,7 +20,7 @@ Each `old` is matched exactly first. If an exact match is not found and `old` sp
 
 ## Success
 
-BharatCode rewrites the file once, records the write in the file tracker, and returns replacement counts plus before and after hashes in metadata. When a language server is configured for the file, any errors and warnings it reports for the edited file are appended to the result — fix the errors before moving on.
+BharatCode rewrites the file once, records the write in the file tracker, and returns replacement counts plus before and after hashes in metadata along with a compact unified diff of the changed lines so you can see exactly what changed. When a language server is configured for the file, any errors and warnings it reports for the edited file are appended to the result — fix the errors before moving on.
 
 ## Failures
 

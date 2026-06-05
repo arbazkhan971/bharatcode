@@ -435,12 +435,17 @@ type geminiUsageMetadata struct {
 	PromptTokenCount        int `json:"promptTokenCount"`
 	CandidatesTokenCount    int `json:"candidatesTokenCount"`
 	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	// ThoughtsTokenCount counts tokens spent on native reasoning by a Gemini 2.5
+	// thinking model. The API reports these separately and excludes them from
+	// CandidatesTokenCount, yet bills them as output, so they are folded into
+	// OutputTokens below to keep token accounting and cost estimates accurate.
+	ThoughtsTokenCount int `json:"thoughtsTokenCount"`
 }
 
 func (u geminiUsageMetadata) toUsage() Usage {
 	return Usage{
 		InputTokens:     u.PromptTokenCount,
-		OutputTokens:    u.CandidatesTokenCount,
+		OutputTokens:    u.CandidatesTokenCount + u.ThoughtsTokenCount,
 		CacheReadTokens: u.CachedContentTokenCount,
 	}
 }

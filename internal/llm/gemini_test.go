@@ -82,6 +82,39 @@ func TestGeminiStreamsTextAndUsage(t *testing.T) {
 	require.Equal(t, 2, usage.CacheReadTokens)
 }
 
+func TestGeminiFoldsThoughtTokensIntoOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A Gemini 2.5 thinking response reports reasoning tokens in
+		// thoughtsTokenCount, separately from candidatesTokenCount.
+		_, _ = io.WriteString(w, geminiSSE(
+			`{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"thoughtsTokenCount":20}}`,
+		))
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.NoError(t, err)
+	collected := collectEvents(events)
+
+	var usage Usage
+	for _, ev := range collected {
+		if e, ok := ev.(EndEvent); ok {
+			usage = e.Usage
+		}
+	}
+	require.Equal(t, 11, usage.InputTokens)
+	// Reasoning tokens are billed as output, so OutputTokens folds in the 20
+	// thought tokens on top of the 4 visible candidate tokens.
+	require.Equal(t, 24, usage.OutputTokens)
+}
+
 func TestGeminiEmitsFunctionCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

@@ -28,7 +28,9 @@ var instructionFilenames = []string{"AGENTS.md", "CLAUDE.md"}
 // the global config directory, then every per-directory instructions
 // file from the repository root down to the working directory,
 // concatenated root-first so that deeper (more specific) files appear
-// last and thus override shallower ones. The total size is capped at
+// last and thus override shallower ones. Each file's @path references
+// are expanded inline from the imported files (see
+// expandInstructionImports). The total size is capped at
 // InstructionBudget. It returns an empty string when no instructions
 // are found.
 func LoadInstructions(ctx context.Context) (string, error) {
@@ -177,5 +179,13 @@ func readInstructionFile(path string) (string, bool, error) {
 	if trimmed == "" {
 		return "", false, nil
 	}
-	return trimmed, true, nil
+	// Expand any @path import references, resolving them relative to the
+	// directory holding this file. The file seeds the visited set so it
+	// cannot transitively import itself.
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	expanded := expandInstructionImports(trimmed, filepath.Dir(abs), 0, map[string]bool{abs: true})
+	return strings.TrimSpace(expanded), true, nil
 }

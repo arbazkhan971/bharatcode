@@ -12,7 +12,7 @@ Use this for source files, configuration files, documentation, and small image a
 
 ## Success
 
-Text files return numbered lines. Supported image files return a short text summary and image data in metadata for the interface.
+Text files return numbered lines. Supported image files return a short text summary and image data in metadata for the interface. Jupyter notebooks (`.ipynb`) are rendered as a compact, numbered transcript of their cells — each cell's type, execution count, source, and outputs (stream text, results, and errors, with ANSI codes stripped) — instead of raw JSON.
 
 ## Truncation
 

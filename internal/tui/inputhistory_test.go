@@ -162,7 +162,7 @@ func TestSlashCompletion_TabCyclesMultipleMatches(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
-	// "/s" matches /sessions, /status, /save in slashCommands order.
+	// "/s" matches /sessions, /status, /save, /search in slashCommands order.
 	typeString(t, m, "/s")
 
 	_, _ = m.Update(keyTab())
@@ -171,9 +171,36 @@ func TestSlashCompletion_TabCyclesMultipleMatches(t *testing.T) {
 	require.Equal(t, "/status", m.input.String())
 	_, _ = m.Update(keyTab())
 	require.Equal(t, "/save", m.input.String())
+	_, _ = m.Update(keyTab())
+	require.Equal(t, "/search", m.input.String())
 	// Cycle wraps back to the first match.
 	_, _ = m.Update(keyTab())
 	require.Equal(t, "/sessions", m.input.String(), "the cycle must wrap to the first match")
+}
+
+// TestSlashCompletion_OffersAllHandledCommands guards against the completion
+// list drifting out of sync with the commands handleSlash actually accepts:
+// these were handled and listed in /help but were not Tab-completable, so the
+// user could not discover or complete them at the prompt.
+func TestSlashCompletion_OffersAllHandledCommands(t *testing.T) {
+	t.Parallel()
+
+	for _, cmd := range []string{"/search", "/tab", "/tabs", "/theme"} {
+		require.Contains(t, slashCommands, cmd,
+			"%s is handled by handleSlash and must be Tab-completable", cmd)
+	}
+}
+
+// TestSlashCommandsAllHaveDescriptions asserts every completable command carries
+// an inline gloss, so the slash-hint menu can always explain the command the
+// user has settled on instead of showing a bare name.
+func TestSlashCommandsAllHaveDescriptions(t *testing.T) {
+	t.Parallel()
+
+	for _, cmd := range slashCommands {
+		require.NotEmptyf(t, slashCommandDescriptions[cmd],
+			"completable command %s must have a slashCommandDescriptions entry", cmd)
+	}
 }
 
 // TestSlashCompletion_EditMidCycleReseeds asserts that editing the buffer after

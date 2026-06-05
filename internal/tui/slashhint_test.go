@@ -86,6 +86,71 @@ func TestRenderSlashHint_VisibleAfterTyping(t *testing.T) {
 	require.NotContains(t, m2.viewString(), "sessions")
 }
 
+// TestSlashHintDescIndex selects the command whose gloss is shown: the active
+// Tab selection when cycling, the sole match when a prefix narrows to one, and
+// nothing while several candidates remain.
+func TestSlashHintDescIndex(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 1, slashHintDescIndex([]string{"/a", "/b", "/c"}, 1),
+		"the active cycle selection is glossed")
+	require.Equal(t, 0, slashHintDescIndex([]string{"/help"}, -1),
+		"a sole remaining match is glossed")
+	require.Equal(t, -1, slashHintDescIndex([]string{"/a", "/b"}, -1),
+		"an ambiguous list has no single command to describe")
+	require.Equal(t, -1, slashHintDescIndex(nil, 5),
+		"an out-of-range active index is ignored")
+}
+
+// TestRenderSlashHint_NarrowedShowsDescription asserts that once a prefix
+// narrows to a single command the rendered hint carries its one-line gloss, so
+// the user can confirm what the command does without opening /help.
+func TestRenderSlashHint_NarrowedShowsDescription(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/diff")
+	require.NotContains(t, m.viewString(), "show the latest edit diff",
+		"a fully typed unique command suppresses the menu entirely")
+
+	m2 := newSizedModel(t)
+	typeString(t, m2, "/dif")
+	view := m2.viewString()
+	require.Contains(t, view, "diff")
+	require.Contains(t, view, "show the latest edit diff",
+		"the narrowed single match carries its description")
+}
+
+// TestRenderSlashHint_AmbiguousHasNoDescription asserts that while several
+// commands still match, no single description is shown — the menu is just the
+// name list.
+func TestRenderSlashHint_AmbiguousHasNoDescription(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/s")
+	view := m.viewString()
+	require.Contains(t, view, "sessions")
+	require.NotContains(t, view, "restore a recent session",
+		"an ambiguous prefix shows names only, no gloss")
+}
+
+// TestRenderSlashHint_DescriptionDroppedWhenNarrow asserts the gloss is omitted
+// rather than wrapping when the row is too narrow to hold both the command name
+// and its description, keeping the hint on a single line.
+func TestRenderSlashHint_DescriptionDroppedWhenNarrow(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.width = 10
+	typeString(t, m, "/dif")
+	hint := m.renderSlashHint(m.width)
+	require.NotEmpty(t, hint)
+	require.NotContains(t, hint, "\n", "the hint must stay on one row")
+	require.NotContains(t, hint, "show the latest edit diff",
+		"no spare width, so the description is dropped")
+}
+
 // TestRenderSlashHint_FitsOneRow asserts the menu never spills past a single
 // row regardless of how many commands match, truncating with an ellipsis.
 func TestRenderSlashHint_FitsOneRow(t *testing.T) {

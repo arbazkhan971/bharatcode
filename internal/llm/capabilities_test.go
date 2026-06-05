@@ -76,6 +76,12 @@ func TestInferContextWindow(t *testing.T) {
 		{"Krutrim-spectre-v2", 8_192},
 		// xAI Grok, Perplexity Sonar tiers, Codestral, Kimi and gpt-oss.
 		{"grok-2-latest", 131_072},
+		{"grok-3", 131_072},
+		// Grok 4 and the grok-code coding line ship a 256k window; their ids carry
+		// the "grok" marker, so the specific rules must win over the 131k family rule.
+		{"grok-4", 256_000},
+		{"grok-4-fast", 256_000},
+		{"grok-code-fast-1", 256_000},
 		{"sonar", 128_000},
 		{"sonar-pro", 200_000},
 		{"codestral-latest", 256_000},

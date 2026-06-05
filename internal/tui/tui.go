@@ -35,6 +35,13 @@ const (
 	minHeight = 24
 )
 
+// inputPlaceholder is the muted hint shown on an empty, focused prompt. It
+// names the three things a newcomer is least likely to discover on their own —
+// "/" for the command palette, "@" for file mentions, and "/keys" for the
+// keyboard-shortcut listing — keeping the line short enough not to wrap on the
+// minimum 80-column terminal.
+const inputPlaceholder = "/ commands · @ files · /keys for shortcuts"
+
 // Dependencies is the full set of services the TUI consumes.
 type Dependencies struct {
 	// Agent is the agent loop that processes user prompts.
@@ -751,6 +758,14 @@ func (m *model) renderMain() string {
 	input := "> " + m.input.String()
 	if m.focus == focusInput {
 		input += "▌"
+	}
+	// An empty prompt shows a muted placeholder advertising the discovery
+	// affordances — slash commands, @-file mentions, and the help listing — the
+	// way Claude Code and opencode hint at their input shortcuts. It is dropped
+	// the moment the user types anything, so it never competes with real input,
+	// and is gated on input focus so a focused-elsewhere view stays uncluttered.
+	if m.focus == focusInput && m.input.Len() == 0 {
+		input += m.theme.Muted.Render(inputPlaceholder)
 	}
 	// Surface the slash-completion menu beneath the prompt so the commands Tab
 	// would cycle through are discoverable without pressing it. It occupies one

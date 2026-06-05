@@ -246,7 +246,7 @@ func TestParseDocumentSymbolsShapes(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []Symbol{
 			{Name: "Server", Kind: Struct, Path: wantPath, Range: wantRange},
-			{Name: "Start", Kind: Method, Path: wantPath, Range: wantRange, ContainerName: "Server"},
+			{Name: "Start", Kind: Method, Path: wantPath, Range: wantRange, ContainerName: "Server", Depth: 1},
 		}, symbols)
 	})
 
@@ -268,7 +268,7 @@ func TestParseDocumentSymbolsShapes(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []Symbol{
 			{Name: "Add", Kind: Function, Path: wantPath, Range: wantRange, Detail: "func(a int, b int) int"},
-			{Name: "sum", Kind: Variable, Path: wantPath, Range: wantRange, ContainerName: "Add", Detail: "int"},
+			{Name: "sum", Kind: Variable, Path: wantPath, Range: wantRange, ContainerName: "Add", Detail: "int", Depth: 1},
 		}, symbols)
 	})
 

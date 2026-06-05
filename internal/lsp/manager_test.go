@@ -563,6 +563,7 @@ func TestDocumentSymbolsReturnsSymbols(t *testing.T) {
 			Path:          source,
 			Range:         Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}},
 			ContainerName: "Server",
+			Depth:         1,
 		},
 	}, symbols)
 

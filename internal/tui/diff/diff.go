@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 )
@@ -634,10 +635,12 @@ func isAdded(line string) bool {
 
 // styleWordLine styles a modified diff line (line) against its counterpart on
 // the other side of the change, emphasizing only the runs that differ. The
-// leading marker and the shared head/tail keep the line's add/remove color; the
-// changed middle is rendered with the emphasized variant. When the two lines
-// share no common prefix or suffix the whole line changed, so there is nothing
-// to single out and it falls back to the plain per-line style.
+// leading marker and every shared run keep the line's add/remove color; each
+// changed run is rendered with the emphasized variant. The comparison is
+// token-level (see wordSegments), so a line carrying several separated edits has
+// each one emphasized independently rather than one span swallowing the
+// unchanged text between them. When the two lines share no token there is
+// nothing to single out and it falls back to the plain per-line style.
 func (v *Viewer) styleWordLine(line, other string) string {
 	if len(line) == 0 || len(other) == 0 {
 		return v.styleLine(line)
@@ -652,29 +655,141 @@ func (v *Viewer) styleWordLine(line, other string) string {
 		base, emph = v.theme.DiffRemove, v.theme.DiffRemoveEmph
 	}
 
-	prefix, mid, suffix := changedSpan(line[1:], other[1:])
-	if prefix == "" && suffix == "" {
+	segs := wordSegments(line[1:], other[1:])
+	if segs == nil {
+		// No token is shared, so the whole line changed and there is nothing to
+		// single out; keep the plain add/remove style.
 		return v.styleLine(line)
 	}
-	return base.Render(marker+prefix) + emph.Render(mid) + base.Render(suffix)
+
+	// Render shared runs (and the leading marker) in the base style and changed
+	// runs in the emphasized style. Consecutive base text — the marker plus a
+	// leading shared run — is coalesced into one styled span so the output stays
+	// compact and a "-func " head renders as a single block.
+	var b strings.Builder
+	pending := marker
+	flush := func() {
+		if pending != "" {
+			b.WriteString(base.Render(pending))
+			pending = ""
+		}
+	}
+	for _, s := range segs {
+		if s.changed {
+			flush()
+			b.WriteString(emph.Render(s.text))
+			continue
+		}
+		pending += s.text
+	}
+	flush()
+	return b.String()
 }
 
-// changedSpan splits a against its counterpart b into the shared leading prefix,
-// the differing middle, and the shared trailing suffix, all from a's point of
-// view. Comparison is rune-wise so multi-byte content is never split mid-rune,
-// and the prefix and suffix never overlap.
-func changedSpan(a, b string) (prefix, mid, suffix string) {
-	ar, br := []rune(a), []rune(b)
-	p := 0
-	for p < len(ar) && p < len(br) && ar[p] == br[p] {
-		p++
+// diffSeg is one run of a word-diff: a stretch of the styled line that either
+// changed relative to its counterpart or is shared with it.
+type diffSeg struct {
+	text    string
+	changed bool
+}
+
+// wordSegments splits line a into coalesced word-diff segments against b, with
+// each segment marked changed (a run present in a but not aligned to b) or
+// shared. Both inputs are the diff content with the leading +/-/space marker
+// already stripped. Tokens are maximal runs of word characters (letters, digits,
+// underscore) or of other characters, aligned by a longest-common-subsequence so
+// unchanged tokens sitting between two edits stay shared — letting a line with
+// several separated edits emphasize each one rather than one span swallowing the
+// text between them, the way git --word-diff, delta, and opencode highlight
+// intra-line changes. It returns nil when a and b share no token, signalling the
+// caller to fall back to a plain whole-line style.
+func wordSegments(a, b string) []diffSeg {
+	at := tokenizeWords(a)
+	common := commonTokens(at, tokenizeWords(b))
+	shared := false
+	for _, c := range common {
+		if c {
+			shared = true
+			break
+		}
 	}
-	sa, sb := len(ar), len(br)
-	for sa > p && sb > p && ar[sa-1] == br[sb-1] {
-		sa--
-		sb--
+	if !shared {
+		return nil
 	}
-	return string(ar[:p]), string(ar[p:sa]), string(ar[sa:])
+	var segs []diffSeg
+	for i, tok := range at {
+		changed := !common[i]
+		if n := len(segs); n > 0 && segs[n-1].changed == changed {
+			segs[n-1].text += tok
+			continue
+		}
+		segs = append(segs, diffSeg{text: tok, changed: changed})
+	}
+	return segs
+}
+
+// tokenizeWords splits s into maximal runs of word characters (letters, digits,
+// underscore) and runs of everything else, so an identifier, an operator, or a
+// stretch of whitespace each becomes one token the word-diff can align. Splitting
+// is rune-wise so a multi-byte character is never cut in half.
+func tokenizeWords(s string) []string {
+	runes := []rune(s)
+	var toks []string
+	for i := 0; i < len(runes); {
+		word := isWordRune(runes[i])
+		j := i + 1
+		for j < len(runes) && isWordRune(runes[j]) == word {
+			j++
+		}
+		toks = append(toks, string(runes[i:j]))
+		i = j
+	}
+	return toks
+}
+
+// isWordRune reports whether r is part of a word token (a letter, digit, or
+// underscore) rather than punctuation or whitespace.
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+}
+
+// commonTokens reports, for each token of a, whether it belongs to a
+// longest-common-subsequence alignment with b. Tokens marked true are shared
+// (rendered plain); the rest changed (emphasized). A standard LCS dynamic program
+// fills the table, then a forward walk marks the matched a-indices, so unchanged
+// tokens between edits stay shared regardless of how the edits move around them.
+func commonTokens(a, b []string) []bool {
+	n, m := len(a), len(b)
+	dp := make([][]int, n+1)
+	for i := range dp {
+		dp[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if a[i] == b[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+	common := make([]bool, n)
+	i, j := 0, 0
+	for i < n && j < m {
+		switch {
+		case a[i] == b[j]:
+			common[i] = true
+			i++
+			j++
+		case dp[i+1][j] >= dp[i][j+1]:
+			i++
+		default:
+			j++
+		}
+	}
+	return common
 }
 
 func minInt(a, b int) int {

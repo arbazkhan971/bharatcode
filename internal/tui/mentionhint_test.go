@@ -226,6 +226,7 @@ func TestRenderMentionHint_FitsOneRow(t *testing.T) {
 	require.NotEmpty(t, hint)
 	require.NotContains(t, hint, "\n", "the menu must stay on one row")
 	require.Contains(t, hint, "…", "an over-long match set is truncated")
+	require.Regexp(t, `\+\d+`, hint, "truncation reports how many matches are hidden")
 }
 
 // TestMatchPositions_ContiguousAndSubsequence asserts the picker locates the

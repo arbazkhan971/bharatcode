@@ -371,7 +371,7 @@ func (m *model) renderMentionHint(width int) string {
 
 	line := indent + strings.Join(parts, sep)
 	if truncated {
-		line += m.theme.Muted.Render(" …")
+		line += m.theme.Muted.Render(overflowSuffix(len(files) - len(parts)))
 	}
 	return line
 }

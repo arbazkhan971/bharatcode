@@ -82,7 +82,7 @@ func slashHintCommands(buffer string, st *inputState) (cmds []string, active int
 	if len(st.completionMatches) > 0 && buffer == st.completionMatches[st.completionIndex] {
 		return st.completionMatches, st.completionIndex
 	}
-	matches := matchSlash(buffer)
+	matches := matchSlash(st.candidates(), buffer)
 	if len(matches) == 0 {
 		return nil, -1
 	}

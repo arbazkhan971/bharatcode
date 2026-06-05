@@ -533,6 +533,32 @@ func TestSlashRegistryPrompt_UnknownFallsBackToErrorDialog(t *testing.T) {
 	require.Contains(t, m.dialogs.Render(200), "/nonexistent")
 }
 
+// TestDynamicSlashNames_RecipesThenPrompts asserts dynamicSlashNames gathers the
+// recipe and custom-prompt names from the registries as leading-slash commands,
+// recipes first and prompts after, matching the order /help prints them, so Tab
+// completion and the hint dropdown list user commands the same way the help dump
+// does. Nil registries contribute nothing.
+func TestDynamicSlashNames_RecipesThenPrompts(t *testing.T) {
+	t.Parallel()
+
+	require.Nil(t, dynamicSlashNames(Dependencies{}),
+		"with no registries there are no dynamic commands")
+
+	recipeDir := t.TempDir()
+	writeRecipeFile(t, recipeDir, "deploy", recipe.Recipe{Title: "Deploy", Prompt: "ship it"})
+	recipes, err := recipe.NewRegistry(recipeDir)
+	require.NoError(t, err)
+
+	promptDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(promptDir, "triage.md"), []byte("Triage {{input}}"), 0o644))
+	prompts, err := config.LoadPromptRegistry(promptDir)
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"/deploy", "/triage"},
+		dynamicSlashNames(Dependencies{Recipes: recipes, Prompts: prompts}),
+		"recipes are listed first, then custom prompts, each as a /name command")
+}
+
 // writeRecipeFile writes a recipe JSON file to dir and returns its path.
 func writeRecipeFile(t *testing.T, dir, name string, r recipe.Recipe) {
 	t.Helper()

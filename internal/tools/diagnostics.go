@@ -140,6 +140,9 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 	var b strings.Builder
 	b.WriteString(diagnosticsSummary(all, counts))
 	b.WriteByte('\n')
+	// Cache file contents so the offending source line can be shown beneath each
+	// diagnostic without re-reading a file once per diagnostic it carries.
+	lineCache := map[string][]string{}
 	for _, d := range all {
 		path := d.Path
 		if rel, err := filepath.Rel(root, d.Path); err == nil && !strings.HasPrefix(rel, "..") {
@@ -155,6 +158,15 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		)
 		b.WriteString(diagnosticTail(d))
 		b.WriteByte('\n')
+		// Surface the offending source line indented beneath the message so the
+		// model sees the code at fault without a separate view, matching how the
+		// navigate tool and goose/opencode shape location results. Omitted when the
+		// file or line cannot be read.
+		if snippet := sourceLine(lineCache, d.Path, d.Range.Start.Line); snippet != "" {
+			b.WriteString("    ")
+			b.WriteString(snippet)
+			b.WriteByte('\n')
+		}
 	}
 
 	return Result{

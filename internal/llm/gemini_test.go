@@ -706,6 +706,118 @@ func TestGeminiThinkingBudgetForEffort(t *testing.T) {
 	require.Equal(t, -1, geminiThinkingBudgetForEffort("Dynamic"), "dynamic must select dynamic thinking, case-insensitive")
 }
 
+func TestGeminiThinkingLevelForEffort(t *testing.T) {
+	require.Equal(t, "", geminiThinkingLevelForEffort(""))
+	require.Equal(t, "", geminiThinkingLevelForEffort("bogus"))
+	require.Equal(t, "low", geminiThinkingLevelForEffort("low"))
+	require.Equal(t, "low", geminiThinkingLevelForEffort("minimal"), "minimal clamps to the universally-supported low level")
+	require.Equal(t, "high", geminiThinkingLevelForEffort("medium"), "medium clamps up to high so the base Gemini 3 Pro never 400s")
+	require.Equal(t, "high", geminiThinkingLevelForEffort("HIGH"), "match must be case-insensitive")
+	require.Equal(t, "", geminiThinkingLevelForEffort("auto"), "dynamic thinking has no level equivalent")
+}
+
+// TestGeminiEmitsThinkingLevelForGemini3 asserts a Gemini 3 model carries a
+// thinkingLevel (the Gemini 3 reasoning knob) derived from reasoning_effort, and
+// never the legacy thinkingBudget, which Gemini 3 rejects with a 400.
+func TestGeminiEmitsThinkingLevelForGemini3(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-3-pro-preview", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-3-pro-preview",
+		Messages:        []message.Message{textMsg("think")},
+		ReasoningEffort: "high",
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig, "reasoning_effort must produce a generationConfig")
+	tc := captured.GenerationConfig.ThinkingConfig
+	require.NotNil(t, tc, "a Gemini 3 model must carry a thinkingConfig")
+	require.True(t, tc.IncludeThoughts)
+	require.Equal(t, "high", tc.ThinkingLevel, "high effort must map to the high thinkingLevel")
+	require.Nil(t, tc.ThinkingBudget, "Gemini 3 must not carry a thinkingBudget (it 400s)")
+
+	// The serialized body must omit thinkingBudget entirely: sending both
+	// thinkingLevel and thinkingBudget is itself a 400.
+	require.NotContains(t, string(rawBody), "thinkingBudget")
+	require.Contains(t, string(rawBody), `"thinkingLevel":"high"`)
+}
+
+// TestGeminiThinkingLevelFromBudgetForGemini3 asserts a numeric thinking budget
+// configured against a Gemini 3 model is bucketed into a thinkingLevel rather
+// than sent as a (rejected) thinkingBudget, with the explicit budget winning over
+// an effort label as it does on the Gemini 2.5 path.
+func TestGeminiThinkingLevelFromBudgetForGemini3(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-3-pro-preview", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-3-pro-preview",
+		Messages:        []message.Message{textMsg("think")},
+		ReasoningEffort: "high",
+		Thinking:        &ThinkingConfig{BudgetTokens: 2048},
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig)
+	tc := captured.GenerationConfig.ThinkingConfig
+	require.NotNil(t, tc)
+	require.Equal(t, "low", tc.ThinkingLevel, "a 2048-token budget buckets to the low level and wins over effort")
+	require.Nil(t, tc.ThinkingBudget)
+}
+
+// TestGeminiDynamicThinkingOmitsLevelForGemini3 asserts a dynamic-thinking
+// request ("auto") leaves a Gemini 3 model's thinkingConfig off entirely: there
+// is no thinkingLevel equivalent of the 2.5-era dynamic sentinel.
+func TestGeminiDynamicThinkingOmitsLevelForGemini3(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-3-pro-preview", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-3-pro-preview",
+		Messages:        []message.Message{textMsg("think")},
+		ReasoningEffort: "auto",
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	if captured.GenerationConfig != nil {
+		require.Nil(t, captured.GenerationConfig.ThinkingConfig, "dynamic thinking must not pin a Gemini 3 thinkingLevel")
+	}
+}
+
 func TestGeminiDynamicThinkingBudgetFromReasoningEffort(t *testing.T) {
 	var rawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

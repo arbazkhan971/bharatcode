@@ -125,3 +125,56 @@ func TestExpandFileMentions_MentionAtStart(t *testing.T) {
 	require.Equal(t, []string{"start.go"}, refs)
 	require.Contains(t, out, "package start")
 }
+
+func TestMentionLang_ByExtension(t *testing.T) {
+	cases := map[string]string{
+		"main.go":     "go",
+		"app.ts":      "typescript",
+		"view.tsx":    "tsx",
+		"lib.rs":      "rust",
+		"Main.kt":     "kotlin",
+		"App.swift":   "swift",
+		"index.php":   "php",
+		"Build.scala": "scala",
+		"deploy.zsh":  "bash",
+		"feed.xml":    "xml",
+		"setup.cfg":   "ini",
+		"core.cxx":    "cpp",
+		"README":      "",
+		"notes.bin":   "",
+	}
+	for name, want := range cases {
+		require.Equalf(t, want, mentionLang(name), "mentionLang(%q)", name)
+	}
+}
+
+func TestMentionLang_BySpecialName(t *testing.T) {
+	cases := map[string]string{
+		"Dockerfile":     "dockerfile",
+		"dockerfile":     "dockerfile",
+		"Containerfile":  "dockerfile",
+		"Makefile":       "makefile",
+		"GNUmakefile":    "makefile",
+		"build.mk":       "makefile",
+		"go.mod":         "go",
+		"go.sum":         "go",
+		"CMakeLists.txt": "cmake",
+		".gitignore":     "gitignore",
+		".dockerignore":  "gitignore",
+		".env":           "bash",
+		"src/Dockerfile": "dockerfile",
+		"nested/go.mod":  "go",
+	}
+	for name, want := range cases {
+		require.Equalf(t, want, mentionLang(name), "mentionLang(%q)", name)
+	}
+}
+
+func TestExpandFileMentions_SpecialNameLanguageTag(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "Dockerfile", "FROM scratch\n")
+
+	out, _ := expandFileMentions("see @Dockerfile", root)
+	require.Contains(t, out, "```dockerfile")
+	require.Contains(t, out, "FROM scratch")
+}

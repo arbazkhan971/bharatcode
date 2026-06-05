@@ -8,6 +8,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/message"
+	"github.com/arbazkhan971/bharatcode/internal/recipe"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
 	"github.com/arbazkhan971/bharatcode/internal/tui/diff"
@@ -324,6 +325,78 @@ func (m *model) handleRegistryPrompt(name string, args string) (handled bool, mo
 	}
 	model, cmd = m.startRun(rendered)
 	return true, model, cmd
+}
+
+// handleRegistryRecipe looks up name in the recipe registry and, when found,
+// collects any RequirementUserPrompt parameters interactively (pushing one
+// dialog per parameter), then renders the recipe and submits the result to the
+// agent via m.startRun. When args is non-empty it is pre-populated as an
+// "input" parameter value (mirroring handleRegistryPrompt's {{input}} binding)
+// and also used as the fallback value for any single required user_prompt
+// parameter. It reports handled=true when the name matches a recipe; an
+// unregistered name returns handled=false so the caller can fall back to the
+// unknown-command dialog.
+func (m *model) handleRegistryRecipe(name string, args string) (handled bool, mod tea.Model, cmd tea.Cmd) {
+	if m.deps.Recipes == nil {
+		return false, m, nil
+	}
+	entry, ok := m.deps.Recipes.Get(name)
+	if !ok {
+		return false, m, nil
+	}
+
+	r, err := entry.Load()
+	if err != nil {
+		m.dialogs.Push(&dialog.Text{
+			DialogID: "error",
+			Title:    "Recipe load error",
+			Body:     err.Error(),
+			Theme:    m.theme,
+		})
+		return true, m, nil
+	}
+
+	// Pre-populate the "input" key from args (mirroring handleRegistryPrompt)
+	// and also seed any single user_prompt param that has no default.
+	prePopulated := make(map[string]string)
+	if args != "" {
+		prePopulated["input"] = args
+		// If there is exactly one user_prompt parameter and the user passed
+		// args, bind args to that parameter so simple one-param recipes just work
+		// without a dialog: /myrecipe some text -> param filled from args.
+		var userPromptParams []recipe.Parameter
+		for _, p := range r.Parameters {
+			if p.Requirement == recipe.RequirementUserPrompt {
+				userPromptParams = append(userPromptParams, p)
+			}
+		}
+		if len(userPromptParams) == 1 && prePopulated[userPromptParams[0].Name] == "" {
+			prePopulated[userPromptParams[0].Name] = args
+		}
+	}
+
+	// onComplete is called once all user_prompt parameters have been
+	// collected. It renders the recipe and submits the result to the agent.
+	onComplete := func(params map[string]string) (tea.Model, tea.Cmd) {
+		rendered, rerr := recipe.Render(r, params)
+		if rerr != nil {
+			m.dialogs.Push(&dialog.Text{
+				DialogID: "error",
+				Title:    "Recipe render error",
+				Body:     rerr.Error(),
+				Theme:    m.theme,
+			})
+			return m, nil
+		}
+		return m.startRun(rendered)
+	}
+
+	collector := newRecipeParamCollector(m, r, prePopulated, onComplete)
+	// Store the active collector on the model so handleKey can advance it
+	// after each parameter dialog pops.
+	m.recipeCollector = collector
+	mod, cmd = collector.pushNextOrComplete(m)
+	return true, mod, cmd
 }
 
 // shortSessionID truncates a session id to a stable short form for display.

@@ -366,7 +366,7 @@ func maxInt(a, b int) int {
 func (v *Viewer) styleLine(line string) string {
 	switch {
 	case strings.HasPrefix(line, "@@"):
-		return v.theme.DiffHunk.Render(line)
+		return v.styleHunkHeader(line)
 	case isDiffHeader(line):
 		return v.theme.DiffHeader.Render(line)
 	case strings.HasPrefix(line, "+"):
@@ -376,6 +376,27 @@ func (v *Viewer) styleLine(line string) string {
 	default:
 		return line
 	}
+}
+
+// styleHunkHeader renders a "@@ -a,b +c,d @@ <section>" hunk header, coloring
+// the "@@ … @@" range marker with the hunk style while rendering git's optional
+// trailing section heading — the enclosing function or block git appends to
+// orient the reader — in the muted style. This separates the line-range marker
+// from the context label the way Claude Code and opencode do, so the reviewer's
+// eye lands on the marker first and the context reads as a quiet annotation. A
+// header with no trailing section (or a malformed one) keeps the whole line in
+// the hunk style.
+func (v *Viewer) styleHunkHeader(line string) string {
+	// The range marker ends at the closing "@@"; anything past it is the
+	// section heading git adds. Search after the opening "@@" so the two never
+	// collide on a bare "@@@@".
+	if close := strings.Index(line[2:], "@@"); close >= 0 {
+		end := close + 2 + 2 // offset of the first rune past the closing "@@"
+		if end < len(line) {
+			return v.theme.DiffHunk.Render(line[:end]) + v.theme.Muted.Render(line[end:])
+		}
+	}
+	return v.theme.DiffHunk.Render(line)
 }
 
 // pairChanges matches each removed line in a unified diff with the added line

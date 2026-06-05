@@ -153,6 +153,34 @@ func TestPairChanges_MatchesWithinBlocks(t *testing.T) {
 	require.Equal(t, []int{-1, -1, 4, 5, 2, 3, -1}, pairs)
 }
 
+// TestUnifiedHunkHeader_SectionHeadingMuted checks that git's trailing section
+// heading on a hunk header ("@@ … @@ func foo()") is rendered in the muted style
+// while the "@@ … @@" range marker keeps the hunk style, so the context label
+// reads as a quiet annotation rather than competing with the marker.
+func TestUnifiedHunkHeader_SectionHeadingMuted(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,3 +1,3 @@ func foo() {\n context\n-old\n+new\n"
+	got := New(theme).RenderUnified(patch, 120)
+	header := strings.Split(got, "\n")[0]
+
+	require.Equal(t, theme.DiffHunk.Render("@@ -1,3 +1,3 @@")+theme.Muted.Render(" func foo() {"), header)
+}
+
+// TestUnifiedHunkHeader_NoSection checks that a header with no trailing section
+// keeps the whole line in the hunk style, so the common case is unchanged.
+func TestUnifiedHunkHeader_NoSection(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,3 +1,3 @@\n context\n-old\n+new\n"
+	got := New(theme).RenderUnified(patch, 120)
+	header := strings.Split(got, "\n")[0]
+
+	require.Equal(t, theme.DiffHunk.Render("@@ -1,3 +1,3 @@"), header)
+}
+
 // TestStat_CountsFilesAndLines checks that Stat reports the changed-file count
 // and the added/removed content totals, excluding the +++/--- file-boundary
 // headers from the line counts.

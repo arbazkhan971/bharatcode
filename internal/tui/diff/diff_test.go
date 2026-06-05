@@ -365,6 +365,48 @@ func TestUnified_TruncateWidthOne(t *testing.T) {
 	require.Equal(t, "…", got)
 }
 
+// TestExpandTabs_AdvancesToStops checks that tabs expand to the next
+// diffTabStop boundary measured from column 0, so the rune count matches the
+// rendered column width, and that a tab-free string is returned unchanged.
+func TestExpandTabs_AdvancesToStops(t *testing.T) {
+	t.Parallel()
+
+	// A leading tab on a "+" line: the marker is column 0, so the tab advances
+	// from column 1 to the next stop (column 4) => 3 spaces.
+	require.Equal(t, "+   code", expandTabs("+\tcode"))
+	// A tab at a stop boundary advances a full stop's worth.
+	require.Equal(t, "    x", expandTabs("\tx"))
+	// Two leading tabs => two indent levels.
+	require.Equal(t, "+       x", expandTabs("+\t\tx"))
+	// No tab: returned verbatim.
+	require.Equal(t, "+plain", expandTabs("+plain"))
+}
+
+// TestUnified_ExpandsTabs checks that tab-indented diff content is rendered with
+// spaces so its measured width matches what the terminal shows, keeping the
+// width clamp accurate for tab-indented code.
+func TestUnified_ExpandsTabs(t *testing.T) {
+	t.Parallel()
+
+	patch := "+\tx\n"
+	got := New(styles.Theme{}).RenderUnified(patch, 120)
+	require.Equal(t, "+   x", got)
+}
+
+// TestUnifiedNumbered_ExpandsTabsKeepsGutterAligned checks that tab expansion in
+// the numbered renderer leaves the line-number gutter intact and produces a
+// content width equal to its displayed column width.
+func TestUnifiedNumbered_ExpandsTabsKeepsGutterAligned(t *testing.T) {
+	t.Parallel()
+
+	patch := "@@ -1,1 +1,2 @@\n context\n+\tindented\n"
+	got := New(styles.Theme{}).RenderUnifiedNumbered(patch, 120)
+	lines := strings.Split(got, "\n")
+
+	// Gutter unchanged; the leading tab on the added line became spaces.
+	require.Equal(t, "  2 +   indented", lines[2])
+}
+
 // TestUnifiedHeader_StyledDistinctly checks that file-boundary metadata lines
 // (---, +++, diff --git, index) are rendered with the header style and not
 // mistaken for added/removed content, so file boundaries stand out in a

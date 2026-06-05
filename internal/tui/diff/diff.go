@@ -33,7 +33,7 @@ func (v *Viewer) RenderUnified(patch string, width int) string {
 	}
 	lines := strings.Split(strings.TrimRight(patch, "\n"), "\n")
 	for i, line := range lines {
-		lines[i] = v.styleLine(clampWidth(line, width))
+		lines[i] = v.styleLine(clampWidth(expandTabs(line), width))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -68,10 +68,10 @@ func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 	inHunk := false
 	out := make([]string, len(lines))
 	for i, line := range lines {
-		clamped := clampWidth(line, contentWidth)
+		clamped := clampWidth(expandTabs(line), contentWidth)
 		styled := v.styleLine(clamped)
 		if j := pairs[i]; j >= 0 {
-			styled = v.styleWordLine(clamped, clampWidth(lines[j], contentWidth))
+			styled = v.styleWordLine(clamped, clampWidth(expandTabs(lines[j]), contentWidth))
 		}
 
 		if m := hunkHeaderPattern.FindStringSubmatch(line); m != nil {
@@ -515,6 +515,40 @@ func clampWidth(line string, width int) string {
 		return "…"
 	}
 	return string(runes[:width-1]) + "…"
+}
+
+// diffTabStop is the column width a tab advances to when rendering a diff line.
+// Diff content — Go source especially — is commonly tab-indented. A terminal
+// would expand those tabs to its own tab stops, but the width clamp and the
+// line-number gutter measure runes, so an unexpanded tab counts as a single
+// column while occupying several, misaligning every column that follows it.
+// Expanding tabs to spaces up front keeps the measured width equal to the
+// displayed width, matching how Claude Code and opencode show tab-indented code.
+const diffTabStop = 4
+
+// expandTabs replaces each tab in line with enough spaces to advance to the next
+// diffTabStop boundary, so the rune count of the result equals its rendered
+// column width. Stops are measured from the start of the diff line — the
+// "+"/"-"/" " marker is column 0 — so a reviewer reads the same indentation the
+// editor shows. A line with no tab is returned unchanged so the common case
+// allocates nothing.
+func expandTabs(line string) string {
+	if !strings.ContainsRune(line, '\t') {
+		return line
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range line {
+		if r == '\t' {
+			n := diffTabStop - col%diffTabStop
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+			continue
+		}
+		b.WriteRune(r)
+		col++
+	}
+	return b.String()
 }
 
 // isDiffHeader reports whether line is unified-diff file-boundary metadata

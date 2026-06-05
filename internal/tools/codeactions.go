@@ -461,6 +461,13 @@ func codeActionApplyNote(a lsp.CodeAction) string {
 		return fmt.Sprintf("edit, %d files", files)
 	case hasCommand:
 		return "command: " + a.Command.Command
+	case len(a.Data) > 0:
+		// Servers advertising resolveProvider (gopls, rust-analyzer) list
+		// refactorings with an empty Edit and defer computing it to a
+		// codeAction/resolve round-trip, keyed by this Data. The action is still
+		// applyable — apply resolves it first — so say so rather than leaving an
+		// empty note that reads as "does nothing".
+		return "resolve to apply"
 	default:
 		return ""
 	}

@@ -77,6 +77,27 @@ func TestCodeActionsConvertsRangeAndFormats(t *testing.T) {
 	)
 }
 
+func TestCodeActionsListNotesResolvableAction(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	// gopls/rust-analyzer list refactorings with an empty Edit and resolve data;
+	// the listing must flag them as applyable rather than leaving an empty note.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Extract function", Kind: "refactor.extract", Data: json.RawMessage(`{"title":"Extract function"}`)},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t,
+		"1. Extract function [refactor.extract] (resolve to apply)",
+		result.Content,
+	)
+}
+
 func TestCodeActionsDefaultsRangeToCursor(t *testing.T) {
 	dir := t.TempDir()
 	writeCodeActionsFile(t, dir)

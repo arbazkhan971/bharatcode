@@ -779,6 +779,7 @@ func (m *model) renderMain() string {
 	if tabBar != "" {
 		parts = append(parts, tabBar)
 	}
+	m.status.Search = m.search.statusSegment()
 	parts = append(parts,
 		m.clampChat(chatBody, chatH),
 		clampHeight(input, m.layout.input.H),

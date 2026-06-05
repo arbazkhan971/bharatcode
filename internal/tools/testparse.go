@@ -64,6 +64,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseSwiftTestFailures(output)
 	case runnerBun:
 		return parseBunTestFailures(output)
+	case runnerMocha:
+		return parseMochaFailures(output)
 	default:
 		return nil
 	}
@@ -88,6 +90,7 @@ const (
 	runnerDeno
 	runnerSwift
 	runnerBun
+	runnerMocha
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -194,6 +197,14 @@ func classifyTestRunner(command string) testRunner {
 		// against future overlap. `bun run test` (an arbitrary npm script) has "run"
 		// between the words and so does not match here.
 		return runnerBun
+	case strings.Contains(c, "mocha"):
+		// `mocha`/`npx mocha` drives Mocha's reporters, whose default/spec output
+		// closes with an "N failing" block that numbers each failure ("  1) <title>")
+		// and prints the assertion/exception beneath — a shape none of the other JS
+		// runners share. Checked before the jest runners since a "mocha" invocation
+		// carries none of their substrings, but kept explicit to guard against
+		// future overlap.
+		return runnerMocha
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1166,6 +1177,93 @@ func parseBunTestFailures(output string) []testFailure {
 		}
 		seen[name] = true
 		failures = append(failures, testFailure{Name: name})
+	}
+	return failures
+}
+
+// "  1) Array\n       #indexOf()\n         returns -1:" — the numbered header
+// that opens each entry in Mocha's "N failing" block. Mocha prints the full test
+// title across one or more increasingly-indented lines, the last ending in a
+// colon, before the assertion/exception message. The captured group is the
+// header line's text — the outermost title segment, or the whole title (ending
+// in ":") when the test has no surrounding describe block.
+var mochaHeaderRe = regexp.MustCompile(`^\s*\d+\) (.+)$`)
+
+// "  2 failing" — the run-summary line Mocha's reporters print immediately before
+// the detailed failure block. The spec reporter also numbers failures inline
+// (intermixed with passing "✓" lines), so the detail block is parsed only from
+// this marker onward to avoid mistaking those progress lines for headers.
+var mochaFailingRe = regexp.MustCompile(`^\s*\d+ failing\b`)
+
+// parseMochaFailures extracts failing tests from Mocha reporter output
+// (`mocha`/`npx mocha`). Each entry in the trailing "N failing" block opens with
+// a "  N) <title>" header; Mocha prints the full test title across one or more
+// increasingly-indented lines, the last ending in a colon, so the segments are
+// joined (and the trailing colon dropped) to form the name. The detail is the
+// first non-empty line after the title — the assertion or thrown-exception
+// message — located before the next numbered header so an entry without a body
+// does not borrow the following one's.
+func parseMochaFailures(output string) []testFailure {
+	lines := splitLines(output)
+	// Scan only from the "N failing" summary onward; the spec reporter's inline
+	// progress section numbers failures too, and parsing those would invent
+	// entries with mangled titles.
+	start := -1
+	for i, ln := range lines {
+		if mochaFailingRe.MatchString(ln) {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	lines = lines[start:]
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := mochaHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		// Collect the title segments: the header text plus any following non-empty
+		// lines up to and including the one ending in a colon (the test's own name).
+		segs := []string{strings.TrimSpace(m[1])}
+		j := i + 1
+		titleDone := strings.HasSuffix(segs[0], ":")
+		for ; !titleDone && j < len(lines); j++ {
+			if mochaHeaderRe.MatchString(lines[j]) {
+				break
+			}
+			t := strings.TrimSpace(lines[j])
+			if t == "" {
+				continue
+			}
+			segs = append(segs, t)
+			if strings.HasSuffix(t, ":") {
+				titleDone = true
+				j++
+				break
+			}
+		}
+		name := strings.TrimSpace(strings.TrimRight(strings.Join(segs, " "), ":"))
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		// The assertion/exception message is the first non-empty line after the
+		// title, before the next numbered header.
+		for ; j < len(lines); j++ {
+			if mochaHeaderRe.MatchString(lines[j]) {
+				break
+			}
+			if t := strings.TrimSpace(lines[j]); t != "" {
+				f.Detail = t
+				break
+			}
+		}
+		failures = append(failures, f)
 	}
 	return failures
 }

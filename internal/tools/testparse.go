@@ -38,6 +38,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseGoTestFailures(output)
 	case runnerPytest:
 		return parsePytestFailures(output)
+	case runnerUnittest:
+		return parseUnittestFailures(output)
 	case runnerJest:
 		return parseJestFailures(output)
 	case runnerCargo:
@@ -58,6 +60,7 @@ const (
 	runnerJest
 	runnerCargo
 	runnerRSpec
+	runnerUnittest
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -87,6 +90,10 @@ func classifyTestRunner(command string) testRunner {
 		return runnerRSpec
 	case strings.Contains(c, "pytest"), strings.Contains(c, "py.test"):
 		return runnerPytest
+	// `python -m unittest` (and `unittest discover`) print a "FAIL:"/"ERROR:"
+	// summary distinct from pytest's, so they get their own parser.
+	case strings.Contains(c, "unittest"):
+		return runnerUnittest
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -361,6 +368,53 @@ func parsePytestFailures(output string) []testFailure {
 				failures = append(failures, testFailure{Name: m[1]})
 			}
 		}
+	}
+	return failures
+}
+
+var (
+	// "FAIL: test_upper (test_module.TestStringMethods)" — a failed assertion;
+	// "ERROR: ..." marks an uncaught exception in setup/teardown/the test body.
+	// The captured group is the test id "method (module.Class)", which is exactly
+	// what `python -m unittest module.Class.method` re-runs. A trailing
+	// " (subTest ...)" descriptor (from assertSubTest) is kept as part of the name.
+	unittestFailRe = regexp.MustCompile(`^(?:FAIL|ERROR): (\S+ \(.+\))$`)
+	// The unindented exception line that closes a unittest traceback, e.g.
+	// "AssertionError: 'FOO' != 'FOOO'". Only the standard Error/Exception/Warning
+	// suffixes are matched so indented traceback frames ("  File ...", code lines)
+	// and the "Traceback (most recent call last):" header are skipped.
+	unittestDetailRe = regexp.MustCompile(`^([A-Za-z_][\w.]*(?:Error|Exception|Warning)(?::.*)?)$`)
+)
+
+// parseUnittestFailures handles Python's stdlib `unittest` output. Each failure
+// block opens with a "FAIL: <id>" or "ERROR: <id>" header; the detail is the
+// terminating exception line of that block's traceback (e.g. "AssertionError:
+// ..."), located before the next "====" separator or the next FAIL/ERROR header.
+func parseUnittestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := unittestFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if strings.HasPrefix(lines[j], "====") || unittestFailRe.MatchString(lines[j]) {
+				break
+			}
+			if d := unittestDetailRe.FindStringSubmatch(lines[j]); d != nil {
+				f.Detail = strings.TrimSpace(d[1])
+				break
+			}
+		}
+		failures = append(failures, f)
 	}
 	return failures
 }

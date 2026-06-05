@@ -14,6 +14,11 @@ questions:
 - `references`: where is this symbol used? Lists every use site across the
   workspace, including the declaration. Use this before renaming or changing a
   signature to gauge blast radius.
+- `incoming_calls`: which functions call this one? Lists the callers from the
+  language server's call hierarchy. More precise than `references` for a
+  function: it reports only call sites, not every textual mention.
+- `outgoing_calls`: which functions does this one call? Lists the callees, so
+  you can map a function's behavior without reading its whole body.
 - `hover`: what is this symbol? Returns the language server's type, signature,
   and documentation for it.
 
@@ -27,11 +32,13 @@ Arguments:
 - `column` integer, optional: 1-based column of the symbol on that line.
   Defaults to 1 (start of line); point it at the symbol's name for accuracy.
 - `action` string, optional: `definition` (default), `type_definition`,
-  `implementation`, `references`, or `hover`.
+  `implementation`, `references`, `incoming_calls`, `outgoing_calls`, or
+  `hover`.
 
 What success looks like:
 
-For `definition`, `type_definition`, `implementation`, and `references`, a sorted list of
+For `definition`, `type_definition`, `implementation`, `references`,
+`incoming_calls`, and `outgoing_calls`, a sorted list of
 `path:line:column: <source line>` entries, workspace-relative where possible;
 the trailing source line is the trimmed code at that site (omitted when the
 file or line cannot be read). `references` additionally leads with a summary

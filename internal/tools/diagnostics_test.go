@@ -212,6 +212,34 @@ func TestDiagnosticsShowsOffendingSourceLine(t *testing.T) {
 	require.NotContains(t, result.Content, "    phantom")
 }
 
+func TestDiagnosticsShowsRelatedInformation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n\nvar x = 1\nvar x = 2\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{
+				Path:     path,
+				Range:    lsp.Range{Start: lsp.Position{Line: 3, Character: 4}},
+				Severity: lsp.Error,
+				Message:  "x redeclared in this block",
+				Related: []lsp.RelatedInformation{{
+					Location: lsp.Location{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 4}}},
+					Message:  "other declaration of x",
+				}},
+			},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// The related location is rendered indented beneath the diagnostic, with a
+	// workspace-relative path and 1-based coordinates.
+	require.Contains(t, result.Content, "    related: main.go:3:5: other declaration of x")
+}
+
 // TestDiagnosticFilesScansRootNamedLikeIgnored guards the path != root exception:
 // when the workspace root itself is named like an ignored directory, its files
 // are still scanned rather than the whole tree being skipped.

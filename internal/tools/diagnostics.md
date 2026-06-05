@@ -22,7 +22,10 @@ warning):`. Beneath it is a sorted list of diagnostics formatted as
 rule code follows in brackets and the reporting source in parentheses, e.g.
 `main.rs:3:9: error: cannot find value `x` [E0425] (rustc)`. When the offending
 source line can be read it is shown, trimmed, indented beneath the message so you
-see the code at fault without a separate view.
+see the code at fault without a separate view. When the language server links
+other locations to a diagnostic (the conflicting prior declaration, an unused
+import's use site), each is listed indented as `related: path:line:column:
+message` so you can act on the cross-reference directly.
 
 Failure cases:
 

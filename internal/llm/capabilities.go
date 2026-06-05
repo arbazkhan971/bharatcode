@@ -93,6 +93,14 @@ func modelSupportsThinking(models []Model, id string) bool {
 var geminiThinkingModelSubstrings = []string{
 	"gemini-2.5",
 	"gemini-3",
+	// Rolling "-latest" aliases resolve to the current Gemini 2.5 generation,
+	// which supports the native thinkingConfig. They carry no version digit, so
+	// the numbered markers above do not match them; list them explicitly so a
+	// thinking budget configured against an alias id is honored rather than
+	// silently dropped.
+	"gemini-flash-latest",
+	"gemini-flash-lite-latest",
+	"gemini-pro-latest",
 }
 
 // modelSupportsGeminiThinking reports whether the configured model named by id is
@@ -164,6 +172,14 @@ var contextWindowRules = []struct {
 	{"gemini-1.5", 1_048_576},
 	{"gemini-2", 1_048_576},
 	{"gemini-3", 1_048_576},
+	// Google's rolling "-latest" aliases (gemini-flash-latest,
+	// gemini-flash-lite-latest, gemini-pro-latest) track the current Gemini 2.5
+	// generation, all of which expose a 1M window. Their ids carry a version
+	// digit (the alias is the whole point), so they share no substring with the
+	// numbered rules above and would otherwise fall through to "unknown" (0).
+	{"gemini-flash-latest", 1_048_576},
+	{"gemini-flash-lite-latest", 1_048_576},
+	{"gemini-pro-latest", 1_048_576},
 	// xAI Grok — Grok 4 and the grok-code coding line lifted the window to 256k,
 	// while the grok-2/3 line stays at 131k. Both ids carry the "grok" marker, so
 	// the specific "grok-4"/"grok-code" rules must precede the family one to avoid

@@ -352,6 +352,31 @@ func TestParseCodeActionPreservesResolveData(t *testing.T) {
 	})
 }
 
+func TestParseCodeActionPreferredAndDisabled(t *testing.T) {
+	t.Run("preferred_flag", func(t *testing.T) {
+		raw := `{"title":"Import \"fmt\"","kind":"quickfix","isPreferred":true}`
+		action, err := parseCodeAction(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.True(t, action.IsPreferred)
+		require.Empty(t, action.Disabled)
+	})
+
+	t.Run("disabled_reason", func(t *testing.T) {
+		raw := `{"title":"Extract function","kind":"refactor.extract","disabled":{"reason":"selection spans a statement boundary"}}`
+		action, err := parseCodeAction(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, "selection spans a statement boundary", action.Disabled)
+	})
+
+	t.Run("absent_fields_default", func(t *testing.T) {
+		raw := `{"title":"Quick Fix","kind":"quickfix"}`
+		action, err := parseCodeAction(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.False(t, action.IsPreferred)
+		require.Empty(t, action.Disabled)
+	})
+}
+
 func TestResolveCodeActionRequiresData(t *testing.T) {
 	// Resolving an action with no round-trip data is rejected before any request
 	// is issued, so a nil client never gets dereferenced.

@@ -534,15 +534,22 @@ func parseCodeAction(raw json.RawMessage) (CodeAction, error) {
 	}
 
 	var wire struct {
-		Title   string          `json:"title"`
-		Kind    string          `json:"kind"`
-		Edit    json.RawMessage `json:"edit"`
-		Command json.RawMessage `json:"command"`
+		Title       string          `json:"title"`
+		Kind        string          `json:"kind"`
+		Edit        json.RawMessage `json:"edit"`
+		Command     json.RawMessage `json:"command"`
+		IsPreferred bool            `json:"isPreferred"`
+		Disabled    *struct {
+			Reason string `json:"reason"`
+		} `json:"disabled"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return CodeAction{}, fmt.Errorf("parsing code action: %w", err)
 	}
-	action := CodeAction{Title: wire.Title, Kind: wire.Kind, Data: append(json.RawMessage(nil), raw...)}
+	action := CodeAction{Title: wire.Title, Kind: wire.Kind, IsPreferred: wire.IsPreferred, Data: append(json.RawMessage(nil), raw...)}
+	if wire.Disabled != nil {
+		action.Disabled = strings.TrimSpace(wire.Disabled.Reason)
+	}
 	if len(wire.Edit) > 0 && string(wire.Edit) != "null" {
 		edit, err := parseWorkspaceEdit(wire.Edit)
 		if err != nil {

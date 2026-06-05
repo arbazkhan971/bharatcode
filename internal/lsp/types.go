@@ -184,6 +184,14 @@ type CodeAction struct {
 	Kind    string
 	Edit    WorkspaceEdit
 	Command *Command
+	// IsPreferred is the server's hint that this action is the recommended one for
+	// the context (e.g. the canonical quick fix for a diagnostic), letting a
+	// consumer pick a default without guessing.
+	IsPreferred bool
+	// Disabled, when non-empty, is the human-readable reason the server marked the
+	// action unavailable in the current context. A disabled action is still listed
+	// (so the reason is visible) but cannot be applied.
+	Disabled string
 	// Data is the raw JSON of the original action object as the server sent it.
 	// Servers that advertise resolveProvider often return an action with an empty
 	// Edit and rely on a follow-up codeAction/resolve request — which echoes this

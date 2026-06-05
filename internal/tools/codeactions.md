@@ -46,7 +46,11 @@ When listing, a numbered list of actions, each showing its title, kind (e.g.
 `quickfix`, `source.organizeImports`, `refactor.extract`) when the server
 reports one, and a note of how it would take effect — an inline edit, a
 server-side command, both, or `resolve to apply` for a refactoring the server
-computes lazily (still applyable; `apply` resolves it first).
+computes lazily (still applyable; `apply` resolves it first). An action the
+server flags as the recommended fix for the position is marked `(preferred)` —
+prefer it when several quick fixes compete. An action the server cannot offer in
+this context is marked `(disabled: <reason>)` and cannot be applied; `apply`
+refuses it with the reason rather than writing a no-op.
 
 When applying, a summary line plus a unified diff per file the action changed.
 If the applied action left any errors or warnings behind, the re-checked

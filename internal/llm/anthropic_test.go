@@ -610,6 +610,69 @@ func TestAnthropicStreamsThinkingThenText(t *testing.T) {
 	require.Contains(t, got, EndEvent{Usage: Usage{InputTokens: 10, OutputTokens: 8}})
 }
 
+// TestAnthropicThinkingBudgetLiftsMaxTokens asserts that enabling extended
+// thinking with a budget at or above the resolved max_tokens lifts the cap above
+// the budget, since Anthropic requires max_tokens to be strictly greater than
+// thinking.budget_tokens (the budget is carved out of the same output allowance)
+// and would otherwise reject the request with a 400.
+func TestAnthropicThinkingBudgetLiftsMaxTokens(t *testing.T) {
+	t.Run("default max_tokens below budget is lifted", func(t *testing.T) {
+		var captured anthropicRequest
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(b, &captured))
+			writeMinimalAnthropicSSE(w, `{"input_tokens":4,"output_tokens":1}`)
+		}))
+		defer server.Close()
+
+		provider := newAnthropicThinkingProvider(t, server.URL)
+		// No explicit MaxTokens, so it resolves to defaultAnthropicMaxTokens, which
+		// is below this budget and must be lifted above it.
+		events, err := provider.Stream(context.Background(), Request{
+			Model: "claude-sonnet-4-20250514",
+			Messages: []message.Message{{
+				Role:    message.RoleUser,
+				Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+			}},
+			Thinking: &ThinkingConfig{BudgetTokens: 8192},
+		})
+		require.NoError(t, err)
+		_ = collectEvents(events)
+
+		require.Equal(t, 8192, captured.Thinking.BudgetTokens)
+		require.Equal(t, 8192+defaultAnthropicMaxTokens, captured.MaxTokens)
+		require.Greater(t, captured.MaxTokens, captured.Thinking.BudgetTokens)
+	})
+
+	t.Run("explicit max_tokens above budget is preserved", func(t *testing.T) {
+		var captured anthropicRequest
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			require.NoError(t, json.Unmarshal(b, &captured))
+			writeMinimalAnthropicSSE(w, `{"input_tokens":4,"output_tokens":1}`)
+		}))
+		defer server.Close()
+
+		provider := newAnthropicThinkingProvider(t, server.URL)
+		events, err := provider.Stream(context.Background(), Request{
+			Model: "claude-sonnet-4-20250514",
+			Messages: []message.Message{{
+				Role:    message.RoleUser,
+				Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+			}},
+			Thinking:  &ThinkingConfig{BudgetTokens: 1024},
+			MaxTokens: 4096,
+		})
+		require.NoError(t, err)
+		_ = collectEvents(events)
+
+		// The caller's cap already exceeds the budget, so it is left untouched.
+		require.Equal(t, 4096, captured.MaxTokens)
+	})
+}
+
 // TestAnthropicSkipsRedactedThinking asserts a redacted_thinking content block
 // is dropped: it produces no ThinkingEvent (its payload is encrypted) while a
 // following text block still streams normally.

@@ -340,6 +340,16 @@ func (p *anthropicProvider) buildAnthropicRequest(req Request) (anthropicRequest
 	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 && modelSupportsThinking(p.models, req.Model) {
 		out.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: req.Thinking.BudgetTokens}
 		out.Temperature = 0
+		// Anthropic requires max_tokens to be strictly greater than the thinking
+		// budget, since the budget is carved out of the same output allowance: the
+		// thinking tokens are billed as output and counted against max_tokens. A
+		// caller that asks for a large thinking budget but leaves max_tokens at the
+		// modest default (or sets it below the budget) would otherwise get a 400.
+		// Lift the cap to the budget plus a full default allowance so there is room
+		// for a visible answer after the model finishes thinking.
+		if out.MaxTokens <= req.Thinking.BudgetTokens {
+			out.MaxTokens = req.Thinking.BudgetTokens + defaultAnthropicMaxTokens
+		}
 	}
 
 	return out, nil

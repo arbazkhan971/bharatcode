@@ -236,6 +236,31 @@ func keySpecial(text string, code rune) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Code: code})
 }
 
+func TestInputPlaceholder_ShownOnEmptyFocusedPrompt(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	require.Equal(t, focusInput, m.focus)
+	require.Equal(t, 0, m.input.Len())
+	require.Contains(t, m.renderMain(), "/keys for shortcuts")
+}
+
+func TestInputPlaceholder_HiddenOnceUserTypes(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.input.WriteString("h")
+	require.NotContains(t, m.renderMain(), "/keys for shortcuts")
+}
+
+func TestInputPlaceholder_HiddenWhenChatFocused(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.focus = focusChat
+	require.NotContains(t, m.renderMain(), "/keys for shortcuts")
+}
+
 func TestStatusbar_UptimeTickMonotonic(t *testing.T) {
 	t.Parallel()
 

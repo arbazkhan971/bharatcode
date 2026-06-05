@@ -61,6 +61,32 @@ func modelSupportsThinking(models []Model, id string) bool {
 	return false
 }
 
+// geminiThinkingModelSubstrings lists case-insensitive markers in Gemini model
+// ids whose models support the native thinkingConfig (the Gemini 2.5 family).
+// The Gemini provider only emits the thinkingConfig field for a configured model
+// whose id matches one of these markers, so opting into a thinking budget on an
+// older model (gemini-1.5, gemini-2.0) does not trigger a 400.
+var geminiThinkingModelSubstrings = []string{
+	"gemini-2.5",
+}
+
+// modelSupportsGeminiThinking reports whether the configured model named by id is
+// a Gemini model that supports the native thinkingConfig. The match is on the
+// model id so callers configure ids such as "gemini-2.5-flash" and the request
+// builder gates the thinkingConfig field automatically.
+func modelSupportsGeminiThinking(models []Model, id string) bool {
+	if _, ok := findModel(models, id); !ok {
+		return false
+	}
+	lid := strings.ToLower(strings.TrimSpace(id))
+	for _, marker := range geminiThinkingModelSubstrings {
+		if strings.Contains(lid, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func modelSupportsTools(models []Model, id string) bool {
 	model, ok := findModel(models, id)
 	return ok && model.SupportsTools

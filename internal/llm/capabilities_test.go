@@ -88,8 +88,11 @@ func TestInferContextWindow(t *testing.T) {
 		// Grok 4 and the grok-code coding line ship a 256k window; their ids carry
 		// the "grok" marker, so the specific rules must win over the 131k family rule.
 		{"grok-4", 256_000},
-		{"grok-4-fast", 256_000},
 		{"grok-code-fast-1", 256_000},
+		// The grok-4-fast line lifted the window to 2M. Its id also carries the
+		// "grok-4" marker, so its rule must win over grok-4's 256k rule.
+		{"grok-4-fast", 2_000_000},
+		{"grok-4-fast-reasoning", 2_000_000},
 		{"sonar", 128_000},
 		{"sonar-pro", 200_000},
 		{"codestral-latest", 256_000},

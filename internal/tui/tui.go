@@ -19,6 +19,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/arbazkhan971/bharatcode/internal/recipe"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tui/chat"
 	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
@@ -58,6 +59,10 @@ type Dependencies struct {
 	// slash commands. It may be nil; the TUI loads a registry from the
 	// configured prompt directories at startup when one is not supplied.
 	Prompts *config.PromptRegistry
+	// Recipes is the optional recipe registry backing /recipename slash
+	// commands. It may be nil; the TUI loads a registry from the configured
+	// recipe directories at startup when one is not supplied.
+	Recipes *recipe.Registry
 }
 
 // Run launches the TUI and blocks until the program exits.
@@ -175,6 +180,12 @@ type model struct {
 	// gracefully when no utility is installed; tests inject a stub.
 	copyToClipboard copyFunc
 
+	// recipeCollector is the in-progress recipe parameter collector, if any.
+	// It is non-nil while the user is answering parameter dialogs for a recipe
+	// invocation. handleKey reads it after a recipeParamDialog pops to advance
+	// the collection sequence.
+	recipeCollector *recipeParamCollector
+
 	// chatScroll is the number of lines the chat viewport is scrolled up from the
 	// bottom. Zero anchors the view to the newest content (the default, unchanged
 	// behavior); a positive value reveals older lines. The mouse wheel adjusts it.
@@ -243,6 +254,9 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	}
 	if m.deps.Prompts == nil {
 		m.deps.Prompts = loadPromptRegistry(deps.Cfg)
+	}
+	if m.deps.Recipes == nil {
+		m.deps.Recipes = loadRecipeRegistry(deps.Cfg)
 	}
 	// Seed the single default tab from the freshly wired active state. With one
 	// tab the tab bar stays hidden, so the default render is unchanged.
@@ -326,7 +340,12 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		_, pop := top.HandleKey(msg)
 		if pop {
-			m.dialogs.Pop()
+			popped := m.dialogs.Pop()
+			// When a recipe parameter dialog is popped and there is an active
+			// collector, advance it with the submitted value (or cancellation).
+			if rpd, ok := popped.(*recipeParamDialog); ok && m.recipeCollector != nil {
+				return m.recipeCollector.advanceFromDialog(m, rpd.param.Name, rpd.result, rpd.cancelled)
+			}
 		}
 		return m, nil
 	}
@@ -567,11 +586,17 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 
 // handleUnknownSlash resolves a slash command that is not built in. It first
 // tries the prompt registry: a "/name rest" line whose name is registered is
-// rendered with rest spliced into {{input}} and submitted to the agent. A name
-// that is not in the registry falls back to the unknown-command dialog.
+// rendered with rest spliced into {{input}} and submitted to the agent. Next
+// it tries the recipe registry: a "/name args" whose name matches a recipe
+// collects parameters interactively (for user_prompt params) and then
+// submits the rendered recipe to the agent. A name that is not in either
+// registry falls back to the unknown-command dialog.
 func (m *model) handleUnknownSlash(text string) (tea.Model, tea.Cmd) {
 	name, args := splitSlash(text)
 	if handled, model, cmd := m.handleRegistryPrompt(name, args); handled {
+		return model, cmd
+	}
+	if handled, model, cmd := m.handleRegistryRecipe(name, args); handled {
 		return model, cmd
 	}
 	m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Unknown command", Body: text, Theme: m.theme})
@@ -698,7 +723,7 @@ func (m *model) renderMain() string {
 		if chatBody != "" {
 			chatBody += "\n\n"
 		}
-		chatBody += slashHelp()
+		chatBody += strings.Join(m.slashHelpLines(), "\n")
 	}
 	if m.filetree.visible {
 		panel := m.renderFiletree(filetreeWidth, m.layout.chat.H)
@@ -851,8 +876,8 @@ func emptyDefault(value string, fallback string) string {
 	return value
 }
 
-func slashHelp() string {
-	return strings.Join([]string{
+func (m *model) slashHelpLines() []string {
+	lines := []string{
 		"/help - list commands",
 		"/clear - clear visible chat",
 		"/sessions - restore a recent session",
@@ -876,7 +901,19 @@ func slashHelp() string {
 		"/yolo - toggle permission bypass",
 		"/save - persist session",
 		"/quit - exit",
-	}, "\n")
+	}
+	// Append registered recipes so the help listing stays self-documenting as
+	// new recipes are dropped into the recipe directories.
+	if m.deps.Recipes != nil {
+		for _, e := range m.deps.Recipes.List() {
+			title := e.Title
+			if title == "" {
+				title = e.Description
+			}
+			lines = append(lines, "/"+e.Name+" - "+title)
+		}
+	}
+	return lines
 }
 
 func clampHeight(s string, height int) string {

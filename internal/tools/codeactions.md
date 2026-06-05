@@ -28,6 +28,9 @@ Arguments:
   that act on a selection.
 - `apply` integer, optional: 1-based index of an action from a prior listing to
   apply. Omit to list rather than apply.
+- `preview` boolean, optional: used with `apply`, show the diff the action would
+  produce without writing anything. Use it to inspect a refactoring that may
+  touch several files, then re-run without `preview` to commit.
 
 What success looks like:
 
@@ -39,6 +42,10 @@ server-side command, or both.
 When applying, a summary line plus a unified diff per file the action changed.
 If the applied action left any errors or warnings behind, the re-checked
 diagnostics are appended so you can fix them.
+
+When previewing (`apply` plus `preview`), the same summary and per-file diffs
+are shown, prefixed to make clear nothing was written; the post-write
+diagnostics re-check is skipped since no file changed.
 
 Failure cases:
 

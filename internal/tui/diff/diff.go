@@ -91,6 +91,54 @@ func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 	return strings.Join(out, "\n")
 }
 
+// Stat summarizes a unified diff as a one-line "N file(s) changed, +A -R"
+// header, matching the diffstat line Claude Code and opencode show above a
+// reviewed diff. Files are counted from "+++" path headers; a bare single-file
+// hunk with no headers still counts as one changed file once it has content.
+// Added and removed counts are the "+"/"-" content lines, excluding the
+// "+++"/"---" file-boundary metadata. The "+A" segment is rendered with the
+// add style and "-R" with the remove style; the rest is muted. An empty or
+// content-free patch returns "".
+func (v *Viewer) Stat(patch string) string {
+	files, added, removed := diffStat(patch)
+	if files == 0 {
+		return ""
+	}
+
+	noun := "files"
+	if files == 1 {
+		noun = "file"
+	}
+	out := v.theme.Muted.Render(fmt.Sprintf("%d %s changed, ", files, noun))
+	out += v.theme.DiffAdd.Render(fmt.Sprintf("+%d", added))
+	out += v.theme.Muted.Render(" ")
+	out += v.theme.DiffRemove.Render(fmt.Sprintf("-%d", removed))
+	return out
+}
+
+// diffStat counts the changed files and the added/removed content lines in a
+// unified diff. It mirrors the line classification used by the renderers so the
+// summary always agrees with what is shown. A patch carrying added or removed
+// content but no "+++" header (a bare hunk) is reported as one changed file.
+func diffStat(patch string) (files, added, removed int) {
+	for _, line := range strings.Split(patch, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++"):
+			files++
+		case strings.HasPrefix(line, "---"), strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "index "), strings.HasPrefix(line, "@@"):
+			// File-boundary or hunk metadata: not counted as content.
+		case strings.HasPrefix(line, "+"):
+			added++
+		case strings.HasPrefix(line, "-"):
+			removed++
+		}
+	}
+	if files == 0 && (added > 0 || removed > 0) {
+		files = 1
+	}
+	return files, added, removed
+}
+
 // gutter renders the muted two-column "old new " line-number prefix. A column
 // is left blank (spaces) when its side does not apply to the line, so an added
 // line shows no old number and a removed line shows no new number.

@@ -486,6 +486,7 @@ func parseCommand(raw json.RawMessage) (*Command, error) {
 // entry, so the caller supplies the path.
 type wireDocumentSymbol struct {
 	Name     string               `json:"name"`
+	Detail   string               `json:"detail"`
 	Kind     int                  `json:"kind"`
 	Range    wireRange            `json:"range"`
 	Children []wireDocumentSymbol `json:"children"`
@@ -560,6 +561,7 @@ func appendDocumentSymbol(out []Symbol, path, container string, node wireDocumen
 		Path:          path,
 		Range:         convertRange(node.Range),
 		ContainerName: container,
+		Detail:        node.Detail,
 	})
 	for _, child := range node.Children {
 		out = appendDocumentSymbol(out, path, node.Name, child)

@@ -8,4 +8,6 @@ Arguments:
 
 Success looks like captured stdout and stderr as text, with metadata containing the job id, status, and exit code. For background commands, keep the returned `job_id` and use `job_output` to inspect progress or `job_kill` to stop it.
 
+Truncation: each of stdout and stderr is captured up to roughly 10 MB; output beyond that is dropped and a `[truncated, N bytes]` marker is appended. To stay well under that limit and keep results focused, narrow your commands with `head`, `tail`, `grep`, or `sed -n "<start>,<end>p"` rather than dumping whole files.
+
 Failure cases include malformed arguments, a missing command argument, permission denial, unavailable shell support, timeout, a non-zero exit status, or context cancellation.

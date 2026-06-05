@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -198,6 +199,100 @@ func newAnthropicTestProvider(t *testing.T, serverURL string) Provider {
 	provider, err := reg.Get("anthropic")
 	require.NoError(t, err)
 	return provider
+}
+
+// TestAnthropicOverloadedStreamErrorIsRetryable proves a mid-stream
+// overloaded_error event is classified as a transient ErrServer fault. On the
+// old code the error event was surfaced with no sentinel, so the failover and
+// backoff layers (which retry only on ErrServer/ErrRateLimit) would give up on
+// a recoverable capacity loss. The stream opens with an ordinary text delta and
+// only then fails, exercising the genuine mid-stream path.
+func TestAnthropicOverloadedStreamErrorIsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\n"+
+			"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n")
+		fmt.Fprint(w, "event: content_block_start\n"+
+			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		fmt.Fprint(w, "event: content_block_delta\n"+
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+		fmt.Fprint(w, "event: error\n"+
+			"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+	})
+	require.NoError(t, err)
+
+	got := collectEvents(events)
+	errEv, ok := findEvent[ErrorEvent](got)
+	require.True(t, ok, "an overloaded_error stream event must emit a terminal ErrorEvent")
+	require.ErrorIs(t, errEv.Err, ErrServer, "overloaded_error must be classified as a retryable ErrServer")
+	require.Contains(t, errEv.Err.Error(), "Overloaded", "the provider message must be preserved")
+}
+
+// TestAnthropicRateLimitStreamErrorIsRetryable proves a mid-stream
+// rate_limit_error event is classified as ErrRateLimit so the failover layer
+// retries it rather than failing hard.
+func TestAnthropicRateLimitStreamErrorIsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_start\n"+
+			"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n")
+		fmt.Fprint(w, "event: error\n"+
+			"data: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Rate limited\"}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+	})
+	require.NoError(t, err)
+
+	got := collectEvents(events)
+	errEv, ok := findEvent[ErrorEvent](got)
+	require.True(t, ok, "a rate_limit_error stream event must emit a terminal ErrorEvent")
+	require.ErrorIs(t, errEv.Err, ErrRateLimit, "rate_limit_error must be classified as a retryable ErrRateLimit")
+}
+
+// TestAnthropicInvalidRequestStreamErrorIsNotRetryable proves a terminal
+// invalid_request_error is NOT tagged with a retryable sentinel, so failover
+// does not loop on a request the provider will always reject.
+func TestAnthropicInvalidRequestStreamErrorIsNotRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: error\n"+
+			"data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad input\"}}\n\n")
+	}))
+	defer server.Close()
+
+	provider := newAnthropicTestProvider(t, server.URL)
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+	})
+	require.NoError(t, err)
+
+	got := collectEvents(events)
+	errEv, ok := findEvent[ErrorEvent](got)
+	require.True(t, ok, "an invalid_request_error stream event must emit a terminal ErrorEvent")
+	require.False(t, errors.Is(errEv.Err, ErrServer), "invalid_request_error must not be retryable as ErrServer")
+	require.False(t, errors.Is(errEv.Err, ErrRateLimit), "invalid_request_error must not be retryable as ErrRateLimit")
 }
 
 // TestAnthropicMarksSystemAndToolsWithCacheControl asserts, against the raw

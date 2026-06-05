@@ -237,11 +237,28 @@ func (s *anthropicStreamState) handle(ctx context.Context, ev sseEvent, events c
 	case "error":
 		var chunk anthropicErrorEvent
 		if err := json.Unmarshal([]byte(ev.Data), &chunk); err == nil && chunk.Error.Message != "" {
-			return fmt.Errorf("provider stream error: %s", chunk.Error.Message)
+			return classifyAnthropicStreamError(chunk.Error.Type, chunk.Error.Message)
 		}
-		return fmt.Errorf("provider stream error: %s", strings.TrimSpace(ev.Data))
+		return fmt.Errorf("provider stream error: %s: %w", strings.TrimSpace(ev.Data), ErrServer)
 	}
 	return nil
+}
+
+// classifyAnthropicStreamError maps an Anthropic mid-stream error event onto a
+// retryable sentinel so the failover and backoff layers can recover. Anthropic
+// surfaces transient capacity loss as overloaded_error and other server faults
+// as api_error; both wrap ErrServer. A rate_limit_error wraps ErrRateLimit.
+// Any other (terminal) error type, such as invalid_request_error, is returned
+// without a retryable sentinel so it is not retried.
+func classifyAnthropicStreamError(errType, message string) error {
+	switch strings.ToLower(strings.TrimSpace(errType)) {
+	case "overloaded_error", "api_error":
+		return fmt.Errorf("provider stream error: %s: %w", message, ErrServer)
+	case "rate_limit_error":
+		return fmt.Errorf("provider stream error: %s: %w", message, ErrRateLimit)
+	default:
+		return fmt.Errorf("provider stream error: %s", message)
+	}
 }
 
 // finish emits a terminal EndEvent if message_stop was not observed, so the

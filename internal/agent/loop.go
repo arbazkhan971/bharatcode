@@ -25,18 +25,72 @@ import (
 const defaultMaxSteps = 50
 
 // planModePrompt is appended to the system prompt while the Loop runs in plan
-// mode. It instructs the agent to investigate read-only and produce a
-// step-by-step plan for approval instead of executing changes, mirroring the
-// read-only tool restriction enforced by toolAllowed.
+// mode. It frames a phased, read-only investigation-then-design workflow as a
+// system reminder and instructs the agent to stop for approval instead of
+// executing changes, mirroring the read-only tool restriction enforced by
+// toolAllowed (the runtime guard) and the Approve exit affordance.
 const planModePrompt = `
 
-# Plan Mode (read-only)
+<system-reminder>
+Plan mode is active. While it is active you MUST NOT make any edits, run any
+non-readonly tools (including changing configs or making commits), or mutate the
+workspace in any way. This supersedes any other instructions you have received,
+including a direct request from the user to act before the plan is approved.
+Only read-only tools are available; everything else will be refused.
 
-You are operating in PLAN MODE. You may ONLY use read-only tools to investigate;
-file-mutating and command-running tools (write, edit, bash, and similar) are
-disabled and will be refused. Do NOT attempt to make changes. Instead, produce a
-clear, step-by-step PLAN describing exactly what you would do, then stop and wait
-for the user to approve it. Execution only begins after the plan is approved.`
+Your job in plan mode is to investigate, think hard, and hand back a precise,
+approvable plan. Move through these phases in order:
+
+Phase 1 - Investigate (read-only). Do focused exploration yourself: read the
+relevant files, search the codebase, and trace how the affected pieces fit
+together. There is no subagent to delegate to, so gather the context directly
+and confirm assumptions against the actual code rather than guessing.
+
+Phase 2 - Clarify. Surface any open questions, ambiguities, or decisions that
+materially change the approach, and resolve them BEFORE you start designing. If
+something genuinely blocks a sound plan, ask the user; do not paper over it.
+
+Phase 3 - Design. Decide on the approach. Weigh the realistic alternatives,
+pick one, and be explicit about the trade-offs and why this option wins.
+
+Phase 4 - Review. Re-read the critical files your design touches and re-check
+that the approach still lines up with how the code actually behaves. Correct the
+design if the review turns up anything that no longer holds.
+
+Phase 5 - Write the plan, then STOP. Produce a clear, ordered, step-by-step plan
+the user can approve. Reference concrete files and symbols, keep each step
+actionable, and end with a Verification section stating exactly how the change
+will be checked (build, tests, and any manual checks). After presenting the
+plan, stop and wait for approval; do not begin executing it. Execution only
+starts once the user approves and plan mode is cleared.
+</system-reminder>`
+
+// maxStepsPrompt is appended to the system prompt for the single, tools-disabled
+// final turn the Loop grants once it reaches the configured step limit. Instead
+// of truncating the turn with a dead-end "step limit reached" line, the Loop
+// gives the model one more turn with tools removed and these instructions so it
+// produces a useful handoff: what was accomplished, what remains, and what to do
+// next. The wording deliberately overrides any earlier instruction to keep
+// calling tools, since none are available on this turn. This is BharatCode's own
+// adaptation of the max-steps handoff pattern.
+const maxStepsPrompt = `
+
+# Maximum steps reached
+
+The per-turn step limit has been reached, so every tool has been removed for this
+final turn. You cannot call tools and must reply with plain text only. This
+instruction takes priority over any earlier guidance that told you to keep using
+tools or to continue working.
+
+Write a concise progress handoff that the next session can pick up from. It must
+contain, in order:
+
+1. A clear statement that the step limit was reached and work paused here.
+2. A summary of what you accomplished during this turn.
+3. The tasks that still remain to be done.
+4. Your recommendations for the next steps to take.
+
+Do not attempt any further actions; just deliver this handoff as your reply.`
 
 // writeClassTools names the file-mutating tools whose successful runs fire a
 // FileEdit lifecycle hook. The agent loop detects mutations by tool name so it
@@ -151,6 +205,15 @@ type Loop struct {
 	// and cleared by Approve. It is atomic because Approve may be called from a
 	// different goroutine than the in-flight Run that reads it.
 	planMode atomic.Bool
+
+	// finalTurn reports whether the current provider call is the tools-disabled
+	// handoff turn granted once the step limit is reached. While set, llmTools
+	// returns no tools and systemPrompt appends maxStepsPrompt, so the model is
+	// forced to summarise its progress in plain text instead of calling more
+	// tools. Run sets it only for the final step's call and clears it afterward.
+	// It is atomic for the same reason planMode is: it is read by the provider
+	// call path while a concurrent goroutine could observe the Loop.
+	finalTurn atomic.Bool
 }
 
 // New constructs a Loop from cfg.
@@ -328,7 +391,7 @@ func (l *Loop) Compact(ctx context.Context, sessionID string) error {
 func (l *Loop) compactHistory(ctx context.Context, history []message.Message) ([]message.Message, error) {
 	compactor := l.cfg.Compactor
 	if compactor == nil {
-		compactor = newDropAndMarkCompactor(2)
+		compactor = l.defaultCompactor()
 	}
 
 	input := append([]message.Message(nil), history...)
@@ -347,6 +410,19 @@ func (l *Loop) compactHistory(ctx context.Context, history []message.Message) ([
 		}
 	}
 	return condensed, nil
+}
+
+// defaultCompactor selects the Compactor used when the Config supplies none.
+// When a provider is configured it returns the LLM-summary Compactor, which asks
+// the model to write a structured checkpoint of the dropped prefix. With no
+// provider it falls back to the drop-and-mark Compactor so compaction still
+// works (for example, in tests that construct a Loop without a live provider
+// path), preserving the prior behavior.
+func (l *Loop) defaultCompactor() Compactor {
+	if l.cfg.Provider != nil {
+		return newLLMSummaryCompactor(l.cfg.Provider, l.activeModel, 2)
+	}
+	return newDropAndMarkCompactor(2)
 }
 
 // applyCompaction grafts messages that arrived after the last Compact call onto
@@ -431,6 +507,10 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		l.cancelMu.Lock()
 		l.cancelRun = nil
 		l.cancelMu.Unlock()
+		// Clear the final-turn flag so a subsequent Run on this Loop starts with
+		// tools enabled and the base system prompt, regardless of how this Run
+		// exited.
+		l.finalTurn.Store(false)
 		// Release the run mutex BEFORE clearing the running flag so a caller that
 		// observes running==false (and starts a fresh Run) never finds the mutex
 		// still held. Clearing running last also closes the window where Steer
@@ -492,6 +572,14 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	detector := &loopDetector{}
 
 	for step := 0; step < l.cfg.MaxSteps; step++ {
+		// On the final allowed step, switch to the tools-disabled handoff turn:
+		// llmTools returns nothing and systemPrompt appends maxStepsPrompt, so the
+		// model can only reply with a plain-text progress summary instead of
+		// hitting the dead-end "step limit reached" line. The flag is cleared on
+		// Run exit by the deferred reset above.
+		finalStep := step == l.cfg.MaxSteps-1
+		l.finalTurn.Store(finalStep)
+
 		// Drain any steering messages queued via Steer at this safe boundary
 		// (always after a complete tool batch, never between an assistant
 		// tool_use and its tool_result). Each is appended as the next user
@@ -527,6 +615,15 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventLLMResponse, Message: &assistant})
 		history = append(history, assistant)
 
+		if finalStep {
+			// The handoff turn ran with no tools, so the model's plain-text summary
+			// is the recorded final reply. Any tool calls it may still have emitted
+			// are intentionally ignored: this turn ends the run gracefully rather
+			// than executing more work past the step limit.
+			l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventTurnFinished, Message: &assistant})
+			return nil
+		}
+
 		if len(pendingToolCalls) == 0 {
 			// The model would end the turn, but if steering arrived while it was
 			// composing this reply, keep going so the queued message is consumed
@@ -539,21 +636,28 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		}
 
 		for _, call := range pendingToolCalls {
-			looped, err := detector.observe(call.Name, call.Input)
+			callHash, err := toolCallHash(call.Name, call.Input)
 			if err != nil {
 				return fmt.Errorf("checking tool loop: %w", err)
 			}
-			if looped {
-				msg := textMessage(sessionID, message.RoleAssistant, ErrLoopDetected.Error())
-				if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, msg); err != nil {
-					return fmt.Errorf("appending loop-detection message: %w", err)
-				}
-				l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventLoopDetected, Message: &msg})
-				return nil
+			// Predict an identical-result run before paying for it: when the prior
+			// observations are already identical and this call matches them, running
+			// it would only reproduce the same futile result, so trip now rather than
+			// execute the K-th identical call.
+			if detector.wouldRepeat(callHash) {
+				return l.tripLoopGuard(runCtx, sessionID)
 			}
 
 			result := l.runTool(runCtx, sessionID, call)
 			l.fireFileEditHook(runCtx, sessionID, call, result)
+
+			// Record the executed (call,result) pair. A true return means the recent
+			// history oscillates A,B,A,B — a distinct futile pattern the predictive
+			// check cannot see because the calls differ each step.
+			if detector.record(callHash, resultHash(result.Content), result.IsError) {
+				return l.tripLoopGuard(runCtx, sessionID)
+			}
+
 			// Bound oversized tool output before it enters the conversation
 			// history so a single giant result cannot blow the context window.
 			// Error results pass through so their essential message stays intact.
@@ -575,11 +679,24 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		}
 	}
 
-	msg := textMessage(sessionID, message.RoleAssistant, "step limit reached")
-	if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, msg); err != nil {
-		return fmt.Errorf("appending step-limit message: %w", err)
+	// Unreachable: MaxSteps is always >= 1 (New defaults a non-positive value),
+	// so the loop runs at least once and the final-step branch returns from
+	// inside the loop after the tools-disabled handoff turn. This return only
+	// satisfies the compiler.
+	return nil
+}
+
+// tripLoopGuard records the loop-detected outcome: it folds ErrLoopDetected
+// into the session as an assistant message and publishes EventLoopDetected,
+// then returns nil so Run ends gracefully without surfacing an error. Both
+// detector signals (predictive identical-run and A,B,A,B cycle) funnel through
+// here so the trip is reported identically regardless of which pattern fired.
+func (l *Loop) tripLoopGuard(ctx context.Context, sessionID string) error {
+	msg := textMessage(sessionID, message.RoleAssistant, ErrLoopDetected.Error())
+	if err := l.cfg.Sessions.AppendMessage(ctx, sessionID, msg); err != nil {
+		return fmt.Errorf("appending loop-detection message: %w", err)
 	}
-	l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventTurnFinished, Message: &msg})
+	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventLoopDetected, Message: &msg})
 	return nil
 }
 
@@ -671,11 +788,15 @@ func (l *Loop) callProvider(ctx context.Context, history []message.Message) (mes
 	}
 }
 
-// systemPrompt returns the system prompt for the current provider call. In plan
-// mode it appends the plan-mode instruction so the agent is prompted to produce
-// a plan rather than execute; once Approve clears plan mode, the base prompt is
-// used unchanged.
+// systemPrompt returns the system prompt for the current provider call. On the
+// tools-disabled final turn granted at the step limit it appends maxStepsPrompt
+// so the model produces a progress handoff. In plan mode it appends the
+// plan-mode instruction so the agent is prompted to produce a plan rather than
+// execute; once Approve clears plan mode, the base prompt is used unchanged.
 func (l *Loop) systemPrompt() string {
+	if l.finalTurn.Load() {
+		return l.cfg.SystemPrompt + maxStepsPrompt
+	}
 	if l.planMode.Load() {
 		return l.cfg.SystemPrompt + planModePrompt
 	}
@@ -719,6 +840,11 @@ func (l *Loop) runToolSafely(ctx context.Context, wrapped *hookedTool, call pend
 }
 
 func (l *Loop) llmTools() []llm.Tool {
+	// The final, tools-disabled handoff turn sends no tools so the model can only
+	// reply with the plain-text progress summary maxStepsPrompt asks for.
+	if l.finalTurn.Load() {
+		return []llm.Tool{}
+	}
 	out := []llm.Tool{}
 	for _, tool := range l.cfg.Tools.List() {
 		if !l.toolAllowed(tool.Name()) {

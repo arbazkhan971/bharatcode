@@ -41,8 +41,10 @@ type Event struct {
 // ErrUnknownAgent is returned when a requested named agent is not configured.
 var ErrUnknownAgent = errors.New("unknown agent")
 
-// ErrLoopDetected is folded into the session when repeated tool calls trip.
-var ErrLoopDetected = errors.New("loop detected: 3 identical tool calls in a row")
+// ErrLoopDetected is folded into the session when repeated, non-progressing
+// tool activity trips the guard: either the same call returning the same result
+// three times, or two steps oscillating in an A,B,A,B cycle.
+var ErrLoopDetected = errors.New("loop detected: repeated tool calls produced no progress")
 
 // ErrContextOverflow is returned when the latest user message alone exceeds the
 // model's usable context window, so no amount of compaction or drop-oldest

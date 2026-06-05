@@ -17,12 +17,75 @@ func TestInjectSkills(t *testing.T) {
 	require.Equal(t, base, injectSkills(base, ""))
 	require.Equal(t, base, injectSkills(base, "   \n  "))
 
-	// Non-empty summaries are appended under the section header.
-	got := injectSkills(base, "pdf — Fill PDF forms\ngit — Manage branches")
+	// Non-empty summaries are appended under the section header, preceded by
+	// the load-the-skill usage instructions.
+	got := injectSkills(base, "<available_skills>\n  <skill><name>pdf</name></skill>\n</available_skills>")
 	require.True(t, strings.HasPrefix(got, base))
 	require.Contains(t, got, availableSkillsHeader)
-	require.Contains(t, got, "pdf — Fill PDF forms")
-	require.Contains(t, got, "git — Manage branches")
+	require.Contains(t, got, "<available_skills>")
+	// The two usage lines tell the model how to load and resolve a skill,
+	// and they appear before the skills block itself.
+	require.Contains(t, got, "Use the read tool to load a skill file when the task matches its description.")
+	require.Contains(t, got, "resolve it against the skill directory and use that absolute path.")
+	require.Less(t, strings.Index(got, "Use the read tool"), strings.Index(got, "<available_skills>"))
+}
+
+func TestRenderPromptSkillsRenderAsXMLWithLocation(t *testing.T) {
+	workdir := t.TempDir()
+	skillsRoot := filepath.Join(workdir, ".bharatcode", "skills")
+	writeSkillFixture(t, skillsRoot, "pdf", "---\nname: pdf\ndescription: Fill and read PDF forms\n---\nbody\n")
+
+	restore := skillSearchDirs
+	skillSearchDirs = func(string) []string { return []string{skillsRoot} }
+	t.Cleanup(func() { skillSearchDirs = restore })
+
+	out := renderInWorkdir(t, workdir)
+
+	// Skills render as an <available_skills> XML block.
+	require.Contains(t, out, "<available_skills>")
+	require.Contains(t, out, "</available_skills>")
+	require.Contains(t, out, "<name>pdf</name>")
+	require.Contains(t, out, "<description>Fill and read PDF forms</description>")
+	// Each skill advertises the absolute <location> of its directory so the
+	// model can load the manifest and resolve relative paths against it.
+	require.Contains(t, out, "<location>"+filepath.Join(skillsRoot, "pdf")+"</location>")
+	// The read-the-file usage instruction prefixes the block.
+	require.Contains(t, out, "Use the read tool to load a skill file when the task matches its description.")
+}
+
+func TestRenderPromptProjectInstructionsArePathTagged(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "AGENTS.md"), []byte("RULE: prefer table-driven tests."), 0o644))
+
+	// No skills, hermetic.
+	restore := skillSearchDirs
+	skillSearchDirs = func(string) []string { return []string{filepath.Join(workdir, "no-such-dir")} }
+	t.Cleanup(func() { skillSearchDirs = restore })
+
+	out := renderInWorkdir(t, workdir)
+
+	// The rule renders inside a <project_context>/<project_instructions>
+	// block attributed to the directory it was loaded from. os.Getwd may
+	// resolve symlinks, so attribute against the realized working directory.
+	wd := mustGetwdIn(t, workdir)
+	require.Contains(t, out, "<project_context>")
+	require.Contains(t, out, `<project_instructions path="`+wd+`">`)
+	require.Contains(t, out, "RULE: prefer table-driven tests.")
+	require.Contains(t, out, "</project_instructions>")
+	require.Contains(t, out, "</project_context>")
+}
+
+// mustGetwdIn returns the realized working directory while chdir'd into
+// workdir, restoring the original directory before it returns.
+func mustGetwdIn(t *testing.T, workdir string) string {
+	t.Helper()
+	orig, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(workdir))
+	defer func() { _ = os.Chdir(orig) }()
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	return wd
 }
 
 // writeSkillFixture creates skillsRoot/<name>/SKILL.md.
@@ -73,14 +136,48 @@ func TestRenderPromptNoSkillsLeavesPromptUnchanged(t *testing.T) {
 	require.Equal(t, withoutSkills, stripSkillsSection(withSkills))
 }
 
+func TestRenderPromptTaskAgentIsReadOnlyExplorer(t *testing.T) {
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "grep", desc: "Search file contents."})
+
+	prompt, err := renderPrompt(context.Background(), "task", "", registry, nil)
+	require.NoError(t, err)
+
+	// The task agent renders a distinct exploration prompt, not the coder one.
+	require.Contains(t, prompt, "exploration agent")
+	require.NotContains(t, prompt, "primary coding agent")
+
+	// Read-only posture is explicit: no system-state mutation.
+	require.Contains(t, prompt, "read-only")
+	require.Contains(t, prompt, "modify the user's system state in any way")
+
+	// Search discipline references the three core exploration tools.
+	require.Contains(t, prompt, "glob")
+	require.Contains(t, prompt, "grep")
+	require.Contains(t, prompt, "view")
+
+	// Findings are reported as absolute paths.
+	require.Contains(t, prompt, "ABSOLUTE path")
+
+	// Template-injected data is still present for the task agent: the tool
+	// list it renders and the trailing environment block.
+	require.Contains(t, prompt, "grep: Search file contents.")
+	require.Contains(t, prompt, "Working directory:")
+}
+
 // stripSkillsSection removes the available-skills section that
-// injectSkills appends, leaving the rest of the prompt intact.
+// injectSkills appends, leaving the rest of the prompt intact. The
+// trailing environment block is rendered after the skills, so it is
+// spliced back on to mirror a prompt that never had a skills section.
 func stripSkillsSection(prompt string) string {
-	idx := strings.Index(prompt, "\n\n"+availableSkillsHeader)
-	if idx < 0 {
+	start := strings.Index(prompt, "\n\n"+availableSkillsHeader)
+	if start < 0 {
 		return prompt
 	}
-	return prompt[:idx]
+	if env := strings.Index(prompt, "\n\n"+environmentHeader); env > start {
+		return prompt[:start] + prompt[env:]
+	}
+	return prompt[:start]
 }
 
 // renderInWorkdir runs renderPrompt with workdir as the process working

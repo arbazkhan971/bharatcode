@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/arbazkhan971/bharatcode/internal/diffutil"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/util/fsext"
 )
@@ -144,6 +145,10 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 	}
 	if outcome.strategy != "" {
 		metadata["match_strategy"] = outcome.strategy
+	}
+	if d := diffutil.Unified(text, newText); d != "" {
+		content += "\n\n" + d
+		metadata["diff"] = d
 	}
 	if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, path); note != "" {
 		content += "\n\n" + note

@@ -95,3 +95,34 @@ func TestWriteMalformedArgs(t *testing.T) {
 	require.True(t, result.IsError)
 	require.Contains(t, result.Content, "invalid JSON arguments")
 }
+
+func TestWriteOverwriteIncludesDiffButNewFileDoesNot(t *testing.T) {
+	workDir := t.TempDir()
+	sessionID := "write-diff"
+	path := filepath.Join(workDir, "doc.txt")
+
+	tool := newWriteTool(Dependencies{WorkDir: workDir, SessionID: sessionID})
+
+	// New file: no diff (it would just echo the content).
+	created, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path":    "doc.txt",
+		"content": "line one\nline two\n",
+	}))
+	require.NoError(t, err)
+	require.False(t, created.IsError)
+	require.NotContains(t, created.Content, "@@")
+	require.Nil(t, created.Metadata["diff"])
+
+	// Overwrite of a viewed file: the result shows what changed.
+	markViewed(sessionID, path)
+	over, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path":    "doc.txt",
+		"content": "line one\nline TWO\n",
+	}))
+	require.NoError(t, err)
+	require.False(t, over.IsError)
+	require.Contains(t, over.Content, "@@")
+	require.Contains(t, over.Content, "-line two")
+	require.Contains(t, over.Content, "+line TWO")
+	require.NotEmpty(t, over.Metadata["diff"])
+}

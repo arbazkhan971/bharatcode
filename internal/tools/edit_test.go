@@ -207,3 +207,25 @@ func TestEditStaleReadSkippedWhenNoTracker(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "namaste\n", string(got))
 }
+
+func TestEditResultIncludesUnifiedDiff(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "diff.txt")
+	require.NoError(t, os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o644))
+
+	tool := newEditTool(Dependencies{WorkDir: workDir, SessionID: "edit-diff"})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path":       "diff.txt",
+		"old_string": "beta",
+		"new_string": "BETA",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "1 replacement(s)")
+	// The model should see exactly which line changed, with context.
+	require.Contains(t, result.Content, "@@")
+	require.Contains(t, result.Content, "-beta")
+	require.Contains(t, result.Content, "+BETA")
+	require.Contains(t, result.Content, " alpha")
+	require.NotEmpty(t, result.Metadata["diff"])
+}

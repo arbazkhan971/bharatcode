@@ -30,6 +30,7 @@ func TestRegistryListsShellTools(t *testing.T) {
 		"job_output",
 		"ls",
 		"multiedit",
+		"symbols",
 		"todo",
 		"view",
 		"web_fetch",

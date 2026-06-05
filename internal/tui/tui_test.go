@@ -195,21 +195,62 @@ func TestRunningStatus_OnlyWhileTurnInFlight(t *testing.T) {
 	t.Parallel()
 
 	start := time.Unix(100, 0)
-	require.Empty(t, runningStatus(time.Time{}, start),
+	require.Empty(t, runningStatus(time.Time{}, start, ""),
 		"an idle prompt (zero start) must add no working segment")
 
-	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second)),
+	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second), ""),
 		"a running turn must report its elapsed time")
 
 	// A negative elapsed (clock skew) must clamp to the first frame, not panic.
-	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(-time.Second)), spinnerFrames[0]+" working "),
+	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(-time.Second), ""), spinnerFrames[0]+" working "),
 		"a negative elapsed must clamp to the first frame without panicking")
 
 	// The spinner advances one frame per whole second and wraps at the end.
-	first := runningStatus(start, start.Add(time.Second))
-	tenth := runningStatus(start, start.Add(time.Duration(len(spinnerFrames))*time.Second))
+	first := runningStatus(start, start.Add(time.Second), "")
+	tenth := runningStatus(start, start.Add(time.Duration(len(spinnerFrames))*time.Second), "")
 	require.True(t, strings.HasPrefix(first, spinnerFrames[1]))
 	require.True(t, strings.HasPrefix(tenth, spinnerFrames[0]), "the spinner must wrap around")
+}
+
+// TestCurrentActivity_TracksToolLifecycle asserts that handling agent events
+// sets the status-bar activity to the running tool's name when a tool is called
+// and clears it once the tool returns or the model produces fresh text, so the
+// "working" segment names the active step only while a tool is in flight.
+func TestCurrentActivity_TracksToolLifecycle(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	require.Empty(t, m.currentActivity, "a fresh model must report no activity")
+
+	m.handleAgentEvent(agentEventMsg{Kind: agent.EventToolCalled, ToolName: "Bash"})
+	require.Equal(t, "Bash", m.currentActivity, "a called tool must become the activity")
+
+	m.handleAgentEvent(agentEventMsg{Kind: agent.EventToolResult, ToolName: "Bash"})
+	require.Empty(t, m.currentActivity, "a returned tool must clear the activity")
+
+	m.handleAgentEvent(agentEventMsg{Kind: agent.EventToolCalled, ToolName: "Edit"})
+	require.Equal(t, "Edit", m.currentActivity, "a second tool must replace the activity")
+
+	// Fresh model text means the agent is thinking again between tools.
+	m.handleAgentEvent(agentEventMsg{Kind: agent.EventLLMResponse})
+	require.Empty(t, m.currentActivity, "model output must clear the activity")
+}
+
+// TestRunningStatus_NamesActiveTool asserts the working segment shows the name
+// of the tool the agent is currently running, falling back to "working" when no
+// tool is active, so a long turn reads as the step it is on rather than a bare
+// "working".
+func TestRunningStatus_NamesActiveTool(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	require.Equal(t, spinnerFrames[3]+" Bash 3s", runningStatus(start, start.Add(3*time.Second), "Bash"),
+		"a running tool must name itself in the working segment")
+	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second), ""),
+		"an empty activity must fall back to the generic working label")
+	// The elapsed and spinner cadence are unchanged by the activity label.
+	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(time.Second), "Edit"), spinnerFrames[1]+" Edit "),
+		"the spinner frame must still advance independently of the activity label")
 }
 
 // TestRunningStatus_SurfacesInStatusBar drives the rendered view: at rest the

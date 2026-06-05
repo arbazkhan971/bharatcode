@@ -172,10 +172,16 @@ type model struct {
 	// turnStartedAt marks when the in-flight turn began, so the status bar can
 	// show how long the agent has been working. It is the zero time while idle.
 	turnStartedAt time.Time
-	turn          int
-	queueCounter  int
-	eventCh       <-chan agent.Event
-	eventCancel   func()
+	// currentActivity names the tool the agent is currently running (e.g.
+	// "Bash", "Edit"), so the status bar can show what the turn is doing rather
+	// than a bare "working". It is set when a tool is called and cleared when the
+	// tool returns (and at turn end), so an empty value means the agent is
+	// thinking between tools.
+	currentActivity string
+	turn            int
+	queueCounter    int
+	eventCh         <-chan agent.Event
+	eventCancel     func()
 
 	// Autonomous goal-loop state (CHANGE 2).
 	goalActive    bool
@@ -850,7 +856,7 @@ func (m *model) renderMain() string {
 	if tabBar != "" {
 		parts = append(parts, tabBar)
 	}
-	m.status.Working = runningStatus(m.turnStartedAt, m.now)
+	m.status.Working = runningStatus(m.turnStartedAt, m.now, m.currentActivity)
 	m.status.Search = m.search.statusSegment()
 	// clampChat finalizes m.chatScroll (clamping it to the scrollable range), so
 	// the scroll indicator is computed from it afterwards to reflect the window
@@ -923,15 +929,18 @@ func scrollStatus(scroll int) string {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // runningStatus returns the status-bar segment shown while a turn is in flight:
-// a cycling spinner, the word "working", and how long the turn has run, e.g.
-// "⠙ working 3s". It returns "" when no turn is running (a zero start time), so
-// the bar reverts to its idle form the moment the agent finishes. The elapsed
-// time is taken from now-started and the spinner frame from the whole-second
-// elapsed count, so the glyph advances in step with the one-second tick that
-// drives the duration. A negative elapsed (clock skew) is treated as zero so the
-// frame index never goes out of range. This gives the live progress cue Claude
-// Code and opencode show while their agent is thinking.
-func runningStatus(started, now time.Time) string {
+// a cycling spinner, a label for what the agent is doing, and how long the turn
+// has run, e.g. "⠙ working 3s" or "⠙ Bash 3s". The label is the name of the tool
+// currently running (activity), falling back to "working" while the agent is
+// thinking between tools, so the reader can tell a long turn is shelling out or
+// editing rather than merely stalled — the way Claude Code and opencode name the
+// active step. It returns "" when no turn is running (a zero start time), so the
+// bar reverts to its idle form the moment the agent finishes. The elapsed time
+// is taken from now-started and the spinner frame from the whole-second elapsed
+// count, so the glyph advances in step with the one-second tick that drives the
+// duration. A negative elapsed (clock skew) is treated as zero so the frame
+// index never goes out of range.
+func runningStatus(started, now time.Time, activity string) string {
 	if started.IsZero() {
 		return ""
 	}
@@ -939,8 +948,12 @@ func runningStatus(started, now time.Time) string {
 	if elapsed < 0 {
 		elapsed = 0
 	}
+	label := activity
+	if label == "" {
+		label = "working"
+	}
 	frame := spinnerFrames[int(elapsed/time.Second)%len(spinnerFrames)]
-	return frame + " working " + util.HumanDuration(elapsed)
+	return frame + " " + label + " " + util.HumanDuration(elapsed)
 }
 
 func (m *model) pushModelPicker() {

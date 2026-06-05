@@ -126,6 +126,22 @@ func TestSlashCommand_Help_ListsAll(t *testing.T) {
 	}
 }
 
+func TestSlashCommand_Keys_OpensShortcutDialog(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.input.WriteString("/keys")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+	require.True(t, m.dialogs.Contains("keybindings"),
+		"/keys must open the keybindings dialog")
+	out := m.dialogs.Render(100)
+	// The Ctrl-key shortcuts have no slash equivalent, so the /keys overlay is
+	// the one place they are documented in-app; it must surface them.
+	for _, key := range []string{"Ctrl+T", "Ctrl+P", "Ctrl+D", "Ctrl+F", "Ctrl+/", "Esc"} {
+		require.Contains(t, out, key)
+	}
+}
+
 func TestSlashCommand_Goal_ShowSetClear(t *testing.T) {
 	t.Parallel()
 

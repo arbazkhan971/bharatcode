@@ -557,6 +557,13 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.handleTabsList()
 	case "/help":
 		m.helpVisible = true
+	case "/keys":
+		m.dialogs.Push(&dialog.Text{
+			DialogID: "keybindings",
+			Title:    "Keyboard shortcuts",
+			Body:     keybindingHelpBody(),
+			Theme:    m.theme,
+		})
 	case "/clear":
 		m.chat.Clear()
 		m.search.reset()
@@ -957,6 +964,34 @@ func (m *model) slashHelpLines() []string {
 		}
 	}
 	return lines
+}
+
+// keybindingHelpBody renders the global key shortcuts shown by /keys. The
+// slash-command listing in /help documents only commands typed at the prompt,
+// leaving the Ctrl-key bindings — which have no slash equivalent — otherwise
+// undiscoverable without reading the source. /keys collects them in one
+// overlay, the way Claude Code and opencode print their shortcuts, so a user
+// can learn the full keymap from a single place. The lines mirror the bindings
+// handled in handleKey, so the two stay in step. It lives in a dialog rather
+// than the chat help dump because the dialog is not height-clamped to the chat
+// viewport, leaving room for the whole keymap.
+func keybindingHelpBody() string {
+	return strings.Join([]string{
+		"Tab        switch focus, or complete a /command or @file",
+		"Up/Down    recall previous prompts",
+		"Ctrl+C     interrupt the agent, or quit on an empty prompt",
+		"Ctrl+T     new tab",
+		"Ctrl+W     close tab",
+		"Ctrl+←/→   switch to the previous/next tab",
+		"Ctrl+P     open the model picker",
+		"Ctrl+A     open the agent picker",
+		"Ctrl+S     open settings",
+		"Ctrl+D     show the latest edit diff",
+		"Ctrl+F     toggle the file-tree panel",
+		"Ctrl+/     jump to the next search match",
+		"Ctrl+\\     jump to the previous search match",
+		"Esc        close a panel, dialog, or the help listing",
+	}, "\n")
 }
 
 // firstNonEmptyLine returns the first non-blank line of s, trimmed and

@@ -9,6 +9,7 @@ import "strings"
 // matching the inline command descriptions in Claude Code and opencode.
 var slashCommandDescriptions = map[string]string{
 	"/help":        "list commands",
+	"/keys":        "show keyboard shortcuts",
 	"/clear":       "clear visible chat",
 	"/model":       "open model picker",
 	"/agent":       "open agent picker",

@@ -137,9 +137,11 @@ func (c *client) rename(ctx context.Context, path string, line, col int, newName
 }
 
 // codeAction issues a textDocument/codeAction request for the range and returns
-// the quick fixes and refactorings the server offers. The context.diagnostics
-// field is required by the LSP spec; an empty array asks for all available
-// actions rather than ones scoped to specific diagnostics.
+// the quick fixes and refactorings the server offers. Most servers only offer
+// quick fixes when the diagnostics they apply to are passed in the request
+// context — an empty diagnostics array silently suppresses every "remove unused
+// import"/"add missing import" action. The diagnostics overlapping the range
+// are attached so those actions surface.
 func (c *client) codeAction(ctx context.Context, path string, rng Range) ([]CodeAction, error) {
 	if err := c.open(ctx, path); err != nil {
 		return nil, err
@@ -150,12 +152,78 @@ func (c *client) codeAction(ctx context.Context, path string, rng Range) ([]Code
 			"start": map[string]any{"line": rng.Start.Line, "character": rng.Start.Character},
 			"end":   map[string]any{"line": rng.End.Line, "character": rng.End.Character},
 		},
-		"context": map[string]any{"diagnostics": []any{}},
+		"context": map[string]any{"diagnostics": c.codeActionDiagnostics(ctx, path, rng)},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("requesting code actions: %w", err)
 	}
 	return parseCodeActions(result)
+}
+
+// codeActionDiagnostics returns the wire-form diagnostics overlapping rng, to
+// be attached to a textDocument/codeAction request's context so quick fixes
+// keyed on a diagnostic are offered. Pull-capable servers are queried (cheap,
+// synchronous); push servers contribute whatever they have already published,
+// without blocking on a publish that may never arrive for this file. A failure
+// to obtain diagnostics is non-fatal: the request proceeds with an empty
+// (never nil) array, matching the prior behavior. The slice is always non-nil
+// so it marshals to a JSON "[]" rather than "null".
+func (c *client) codeActionDiagnostics(ctx context.Context, path string, rng Range) []map[string]any {
+	out := make([]map[string]any, 0)
+	var diags []Diagnostic
+	if c.pullDiagnostic {
+		if pulled, err := c.diagnostics(ctx, path); err == nil {
+			diags = pulled
+		}
+	} else {
+		diags, _ = c.cachedDiagnostics(path)
+	}
+	for _, d := range diags {
+		if rangesOverlap(d.Range, rng) {
+			out = append(out, diagnosticToWire(d))
+		}
+	}
+	return out
+}
+
+// diagnosticToWire renders a Diagnostic in the LSP wire shape expected inside a
+// code-action request's context. The normalized string Code is emitted as-is
+// (servers tolerate a string code), and the zero Severity is omitted so a
+// diagnostic without one does not assert "Error".
+func diagnosticToWire(d Diagnostic) map[string]any {
+	m := map[string]any{
+		"range": map[string]any{
+			"start": map[string]any{"line": d.Range.Start.Line, "character": d.Range.Start.Character},
+			"end":   map[string]any{"line": d.Range.End.Line, "character": d.Range.End.Character},
+		},
+		"message": d.Message,
+	}
+	if d.Severity != 0 {
+		m["severity"] = int(d.Severity)
+	}
+	if d.Source != "" {
+		m["source"] = d.Source
+	}
+	if d.Code != "" {
+		m["code"] = d.Code
+	}
+	return m
+}
+
+// rangesOverlap reports whether two LSP ranges intersect, treating a shared
+// boundary as an overlap so a diagnostic that merely touches the requested
+// range (e.g. a cursor at its edge) still counts.
+func rangesOverlap(a, b Range) bool {
+	return positionLessOrEqual(a.Start, b.End) && positionLessOrEqual(b.Start, a.End)
+}
+
+// positionLessOrEqual reports whether position a is at or before position b,
+// comparing by line then character.
+func positionLessOrEqual(a, b Position) bool {
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	return a.Character <= b.Character
 }
 
 // format issues a textDocument/formatting request for the document and returns

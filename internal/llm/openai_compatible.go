@@ -81,7 +81,7 @@ func (p *openAICompatibleProvider) Stream(ctx context.Context, req Request) (<-c
 	if err != nil {
 		return nil, fmt.Errorf("building provider request: %w", err)
 	}
-	resp, err := postJSON(ctx, p.client, p.baseURL+"/chat/completions", apiKey, body)
+	resp, err := postJSON(ctx, p.client, appendPath(p.baseURL, "/chat/completions"), apiKey, body)
 	if err != nil {
 		return nil, err
 	}

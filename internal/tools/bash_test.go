@@ -59,6 +59,39 @@ func TestBashRunsCommand(t *testing.T) {
 	require.NotEmpty(t, result.Metadata["job_id"])
 }
 
+// TestBashEnvVarsPassedToCommand asserts that the env argument is exported into
+// the command's environment, so the model can set variables without fragile
+// inline VAR=val prefixes.
+func TestBashEnvVarsPassedToCommand(t *testing.T) {
+	tool, ok := NewRegistry(shellDeps(t, &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+	})).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), json.RawMessage(
+		`{"command":"printf %s \"$BC_GREETING\"","env":{"BC_GREETING":"namaste"}}`))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "[exit 0 | Completed]")
+	require.Contains(t, result.Content, "namaste")
+}
+
+// TestBashEnvVarSurvivesPipeline asserts that an env var set via the env argument
+// is visible to every stage of a pipeline — the failure mode of inline
+// `VAR=val a | b`, which scopes VAR to the first command only.
+func TestBashEnvVarSurvivesPipeline(t *testing.T) {
+	tool, ok := NewRegistry(shellDeps(t, &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+	})).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), json.RawMessage(
+		`{"command":"true | printf %s \"$BC_PIPE\"","env":{"BC_PIPE":"downstream"}}`))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "downstream")
+}
+
 // TestBashTestFailuresSurfacedInMetadata asserts that a bash command classified
 // as a test runner has its failed tests parsed into Result.Metadata and appended
 // as a compact summary to Result.Content. The "# go test" trailing comment makes

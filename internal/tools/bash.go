@@ -23,10 +23,11 @@ type bashTool struct {
 }
 
 type bashArgs struct {
-	Command    string `json:"command"`
-	TimeoutSec int    `json:"timeout,omitempty"`
-	Cwd        string `json:"cwd,omitempty"`
-	Background bool   `json:"background,omitempty"`
+	Command    string            `json:"command"`
+	TimeoutSec int               `json:"timeout,omitempty"`
+	Cwd        string            `json:"cwd,omitempty"`
+	Background bool              `json:"background,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
 }
 
 var bashSchema = json.RawMessage(`{
@@ -38,7 +39,12 @@ var bashSchema = json.RawMessage(`{
     "command": {"type": "string", "minLength": 1},
     "timeout": {"type": "integer", "minimum": 1},
     "cwd": {"type": "string"},
-    "background": {"type": "boolean"}
+    "background": {"type": "boolean"},
+    "env": {
+      "type": "object",
+      "additionalProperties": {"type": "string"},
+      "description": "Extra environment variables for this command, merged over the inherited environment. Use this instead of inline VAR=val prefixes so values survive across pipelines and quoting."
+    }
   }
 }`)
 
@@ -94,7 +100,7 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 		}
 	}
 
-	opts := shell.RunOpts{Cwd: args.Cwd}
+	opts := shell.RunOpts{Cwd: args.Cwd, Env: args.Env}
 	if opts.Cwd == "" {
 		opts.Cwd = t.workDir
 	}

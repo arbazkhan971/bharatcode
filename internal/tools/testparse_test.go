@@ -65,6 +65,10 @@ func TestClassifyTestRunner(t *testing.T) {
 		"rake test":                             runnerMinitest,
 		"bundle exec rake test TEST=test/x.rb":  runnerMinitest,
 		"ruby -Itest test/calculator_test.rb":   runnerMinitest,
+		"dart test":                             runnerDart,
+		"dart test test/calc_test.dart":         runnerDart,
+		"flutter test":                          runnerDart,
+		"flutter test test/widget_test.dart":    runnerDart,
 		"echo rake testing notes":               runnerNone,
 		"ls -la":                                runnerNone,
 		"echo go testing the waters":            runnerNone,
@@ -924,6 +928,52 @@ func TestParseBunTestFailures_NoFailures(t *testing.T) {
  1 pass
  0 fail`
 	if got := parseTestFailures("bun test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseDartTestFailures(t *testing.T) {
+	out := `00:00 +0: loading test/calc_test.dart
+00:00 +0: adds two numbers
+00:01 +1: subtracts two numbers
+00:01 +1 -1: subtracts two numbers [E]
+  Expected: <2>
+    Actual: <1>
+
+  package:test_api          expect
+  test/calc_test.dart 9:5   main.<fn>
+
+00:01 +1 -1: math group divides by zero [E]
+  ArgumentError: cannot divide by zero
+
+00:01 +1 -2: Some tests failed.`
+	got := parseTestFailures("dart test", out)
+	want := []testFailure{
+		{Name: "subtracts two numbers", Detail: "Expected: <2>"},
+		{Name: "math group divides by zero", Detail: "ArgumentError: cannot divide by zero"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseDartTestFailures_SkippedCounter(t *testing.T) {
+	// A "~skipped" counter segment must not break the failure-line match, and a
+	// test that emits two error lines is reported once.
+	out := `00:02 +3 ~1 -1: widget renders title [E]
+  Expected a Text widget, found none.
+00:02 +3 ~1 -1: widget renders title [E]
+  (second failure on the same test)
+00:02 +3 ~1 -1: Some tests failed.`
+	got := parseTestFailures("flutter test", out)
+	want := []testFailure{
+		{Name: "widget renders title", Detail: "Expected a Text widget, found none."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseDartTestFailures_NoFailures(t *testing.T) {
+	out := `00:00 +0: adds two numbers
+00:01 +2: All tests passed!`
+	if got := parseTestFailures("dart test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

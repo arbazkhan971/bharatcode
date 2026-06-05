@@ -33,6 +33,7 @@ type formatArgs struct {
 	Path    string `json:"path"`
 	Line    int    `json:"line,omitempty"`
 	EndLine int    `json:"end_line,omitempty"`
+	Preview bool   `json:"preview,omitempty"`
 }
 
 var schemaFormat = json.RawMessage(`{
@@ -54,6 +55,10 @@ var schemaFormat = json.RawMessage(`{
       "type": "integer",
       "minimum": 1,
       "description": "1-based last line of the span to reformat. Defaults to line (a single line). Ignored unless line is set."
+    },
+    "preview": {
+      "type": "boolean",
+      "description": "When true, compute and show the diff the reformatting would produce without writing anything to disk. Use it to inspect the changes before committing; re-run with preview omitted (or false) to apply."
     }
   }
 }`)
@@ -106,8 +111,11 @@ func (t *formatTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 	if !isInsideWorkDir(path, t.deps.WorkDir) {
 		return errorResult("path is outside the workspace: " + path), nil
 	}
-	if err := t.checkPermission(ctx, path, raw); err != nil {
-		return errorResult(err.Error()), nil
+	// A preview writes nothing, so it does not need write permission.
+	if !args.Preview {
+		if err := t.checkPermission(ctx, path, raw); err != nil {
+			return errorResult(err.Error()), nil
+		}
 	}
 
 	// A line selects range formatting (reformat just that span); without one the
@@ -154,15 +162,28 @@ func (t *formatTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 		return Result{Content: fmt.Sprintf("%s is already formatted.", scope)}, nil
 	}
 
-	if err := fsext.AtomicWrite(path, []byte(newText), 0o644); err != nil {
-		return Result{}, fmt.Errorf("writing file %s: %w", path, err)
-	}
-	if err := t.recordWrite(ctx, path, oldContent, []byte(newText)); err != nil {
-		return Result{}, err
+	// A preview reports the same diff but writes nothing, records nothing, and
+	// skips the permission check above, so the model can inspect the reformatting
+	// before committing — mirroring the rename and codeactions tools' preview mode.
+	if !args.Preview {
+		if err := fsext.AtomicWrite(path, []byte(newText), 0o644); err != nil {
+			return Result{}, fmt.Errorf("writing file %s: %w", path, err)
+		}
+		if err := t.recordWrite(ctx, path, oldContent, []byte(newText)); err != nil {
+			return Result{}, err
+		}
 	}
 
-	content := fmt.Sprintf("formatted %s (%d edit(s))", scope, len(edits))
+	var content string
+	if args.Preview {
+		content = fmt.Sprintf("preview: formatting %s would make %d edit(s) (nothing written)", scope, len(edits))
+	} else {
+		content = fmt.Sprintf("formatted %s (%d edit(s))", scope, len(edits))
+	}
 	metadata := map[string]any{"path": path, "edits": len(edits)}
+	if args.Preview {
+		metadata["preview"] = true
+	}
 	// Surface a unified diff of the reformatting so the model can see exactly
 	// what changed, mirroring the edit tool's output shaping.
 	if d := diffutil.Unified(string(oldContent), newText); d != "" {

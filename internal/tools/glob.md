@@ -16,9 +16,10 @@ The result is a list of workspace-relative file paths, one per line, ordered by
 modification time with the most recently changed files first (paths sharing a
 timestamp fall back to lexicographic order). The files you most likely care
 about — the ones just edited — surface at the top. Paths use forward slashes so
-the model sees the same shape across operating systems. Paths matched by the
-workspace `.gitignore` (and the `.git` directory) are skipped, so vendored and
-build output such as `node_modules` or `dist` never appears — the same filtering
+the model sees the same shape across operating systems. Paths matched by a
+`.gitignore` (the workspace root's and any in subdirectories, e.g.
+`build/.gitignore`) or the `.git` directory are skipped, so vendored and build
+output such as `node_modules` or `dist` never appears — the same nested filtering
 `ls` and `grep` apply.
 
 Failure cases:

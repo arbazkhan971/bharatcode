@@ -12,8 +12,9 @@ Arguments:
 What success looks like:
 
 The result is a sorted list of immediate children. Directory names end with `/`.
-The tool reads the workspace `.gitignore` and hides ignored directories such as
-`node_modules/` by default.
+The tool reads `.gitignore` — the workspace root's and any covering the listed
+directory (e.g. listing `build/` honors `build/.gitignore`) — and hides ignored
+entries such as `node_modules/` by default.
 
 Failure cases:
 

@@ -112,8 +112,8 @@ func TestStatLines_PerFileBreakdown(t *testing.T) {
 	lines := strings.Split(got, "\n")
 
 	require.Equal(t, "2 files changed, +3 -1", lines[0])
-	require.Equal(t, "  main.go  +1 -1", lines[1])
-	require.Equal(t, "  util.go  +2 -0", lines[2])
+	require.Equal(t, "  main.go  +1 -1  +-", lines[1])
+	require.Equal(t, "  util.go  +2 -0  ++", lines[2])
 	require.Len(t, lines, 3)
 }
 
@@ -137,8 +137,69 @@ func TestStatLines_AlignsPaths(t *testing.T) {
 	got := New(styles.Theme{}).StatLines(patch)
 	lines := strings.Split(got, "\n")
 
-	require.Equal(t, "  a.go       +1 -1", lines[1])
-	require.Equal(t, "  longer.go  +1 -0", lines[2])
+	require.Equal(t, "  a.go       +1 -1  +-", lines[1])
+	require.Equal(t, "  longer.go  +1 -0  +", lines[2])
+}
+
+// TestStatLines_BarScalesAndBoundsWidth checks that a file far larger than
+// statBarWidth has its histogram bar scaled down to that width while a tiny file
+// in the same patch keeps at least one cell, so the bar stays bounded yet never
+// drops a changed side.
+func TestStatLines_BarScalesAndBoundsWidth(t *testing.T) {
+	t.Parallel()
+
+	var big strings.Builder
+	big.WriteString("--- a/big.go\n+++ b/big.go\n@@ -0,0 +1,40 @@\n")
+	for i := 0; i < 40; i++ {
+		big.WriteString("+line\n")
+	}
+	patch := big.String() + "--- a/tiny.go\n+++ b/tiny.go\n@@ -0,0 +1,1 @@\n+x\n"
+
+	lines := strings.Split(New(styles.Theme{}).StatLines(patch), "\n")
+	require.Len(t, lines, 3)
+
+	bigBar := barOf(t, lines[1])
+	tinyBar := barOf(t, lines[2])
+	require.Equal(t, statBarWidth, len(bigBar), "large file's bar should be clamped to statBarWidth")
+	require.Equal(t, strings.Repeat("+", statBarWidth), bigBar)
+	require.Equal(t, "+", tinyBar, "tiny file should keep one cell")
+}
+
+// TestStatLines_BarsAlignAcrossCountWidths checks that files whose "+A -B" count
+// strings differ in width still have their histogram bars begin at the same
+// column, because the count column is padded to the widest entry.
+func TestStatLines_BarsAlignAcrossCountWidths(t *testing.T) {
+	t.Parallel()
+
+	var wide strings.Builder
+	wide.WriteString("--- a/wide.go\n+++ b/wide.go\n@@ -0,0 +1,10 @@\n")
+	for i := 0; i < 10; i++ {
+		wide.WriteString("+line\n")
+	}
+	patch := wide.String() + "--- a/x.go\n+++ b/x.go\n@@ -1,1 +1,1 @@\n-a\n+b\n"
+
+	lines := strings.Split(New(styles.Theme{}).StatLines(patch), "\n")
+	require.Len(t, lines, 3)
+	require.Equal(t, barStart(lines[1]), barStart(lines[2]), "bars should start at the same column")
+}
+
+// barOf extracts the trailing run of "+"/"-" histogram cells from a per-file
+// diffstat row (everything after the last run of spaces).
+func barOf(t *testing.T, row string) string {
+	t.Helper()
+	fields := strings.Fields(row)
+	return fields[len(fields)-1]
+}
+
+// barStart returns the rune index where the histogram bar begins: the start of
+// the final "+/-" run in the row.
+func barStart(row string) int {
+	runes := []rune(row)
+	i := len(runes)
+	for i > 0 && (runes[i-1] == '+' || runes[i-1] == '-') {
+		i--
+	}
+	return i
 }
 
 // TestStatLines_EmptyPatch checks that a content-free patch yields no summary.

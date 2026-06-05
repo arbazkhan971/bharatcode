@@ -111,28 +111,61 @@ func TestUnifiedNumbered_WordHighlight_UnpairedLines(t *testing.T) {
 	require.Contains(t, got, theme.DiffAdd.Render("+brand new line"))
 }
 
-// TestChangedSpan_SplitsSharedAffixes checks the rune-wise prefix/middle/suffix
-// split that drives word highlighting, including a multi-byte case so a rune is
-// never cut in half.
-func TestChangedSpan_SplitsSharedAffixes(t *testing.T) {
+// TestUnifiedNumbered_WordHighlight_MultipleSpans checks that a line carrying two
+// separated edits has each changed word emphasized independently while the
+// unchanged text between them — including the word sitting in the middle — keeps
+// the plain style. The single-span affix approach would have emphasized the whole
+// stretch from the first edit through the last; the token-level diff does not.
+func TestUnifiedNumbered_WordHighlight_MultipleSpans(t *testing.T) {
 	t.Parallel()
 
-	prefix, mid, suffix := changedSpan("func old() {}", "func new() {}")
-	require.Equal(t, "func ", prefix)
-	require.Equal(t, "old", mid)
-	require.Equal(t, "() {}", suffix)
+	theme := styles.Default()
+	patch := "@@ -1,1 +1,1 @@\n-call(alpha, mid, beta)\n+call(gamma, mid, delta)\n"
+	got := New(theme).RenderUnifiedNumbered(patch, 120)
 
-	// No shared affix: the whole string is the middle.
-	prefix, mid, suffix = changedSpan("xyz", "abc")
-	require.Equal(t, "", prefix)
-	require.Equal(t, "xyz", mid)
-	require.Equal(t, "", suffix)
+	// Both changed words are emphasized on the added side...
+	require.Contains(t, got, theme.DiffAddEmph.Render("gamma"))
+	require.Contains(t, got, theme.DiffAddEmph.Render("delta"))
+	// ...and the unchanged "mid" between them stays plain rather than being
+	// swallowed into one big emphasized block.
+	require.NotContains(t, got, theme.DiffAddEmph.Render("mid"))
+	require.Contains(t, got, theme.DiffRemoveEmph.Render("alpha"))
+	require.Contains(t, got, theme.DiffRemoveEmph.Render("beta"))
+}
 
-	// Multi-byte runes stay intact around the change.
-	prefix, mid, suffix = changedSpan("café au lait", "café con leche")
-	require.Equal(t, "café ", prefix)
-	require.Equal(t, "au lait", mid)
-	require.Equal(t, "", suffix)
+// TestWordSegments_TokenAlignment checks the token-level word-diff that drives
+// intra-line highlighting: separated edits each become their own changed segment
+// with shared runs (and a multi-byte token) left intact between them, and a pair
+// sharing no token reports nil so the caller falls back to a plain style.
+func TestWordSegments_TokenAlignment(t *testing.T) {
+	t.Parallel()
+
+	// A single changed identifier between a shared head and tail.
+	require.Equal(t, []diffSeg{
+		{text: "func ", changed: false},
+		{text: "old", changed: true},
+		{text: "() {}", changed: false},
+	}, wordSegments("func old() {}", "func new() {}"))
+
+	// Two separated edits keep the unchanged token between them shared.
+	require.Equal(t, []diffSeg{
+		{text: "call(", changed: false},
+		{text: "alpha", changed: true},
+		{text: ", mid, ", changed: false},
+		{text: "beta", changed: true},
+		{text: ")", changed: false},
+	}, wordSegments("call(alpha, mid, beta)", "call(gamma, mid, delta)"))
+
+	// Multi-byte tokens stay intact and aligned around the change.
+	require.Equal(t, []diffSeg{
+		{text: "café ", changed: false},
+		{text: "au", changed: true},
+		{text: " ", changed: false},
+		{text: "lait", changed: true},
+	}, wordSegments("café au lait", "café con leche"))
+
+	// No shared token: nil signals a plain whole-line fallback.
+	require.Nil(t, wordSegments("xyz", "abc"))
 }
 
 // TestPairChanges_MatchesWithinBlocks checks that removed lines are paired with

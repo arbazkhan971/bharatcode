@@ -15,6 +15,10 @@
 /bin/
 /dist/
 
+# Stray local builds of the binary at the repo root (e.g. `go build -o`).
+/bharatcode
+/bharatcode-test
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*

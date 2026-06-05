@@ -5,6 +5,7 @@ Arguments:
 - `timeout` integer, optional: seconds before BharatCode stops the process.
 - `cwd` string, optional: working directory for the command; defaults to the workspace.
 - `background` boolean, optional: start the process and return a `job_id` immediately.
+- `env` object (string→string), optional: extra environment variables merged over the inherited environment for this command only. Prefer this to inline `VAR=val command` prefixes, which break across pipes (`VAR=val a | b` sets `VAR` only for `a`) and subshells.
 
 Output format: every result begins with a one-line header `[exit N | Status]` followed by the captured output. The header is always present — use it to read the exit code without scanning the text.
 

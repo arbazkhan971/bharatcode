@@ -61,7 +61,20 @@ func TestOpenRouterReasoning(t *testing.T) {
 	for _, label := range []string{"auto", "dynamic", "AUTO", " dynamic "} {
 		r = openRouterReasoning(Request{ReasoningEffort: label})
 		require.NotNil(t, r, label)
-		require.True(t, r.Enabled, label)
+		require.NotNil(t, r.Enabled, label)
+		require.True(t, *r.Enabled, label)
+		require.Empty(t, r.Effort, label)
+		require.Zero(t, r.MaxTokens, label)
+	}
+
+	// The "none" label means "do not reason", which has no OpenRouter effort value,
+	// so it disables reasoning (enabled:false) rather than being sent as an effort
+	// OpenRouter would reject. The match is case- and whitespace-insensitive.
+	for _, label := range []string{"none", "NONE", " none "} {
+		r = openRouterReasoning(Request{ReasoningEffort: label})
+		require.NotNil(t, r, label)
+		require.NotNil(t, r.Enabled, label)
+		require.False(t, *r.Enabled, label)
 		require.Empty(t, r.Effort, label)
 		require.Zero(t, r.MaxTokens, label)
 	}
@@ -70,7 +83,7 @@ func TestOpenRouterReasoning(t *testing.T) {
 	r = openRouterReasoning(Request{Thinking: &ThinkingConfig{BudgetTokens: 1024}, ReasoningEffort: "auto"})
 	require.NotNil(t, r)
 	require.Equal(t, 1024, r.MaxTokens)
-	require.False(t, r.Enabled)
+	require.Nil(t, r.Enabled)
 
 	// Nothing configured (or only whitespace effort) leaves reasoning unset so the
 	// model's own default applies rather than reasoning being force-enabled.
@@ -144,6 +157,18 @@ func TestOpenRouterStreamSetsReasoningEnabledFromAuto(t *testing.T) {
 		req.ReasoningEffort = "auto"
 	})
 	require.Contains(t, string(body), `"reasoning":{"enabled":true}`)
+	require.NotContains(t, string(body), `"effort"`)
+}
+
+// TestOpenRouterStreamSetsReasoningDisabledFromNone proves a "none" effort is
+// forwarded as reasoning.enabled:false (reasoning off) rather than as an
+// effort:"none" label OpenRouter would reject. The pointer-typed Enabled field is
+// what lets the explicit false survive JSON omitempty into the wire body.
+func TestOpenRouterStreamSetsReasoningDisabledFromNone(t *testing.T) {
+	body := openRouterWireBody(t, "/openrouter.ai/api/v1", "google/gemini-2.5-pro", func(req *Request) {
+		req.ReasoningEffort = "none"
+	})
+	require.Contains(t, string(body), `"reasoning":{"enabled":false}`)
 	require.NotContains(t, string(body), `"effort"`)
 }
 

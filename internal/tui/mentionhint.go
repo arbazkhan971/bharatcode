@@ -122,11 +122,13 @@ func shallowerFirst(a, b string) bool {
 
 // mentionScore rates how well a lower-cased path matches a lower-cased token,
 // reporting ok only on a match. Lower scores rank first: 0 when the base name is
-// a prefix, 1 when the path contains the token, 2 on a subsequence match within
-// the base name, 3 on a subsequence match that only holds across the full path.
-// Splitting the subsequence band keeps base-name relevance ahead of matches whose
-// runes are scattered through directory segments, matching how fuzzy file pickers
-// in Claude Code and opencode favour the file name over its location.
+// a prefix, 1 when the base name contains the token, 2 when only a directory
+// segment of the path contains it, 3 on a subsequence match within the base
+// name, 4 on a subsequence match that only holds across the full path. Both the
+// contiguous and the subsequence bands split on base-name versus path, keeping
+// file-name relevance ahead of matches that merely borrow from directory
+// segments, matching how fuzzy file pickers in Claude Code and opencode favour
+// the file name over its location.
 func mentionScore(token, path string) (int, bool) {
 	base := path
 	if i := strings.LastIndexByte(path, '/'); i >= 0 {
@@ -135,14 +137,17 @@ func mentionScore(token, path string) (int, bool) {
 	if strings.HasPrefix(base, token) {
 		return 0, true
 	}
-	if strings.Contains(path, token) {
+	if strings.Contains(base, token) {
 		return 1, true
 	}
-	if isSubsequence(token, base) {
+	if strings.Contains(path, token) {
 		return 2, true
 	}
-	if isSubsequence(token, path) {
+	if isSubsequence(token, base) {
 		return 3, true
+	}
+	if isSubsequence(token, path) {
+		return 4, true
 	}
 	return 0, false
 }

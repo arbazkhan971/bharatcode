@@ -17,6 +17,7 @@ var builtinFilters = []*Filter{
 	filterNpmTest,
 	filterPnpmInstall,
 	filterYarnInstall,
+	filterPipInstall,
 	filterTerraformPlan,
 	filterGitStatus,
 	filterGitDiff,
@@ -176,6 +177,32 @@ var filterYarnInstall = &Filter{
 	},
 	MaxLines: 30,
 	OnEmpty:  "yarn: ok",
+}
+
+// ---- Python -------------------------------------------------------------
+
+var filterPipInstall = &Filter{
+	Name:         "pip-install",
+	Description:  "Compact pip install output — strip already-satisfied/collecting/download progress, keep the installed summary and errors",
+	MatchCommand: re(`^(pip[23]?|python[23]?\s+-m\s+pip|uv\s+pip)\s+install\b`),
+	StripANSI:    true,
+	StripLinesMatching: []*regexp.Regexp{
+		re(`^\s*$`),
+		re(`^Requirement already satisfied:`),
+		re(`^Collecting\s+`),
+		re(`^\s*Using cached\s+`),
+		re(`^\s*Downloading\s+`),
+		re(`^\s*Preparing metadata`),
+		re(`^\s*Building wheels?\b`),
+		re(`^\s*Created wheel for`),
+		re(`^\s*Stored in directory`),
+		re(`^\s*Installing collected packages:`),
+		re(`^\s*━`),          // download progress bar (modern pip, box-drawing)
+		re(`\beta \d`),       // download progress trailer "… eta 0:00:00"
+		re(`^\s*\[notice\]`), // "A new release of pip is available" upgrade notice
+	},
+	MaxLines: 40,
+	OnEmpty:  "pip install: requirements already satisfied",
 }
 
 // ---- Terraform ----------------------------------------------------------

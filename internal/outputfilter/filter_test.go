@@ -313,6 +313,42 @@ func TestBuiltinCargo(t *testing.T) {
 	runBuiltinCases(t, cases)
 }
 
+func TestBuiltinPipInstall(t *testing.T) {
+	cases := []filterCase{
+		{
+			name: "strips collecting/download noise, keeps the installed summary",
+			cmd:  "pip install requests",
+			input: "Collecting requests\n" +
+				"  Using cached requests-2.31.0-py3-none-any.whl (62 kB)\n" +
+				"Collecting urllib3<3,>=1.21.1\n" +
+				"  Downloading urllib3-2.2.1-py3-none-any.whl (121 kB)\n" +
+				"     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 121.1/121.1 kB 9.5 MB/s eta 0:00:00\n" +
+				"Installing collected packages: urllib3, requests\n" +
+				"Successfully installed requests-2.31.0 urllib3-2.2.1\n",
+			expected: "Successfully installed requests-2.31.0 urllib3-2.2.1",
+		},
+		{
+			name: "on_empty when everything is already satisfied",
+			cmd:  "pip3 install -r requirements.txt",
+			input: "Requirement already satisfied: requests in /usr/lib/python3 (2.31.0)\n" +
+				"Requirement already satisfied: urllib3 in /usr/lib/python3 (2.2.1)\n" +
+				"\n" +
+				"[notice] A new release of pip is available: 24.0 -> 24.1\n",
+			expected: "pip install: requirements already satisfied",
+		},
+		{
+			name: "keeps error output",
+			cmd:  "python -m pip install badpkg",
+			input: "Collecting badpkg\n" +
+				"ERROR: Could not find a version that satisfies the requirement badpkg\n" +
+				"ERROR: No matching distribution found for badpkg\n",
+			expected: "ERROR: Could not find a version that satisfies the requirement badpkg\n" +
+				"ERROR: No matching distribution found for badpkg",
+		},
+	}
+	runBuiltinCases(t, cases)
+}
+
 func TestBuiltinTerraformPlan(t *testing.T) {
 	cases := []filterCase{
 		{

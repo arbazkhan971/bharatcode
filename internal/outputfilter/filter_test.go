@@ -349,6 +349,71 @@ func TestBuiltinPipInstall(t *testing.T) {
 	runBuiltinCases(t, cases)
 }
 
+func TestBuiltinPytest(t *testing.T) {
+	cases := []filterCase{
+		{
+			name: "strips session header and progress, keeps the all-pass summary",
+			cmd:  "pytest",
+			input: "============================= test session starts ==============================\n" +
+				"platform linux -- Python 3.11.0, pytest-7.4.0, pluggy-1.3.0\n" +
+				"rootdir: /home/user/project\n" +
+				"plugins: cov-4.1.0\n" +
+				"collected 42 items\n" +
+				"\n" +
+				"tests/test_foo.py ........                                              [100%]\n" +
+				"\n" +
+				"============================== 42 passed in 2.34s ==============================\n",
+			expected: "collected 42 items\n" +
+				"============================== 42 passed in 2.34s ==============================",
+		},
+		{
+			name: "keeps the FAILURES section and short summary, drops progress noise",
+			cmd:  "python -m pytest tests/",
+			input: "============================= test session starts ==============================\n" +
+				"platform linux -- Python 3.11.0, pytest-7.4.0\n" +
+				"rootdir: /home/user/project\n" +
+				"collected 3 items\n" +
+				"\n" +
+				"tests/test_bar.py .F.                                                   [100%]\n" +
+				"\n" +
+				"=================================== FAILURES ===================================\n" +
+				"_______________________________ test_something _________________________________\n" +
+				"\n" +
+				"    def test_something():\n" +
+				">       assert add(1, 2) == 4\n" +
+				"E       assert 3 == 4\n" +
+				"\n" +
+				"tests/test_bar.py:10: AssertionError\n" +
+				"=========================== short test summary info ============================\n" +
+				"FAILED tests/test_bar.py::test_something - assert 3 == 4\n" +
+				"========================= 1 failed, 2 passed in 0.12s ==========================\n",
+			expected: "collected 3 items\n" +
+				"=================================== FAILURES ===================================\n" +
+				"_______________________________ test_something _________________________________\n" +
+				"    def test_something():\n" +
+				">       assert add(1, 2) == 4\n" +
+				"E       assert 3 == 4\n" +
+				"tests/test_bar.py:10: AssertionError\n" +
+				"=========================== short test summary info ============================\n" +
+				"FAILED tests/test_bar.py::test_something - assert 3 == 4\n" +
+				"========================= 1 failed, 2 passed in 0.12s ==========================",
+		},
+		{
+			name: "verbose mode: strips per-test PASSED progress lines, keeps failures",
+			cmd:  "py.test -v",
+			input: "tests/test_a.py::test_one PASSED                                        [ 50%]\n" +
+				"tests/test_a.py::test_two FAILED                                       [100%]\n" +
+				"=========================== short test summary info ============================\n" +
+				"FAILED tests/test_a.py::test_two - AssertionError\n" +
+				"========================= 1 failed, 1 passed in 0.05s ==========================\n",
+			expected: "=========================== short test summary info ============================\n" +
+				"FAILED tests/test_a.py::test_two - AssertionError\n" +
+				"========================= 1 failed, 1 passed in 0.05s ==========================",
+		},
+	}
+	runBuiltinCases(t, cases)
+}
+
 func TestBuiltinTerraformPlan(t *testing.T) {
 	cases := []filterCase{
 		{

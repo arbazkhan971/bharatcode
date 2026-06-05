@@ -18,6 +18,7 @@ var builtinFilters = []*Filter{
 	filterPnpmInstall,
 	filterYarnInstall,
 	filterPipInstall,
+	filterPytest,
 	filterTerraformPlan,
 	filterGitStatus,
 	filterGitDiff,
@@ -203,6 +204,23 @@ var filterPipInstall = &Filter{
 	},
 	MaxLines: 40,
 	OnEmpty:  "pip install: requirements already satisfied",
+}
+
+var filterPytest = &Filter{
+	Name:         "pytest",
+	Description:  "Compact pytest output — strip the session header and per-test progress lines, keep failures and the final summary",
+	MatchCommand: re(`^(pytest|py\.test|python[23]?\s+-m\s+pytest)\b`),
+	StripANSI:    true,
+	StripLinesMatching: []*regexp.Regexp{
+		re(`^\s*$`),
+		re(`^=+ test session starts =+$`), // decorative session banner
+		re(`^platform \S+ -- Python`),     // platform/interpreter/plugin versions
+		re(`^(rootdir|plugins|cachedir|configfile|testpaths):`),
+		re(`^collecting\b`),   // transient "collecting ..." line pytest overwrites
+		re(`\[\s*\d+%\]\s*$`), // per-test/per-file progress lines ("... [ 42%]")
+	},
+	MaxLines: 80,
+	OnEmpty:  "pytest: all pass",
 }
 
 // ---- Terraform ----------------------------------------------------------

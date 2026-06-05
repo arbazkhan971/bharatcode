@@ -262,6 +262,37 @@ func TestFiletreeFilter_EnterConfirmsAndArrowsNavigate(t *testing.T) {
 	require.Equal(t, "alpha.go", m.filetree.selected())
 }
 
+func TestFiletreeFilter_HighlightsMatchedRunes(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "album.go", "")
+	writeFile(t, root, "alpha.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("al"))
+	require.Equal(t, []string{"album.go", "alpha.go"}, m.filetree.files)
+
+	render := m.renderMain()
+
+	// The visible text of each surviving entry round-trips intact: highlighting
+	// changes only styling, never the characters shown.
+	stripped := stripANSI(render)
+	require.Contains(t, stripped, "album.go")
+	require.Contains(t, stripped, "alpha.go")
+
+	// A non-cursor match (alpha.go sits below the cursor) accents exactly the
+	// runes the filter matched, reusing the @-file picker's highlighter, so the
+	// "al" prefix is rendered as its own accent span.
+	require.Equal(t, 0, m.filetree.cursor)
+	require.Contains(t, render, m.theme.Accent.Render("al"),
+		"matched filter runes are highlighted in the listing")
+}
+
 func TestFiletreeFilter_EscClearsBeforeClosingPanel(t *testing.T) {
 	t.Parallel()
 

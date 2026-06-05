@@ -23,8 +23,14 @@ func TestInferContextWindow(t *testing.T) {
 		{"gpt-4", 8_192},
 		{"gpt-3.5-turbo", 16_385},
 		{"gpt-5", 400_000},
-		{"o1-preview", 200_000},
+		// o1-preview and o1-mini shipped a 128k window; the released o1 and the
+		// o3/o4-mini line are 200k. The specific preview/mini rules must win over
+		// the broader "o1" family rule.
+		{"o1-preview", 128_000},
+		{"o1-mini", 128_000},
+		{"o1-2024-12-17", 200_000},
 		{"o3-mini", 200_000},
+		{"o4-mini", 200_000},
 		{"claude-sonnet-4-20250514", 200_000},
 		{"claude-3-5-haiku", 200_000},
 		{"gemini-1.5-pro-latest", 2_097_152},

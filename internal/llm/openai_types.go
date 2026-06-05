@@ -137,8 +137,17 @@ type openAIFunctionDelta struct {
 type openAIChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content   string                  `json:"content"`
-			ToolCalls []openAIMessageToolCall `json:"tool_calls"`
+			Content string `json:"content"`
+			// ReasoningContent / Reasoning carry a reasoning model's thinking text
+			// in a buffered (non-streamed) completion, mirroring the two field names
+			// the streaming delta reads: reasoning_content is DeepSeek's direct API
+			// (and the deployments that copied it), reasoning is the field OpenRouter
+			// normalizes every upstream reasoning model into. A provider that returns
+			// a buffered JSON body instead of an SSE stream would otherwise drop the
+			// thinking text that the stream path surfaces.
+			ReasoningContent string                  `json:"reasoning_content"`
+			Reasoning        string                  `json:"reasoning"`
+			ToolCalls        []openAIMessageToolCall `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`
 	Usage openAIUsage `json:"usage"`

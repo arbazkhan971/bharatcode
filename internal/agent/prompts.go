@@ -16,6 +16,7 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
+	"github.com/arbazkhan971/bharatcode/internal/recipe"
 	"github.com/arbazkhan971/bharatcode/internal/skills"
 	"github.com/arbazkhan971/bharatcode/internal/tools"
 )
@@ -34,6 +35,17 @@ const availableSkillsHeader = "## Available skills"
 // against the skill's own directory.
 const skillUsageInstructions = "Use the read tool to load a skill file when the task matches its description.\n" +
 	"When a skill file references a relative path, resolve it against the skill directory and use that absolute path."
+
+// availableRecipesHeader delimits the available-recipes section injected
+// into the assembled system prompt.
+const availableRecipesHeader = "## Available recipes"
+
+// recipeUsageInstructions prefixes the available-recipes block. It tells
+// the model that a recipe is a saved, parameterized workflow the user can
+// launch with a slash command, so the model can suggest the relevant one
+// when a request matches a recipe's description.
+const recipeUsageInstructions = "Recipes are saved, parameterized prompts the user can run with /<name>.\n" +
+	"When a request matches a recipe's description, suggest the user run that recipe."
 
 // instructionFilenames lists the per-directory project-instruction files
 // in priority order. AGENTS.md is preferred; CLAUDE.md is the fallback
@@ -78,6 +90,18 @@ func defaultSkillSearchDirs(workdir string) []string {
 	}
 	dirs = append(dirs, filepath.Join(workdir, ".bharatcode", "skills"))
 	return dirs
+}
+
+// recipeSearchDirs returns the recipe directories to scan, global first
+// then project, so project recipes override global ones. It is a package
+// var so tests can supply hermetic temp roots without touching the
+// developer's real recipe directories.
+var recipeSearchDirs = defaultRecipeSearchDirs
+
+// defaultRecipeSearchDirs returns the standard recipe roots in precedence
+// order (global first, project second), mirroring recipe.DefaultDirs.
+func defaultRecipeSearchDirs(workdir string) []string {
+	return recipe.DefaultDirs(config.GlobalPath(), workdir)
 }
 
 //go:embed templates/*.md.tpl
@@ -153,6 +177,15 @@ func renderPrompt(ctx context.Context, agentName, promptOverride string, registr
 		assembled = injectSkills(assembled, set.Summaries())
 	}
 
+	// Inject a summary of discoverable recipes so the model knows which
+	// saved workflows the user can launch. A load failure is non-fatal:
+	// the prompt renders without the section.
+	if reg, err := recipe.NewRegistry(recipeSearchDirs(workdir)...); err != nil {
+		slog.Warn("Loading recipes for system prompt", "error", err)
+	} else {
+		assembled = injectRecipes(assembled, reg.Summaries())
+	}
+
 	// Append the environment block last, after the volatile instructions
 	// and skills, so workdir/date sit at the very tail of the prompt.
 	env, err := renderTemplate("environment", environmentTemplate, data)
@@ -194,6 +227,20 @@ func injectSkills(base, summaries string) string {
 	}
 	return base + "\n\n" + availableSkillsHeader + "\n\n" +
 		skillUsageInstructions + "\n\n" + summaries
+}
+
+// injectRecipes appends the available-recipes section to base. The section
+// opens with usage instructions telling the model what a recipe is and when
+// to suggest one, followed by the <available_recipes> XML block produced by
+// recipe.Registry.Summaries. When summaries is empty after trimming, base is
+// returned unchanged so that no recipes means no change to the prompt.
+func injectRecipes(base, summaries string) string {
+	summaries = strings.TrimSpace(summaries)
+	if summaries == "" {
+		return base
+	}
+	return base + "\n\n" + availableRecipesHeader + "\n\n" +
+		recipeUsageInstructions + "\n\n" + summaries
 }
 
 // injectInstructions appends the project-instructions section to base.

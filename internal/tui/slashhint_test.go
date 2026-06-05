@@ -6,6 +6,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestOverflowSuffix asserts the truncation indicator reports the hidden-match
+// count when matches were dropped and falls back to a bare ellipsis otherwise,
+// so a non-positive count never renders a "+0" or negative tail.
+func TestOverflowSuffix(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, " … +12", overflowSuffix(12))
+	require.Equal(t, " … +1", overflowSuffix(1))
+	require.Equal(t, " …", overflowSuffix(0))
+	require.Equal(t, " …", overflowSuffix(-3))
+}
+
 // TestSlashHintCommands_NonSlashBufferShowsNothing asserts the menu is inert
 // for ordinary prose, so a normal prompt never grows a completion row.
 func TestSlashHintCommands_NonSlashBufferShowsNothing(t *testing.T) {
@@ -165,6 +177,7 @@ func TestRenderSlashHint_FitsOneRow(t *testing.T) {
 	require.NotEmpty(t, hint)
 	require.NotContains(t, hint, "\n", "the menu must stay on one row")
 	require.Contains(t, hint, "…", "an over-long match set is truncated")
+	require.Regexp(t, `\+\d+`, hint, "truncation reports how many matches are hidden")
 }
 
 // TestRenderSlashHint_HighlightsPrefixMatch asserts the runes a prefix matched

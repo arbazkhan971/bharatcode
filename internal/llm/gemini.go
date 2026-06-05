@@ -23,6 +23,27 @@ const defaultGeminiBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 // no room for output after the reasoning pass. See buildGeminiRequest.
 const defaultGeminiMaxTokens = 8192
 
+// geminiThinkingBudgetForEffort maps the provider-independent reasoning_effort
+// label onto a Gemini thinkingBudget (in tokens). It lets a user opt a Gemini
+// 2.5 model into native thinking with the same "low"/"medium"/"high" knob the
+// OpenAI reasoning models use, instead of having to pick a raw token count. The
+// chosen budgets sit inside the range both Flash (0–24576) and Pro (128–32768)
+// accept, so the same effort is valid across the 2.5 family. An empty or
+// unrecognized label returns 0, which leaves thinking unconfigured (the model's
+// own default applies).
+func geminiThinkingBudgetForEffort(effort string) int {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low":
+		return 4096
+	case "medium":
+		return 8192
+	case "high":
+		return 16384
+	default:
+		return 0
+	}
+}
+
 // geminiProvider speaks Google's native Generative Language API
 // (generateContent / streamGenerateContent) rather than the OpenAI-compatible
 // shim. It maps BharatCode's provider-independent Request onto Gemini's
@@ -349,18 +370,28 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 	}
 
 	// Native extended thinking is opt-in per request and only emitted for a
-	// Gemini 2.5 model that supports thinkingConfig. Like Anthropic's path, an
-	// unsupported thinking request is silently dropped rather than rejected: the
-	// support check is an approximate model-id heuristic, so degrading gracefully
-	// beats 400-ing a valid request on a false negative. IncludeThoughts asks the
-	// API for thought summaries, which the stream surfaces as ThinkingEvents.
-	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 && modelSupportsGeminiThinking(p.models, req.Model) {
+	// Gemini 2.5 model that supports thinkingConfig. The budget comes from an
+	// explicit ThinkingConfig when set, otherwise from the configured
+	// reasoning_effort (the uniform knob OpenAI reasoning models use), so a Gemini
+	// user gets parity without having to hand-tune a token count. Like Anthropic's
+	// path, an unsupported thinking request is silently dropped rather than
+	// rejected: the support check is an approximate model-id heuristic, so
+	// degrading gracefully beats 400-ing a valid request on a false negative.
+	// IncludeThoughts asks the API for thought summaries, which the stream
+	// surfaces as ThinkingEvents.
+	budget := 0
+	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
+		budget = req.Thinking.BudgetTokens
+	} else {
+		budget = geminiThinkingBudgetForEffort(req.ReasoningEffort)
+	}
+	if budget > 0 && modelSupportsGeminiThinking(p.models, req.Model) {
 		if out.GenerationConfig == nil {
 			out.GenerationConfig = &geminiGenerationConfig{}
 		}
 		out.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
 			IncludeThoughts: true,
-			ThinkingBudget:  &req.Thinking.BudgetTokens,
+			ThinkingBudget:  &budget,
 		}
 		// On Gemini 2.5 the thinking tokens are carved out of the same
 		// maxOutputTokens allowance and billed as output, so a positive cap at or
@@ -369,8 +400,8 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 		// truncated). Lift the cap to the budget plus a full default allowance,
 		// mirroring the Anthropic path. A zero cap is left untouched so the model's
 		// own (much larger) default applies.
-		if out.GenerationConfig.MaxOutputTokens > 0 && out.GenerationConfig.MaxOutputTokens <= req.Thinking.BudgetTokens {
-			out.GenerationConfig.MaxOutputTokens = req.Thinking.BudgetTokens + defaultGeminiMaxTokens
+		if out.GenerationConfig.MaxOutputTokens > 0 && out.GenerationConfig.MaxOutputTokens <= budget {
+			out.GenerationConfig.MaxOutputTokens = budget + defaultGeminiMaxTokens
 		}
 	}
 

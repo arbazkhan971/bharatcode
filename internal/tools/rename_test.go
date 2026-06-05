@@ -75,6 +75,16 @@ func TestRenameAppliesEditsAcrossFiles(t *testing.T) {
 	gotB, err := os.ReadFile(b)
 	require.NoError(t, err)
 	require.Equal(t, "bar()\n", string(gotB))
+
+	// A compact unified diff of each changed file is included so the model sees
+	// the touched lines, mirroring the edit/multiedit/write tools.
+	require.Contains(t, result.Content, "-foo()")
+	require.Contains(t, result.Content, "+bar()")
+	diffs, ok := result.Metadata["diffs"].(map[string]string)
+	require.True(t, ok)
+	require.Contains(t, diffs, "a.go")
+	require.Contains(t, diffs, "b.go")
+	require.Contains(t, diffs["a.go"], "+bar()")
 }
 
 func TestRenameNoChangesReportsNothingDone(t *testing.T) {

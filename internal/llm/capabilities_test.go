@@ -49,6 +49,16 @@ func TestInferContextWindow(t *testing.T) {
 		{"ministral-3b-2410", 128_000},
 		{"devstral-small-2507", 128_000},
 		{"qwen2.5-coder", 32_768},
+		// Microsoft Phi: the hosted Phi-3/3.5 line is 128k, Phi-4 is 16k. The
+		// "dolphin" finetunes contain the substring "phi" but must not match the
+		// specific "phi-3"/"phi-4" markers (they fall through to their base window).
+		{"phi-4", 16_384},
+		{"phi-3.5-mini-instruct", 128_000},
+		{"microsoft/phi-3-medium-128k-instruct", 128_000},
+		{"dolphin-2.9-llama3-8b", 128_000},
+		// Databricks DBRX (32k) and IBM Granite 3.x (128k).
+		{"dbrx-instruct", 32_768},
+		{"granite-3.3-8b-instruct", 128_000},
 		{"deepseek-chat", 65_536},
 		// Amazon Nova (Bedrock): Pro/Lite are 300k, Micro is 128k.
 		{"nova-pro-v1", 300_000},

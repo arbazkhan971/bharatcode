@@ -179,11 +179,19 @@ const (
 
 // Hook is a user-defined shell command that fires on a HookEvent.
 // Command runs through /bin/sh -c on POSIX, cmd.exe /c on Windows.
+//
+// VerifyCommand, when non-empty, is run after a successful write-class tool
+// execution that matches the hook's Match pattern. It is opt-in: an empty
+// VerifyCommand disables verification entirely, preserving the prior behaviour.
+// VerifyTimeoutSeconds caps how long the verify command may run; a non-positive
+// value selects a sensible default (30 s).
 type Hook struct {
-	Event   HookEvent `json:"event"`
-	Match   string    `json:"match,omitempty"` // glob over tool name
-	Command string    `json:"command"`
-	Timeout int       `json:"timeout_seconds,omitempty"`
+	Event                HookEvent `json:"event"`
+	Match                string    `json:"match,omitempty"` // glob over tool name
+	Command              string    `json:"command"`
+	Timeout              int       `json:"timeout_seconds,omitempty"`
+	VerifyCommand        string    `json:"verify_command,omitempty"`
+	VerifyTimeoutSeconds int       `json:"verify_timeout_seconds,omitempty"`
 }
 
 // MCPServer is one MCP endpoint definition. Transport is "stdio",

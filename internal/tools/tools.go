@@ -42,6 +42,12 @@ type Result struct {
 	IsError  bool           `json:"is_error,omitempty"`
 	StopTurn bool           `json:"stop_turn,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
+	// VerifyNeeded, when true, signals to the agent loop that this write-class
+	// tool result should trigger any configured verify_command. It is set by
+	// edit, multiedit, and write when they succeed, and is always false for
+	// tools that do not mutate files. The loop ignores it when no verify_command
+	// is configured, so the field is opt-in at the config level.
+	VerifyNeeded bool `json:"verify_needed,omitempty"`
 }
 
 // Dependencies groups collaborators injected into built-in tools.

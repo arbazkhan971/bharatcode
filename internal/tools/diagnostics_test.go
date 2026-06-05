@@ -101,6 +101,78 @@ func TestDiagnosticsSummarySingularGrammar(t *testing.T) {
 	require.Contains(t, result.Content, "1 diagnostic across 1 file (1 error):")
 }
 
+// TestDiagnosticsSeverityFilterDropsLessSevere asserts that a "warning" filter
+// keeps errors and warnings but drops the info/hint diagnostics, and that the
+// summary and metadata reflect only the surviving set.
+func TestDiagnosticsSeverityFilterDropsLessSevere(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "boom"},
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 1}}, Severity: lsp.Warning, Message: "meh"},
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2}}, Severity: lsp.Information, Message: "fyi"},
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 3}}, Severity: lsp.Hint, Message: "tip"},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go", "severity": "warning"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "2 diagnostics across 1 file (1 error, 1 warning):")
+	require.Contains(t, result.Content, "boom")
+	require.Contains(t, result.Content, "meh")
+	require.NotContains(t, result.Content, "fyi")
+	require.NotContains(t, result.Content, "tip")
+	require.Equal(t, 2, result.Metadata[MetadataDiagnosticCount])
+}
+
+// TestDiagnosticsSeverityFilterEmptyMessage checks that when the filter removes
+// every diagnostic, the tool reports the threshold rather than the unfiltered
+// "No diagnostics found." message.
+func TestDiagnosticsSeverityFilterEmptyMessage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Warning, Message: "meh"},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go", "severity": "error"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "No diagnostics at or above error severity.", result.Content)
+}
+
+// TestDiagnosticsSeverityFilterRejectsUnknown asserts an unrecognized severity
+// value is a tool error rather than a silent no-op.
+func TestDiagnosticsSeverityFilterRejectsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	tool := &diagnosticsTool{source: fakeDiagnostics{}, workDir: dir}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"severity": "fatal"}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "unknown severity")
+}
+
+// TestFilterBySeverityKeepsUnclassified pins that a diagnostic whose severity is
+// outside the Error..Hint range (a server that omitted it) survives any filter,
+// since it cannot be safely judged below the threshold.
+func TestFilterBySeverityKeepsUnclassified(t *testing.T) {
+	diags := []lsp.Diagnostic{
+		{Path: "a.go", Severity: lsp.Hint, Message: "tip"},
+		{Path: "a.go", Severity: 0, Message: "unset"},
+	}
+	got := filterBySeverity(diags, lsp.Error)
+	require.Len(t, got, 1)
+	require.Equal(t, "unset", got[0].Message)
+}
+
 // TestDiagnosticsSummaryHeaderHelper exercises diagnosticsSummary directly so the
 // severity ordering and the omission of zero-count categories are pinned without
 // routing through the language-server plumbing.

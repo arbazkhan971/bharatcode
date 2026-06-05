@@ -99,6 +99,23 @@ func TestMentionMatches_EmptyTokenPrefersShallowFiles(t *testing.T) {
 	require.Equal(t, []string{"main.go", "README.md", "aaa/bbb/deep.go"}, got)
 }
 
+// TestMentionMatches_BaseNameSubstringOutranksPathSubstring asserts that when a
+// token appears contiguously in a file's base name it ranks ahead of a file
+// where the same token only appears inside a directory segment, so the picker
+// favours file-name relevance over path location even for substring matches.
+func TestMentionMatches_BaseNameSubstringOutranksPathSubstring(t *testing.T) {
+	t.Parallel()
+
+	// "log" is a substring of the base name "logger.go", but for
+	// "log/server.go" it only appears in the directory segment.
+	root := mentionWorkspace(t,
+		"log/server.go",
+		"internal/logger.go",
+	)
+	got := mentionMatches("log", root)
+	require.Equal(t, []string{"internal/logger.go", "log/server.go"}, got)
+}
+
 // TestMentionMatches_SubsequenceFallback asserts a non-contiguous subsequence
 // still matches when no prefix or substring does.
 func TestMentionMatches_SubsequenceFallback(t *testing.T) {

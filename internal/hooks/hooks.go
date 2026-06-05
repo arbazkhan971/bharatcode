@@ -37,6 +37,11 @@ const (
 	OnError Event = "OnError"
 	// OnSession fires for legacy session lifecycle configuration.
 	OnSession Event = "OnSession"
+	// VerifyEdit fires after a write-class tool succeeds, running the
+	// verify_command configured on the matching FileEdit hook. It is separate
+	// from FileEdit so user hooks and auto-verify can coexist on the same hook
+	// definition without ambiguity.
+	VerifyEdit Event = "VerifyEdit"
 )
 
 // HookDef is a single user-defined hook command.
@@ -45,6 +50,22 @@ type HookDef struct {
 	Match   string
 	Command string
 	Timeout time.Duration
+	// VerifyCommand, when non-empty, is a shell command run after a successful
+	// write-class tool execution that matches this hook's Match pattern (for
+	// FileEdit events only). A non-zero exit code is treated as a verification
+	// failure and is surfaced to the agent as an error tool result so it can
+	// re-edit or explain.
+	VerifyCommand string
+	VerifyTimeout time.Duration
+}
+
+// VerifySpec describes a verify command that should run after a file edit.
+// It is returned by MatchingVerifiers for callers that want to run verify
+// commands independently of the normal hook-fire path.
+type VerifySpec struct {
+	Command string
+	Timeout time.Duration
+	Cwd     string
 }
 
 // Decision is the aggregate result of firing matching hooks.
@@ -146,17 +167,55 @@ func New(cfg *config.Config, sh *shell.Shell) *Engine {
 		return engine
 	}
 
+	const defaultVerifyTimeout = 30 * time.Second
+
 	engine.hooks = make([]HookDef, 0, len(cfg.Hooks))
 	for _, hook := range cfg.Hooks {
 		timeout := time.Duration(hook.Timeout) * time.Second
+		verifyTimeout := time.Duration(hook.VerifyTimeoutSeconds) * time.Second
+		if verifyTimeout <= 0 && hook.VerifyCommand != "" {
+			verifyTimeout = defaultVerifyTimeout
+		}
 		engine.hooks = append(engine.hooks, HookDef{
-			Event:   Event(hook.Event),
-			Match:   hook.Match,
-			Command: hook.Command,
-			Timeout: timeout,
+			Event:         Event(hook.Event),
+			Match:         hook.Match,
+			Command:       hook.Command,
+			Timeout:       timeout,
+			VerifyCommand: hook.VerifyCommand,
+			VerifyTimeout: verifyTimeout,
 		})
 	}
 	return engine
+}
+
+// MatchingVerifiers returns the VerifySpec for every FileEdit hook whose
+// Match pattern matches filePath and whose VerifyCommand is non-empty. The
+// caller is responsible for running the returned commands. When no hooks match
+// or none carry a VerifyCommand, the returned slice is empty. A nil engine
+// always returns nil.
+func (e *Engine) MatchingVerifiers(filePath string) []VerifySpec {
+	if e == nil {
+		return nil
+	}
+	var out []VerifySpec
+	for _, hook := range e.hooks {
+		if hook.Event != FileEdit {
+			continue
+		}
+		if hook.VerifyCommand == "" {
+			continue
+		}
+		ok, err := matches(hook.Match, filePath)
+		if err != nil || !ok {
+			continue
+		}
+		out = append(out, VerifySpec{
+			Command: hook.VerifyCommand,
+			Timeout: hook.VerifyTimeout,
+			Cwd:     e.cwd,
+		})
+	}
+	return out
 }
 
 // Fire runs all hooks matching event and payload, then aggregates their decisions.

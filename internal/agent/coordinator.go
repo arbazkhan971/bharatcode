@@ -293,6 +293,7 @@ func (c *Coordinator) Agent(name string) (*Loop, error) {
 				Ledger:        c.deps.Ledger,
 				Bus:           c.deps.Bus,
 				Hooks:         c.deps.Hooks,
+				VerifyHooks:   c.deps.Hooks,
 				SystemPrompt:  def.systemPrompt,
 				ToolAllowList: def.tools,
 				Router:        c.deps.Router,

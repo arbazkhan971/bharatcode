@@ -546,6 +546,52 @@ func TestRegistryInfersGLMContextWindow(t *testing.T) {
 	require.Equal(t, 200_000, models[0].ContextWindow)
 }
 
+// TestDefaultConfigCoherePreset asserts the embedded default config ships a
+// Cohere provider wired to Cohere's OpenAI-compatibility endpoint, and that its
+// Command A model surfaces in the registry catalog with the right window and
+// capabilities. Cohere's /compatibility/v1 dialect speaks the OpenAI wire
+// format, so it rides the openai_compatible client; this guards the preset
+// against a silent regression in either the provider block or its catalog
+// entry. Fully offline: Default() unmarshals embedded bytes and NewRegistry
+// only constructs structs.
+func TestDefaultConfigCoherePreset(t *testing.T) {
+	cfg := config.Default()
+
+	var prov *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "cohere" {
+			prov = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, prov, "default config should define a cohere provider")
+	require.Equal(t, config.ProviderOpenAICompatible, prov.Type)
+	require.Equal(t, "https://api.cohere.ai/compatibility/v1", prov.BaseURL,
+		"cohere preset should target Cohere's OpenAI-compatibility endpoint")
+	require.Equal(t, "COHERE_API_KEY", prov.APIKeyEnv)
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	provider, err := reg.Get("cohere")
+	require.NoError(t, err)
+	_, ok := provider.(*openAICompatibleProvider)
+	require.True(t, ok, "cohere should resolve to the openai_compatible client")
+
+	var model Model
+	for _, m := range reg.ListModels() {
+		if m.ID == "command-a-03-2025" {
+			model = m
+			break
+		}
+	}
+	require.Equal(t, "command-a-03-2025", model.ID, "Command A should appear in the catalog")
+	require.Equal(t, "cohere", model.Provider)
+	require.Equal(t, 256_000, model.ContextWindow, "Command A serves a 256k context window")
+	require.True(t, model.SupportsTools, "Command A supports tool calling")
+	require.False(t, model.SupportsImages, "Command A is text-only")
+}
+
 func collectEvents(events <-chan Event) []Event {
 	var out []Event
 	for event := range events {

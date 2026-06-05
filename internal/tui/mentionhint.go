@@ -483,6 +483,14 @@ func (m *model) renderMentionHint(width int) string {
 
 	line := indent + strings.Join(parts, sep)
 
+	// While Tab-cycling, append the position within the cycle so the user can see
+	// how far through the matches they have walked, the way the slash-command menu
+	// does. It is width-guarded so the menu still never spills past one row.
+	if suffix := cyclePositionSuffix(active, len(files)); suffix != "" && used+len([]rune(suffix)) <= width {
+		line += m.theme.Muted.Render(suffix)
+		used += len([]rune(suffix))
+	}
+
 	// Report the overflow against the true match total, not the displayed cap.
 	// During a Tab cycle the universe is the already-capped match list, so its
 	// length is the total; while browsing, recompute the uncapped count so a token

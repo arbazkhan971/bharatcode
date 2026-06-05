@@ -22,3 +22,9 @@ Failure cases:
 Malformed JSON, a missing URL, a non-HTTP scheme, a non-2xx response, or a
 network failure returns an error. Large responses are capped so BharatCode tool
 output stays bounded.
+
+For safety, `web_fetch` refuses to connect to non-public addresses: private
+networks, link-local hosts (including the `169.254.169.254` cloud-metadata
+service), and multicast addresses are blocked, and the block is re-checked on
+every redirect. Loopback (`localhost`) is allowed so local development servers
+remain reachable.

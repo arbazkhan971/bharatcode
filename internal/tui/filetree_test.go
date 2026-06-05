@@ -98,7 +98,10 @@ func TestFiletreePanel_SelectingEditedFile_RendersDiff(t *testing.T) {
 	_, _ = m.Update(keySpecial("down", tea.KeyDown))
 	require.Equal(t, "beta.go", m.filetree.selected())
 
-	out := m.renderMain()
+	// Strip ANSI before matching: the diff viewer highlights the changed run of a
+	// modified line as a separate styled span, so the line's text is no longer one
+	// contiguous escape-free substring in the raw render.
+	out := plainText(m.renderMain())
 	require.Contains(t, out, "Diff: beta.go")
 	require.Contains(t, out, "old line")
 	require.Contains(t, out, "new line")

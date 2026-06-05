@@ -58,6 +58,101 @@ func TestUnifiedNumbered_GutterWidthScales(t *testing.T) {
 	require.Equal(t, "    101 +new", lines[3])
 }
 
+// TestUnifiedNumbered_WordHighlight checks that a modified line has only its
+// changed run rendered with the emphasized add/remove style while the shared
+// head and tail keep the plain add/remove style, matching the intra-line
+// word-diff highlighting of Claude Code and opencode.
+func TestUnifiedNumbered_WordHighlight(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,1 +1,1 @@\n-func old() {}\n+func new() {}\n"
+	got := New(theme).RenderUnifiedNumbered(patch, 120)
+
+	// The shared prefix and suffix keep the plain colors; only the differing
+	// word is emphasized on each side.
+	require.Contains(t, got, theme.DiffRemove.Render("-func "))
+	require.Contains(t, got, theme.DiffRemoveEmph.Render("old"))
+	require.Contains(t, got, theme.DiffAddEmph.Render("new"))
+	require.Contains(t, got, theme.DiffAdd.Render("() {}"))
+}
+
+// TestUnifiedNumbered_WordHighlight_NoSharedAffix checks that when the removed
+// and added lines share no common prefix or suffix there is nothing to single
+// out, so the whole line keeps its plain add/remove style rather than being
+// rendered as one big emphasized block.
+func TestUnifiedNumbered_WordHighlight_NoSharedAffix(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,1 +1,1 @@\n-xyz\n+abc\n"
+	got := New(theme).RenderUnifiedNumbered(patch, 120)
+
+	require.Contains(t, got, theme.DiffRemove.Render("-xyz"))
+	require.Contains(t, got, theme.DiffAdd.Render("+abc"))
+	require.NotContains(t, got, theme.DiffRemoveEmph.Render("xyz"))
+	require.NotContains(t, got, theme.DiffAddEmph.Render("abc"))
+}
+
+// TestUnifiedNumbered_WordHighlight_UnpairedLines checks that added or removed
+// lines without a counterpart on the other side (an unbalanced change block)
+// are left with their plain style, since there is no line to diff them against.
+func TestUnifiedNumbered_WordHighlight_UnpairedLines(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	// One removal replaced by two additions: the first add pairs with the
+	// removal, the second add is surplus and must stay plain.
+	patch := "@@ -1,1 +1,2 @@\n-alpha one\n+alpha two\n+brand new line\n"
+	got := New(theme).RenderUnifiedNumbered(patch, 120)
+
+	require.Contains(t, got, theme.DiffAddEmph.Render("two"))
+	require.Contains(t, got, theme.DiffAdd.Render("+brand new line"))
+}
+
+// TestChangedSpan_SplitsSharedAffixes checks the rune-wise prefix/middle/suffix
+// split that drives word highlighting, including a multi-byte case so a rune is
+// never cut in half.
+func TestChangedSpan_SplitsSharedAffixes(t *testing.T) {
+	t.Parallel()
+
+	prefix, mid, suffix := changedSpan("func old() {}", "func new() {}")
+	require.Equal(t, "func ", prefix)
+	require.Equal(t, "old", mid)
+	require.Equal(t, "() {}", suffix)
+
+	// No shared affix: the whole string is the middle.
+	prefix, mid, suffix = changedSpan("xyz", "abc")
+	require.Equal(t, "", prefix)
+	require.Equal(t, "xyz", mid)
+	require.Equal(t, "", suffix)
+
+	// Multi-byte runes stay intact around the change.
+	prefix, mid, suffix = changedSpan("café au lait", "café con leche")
+	require.Equal(t, "café ", prefix)
+	require.Equal(t, "au lait", mid)
+	require.Equal(t, "", suffix)
+}
+
+// TestPairChanges_MatchesWithinBlocks checks that removed lines are paired with
+// the added lines that replaced them, index-for-index within a contiguous
+// change block, and that surplus or stand-alone lines stay unpaired (-1).
+func TestPairChanges_MatchesWithinBlocks(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		"@@ -1,2 +1,2 @@",
+		" context",
+		"-old a",
+		"-old b",
+		"+new a",
+		"+new b",
+		"+extra add", // surplus: no removed counterpart
+	}
+	pairs := pairChanges(lines)
+	require.Equal(t, []int{-1, -1, 4, 5, 2, 3, -1}, pairs)
+}
+
 // TestStat_CountsFilesAndLines checks that Stat reports the changed-file count
 // and the added/removed content totals, excluding the +++/--- file-boundary
 // headers from the line counts.

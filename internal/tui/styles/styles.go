@@ -69,8 +69,17 @@ type Theme struct {
 	Modal      lipgloss.Style
 	DiffAdd    lipgloss.Style
 	DiffRemove lipgloss.Style
-	DiffHunk   lipgloss.Style
-	DiffHeader lipgloss.Style
+	// DiffAddEmph and DiffRemoveEmph accent the specific runs that changed
+	// within a modified line, so a reviewer's eye lands on the edited words
+	// rather than the whole reflowed line, matching the intra-line word-diff
+	// highlighting of Claude Code and opencode. They build on the add/remove
+	// colors with bold + reverse video so the changed run reads as a solid block
+	// (and renders as a single styled span, unlike underline which lipgloss emits
+	// per rune).
+	DiffAddEmph    lipgloss.Style
+	DiffRemoveEmph lipgloss.Style
+	DiffHunk       lipgloss.Style
+	DiffHeader     lipgloss.Style
 }
 
 // palette is the set of raw colors a theme is built from.
@@ -98,22 +107,24 @@ func build(p palette) Theme {
 	panel := lipgloss.NewStyle().Foreground(lipgloss.Color(p.base)).Background(lipgloss.Color(p.panel))
 
 	return Theme{
-		Name:       p.name,
-		Markdown:   p.markdown,
-		Base:       base,
-		Muted:      muted,
-		Accent:     accent,
-		Panel:      panel,
-		Warn:       warn,
-		Error:      err,
-		Success:    success,
-		Header:     panel.Bold(true).Padding(0, 1),
-		Status:     panel.Padding(0, 1),
-		Footer:     muted,
-		Modal:      panel.Border(lipgloss.RoundedBorder()).Padding(1, 2),
-		DiffAdd:    success,
-		DiffRemove: err,
-		DiffHunk:   accent,
+		Name:           p.name,
+		Markdown:       p.markdown,
+		Base:           base,
+		Muted:          muted,
+		Accent:         accent,
+		Panel:          panel,
+		Warn:           warn,
+		Error:          err,
+		Success:        success,
+		Header:         panel.Bold(true).Padding(0, 1),
+		Status:         panel.Padding(0, 1),
+		Footer:         muted,
+		Modal:          panel.Border(lipgloss.RoundedBorder()).Padding(1, 2),
+		DiffAdd:        success,
+		DiffRemove:     err,
+		DiffAddEmph:    success.Bold(true).Reverse(true),
+		DiffRemoveEmph: err.Bold(true).Reverse(true),
+		DiffHunk:       accent,
 		// File-header lines (---, +++, diff --git, index) are bold-muted so
 		// file boundaries stand out from added/removed content in a multi-file
 		// diff without competing with the accent-colored hunk markers.

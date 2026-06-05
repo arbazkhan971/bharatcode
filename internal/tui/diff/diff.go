@@ -60,11 +60,19 @@ func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 		contentWidth = 1
 	}
 
+	// Pair each removed line with the added line that replaced it so modified
+	// lines can have just their changed runs emphasized.
+	pairs := pairChanges(lines)
+
 	var oldLn, newLn int
 	inHunk := false
 	out := make([]string, len(lines))
 	for i, line := range lines {
-		styled := v.styleLine(clampWidth(line, contentWidth))
+		clamped := clampWidth(line, contentWidth)
+		styled := v.styleLine(clamped)
+		if j := pairs[i]; j >= 0 {
+			styled = v.styleWordLine(clamped, clampWidth(lines[j], contentWidth))
+		}
 
 		if m := hunkHeaderPattern.FindStringSubmatch(line); m != nil {
 			oldLn, _ = strconv.Atoi(m[1])
@@ -368,6 +376,106 @@ func (v *Viewer) styleLine(line string) string {
 	default:
 		return line
 	}
+}
+
+// pairChanges matches each removed line in a unified diff with the added line
+// that replaced it, returning a slice the length of lines whose entry is the
+// index of a line's counterpart or -1 when it has none. Within a contiguous
+// change block — a run of "-" lines immediately followed by a run of "+" lines
+// — the k-th removed line is paired with the k-th added line, mirroring how
+// git, delta, and opencode align replaced lines for intra-line word diffing.
+// Surplus lines on either side (a block that adds or removes more than it
+// replaces) stay unpaired and render with their plain add/remove style.
+func pairChanges(lines []string) []int {
+	pairs := make([]int, len(lines))
+	for i := range pairs {
+		pairs[i] = -1
+	}
+	i := 0
+	for i < len(lines) {
+		if !isRemoved(lines[i]) {
+			i++
+			continue
+		}
+		rStart := i
+		for i < len(lines) && isRemoved(lines[i]) {
+			i++
+		}
+		aStart := i
+		for i < len(lines) && isAdded(lines[i]) {
+			i++
+		}
+		n := minInt(aStart-rStart, i-aStart)
+		for k := 0; k < n; k++ {
+			pairs[rStart+k] = aStart + k
+			pairs[aStart+k] = rStart + k
+		}
+	}
+	return pairs
+}
+
+// isRemoved reports whether line is removed diff content ("-…") rather than the
+// "---" file-boundary header.
+func isRemoved(line string) bool {
+	return strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---")
+}
+
+// isAdded reports whether line is added diff content ("+…") rather than the
+// "+++" file-boundary header.
+func isAdded(line string) bool {
+	return strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++")
+}
+
+// styleWordLine styles a modified diff line (line) against its counterpart on
+// the other side of the change, emphasizing only the runs that differ. The
+// leading marker and the shared head/tail keep the line's add/remove color; the
+// changed middle is rendered with the emphasized variant. When the two lines
+// share no common prefix or suffix the whole line changed, so there is nothing
+// to single out and it falls back to the plain per-line style.
+func (v *Viewer) styleWordLine(line, other string) string {
+	if len(line) == 0 || len(other) == 0 {
+		return v.styleLine(line)
+	}
+	marker := line[:1]
+	if marker != other[:1] && !(isAdded(line) && isRemoved(other)) && !(isRemoved(line) && isAdded(other)) {
+		return v.styleLine(line)
+	}
+
+	base, emph := v.theme.DiffAdd, v.theme.DiffAddEmph
+	if isRemoved(line) {
+		base, emph = v.theme.DiffRemove, v.theme.DiffRemoveEmph
+	}
+
+	prefix, mid, suffix := changedSpan(line[1:], other[1:])
+	if prefix == "" && suffix == "" {
+		return v.styleLine(line)
+	}
+	return base.Render(marker+prefix) + emph.Render(mid) + base.Render(suffix)
+}
+
+// changedSpan splits a against its counterpart b into the shared leading prefix,
+// the differing middle, and the shared trailing suffix, all from a's point of
+// view. Comparison is rune-wise so multi-byte content is never split mid-rune,
+// and the prefix and suffix never overlap.
+func changedSpan(a, b string) (prefix, mid, suffix string) {
+	ar, br := []rune(a), []rune(b)
+	p := 0
+	for p < len(ar) && p < len(br) && ar[p] == br[p] {
+		p++
+	}
+	sa, sb := len(ar), len(br)
+	for sa > p && sb > p && ar[sa-1] == br[sb-1] {
+		sa--
+		sb--
+	}
+	return string(ar[:p]), string(ar[p:sa]), string(ar[sa:])
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // clampWidth truncates line to at most width runes. When a line is cut short, an

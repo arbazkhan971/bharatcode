@@ -36,6 +36,7 @@ type codeActionsArgs struct {
 	EndLine   int    `json:"end_line,omitempty"`
 	EndColumn int    `json:"end_column,omitempty"`
 	Apply     int    `json:"apply,omitempty"`
+	Preview   bool   `json:"preview,omitempty"`
 }
 
 var schemaCodeActions = json.RawMessage(`{
@@ -72,6 +73,10 @@ var schemaCodeActions = json.RawMessage(`{
       "type": "integer",
       "minimum": 1,
       "description": "1-based index of an action from a prior listing to apply. Only edit-based actions (organize imports, quick fixes) can be applied; server-side commands cannot. Omit to just list the available actions."
+    },
+    "preview": {
+      "type": "boolean",
+      "description": "Used with apply: compute and show the diff the action would produce without writing anything to disk. Use it to inspect a refactoring that may touch several files before committing; re-run with preview omitted (or false) to apply."
     }
   }
 }`)
@@ -160,7 +165,7 @@ func (t *codeActionsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 
 	ordered := orderedCodeActions(actions)
 	if args.Apply > 0 {
-		return t.applyCodeAction(ctx, ordered, args.Apply, raw)
+		return t.applyCodeAction(ctx, ordered, args.Apply, args.Preview, raw)
 	}
 	return codeActionsResult(ordered), nil
 }
@@ -170,7 +175,11 @@ func (t *codeActionsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 // edit-bearing actions can be applied locally; server-side commands are
 // rejected with guidance. Each touched file is written atomically and recorded,
 // and the result carries a unified diff per file like the rename/edit tools.
-func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.CodeAction, idx int, raw json.RawMessage) (Result, error) {
+// When preview is true it computes and reports the same per-file diffs but
+// writes nothing, records nothing, skips the permission check, and skips the
+// post-write diagnostics re-check, so the model can inspect a wide-reaching
+// refactoring before committing — mirroring the rename tool's preview mode.
+func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.CodeAction, idx int, preview bool, raw json.RawMessage) (Result, error) {
 	if idx > len(ordered) {
 		if len(ordered) == 0 {
 			return errorResult("cannot apply: no code actions available for this range"), nil
@@ -200,8 +209,11 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.Cod
 		}
 	}
 
-	if err := t.checkPermission(ctx, raw); err != nil {
-		return errorResult(err.Error()), nil
+	// A preview writes nothing, so it does not need write permission.
+	if !preview {
+		if err := t.checkPermission(ctx, raw); err != nil {
+			return errorResult(err.Error()), nil
+		}
 	}
 
 	type pending struct {
@@ -232,20 +244,29 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.Cod
 		totalEdits += len(edits)
 	}
 	if len(updates) == 0 {
+		if preview {
+			return Result{Content: fmt.Sprintf("preview of %q: the edits would leave every file unchanged (nothing written).", title)}, nil
+		}
 		return Result{Content: fmt.Sprintf("Applied %q: the edits left every file unchanged.", title)}, nil
 	}
 
-	for _, u := range updates {
-		if err := fsext.AtomicWrite(u.path, u.newContent, 0o644); err != nil {
-			return Result{}, fmt.Errorf("writing file %s: %w", u.path, err)
-		}
-		if err := t.recordWrite(ctx, u.path, u.oldContent, u.newContent); err != nil {
-			return Result{}, err
+	if !preview {
+		for _, u := range updates {
+			if err := fsext.AtomicWrite(u.path, u.newContent, 0o644); err != nil {
+				return Result{}, fmt.Errorf("writing file %s: %w", u.path, err)
+			}
+			if err := t.recordWrite(ctx, u.path, u.oldContent, u.newContent); err != nil {
+				return Result{}, err
+			}
 		}
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "applied %q: %d edit(s) across %d file(s)\n", title, totalEdits, len(updates))
+	if preview {
+		fmt.Fprintf(&b, "preview of %q: would make %d edit(s) across %d file(s) (nothing written)\n", title, totalEdits, len(updates))
+	} else {
+		fmt.Fprintf(&b, "applied %q: %d edit(s) across %d file(s)\n", title, totalEdits, len(updates))
+	}
 	diffs := make(map[string]string, len(updates))
 	for _, u := range updates {
 		rel := u.path
@@ -260,6 +281,9 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.Cod
 	}
 
 	metadata := map[string]any{"applied": title, "files": len(updates), "edits": totalEdits}
+	if preview {
+		metadata["preview"] = true
+	}
 	if len(diffs) > 0 {
 		metadata["diffs"] = diffs
 	}
@@ -267,8 +291,9 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.Cod
 	// Applying a quick fix or refactor can introduce errors (a now-unused import,
 	// a name collision), so re-check each touched file and surface the problems,
 	// as the edit/write/rename tools do. Files are processed in the same
-	// sorted-path order for deterministic output.
-	if t.diag != nil {
+	// sorted-path order for deterministic output. A preview wrote nothing, so
+	// there is nothing new to re-check.
+	if t.diag != nil && !preview {
 		var notes []string
 		for _, u := range updates {
 			if note := postWriteDiagnostics(ctx, t.diag, t.workDir, u.path); note != "" {

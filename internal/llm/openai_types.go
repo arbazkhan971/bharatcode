@@ -22,6 +22,23 @@ type openAIChatRequest struct {
 	// gpt-5 reasoning) when the request specifies one. It is omitted for
 	// non-reasoning models and when empty.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Reasoning is OpenRouter's unified extended-thinking control. Unlike the
+	// OpenAI-only reasoning_effort/max_completion_tokens fields, it turns on
+	// reasoning across every upstream OpenRouter proxies (Anthropic, Gemini,
+	// Grok, DeepSeek). It is set only for OpenRouter providers and omitted
+	// otherwise so other openai_compatible backends never receive a field they
+	// would reject.
+	Reasoning *openAIReasoning `json:"reasoning,omitempty"`
+}
+
+// openAIReasoning is OpenRouter's reasoning request object. Exactly one of
+// Effort ("low"/"medium"/"high") or MaxTokens (a thinking-token budget) is set
+// per request; both are omitempty so the unused one drops out of the body. An
+// empty object would enable provider-default reasoning, so the builder leaves
+// Reasoning nil unless a budget or effort was configured.
+type openAIReasoning struct {
+	Effort    string `json:"effort,omitempty"`
+	MaxTokens int    `json:"max_tokens,omitempty"`
 }
 
 // openAIStreamOptions toggles streaming extras. IncludeUsage asks the provider

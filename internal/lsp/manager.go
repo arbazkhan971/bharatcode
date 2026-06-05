@@ -531,6 +531,30 @@ func (m *Manager) workspaceSpecs(ctx context.Context) []languageSpec {
 	return specs
 }
 
+// SupportedExtensions returns the file extensions (lowercased, leading dot,
+// deduplicated and sorted) for which this manager has a language server
+// configured. It is the source of truth for which files a workspace-wide
+// diagnostics scan should open, so the scan tracks the configured language set —
+// including servers added or overridden via config — without keeping a second
+// hardcoded list in sync. A custom server registered for a language with no
+// known extensions contributes nothing, matching the scan's file-driven model.
+func (m *Manager) SupportedExtensions() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	set := make(map[string]struct{})
+	for _, spec := range m.specs {
+		for ext := range spec.extension {
+			set[strings.ToLower(ext)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for ext := range set {
+		out = append(out, ext)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Shutdown terminates every running language-server process.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()

@@ -251,6 +251,69 @@ func TestOpenAIReasoningModelPassesReasoningEffort(t *testing.T) {
 	})
 }
 
+// TestOpenAIMaxTokensFieldSelection asserts the output cap is sent under
+// max_tokens for a normal model but under max_completion_tokens for a reasoning
+// model, which rejects the legacy max_tokens field.
+func TestOpenAIMaxTokensFieldSelection(t *testing.T) {
+	t.Run("normal model uses max_tokens", func(t *testing.T) {
+		var raw []byte
+		server := httptest.NewServer(jsonOKHandler(&raw))
+		defer server.Close()
+		t.Setenv("TEST_OPENAI_KEY", "sk-test-123")
+
+		cfg := openAIModelConfig(t, server.URL+"/v1", "gpt-4o")
+		reg, err := NewRegistry(cfg)
+		require.NoError(t, err)
+		provider, err := reg.Get("openai")
+		require.NoError(t, err)
+
+		streamOnce(t, provider, Request{
+			Model:     "gpt-4o",
+			MaxTokens: 1234,
+			Messages:  []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+		})
+
+		require.NotEmpty(t, raw)
+		var probe struct {
+			MaxTokens           *int `json:"max_tokens"`
+			MaxCompletionTokens *int `json:"max_completion_tokens"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &probe))
+		require.NotNil(t, probe.MaxTokens)
+		require.Equal(t, 1234, *probe.MaxTokens)
+		require.Nil(t, probe.MaxCompletionTokens, "normal model must not send max_completion_tokens")
+	})
+
+	t.Run("reasoning model uses max_completion_tokens", func(t *testing.T) {
+		var raw []byte
+		server := httptest.NewServer(jsonOKHandler(&raw))
+		defer server.Close()
+		t.Setenv("TEST_OPENAI_KEY", "sk-test-123")
+
+		cfg := openAIModelConfig(t, server.URL+"/v1", "o3-mini")
+		reg, err := NewRegistry(cfg)
+		require.NoError(t, err)
+		provider, err := reg.Get("openai")
+		require.NoError(t, err)
+
+		streamOnce(t, provider, Request{
+			Model:     "o3-mini",
+			MaxTokens: 1234,
+			Messages:  []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+		})
+
+		require.NotEmpty(t, raw)
+		var probe struct {
+			MaxTokens           *int `json:"max_tokens"`
+			MaxCompletionTokens *int `json:"max_completion_tokens"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &probe))
+		require.NotNil(t, probe.MaxCompletionTokens)
+		require.Equal(t, 1234, *probe.MaxCompletionTokens)
+		require.Nil(t, probe.MaxTokens, "reasoning model must not send the legacy max_tokens field")
+	})
+}
+
 // TestIsReasoningModel pins the model-id classification so the gating prefixes
 // stay intentional: o-series and gpt-5 reasoning variants are reasoning models;
 // gpt-4o and a bare gpt-5 chat id are not.

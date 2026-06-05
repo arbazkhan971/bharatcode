@@ -195,19 +195,21 @@ func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error
 		// carry real prompt/completion token counts; without this OpenAI omits
 		// usage from streamed responses entirely.
 		StreamOptions: &openAIStreamOptions{IncludeUsage: true},
-		MaxTokens:     req.MaxTokens,
 	}
-	// Reasoning models (o-series, gpt-5 reasoning) reject temperature and
-	// instead accept reasoning_effort. Non-reasoning models keep the classic
-	// temperature param and ignore reasoning_effort. Gate both by model id so
-	// we never send a param the API would 400 on. Temperature stays unset (and
-	// thus omitted) for reasoning models, preserving the prior omitempty
-	// behavior for every other model: a zero temperature is omitted so the
-	// provider applies its own default.
+	// Reasoning models (o-series, gpt-5 reasoning) reject temperature and the
+	// legacy max_tokens field; they accept reasoning_effort and
+	// max_completion_tokens instead. Non-reasoning models keep the classic
+	// temperature and max_tokens params and ignore the reasoning ones. Gate all
+	// of them by model id so we never send a param the API would 400 on.
+	// Temperature stays unset (and thus omitted) for reasoning models,
+	// preserving the prior omitempty behavior for every other model: a zero
+	// temperature is omitted so the provider applies its own default.
 	if isReasoningModel(req.Model) {
 		body.ReasoningEffort = req.ReasoningEffort
+		body.MaxCompletionTokens = req.MaxTokens
 	} else {
 		body.Temperature = req.Temperature
+		body.MaxTokens = req.MaxTokens
 	}
 	return body, nil
 }

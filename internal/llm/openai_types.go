@@ -9,6 +9,11 @@ type openAIChatRequest struct {
 	Stream      bool            `json:"stream"`
 	Temperature float64         `json:"temperature,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
+	// MaxCompletionTokens is the output cap for OpenAI reasoning models
+	// (o-series, gpt-5 reasoning), which reject the legacy max_tokens field.
+	// Exactly one of MaxTokens / MaxCompletionTokens is set per request, gated
+	// by model id; both are omitempty so the unused one drops out of the body.
+	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// StreamOptions carries streaming-only flags. It is set only on streaming
 	// requests so the provider returns token usage in the final stream chunk;
 	// it is omitted otherwise.

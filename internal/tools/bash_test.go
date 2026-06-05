@@ -59,6 +59,47 @@ func TestBashRunsCommand(t *testing.T) {
 	require.NotEmpty(t, result.Metadata["job_id"])
 }
 
+// TestBashTestFailuresSurfacedInMetadata asserts that a bash command classified
+// as a test runner has its failed tests parsed into Result.Metadata and appended
+// as a compact summary to Result.Content. The "# go test" trailing comment makes
+// the classifier recognize the runner while the printf produces the fake output.
+func TestBashTestFailuresSurfacedInMetadata(t *testing.T) {
+	tool, ok := NewRegistry(shellDeps(t, &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+	})).Get("bash")
+	require.True(t, ok)
+
+	cmd := `printf -- '--- FAIL: TestX (0.00s)\n    x_test.go:7: boom\n'; exit 1 # go test`
+	args, err := json.Marshal(map[string]string{"command": cmd})
+	require.NoError(t, err)
+	result, err := tool.Run(context.Background(), json.RawMessage(args))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+
+	require.Equal(t, 1, result.Metadata[MetadataTestFailedCount])
+	failures, ok := result.Metadata[MetadataTestFailures].([]testFailure)
+	require.True(t, ok, "test_failures should be []testFailure")
+	require.Len(t, failures, 1)
+	require.Equal(t, "TestX", failures[0].Name)
+	require.Equal(t, "x_test.go:7: boom", failures[0].Detail)
+	require.Contains(t, result.Content, "[test failures: 1]")
+	require.Contains(t, result.Content, "TestX — x_test.go:7: boom")
+}
+
+// TestBashNonTestCommandNoTestMetadata asserts ordinary commands carry no test
+// metadata even when their output contains words like "FAIL".
+func TestBashNonTestCommandNoTestMetadata(t *testing.T) {
+	tool, ok := NewRegistry(shellDeps(t, &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+	})).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), json.RawMessage(`{"command":"echo FAILED to reticulate"}`))
+	require.NoError(t, err)
+	require.Nil(t, result.Metadata[MetadataTestFailures])
+	require.Nil(t, result.Metadata[MetadataTestFailedCount])
+}
+
 // TestBashExitCodeHeaderAlwaysPresent asserts that every command result includes
 // the "[exit N | Status]" header regardless of success or failure.
 func TestBashExitCodeHeaderAlwaysPresent(t *testing.T) {

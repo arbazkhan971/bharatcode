@@ -4,13 +4,16 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -23,8 +26,33 @@ type webFetchArgs struct {
 	Prompt string `json:"prompt,omitempty"`
 }
 
+// errBlockedAddress marks a dial refused by the SSRF guard so Run can convert
+// it into a clean tool-level error instead of an opaque transport failure.
+var errBlockedAddress = errors.New("address is not a public host")
+
+// fetchTransport is web_fetch's HTTP transport. It mirrors http.DefaultTransport
+// but installs an SSRF guard on every dial: the model (or a page it follows via
+// a redirect) cannot steer a fetch at the cloud-metadata endpoint
+// (169.254.169.254), a private-network service, or other non-public address.
+// The Control hook runs after DNS resolution on the concrete IP about to be
+// dialed, so it also defeats DNS-rebinding and redirect-based bypasses. Loopback
+// is deliberately allowed so localhost dev servers stay fetchable.
+var fetchTransport = &http.Transport{
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   ssrfSafeControl,
+	}).DialContext,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
+
 var (
-	httpClient     = &http.Client{Timeout: 15 * time.Second}
+	httpClient     = &http.Client{Timeout: 15 * time.Second, Transport: fetchTransport}
 	schemaWebFetch = json.RawMessage(`{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
@@ -83,6 +111,12 @@ func (t *webFetchTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 
 	resp, err := t.client.Do(req)
 	if err != nil {
+		// A dial refused by the SSRF guard (including one reached only via a
+		// redirect) is the model's mistake, not an internal failure, so report it
+		// as a tool error the model can read and recover from.
+		if errors.Is(err, errBlockedAddress) {
+			return errorResult("refused to fetch a non-public address (loopback aside, private, link-local, and cloud-metadata hosts are blocked)"), nil
+		}
 		return Result{}, fmt.Errorf("fetching url: %w", err)
 	}
 	defer resp.Body.Close()
@@ -124,6 +158,42 @@ var (
 	reBlockBreak  = regexp.MustCompile(`(?is)</p>|<br\s*/?>|</div>|</section>|</article>|</tr>`)
 	reAnyTag      = regexp.MustCompile(`(?is)<[^>]+>`)
 )
+
+// ssrfSafeControl is a net.Dialer Control hook that refuses to connect to any
+// address the SSRF guard blocks. It receives the already-resolved "ip:port"
+// being dialed, so it sees through DNS names and redirects to the concrete IP.
+func ssrfSafeControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("%w: unparseable dial address %q", errBlockedAddress, address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("%w: unresolved dial host %q", errBlockedAddress, host)
+	}
+	if isBlockedFetchIP(ip) {
+		return fmt.Errorf("%w: %s", errBlockedAddress, ip)
+	}
+	return nil
+}
+
+// isBlockedFetchIP reports whether ip is a non-public address web_fetch must not
+// reach. Loopback is allowed so localhost development servers remain fetchable;
+// everything else off the public internet — private networks, link-local
+// (which carries the 169.254.169.254 cloud-metadata service), multicast, and the
+// unspecified address — is refused. The standard net.IP predicates already fold
+// in the IPv4-mapped-IPv6 and IPv6 ULA (fc00::/7) cases.
+func isBlockedFetchIP(ip net.IP) bool {
+	if ip.IsLoopback() {
+		return false
+	}
+	return ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
+}
 
 // htmlToMarkdown reduces simple HTML to model-readable, markdown-like text.
 // Whitespace is aggressively collapsed everywhere EXCEPT inside <pre> blocks,

@@ -138,6 +138,36 @@ func (m *Manager) Hover(ctx context.Context, path string, line, col int) (string
 	return text, nil
 }
 
+// SignatureHelp returns the language server's signature help for the call at the
+// position in path (the function signature and which argument the cursor is on),
+// starting a server if needed. An empty string with a nil error means no server
+// is configured for the file or the position is not inside a call.
+func (m *Manager) SignatureHelp(ctx context.Context, path string, line, col int) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolving signature help path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return "", nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", nil
+	}
+
+	text, err := c.signatureHelp(ctx, abs, line, col)
+	if err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
 // Definition returns the locations the language server resolves the symbol at
 // the position in path to, starting a server if needed. A nil slice with a nil
 // error means no server is configured for the file or the symbol is undefined.

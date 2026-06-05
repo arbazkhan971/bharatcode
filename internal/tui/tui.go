@@ -372,12 +372,21 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "tab":
 		// On the input line, Tab completes/cycles a slash command when the
-		// buffer is a slash prefix; otherwise it toggles focus to the chat.
+		// buffer is a slash prefix, or an @-file mention when the buffer ends with
+		// one; otherwise it toggles focus to the chat.
 		if m.focus == focusInput && strings.HasPrefix(m.input.String(), "/") {
 			if completed, ok := m.inputHistory.completeSlash(m.input.String()); ok {
 				m.setInput(completed)
 			}
 			return m, nil
+		}
+		if m.focus == focusInput {
+			if _, ok := activeMention(m.input.String()); ok {
+				if completed, ok := m.inputHistory.completeMention(m.input.String(), m.workspaceRoot); ok {
+					m.setInput(completed)
+				}
+				return m, nil
+			}
 		}
 		if m.focus == focusInput {
 			m.focus = focusChat
@@ -742,6 +751,8 @@ func (m *model) renderMain() string {
 	// renders nothing for a non-slash buffer.
 	if m.focus == focusInput {
 		if hint := m.renderSlashHint(m.width); hint != "" {
+			input += "\n" + hint
+		} else if hint := m.renderMentionHint(m.width); hint != "" {
 			input += "\n" + hint
 		}
 	}

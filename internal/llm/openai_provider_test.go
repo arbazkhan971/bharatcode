@@ -314,6 +314,90 @@ func TestOpenAIMaxTokensFieldSelection(t *testing.T) {
 	})
 }
 
+// TestNormalizeOpenAIReasoningEffort pins the effort normalization that keeps the
+// provider-independent ReasoningEffort knob from sending OpenAI a value it 400s
+// on: the four accepted labels pass through lowercased, while "auto"/"dynamic"
+// (and anything unrecognized) collapse to "" so the field is omitted.
+func TestNormalizeOpenAIReasoningEffort(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"minimal", "minimal"},
+		{"low", "low"},
+		{"medium", "medium"},
+		{"high", "high"},
+		{"High", "high"},
+		{"  high  ", "high"},
+		{"auto", ""},
+		{"dynamic", ""},
+		{"", ""},
+		{"bogus", ""},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, normalizeOpenAIReasoningEffort(tc.in),
+			"normalizeOpenAIReasoningEffort(%q)", tc.in)
+	}
+}
+
+// TestOpenAIReasoningEffortNormalizedOnWire asserts a recognized effort reaches
+// the chat/completions body verbatim while the provider-independent "auto" label
+// is dropped (omitempty) so the request is not rejected.
+func TestOpenAIReasoningEffortNormalizedOnWire(t *testing.T) {
+	t.Run("recognized effort is sent", func(t *testing.T) {
+		var raw []byte
+		server := httptest.NewServer(jsonOKHandler(&raw))
+		defer server.Close()
+		t.Setenv("TEST_OPENAI_KEY", "sk-test-123")
+
+		cfg := openAIModelConfig(t, server.URL+"/v1", "o3-mini")
+		reg, err := NewRegistry(cfg)
+		require.NoError(t, err)
+		provider, err := reg.Get("openai")
+		require.NoError(t, err)
+
+		streamOnce(t, provider, Request{
+			Model:           "o3-mini",
+			ReasoningEffort: "high",
+			Messages:        []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+		})
+
+		require.NotEmpty(t, raw)
+		var probe struct {
+			ReasoningEffort *string `json:"reasoning_effort"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &probe))
+		require.NotNil(t, probe.ReasoningEffort)
+		require.Equal(t, "high", *probe.ReasoningEffort)
+	})
+
+	t.Run("auto effort is dropped", func(t *testing.T) {
+		var raw []byte
+		server := httptest.NewServer(jsonOKHandler(&raw))
+		defer server.Close()
+		t.Setenv("TEST_OPENAI_KEY", "sk-test-123")
+
+		cfg := openAIModelConfig(t, server.URL+"/v1", "o3-mini")
+		reg, err := NewRegistry(cfg)
+		require.NoError(t, err)
+		provider, err := reg.Get("openai")
+		require.NoError(t, err)
+
+		streamOnce(t, provider, Request{
+			Model:           "o3-mini",
+			ReasoningEffort: "auto",
+			Messages:        []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+		})
+
+		require.NotEmpty(t, raw)
+		var probe struct {
+			ReasoningEffort *string `json:"reasoning_effort"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &probe))
+		require.Nil(t, probe.ReasoningEffort, `"auto" must not be sent as reasoning_effort`)
+	})
+}
+
 // TestIsReasoningModel pins the model-id classification so the gating prefixes
 // stay intentional: the o-series and the whole gpt-5 family are reasoning
 // models; gpt-4o and the chat-tuned gpt-5-chat variant are not.

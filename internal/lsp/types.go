@@ -28,6 +28,19 @@ type Diagnostic struct {
 	// such as "E0425" (rustc), "2304" (tsserver), or "unused-import". The LSP
 	// wire value may be a string or an integer; both are normalized to a string.
 	Code string
+	// Related carries the diagnostic's relatedInformation entries: other source
+	// locations the server links to this issue, such as the conflicting prior
+	// declaration behind a "redeclared" error or the unused import's use site.
+	// It is empty when the server attaches none.
+	Related []RelatedInformation
+}
+
+// RelatedInformation is one location the language server links to a diagnostic,
+// pairing a source Location with the explanatory Message shown there (e.g.
+// "other declaration of 'x'").
+type RelatedInformation struct {
+	Location Location
+	Message  string
 }
 
 // Range identifies the start and end positions of a diagnostic.

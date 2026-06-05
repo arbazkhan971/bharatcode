@@ -739,20 +739,38 @@ func parseMavenTestFailures(output string) []testFailure {
 	return failures
 }
 
+// maxSummarizedFailures bounds how many failed tests the appended summary block
+// lists. A suite that breaks wholesale (a bad import, a renamed symbol) can fail
+// hundreds of tests at once; listing every one would bury the rest of the output
+// and the model's context in near-identical lines. The full set is always kept
+// in Metadata[MetadataTestFailures], so nothing is lost — only the inline render
+// is truncated, with a trailing "... and N more" marker so the elision is
+// explicit rather than silent.
+const maxSummarizedFailures = 50
+
 // summarizeTestFailures renders a compact, agent-friendly block listing the
-// failed tests (and their detail line when known). Returns "" for no failures.
+// failed tests (and their detail line when known). At most maxSummarizedFailures
+// entries are shown; any beyond that are collapsed into a "... and N more" line.
+// Returns "" for no failures.
 func summarizeTestFailures(failures []testFailure) string {
 	if len(failures) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[test failures: %d]", len(failures))
-	for _, f := range failures {
+	shown := failures
+	if len(shown) > maxSummarizedFailures {
+		shown = shown[:maxSummarizedFailures]
+	}
+	for _, f := range shown {
 		if f.Detail != "" {
 			fmt.Fprintf(&b, "\n  %s — %s", f.Name, f.Detail)
 		} else {
 			fmt.Fprintf(&b, "\n  %s", f.Name)
 		}
+	}
+	if remaining := len(failures) - len(shown); remaining > 0 {
+		fmt.Fprintf(&b, "\n  ... and %d more", remaining)
 	}
 	return b.String()
 }

@@ -183,6 +183,89 @@ func matchSlash(prefix string) []string {
 	return matches
 }
 
+// maxSuggestDistance bounds how far an unrecognized command name may sit from a
+// built-in one and still be offered as a "did you mean" suggestion. Two edits
+// covers the common typos — a transposition, a dropped or doubled letter, a
+// wrong key — without proposing an unrelated command for a genuinely novel name.
+const maxSuggestDistance = 2
+
+// suggestSlash returns the built-in slash command closest to an unrecognized
+// command name (the bare token, without its leading slash), or "" when none is
+// near enough to be a likely typo. Closeness is Levenshtein edit distance on the
+// lower-cased name; the nearest command within maxSuggestDistance wins, ties
+// broken by the canonical slashCommands order so the result is deterministic. A
+// suggestion is never offered when the edit distance is as long a leap as simply
+// retyping either name (distance >= either length), so a one- or two-letter stub
+// does not get "corrected" to an unrelated command. This backs
+// the unknown-command dialog's hint, matching how git and the Claude Code /
+// opencode palettes point a mistyped command at its closest real one.
+func suggestSlash(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return ""
+	}
+	best := ""
+	bestDist := maxSuggestDistance + 1
+	nameLen := len([]rune(name))
+	for _, cmd := range slashCommands {
+		target := strings.TrimPrefix(cmd, "/")
+		d := levenshtein(name, target)
+		// Require the edit distance to be strictly less than both names' lengths:
+		// "correcting" a one- or two-letter stub into a short command (e.g. "a" →
+		// "tab", "go" → "goal") takes as many edits as just typing it, so it is a
+		// guess rather than a typo fix.
+		if d > maxSuggestDistance || d >= len(target) || d >= nameLen {
+			continue
+		}
+		if d < bestDist {
+			best, bestDist = cmd, d
+		}
+	}
+	return best
+}
+
+// levenshtein returns the edit distance between a and b: the minimum number of
+// single-rune insertions, deletions, or substitutions to turn one into the
+// other. It runs on runes so multi-byte names compare by character, and keeps a
+// single row of state so the allocation is proportional to the shorter input.
+func levenshtein(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	// Iterate columns over the longer string so the retained row is the shorter.
+	if len(ar) < len(br) {
+		ar, br = br, ar
+	}
+	prev := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		diag := prev[0]
+		prev[0] = i
+		for j := 1; j <= len(br); j++ {
+			cur := prev[j]
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			prev[j] = minInt3(prev[j]+1, prev[j-1]+1, diag+cost)
+			diag = cur
+		}
+	}
+	return prev[len(br)]
+}
+
+// minInt3 returns the smallest of three ints.
+func minInt3(a, b, c int) int {
+	m := a
+	if b < m {
+		m = b
+	}
+	if c < m {
+		m = c
+	}
+	return m
+}
+
 // rankFuzzySlash reorders the fuzzy-fallback matches in place so the most
 // relevant command sorts first. A command whose name contains the token as a
 // contiguous substring ranks ahead of one that only matches as a scattered

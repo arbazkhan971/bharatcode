@@ -185,6 +185,7 @@ func newAgentHarness(t *testing.T, provider llm.Provider) *agentHarness {
 	t.Cleanup(ledgerBus.Close)
 	deps := Dependencies{
 		Agent:       loop,
+		Coordinator: coord,
 		Sessions:    repo,
 		Cfg:         cfg,
 		Bus:         bus,

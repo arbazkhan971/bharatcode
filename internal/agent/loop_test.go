@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
@@ -866,4 +868,252 @@ func (p *blockingProvider) SupportsTools() bool {
 
 func (p *blockingProvider) SupportsImages() bool {
 	return false
+}
+
+// stopTurnTool is a fake tool that always returns StopTurn=true, signalling
+// the agent loop to end the turn after recording this tool's result.
+type stopTurnTool struct {
+	name   string
+	result string
+	mu     sync.Mutex
+	calls  []string
+}
+
+func (t *stopTurnTool) Name() string { return t.name }
+
+func (t *stopTurnTool) Description() string { return "stop-turn test tool " + t.name }
+
+func (t *stopTurnTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (t *stopTurnTool) Run(_ context.Context, args json.RawMessage) (tools.Result, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls = append(t.calls, string(args))
+	return tools.Result{Content: t.result, StopTurn: true}, nil
+}
+
+// TestStopTurnEndsAfterToolResult asserts that when a tool returns
+// StopTurn=true, the agent loop ends the turn cleanly (EventTurnFinished, not
+// an error) after the tool's result is recorded, without calling the provider
+// for another step.
+func TestStopTurnEndsAfterToolResult(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+
+	stopper := &stopTurnTool{name: "stop", result: "STOP-RESULT-7a9c"}
+	normal := &recordingTool{name: "normal", result: "normal output"}
+	registry.Register(stopper)
+	registry.Register(normal)
+
+	// The model emits two tool calls in a single batch: stop then normal.
+	// The loop must run stop, detect StopTurn=true, record stop's real result,
+	// synthesize a placeholder for normal (which did not run), and finish.
+	// The guard turn should never be consumed.
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{
+			toolCall("stop-1", "stop", `{}`),
+			toolCall("norm-1", "normal", `{}`),
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 5, OutputTokens: 3}},
+		},
+		// Guard: must never be reached.
+		{llm.DeltaTextEvent{Text: "should not run"}, llm.EndEvent{}},
+	}}
+
+	bus := pubsub.NewTopic[Event]("agent-test", 16)
+	events, cancel := bus.Subscribe()
+	defer cancel()
+
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		Bus:          bus,
+		SystemPrompt: "test",
+	})
+	err := loop.Run(ctx, sessionID, userMessage("do the stopper"))
+	require.NoError(t, err)
+
+	// Only one provider call ran — the loop did not continue past StopTurn.
+	require.Len(t, provider.reqs, 1)
+
+	// The stop tool ran exactly once; the normal tool was never executed.
+	require.Len(t, stopper.calls, 1)
+	require.Empty(t, normal.calls, "normal tool must not run when stop precedes it")
+
+	// An EventTurnFinished was published (not an error event).
+	var sawFinished bool
+loop:
+	for {
+		select {
+		case ev := <-events:
+			if ev.Kind == EventTurnFinished {
+				sawFinished = true
+			}
+		default:
+			break loop
+		}
+	}
+	require.True(t, sawFinished, "EventTurnFinished must be published on StopTurn")
+
+	// Verify history: the stop tool's real result is persisted, and the
+	// normal tool has a synthetic error result (not missing) so history is
+	// well-formed with no orphaned tool_use blocks.
+	messages, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+
+	var stopResult, normalResult *message.ToolResultBlock
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if b, ok := block.(message.ToolResultBlock); ok {
+				rb := b
+				switch rb.ToolUseID {
+				case "stop-1":
+					stopResult = &rb
+				case "norm-1":
+					normalResult = &rb
+				}
+			}
+		}
+	}
+	require.NotNil(t, stopResult, "stop tool result must be persisted")
+	require.False(t, stopResult.IsError, "stop tool result must not be an error")
+	require.Equal(t, "STOP-RESULT-7a9c", stopResult.Content)
+
+	require.NotNil(t, normalResult, "normal tool must have a synthesized result (no orphaned tool_use)")
+	require.True(t, normalResult.IsError, "synthesized result for unexecuted tool must be marked as error")
+}
+
+// testLedgerFailingRecord opens a fresh DB and returns a Ledger configured
+// with an empty pricing table so every Record call returns ErrUnknownModel.
+// This exercises the ledger-failure path without touching the filesystem
+// ledger or mocking unexported types.
+func testLedgerFailingRecord(t *testing.T) *ledger.Ledger {
+	t.Helper()
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "ledger.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+	cfg := &config.LedgerConfig{Currency: "INR", UsdInrRate: 83.5}
+	// Passing nil models means the pricing table is empty: Record always
+	// returns ErrUnknownModel, which is the failure path we want to exercise.
+	return ledger.New(database, cfg, nil, nil)
+}
+
+// TestLedgerFailureDoesNotAbortTurn asserts that a billing-record error (e.g.
+// unknown model in the pricing table) does not discard the already-successful
+// provider response or abort the turn. The turn must finish normally and the
+// assistant text must be preserved in the session.
+func TestLedgerFailureDoesNotAbortTurn(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "view", result: "file contents"})
+
+	const assistantText = "LEDGER-TEST-MARKER-3b1c: done reviewing the file."
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{
+			toolCall("v-1", "view", `{"path":"x.go"}`),
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 8, OutputTokens: 4}},
+		},
+		{
+			llm.DeltaTextEvent{Text: assistantText},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 6}},
+		},
+	}}
+
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		Ledger:       testLedgerFailingRecord(t),
+		SystemPrompt: "test",
+	})
+	// Run must return nil even though the ledger Record fails on every step.
+	err := loop.Run(ctx, sessionID, userMessage("review x.go"))
+	require.NoError(t, err)
+
+	// Both provider turns ran — the loop continued past the ledger error.
+	require.Len(t, provider.reqs, 2)
+
+	// The final persisted assistant message is the second-turn text, proving
+	// the completed work was kept and not discarded by the ledger failure.
+	messages, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+	last := messages[len(messages)-1]
+	require.Equal(t, message.RoleAssistant, last.Role)
+	require.Contains(t, textOf(last), assistantText,
+		"assistant text from a successful provider response must survive a ledger write failure")
+}
+
+// TestAbortedBatchLeavesNoOrphanedToolUse asserts that when the loop guard
+// trips mid-batch (before all pending tool_use calls have run), the session
+// history contains a matching tool_result for every tool_use block — including
+// the unexecuted ones — so the next turn can be sent to the provider without
+// a 400 "tool_use ids found without tool_result" rejection.
+func TestAbortedBatchLeavesNoOrphanedToolUse(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+
+	// bash always returns the same result so the predictive loop guard fires
+	// before the third identical call runs (same call, same output observed
+	// twice means the third is predicted to produce the same futile result).
+	bash := &recordingTool{name: "bash", result: "same-output"}
+	registry.Register(bash)
+
+	// Three identical calls in one assistant batch: the first two execute
+	// (building up the detector's identical-pair signal), and the predictive
+	// gate fires before b-3 runs.
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{
+			toolCall("b-1", "bash", `{"command":"echo x"}`),
+			toolCall("b-2", "bash", `{"command":"echo x"}`),
+			toolCall("b-3", "bash", `{"command":"echo x"}`),
+			llm.EndEvent{},
+		},
+	}}
+
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		SystemPrompt: "test",
+	})
+	err := loop.Run(ctx, sessionID, userMessage("trip the guard"))
+	require.NoError(t, err)
+
+	messages, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+
+	// Collect all tool_use IDs from assistant messages and all tool_result
+	// IDs from user messages. Every tool_use must have exactly one matching
+	// tool_result, with no unmatched IDs on either side.
+	toolUseIDs := map[string]bool{}
+	toolResultIDs := map[string]bool{}
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			switch b := block.(type) {
+			case message.ToolUseBlock:
+				toolUseIDs[b.ID] = true
+			case message.ToolResultBlock:
+				toolResultIDs[b.ToolUseID] = true
+			}
+		}
+	}
+
+	for id := range toolUseIDs {
+		require.True(t, toolResultIDs[id],
+			"tool_use %q has no matching tool_result — orphaned block would cause provider 400", id)
+	}
+	require.Equal(t, len(toolUseIDs), len(toolResultIDs),
+		"tool_use count must equal tool_result count: no unmatched results either")
 }

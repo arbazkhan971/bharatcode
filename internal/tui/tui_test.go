@@ -196,8 +196,10 @@ func testDeps() Dependencies {
 		}},
 		Ledger: config.LedgerConfig{MaxInrPerMonth: 100},
 	}
+	coord, _ := agent.NewCoordinator(cfg, agent.Dependencies{})
 	return Dependencies{
 		Agent:       &agent.Loop{},
+		Coordinator: coord,
 		Sessions:    &session.Repo{},
 		Cfg:         cfg,
 		Bus:         pubsub.NewTopic[agent.Event]("test_agent", 256),

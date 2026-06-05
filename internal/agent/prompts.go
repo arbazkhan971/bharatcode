@@ -47,6 +47,11 @@ var instructionFilenames = []string{"AGENTS.md", "CLAUDE.md"}
 // stays prefix-stable for prompt-cache hits.
 const environmentHeader = "## Environment"
 
+// nowFunc supplies the timestamp rendered into the environment block's
+// "Current date" line. It is a package var so tests can freeze the clock
+// and get byte-stable prompts; production uses the real wall clock.
+var nowFunc = time.Now
+
 // environmentTemplate renders the trailing environment block. It uses the
 // same PromptData and template funcs as the body so callers can move it
 // freely relative to the injected instructions and skills.
@@ -164,7 +169,7 @@ func renderTemplate(name, source string, data PromptData) (string, error) {
 		Funcs(template.FuncMap{
 			"humanBytes": humanBytes,
 			"shortPath":  shortPath,
-			"now":        func() string { return time.Now().UTC().Format(time.RFC3339) },
+			"now":        func() string { return nowFunc().UTC().Format(time.RFC3339) },
 		}).
 		Parse(source)
 	if err != nil {

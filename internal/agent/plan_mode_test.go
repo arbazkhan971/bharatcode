@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
@@ -118,6 +119,169 @@ func TestPlanModeRefusesWritesThenExecutesAfterApproval(t *testing.T) {
 		"approved turn must not prompt for a plan")
 	require.Equal(t, "base prompt", provider.reqs[2].SystemPrompt,
 		"approved turn uses the unmodified base system prompt")
+}
+
+// TestExtractPlanTextFromAssistantMessage proves that ExtractPlanText pulls the
+// plan out of a representative plan-mode assistant message. The message mirrors
+// what the agent produces at the end of a plan turn: a text block with the
+// phased plan, optionally preceded by a tool-use block (from the investigation
+// phase). ExtractPlanText must return the concatenated text blocks, trimmed,
+// and must ignore non-text blocks so the plan is clean prose.
+func TestExtractPlanTextFromAssistantMessage(t *testing.T) {
+	planBody := "Phase 1 - Investigate: read main.go\n\nPhase 5 - Write the plan, then STOP:\n1. Edit main.go line 42.\n2. Run go test ./...\n3. Verify: go build ./..."
+
+	// Representative plan-mode assistant message: a tool-use block from the
+	// investigation phase followed by the plan text block. ExtractPlanText
+	// must return only the text, not the raw JSON of the tool-use block.
+	msg := message.Message{
+		Role: message.RoleAssistant,
+		Content: []message.ContentBlock{
+			message.ToolUseBlock{
+				ID:    "inv-1",
+				Name:  "view",
+				Input: []byte(`{"path":"main.go"}`),
+			},
+			message.TextBlock{Text: planBody},
+		},
+	}
+
+	got := ExtractPlanText(msg)
+	require.Equal(t, planBody, got,
+		"ExtractPlanText must return the exact plan text, trimmed, from a mixed-block message")
+
+	// A message with leading/trailing whitespace around the text is trimmed.
+	msgWithSpace := message.Message{
+		Role:    message.RoleAssistant,
+		Content: []message.ContentBlock{message.TextBlock{Text: "\n  " + planBody + "\n\n"}},
+	}
+	require.Equal(t, planBody, ExtractPlanText(msgWithSpace),
+		"ExtractPlanText must trim surrounding whitespace")
+
+	// A tool-only message (no text blocks) returns an empty string.
+	toolOnly := message.Message{
+		Role: message.RoleAssistant,
+		Content: []message.ContentBlock{
+			message.ToolUseBlock{ID: "x", Name: "view", Input: []byte(`{}`)},
+		},
+	}
+	require.Equal(t, "", ExtractPlanText(toolOnly),
+		"ExtractPlanText must return empty string for a tool-use-only message")
+
+	// Multiple consecutive text blocks are concatenated in order.
+	multi := message.Message{
+		Role: message.RoleAssistant,
+		Content: []message.ContentBlock{
+			message.TextBlock{Text: "Step 1: do A."},
+			message.TextBlock{Text: "\nStep 2: do B."},
+		},
+	}
+	require.Equal(t, "Step 1: do A.\nStep 2: do B.", ExtractPlanText(multi),
+		"ExtractPlanText must concatenate multiple text blocks in order")
+}
+
+// TestApprovePlanTransitionsStateAndPreservesPlan proves the coordinator-side
+// approve-plan state machine:
+//
+//   - StorePlan records the plan for the session.
+//   - PlanFor retrieves it without consuming it (idempotent reads).
+//   - ApprovePlan calls loop.Approve (plan mode off) AND returns the stored
+//     plan, not an empty string — the plan is passed through, not dropped.
+//   - After ApprovePlan the plan is consumed: a second call returns empty.
+//   - A session that never had StorePlan called returns empty from PlanFor and
+//     ApprovePlan without panicking.
+func TestApprovePlanTransitionsStateAndPreservesPlan(t *testing.T) {
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "view"})
+	registry.Register(&recordingTool{name: "edit"})
+
+	// Build a Loop in plan mode and a Coordinator to manage its plan state.
+	loop := New(Config{
+		Name:     "coder",
+		Model:    "fake-model",
+		Provider: &scriptProvider{},
+		Tools:    registry,
+		Sessions: testRepo(t),
+		PlanMode: true,
+	})
+
+	cfg := &config.Config{}
+	coord, err := NewCoordinator(cfg, Dependencies{})
+	require.NoError(t, err)
+
+	const sessionID = "session-plan-approve-test"
+	const planText = "Phase 5 - Write the plan:\n1. Edit foo.go.\n2. Run go build ./...\n3. Verify: go test ./..."
+
+	// Before any StorePlan call, PlanFor and ApprovePlan return empty without
+	// panicking.
+	require.Equal(t, "", coord.PlanFor(sessionID),
+		"PlanFor must return empty when no plan has been stored")
+
+	require.True(t, loop.PlanMode(), "loop must be in plan mode before ApprovePlan")
+	returnedEmpty := coord.ApprovePlan(sessionID, loop)
+	require.Equal(t, "", returnedEmpty,
+		"ApprovePlan must return empty when no plan was stored")
+	// ApprovePlan still transitions plan mode even when no plan text was stored.
+	require.False(t, loop.PlanMode(),
+		"ApprovePlan must leave plan mode even when no plan text was stored")
+
+	// Reset back to plan mode for the main scenario.
+	loop.SetPlanMode(true)
+	require.True(t, loop.PlanMode(), "loop must be back in plan mode for the main test")
+
+	// StorePlan records the plan; PlanFor can read it without consuming it.
+	coord.StorePlan(sessionID, planText)
+	require.Equal(t, planText, coord.PlanFor(sessionID),
+		"PlanFor must return the stored plan text")
+	require.Equal(t, planText, coord.PlanFor(sessionID),
+		"PlanFor must be idempotent — reading twice must not consume the plan")
+
+	// ApprovePlan clears plan mode on the loop AND returns the plan text.
+	// The plan must not be silently dropped.
+	got := coord.ApprovePlan(sessionID, loop)
+
+	require.False(t, loop.PlanMode(),
+		"ApprovePlan must transition the loop out of plan mode")
+	require.Equal(t, planText, got,
+		"ApprovePlan must return the stored plan text, not drop it")
+
+	// After ApprovePlan the plan is consumed: subsequent calls return empty.
+	require.Equal(t, "", coord.PlanFor(sessionID),
+		"PlanFor must return empty after the plan has been consumed by ApprovePlan")
+	require.Equal(t, "", coord.ApprovePlan(sessionID, loop),
+		"second ApprovePlan call must return empty — plan consumed exactly once")
+}
+
+// TestSeedMessageFromPlanCarriesPlanText proves SeedMessageFromPlan builds the
+// correct synthetic user message that seeds the execution turn with the
+// approved plan. The message must contain the plan text verbatim and must use
+// the correct role and session ID. An empty plan falls back to a plain "go
+// ahead" message rather than an empty body.
+func TestSeedMessageFromPlanCarriesPlanText(t *testing.T) {
+	const sessionID = "session-seed-test"
+	const planText = "1. Edit main.go line 10.\n2. Run go test ./..."
+
+	msg := SeedMessageFromPlan(sessionID, planText)
+
+	require.Equal(t, message.RoleUser, msg.Role,
+		"seed message must have user role so it enters the conversation as the next turn prompt")
+	require.Equal(t, sessionID, msg.SessionID,
+		"seed message must carry the session ID")
+	require.Len(t, msg.Content, 1, "seed message must have exactly one content block")
+	tb, ok := msg.Content[0].(message.TextBlock)
+	require.True(t, ok, "seed message content must be a TextBlock")
+	require.Contains(t, tb.Text, planText,
+		"seed message body must include the approved plan text verbatim")
+	require.Contains(t, tb.Text, "Execute the approved plan",
+		"seed message must instruct the agent to execute the approved plan")
+
+	// Empty plan falls back to a non-empty instructional message, not an empty body.
+	emptyMsg := SeedMessageFromPlan(sessionID, "")
+	tb2, ok := emptyMsg.Content[0].(message.TextBlock)
+	require.True(t, ok)
+	require.NotEmpty(t, tb2.Text,
+		"seed message from empty plan must still have a non-empty body")
+	require.Contains(t, tb2.Text, "Plan approved",
+		"empty-plan seed message must still tell the agent to proceed")
 }
 
 // toolResultFor returns the tool-result block for the given tool-use ID from the

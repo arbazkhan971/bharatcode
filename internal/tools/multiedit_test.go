@@ -103,3 +103,91 @@ func TestMultiEditMalformedArgs(t *testing.T) {
 	require.True(t, result.IsError)
 	require.Contains(t, result.Content, "invalid JSON arguments")
 }
+
+// TestMultiEditNotFoundShowsNearMatchHint verifies that when an edit's old value
+// is absent but a whitespace-normalised version exists in the file, the error
+// message includes a near-match hint so the model can correct its indentation.
+func TestMultiEditNotFoundShowsNearMatchHint(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "indent.txt")
+	// File uses four-space indentation; the model provides tab-indented text.
+	// Neither is a substring of the other, but they normalise identically.
+	require.NoError(t, os.WriteFile(path, []byte("    func hello() {}\n"), 0o644))
+
+	tool := newMultiEditTool(Dependencies{WorkDir: workDir, SessionID: "multiedit-hint"})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "indent.txt",
+		"edits": []map[string]any{
+			{"old": "\tfunc hello() {}", "new": "\tfunc namaste() {}"}, // tab vs spaces
+		},
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "edits[0].old was not found")
+	// The hint must mention whitespace so the model can recover.
+	require.Contains(t, result.Content, "whitespace")
+	// File must be untouched.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "    func hello() {}\n", string(got))
+}
+
+// TestMultiEditRejectsStaleRead verifies that a multiedit is rejected when the
+// file changed on disk since the session last read it, with a clear re-view
+// instruction, and the file is left unmodified.
+func TestMultiEditRejectsStaleRead(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "stale.txt")
+	require.NoError(t, os.WriteFile(path, []byte("alpha beta\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, "multiedit-stale")
+	require.NoError(t, tracker.RecordRead(ctx, "multiedit-stale", path))
+
+	// External modification after the recorded read.
+	require.NoError(t, os.WriteFile(path, []byte("alpha beta gamma\n"), 0o644))
+
+	tool := newMultiEditTool(Dependencies{
+		FileTracker: tracker,
+		WorkDir:     workDir,
+		SessionID:   "multiedit-stale",
+	})
+	result, err := tool.Run(ctx, mustJSON(t, map[string]any{
+		"path": "stale.txt",
+		"edits": []map[string]any{
+			{"old": "alpha beta gamma", "new": "replaced"},
+		},
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "modified on disk")
+	require.Contains(t, result.Content, "view")
+
+	// File must remain exactly as the external edit left it.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "alpha beta gamma\n", string(got))
+}
+
+// TestMultiEditStaleReadSkippedWhenNoTracker verifies the guard is a no-op when
+// FileTracker is nil.
+func TestMultiEditStaleReadSkippedWhenNoTracker(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "notrace.txt")
+	require.NoError(t, os.WriteFile(path, []byte("alpha beta\n"), 0o644))
+
+	tool := newMultiEditTool(Dependencies{WorkDir: workDir, SessionID: "multiedit-notrace"})
+	result, err := tool.Run(ctx, mustJSON(t, map[string]any{
+		"path": "notrace.txt",
+		"edits": []map[string]any{
+			{"old": "alpha", "new": "one"},
+		},
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "one beta\n", string(got))
+}

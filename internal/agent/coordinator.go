@@ -15,6 +15,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/mcp"
+	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -70,6 +71,13 @@ type Coordinator struct {
 	// effective tool set, so any agent can call the "skill" tool to load a
 	// skill's full SKILL.md body without bloating the base prompt.
 	skillTool *skillTool
+
+	// plans holds the most recent plan text for each session, written after a
+	// plan-mode turn completes and consumed by ApprovePlan when the user
+	// approves. planStore carries its own mutex so it is safe for concurrent
+	// access from the TUI thread and any other goroutine that calls StorePlan,
+	// PlanFor, or ApprovePlan.
+	plans planStore
 }
 
 type agentDef struct {
@@ -141,6 +149,118 @@ func (c *Coordinator) Start(ctx context.Context) error {
 func (c *Coordinator) Stop(ctx context.Context) error {
 	_ = ctx
 	return nil
+}
+
+// planStore holds the most recent extracted plan for each session, keyed by
+// session ID. Plans are written by StorePlan (after a plan-mode turn ends and
+// the caller has extracted the plan text) and cleared by ApprovePlan (once the
+// plan is handed to the execution turn). The zero value is ready to use.
+type planStore struct {
+	mu    sync.Mutex
+	plans map[string]string
+}
+
+func (ps *planStore) set(sessionID, planText string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.plans == nil {
+		ps.plans = make(map[string]string)
+	}
+	ps.plans[sessionID] = planText
+}
+
+func (ps *planStore) get(sessionID string) string {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return ps.plans[sessionID]
+}
+
+func (ps *planStore) take(sessionID string) string {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	plan := ps.plans[sessionID]
+	delete(ps.plans, sessionID)
+	return plan
+}
+
+// ExtractPlanText extracts the textual plan the model produced during a
+// plan-mode turn. It concatenates every TextBlock in msg's content in order,
+// trimming leading and trailing whitespace from the result. A message with no
+// text blocks (e.g. one that contains only tool-use blocks) returns an empty
+// string. The function is intentionally pure — it only inspects msg and has
+// no side effects — so it can be called freely from the TUI or any other layer
+// that receives the plan-turn EventLLMResponse message.
+func ExtractPlanText(msg message.Message) string {
+	var sb strings.Builder
+	for _, block := range msg.Content {
+		if tb, ok := block.(message.TextBlock); ok {
+			sb.WriteString(tb.Text)
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// StorePlan records planText as the pending plan for sessionID. It is called
+// by the TUI (or any layer driving the Loop) after the plan-mode turn ends and
+// the plan text has been extracted via ExtractPlanText. Storing the plan makes
+// it retrievable via PlanFor and consumable by ApprovePlan, so the approval
+// path can carry the plan into the execution turn without the caller needing
+// to track it separately.
+func (c *Coordinator) StorePlan(sessionID, planText string) {
+	c.plans.set(sessionID, planText)
+}
+
+// PlanFor returns the most recent stored plan for sessionID without consuming
+// it. It returns an empty string when no plan has been stored for the session.
+// The TUI uses this to render the plan in the approval dialog before the user
+// decides to approve or reject.
+func (c *Coordinator) PlanFor(sessionID string) string {
+	return c.plans.get(sessionID)
+}
+
+// ApprovePlan transitions loop out of plan mode and returns the stored plan
+// for sessionID so the caller can seed the next execution turn with it. It
+// calls loop.Approve() (which clears the read-only restriction and removes the
+// plan-mode prompt) and then atomically consumes and returns the stored plan,
+// ensuring the plan is passed through exactly once and not silently discarded.
+//
+// The caller is expected to start a new Run with a synthetic user message that
+// includes the returned plan text, for example:
+//
+//	planText := c.ApprovePlan(sessionID, loop)
+//	if planText != "" {
+//	    loop.Run(ctx, sessionID, SeedMessageFromPlan(sessionID, planText))
+//	}
+//
+// This pattern is what loop.go's integrator must wire: see integrationNotes in
+// the lane return value for the exact synthetic message format and the Run call
+// site that should inject it.
+func (c *Coordinator) ApprovePlan(sessionID string, loop *Loop) string {
+	loop.Approve()
+	return c.plans.take(sessionID)
+}
+
+// SeedMessageFromPlan builds the synthetic user message that carries the
+// approved plan into the first execution turn. The message instructs the agent
+// to execute the plan exactly as written, without re-deriving intent from
+// scratch. Callers pass this message as the userMsg argument to loop.Run so
+// the execution turn is seeded with the plan rather than the original
+// free-form prompt.
+//
+// When planText is empty SeedMessageFromPlan returns a plain "go ahead"
+// message so the turn still runs even if no plan text was captured. Callers
+// that have already confirmed a non-empty plan (e.g. via PlanFor before
+// ApprovePlan) can skip that branch.
+func SeedMessageFromPlan(sessionID, planText string) message.Message {
+	body := "Execute the approved plan:\n\n" + planText
+	if strings.TrimSpace(planText) == "" {
+		body = "Plan approved. Go ahead and execute it."
+	}
+	return message.Message{
+		SessionID: sessionID,
+		Role:      message.RoleUser,
+		Content:   []message.ContentBlock{message.TextBlock{Text: body}},
+	}
 }
 
 // Agent returns a fresh Loop for name.

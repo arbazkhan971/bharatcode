@@ -38,6 +38,8 @@ const (
 type Dependencies struct {
 	// Agent is the agent loop that processes user prompts.
 	Agent *agent.Loop
+	// Coordinator manages configured named agents and plan state.
+	Coordinator *agent.Coordinator
 	// Sessions is the session repository used for save and restore.
 	Sessions *session.Repo
 	// Cfg is the merged user and project configuration.
@@ -82,6 +84,9 @@ func Run(ctx context.Context, deps Dependencies) error {
 func validateDependencies(deps Dependencies) error {
 	if deps.Agent == nil {
 		return fmt.Errorf("validating tui dependencies: agent is nil")
+	}
+	if deps.Coordinator == nil {
+		return fmt.Errorf("validating tui dependencies: coordinator is nil")
 	}
 	if deps.Sessions == nil {
 		return fmt.Errorf("validating tui dependencies: sessions is nil")

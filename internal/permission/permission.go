@@ -39,6 +39,7 @@ var readClassTools = map[string]bool{
 	"grep":        true,
 	"glob":        true,
 	"diagnostics": true,
+	"symbols":     true,
 	"web_fetch":   true,
 	"web_search":  true,
 	"job_output":  true,

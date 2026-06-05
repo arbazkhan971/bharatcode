@@ -37,6 +37,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"gradlew check":                       runnerGradle,
 		"mix test":                            runnerExUnit,
 		"mix test test/foo_test.exs:12":       runnerExUnit,
+		"node --test":                         runnerTAP,
+		"node --test test/*.js":               runnerTAP,
+		"npx tape test/*.js":                  runnerTAP,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
@@ -622,6 +625,55 @@ Finished in 0.02 seconds
 4 tests, 0 failures`
 	if got := parseTestFailures("mix test", out); got != nil {
 		t.Errorf("expected nil for passing run, got %v", got)
+	}
+}
+
+func TestParseTAPFailures(t *testing.T) {
+	out := `TAP version 13
+ok 1 - adds numbers
+not ok 2 - subtracts numbers
+  ---
+  duration_ms: 0.5
+  message: 'expected 1 to equal 2'
+  ...
+ok 3 - skipped one # SKIP not ready
+not ok 4 - flaky one # TODO fix later
+not ok 5 - divides numbers
+  ---
+  message: "division by zero"
+  ...
+1..5`
+	got := parseTestFailures("node --test", out)
+	want := []testFailure{
+		{Name: "subtracts numbers", Detail: "expected 1 to equal 2"},
+		{Name: "divides numbers", Detail: "division by zero"},
+	}
+	if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+		t.Errorf("parseTAPFailures mismatch:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestParseTAPFailures_NoMessageAndNoDescription(t *testing.T) {
+	out := `not ok 1
+not ok 2 - bare failure
+1..2`
+	got := parseTestFailures("tape test.js", out)
+	want := []testFailure{
+		{Name: "TAP test 1"},
+		{Name: "bare failure"},
+	}
+	if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+		t.Errorf("parseTAPFailures mismatch:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestParseTAPFailures_NoFailures(t *testing.T) {
+	out := `TAP version 13
+ok 1 - adds numbers
+ok 2 - subtracts numbers
+1..2`
+	if got := parseTestFailures("node --test", out); got != nil {
+		t.Errorf("expected nil for passing TAP run, got %v", got)
 	}
 }
 

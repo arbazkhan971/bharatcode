@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -700,12 +701,42 @@ func TestSlashHelp_ListsRegisteredRecipes(t *testing.T) {
 	require.NoError(t, err)
 	m.deps.Recipes = reg
 
+	// The help listing is rendered inside the chat viewport, which clamps from
+	// the top when the content overflows. Give it a window tall enough to hold
+	// the full built-in list plus the recipe so this test exercises the listing's
+	// content rather than where the viewport happens to cut it.
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 60})
+
 	m.helpVisible = true
 	out := plainText(m.renderMain())
 
 	require.Contains(t, out, "/help", "built-in commands must still appear in /help")
 	require.Contains(t, out, "/daily-standup", "registered recipe name must appear in /help output")
 	require.Contains(t, out, "Daily standup", "registered recipe title must appear in /help output")
+}
+
+// TestSlashHelp_DocumentsEveryBuiltinCommand guards against the /help listing
+// drifting out of sync with the completable command set: every command the user
+// can Tab-complete must carry a documenting line in /help, so a command like
+// /keys is never silently undiscoverable from the help dump. It mirrors
+// TestSlashCommandsAllHaveDescriptions, which makes the same coverage guarantee
+// for the inline slash-hint gloss.
+func TestSlashHelp_DocumentsEveryBuiltinCommand(t *testing.T) {
+	m := newSizedModel(t)
+
+	lines := m.slashHelpLines()
+	for _, cmd := range slashCommands {
+		found := false
+		for _, line := range lines {
+			// Help lines read "/cmd [args] - description"; match the command token
+			// at the line start so "/tab" does not spuriously satisfy "/tabs".
+			if line == cmd || strings.HasPrefix(line, cmd+" ") {
+				found = true
+				break
+			}
+		}
+		require.Truef(t, found, "completable command %s must be documented in /help", cmd)
+	}
 }
 
 // TestSlashHelp_ListsCustomPromptsWithFrontmatter asserts that registered

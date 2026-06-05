@@ -99,27 +99,23 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 		return Result{}, fmt.Errorf("reading file %s: %w", path, err)
 	}
 	text := string(oldContent)
-	count := strings.Count(text, in.OldString)
-	if count == 0 {
+	outcome := applyReplacement(text, in.OldString, in.NewString, in.ReplaceAll)
+	switch outcome.status {
+	case replaceNotFound:
 		hint := nearestMatchHint(text, in.OldString)
 		msg := "old_string was not found in " + path + ". old_string must match exactly, including all whitespace and newlines."
 		if hint != "" {
 			msg += "\n" + hint
 		}
 		return errorResult(msg), nil
-	}
-	if count > 1 && !in.ReplaceAll {
+	case replaceAmbiguous:
 		return errorResult(fmt.Sprintf(
 			"Found %d occurrences of old_string in %s. Each old_string must be unique — provide more surrounding context to make it unique (or set replace_all to true to replace every match).",
-			count, path,
+			outcome.found, path,
 		)), nil
 	}
 
-	replacements := 1
-	if in.ReplaceAll {
-		replacements = -1
-	}
-	newText := strings.Replace(text, in.OldString, in.NewString, replacements)
+	newText := outcome.text
 	if newText == text {
 		return errorResult("edit produced no changes"), nil
 	}
@@ -130,13 +126,18 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 		return Result{}, err
 	}
 
-	return Result{
-		Content: fmt.Sprintf("edited %s (%d replacement(s))", path, countForReport(count, in.ReplaceAll)),
-		Metadata: map[string]any{
-			"path":         path,
-			"replacements": countForReport(count, in.ReplaceAll),
-		},
-	}, nil
+	content := fmt.Sprintf("edited %s (%d replacement(s))", path, outcome.count)
+	if outcome.strategy != "" {
+		content += fmt.Sprintf(" [matched via flexible %s matching]", outcome.strategy)
+	}
+	metadata := map[string]any{
+		"path":         path,
+		"replacements": outcome.count,
+	}
+	if outcome.strategy != "" {
+		metadata["match_strategy"] = outcome.strategy
+	}
+	return Result{Content: content, Metadata: metadata}, nil
 }
 
 func (t *EditTool) checkPermission(ctx context.Context, path string, raw json.RawMessage) error {

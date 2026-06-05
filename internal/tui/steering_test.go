@@ -273,7 +273,9 @@ func (p *gatedProvider) Stream(ctx context.Context, _ llm.Request) (<-chan llm.E
 }
 
 func (p *gatedProvider) Models() []llm.Model {
-	return []llm.Model{{ID: "fake-model", Provider: "fake", ContextWindow: 8192, SupportsTools: true}}
+	// A large window keeps the steering transcript in budget so the assertions
+	// stay focused on call ordering rather than tool-doc-driven compaction.
+	return []llm.Model{{ID: "fake-model", Provider: "fake", ContextWindow: 1 << 20, SupportsTools: true}}
 }
 
 func (p *gatedProvider) SupportsTools() bool  { return true }

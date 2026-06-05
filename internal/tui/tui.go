@@ -480,6 +480,15 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.filetree.focused = false
 			return m, nil
 		}
+		// Clear an active scrollback search so the viewport is unpinned and the
+		// "search N/M" status segment disappears, the way an editor or pager
+		// cancels its search on Esc. This only fires when a search is live, so an
+		// otherwise-idle Esc still falls through to closing the help listing.
+		if m.search.active() {
+			m.search.reset()
+			m.status.Search = m.search.statusSegment()
+			return m, nil
+		}
 		m.helpVisible = false
 		return m, nil
 	case "enter":
@@ -1084,7 +1093,7 @@ func keybindingHelpBody() string {
 		"Ctrl+F     toggle the file-tree panel",
 		"Ctrl+/     jump to the next search match",
 		"Ctrl+\\     jump to the previous search match",
-		"Esc        close a panel, dialog, or the help listing",
+		"Esc        close a panel or dialog, clear the search, or hide help",
 	}, "\n")
 }
 

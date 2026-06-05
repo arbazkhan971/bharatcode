@@ -3,6 +3,7 @@ package tui
 import (
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // maxMentionHints bounds how many file matches the @-mention picker surfaces and
@@ -230,15 +231,103 @@ func mentionHintFiles(buffer, root string, st *inputState) (files []string, acti
 	return files, -1
 }
 
+// matchPositions returns the rune indices of path that matched token, so the
+// picker can emphasize exactly the characters that connected the search to the
+// candidate, the way fuzzy file pickers in Claude Code, opencode, and fzf
+// highlight a match. A contiguous (case-insensitive) substring is preferred so
+// the highlighted run reads as one block; when the token only matches as a
+// scattered subsequence the individual matched runes are returned instead.
+// Comparison is per-rune lower-casing so indices line up with path's own runes,
+// and an empty or unmatched token yields nil.
+func matchPositions(token, path string) []int {
+	if token == "" {
+		return nil
+	}
+	pr, tr := []rune(path), []rune(token)
+
+	// Prefer the first contiguous run equal to the token.
+	for start := 0; start+len(tr) <= len(pr); start++ {
+		matched := true
+		for k := range tr {
+			if unicode.ToLower(pr[start+k]) != unicode.ToLower(tr[k]) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			pos := make([]int, len(tr))
+			for k := range tr {
+				pos[k] = start + k
+			}
+			return pos
+		}
+	}
+
+	// Fall back to a scattered subsequence, recording each rune that advanced it.
+	var pos []int
+	i := 0
+	for j := 0; j < len(pr) && i < len(tr); j++ {
+		if unicode.ToLower(pr[j]) == unicode.ToLower(tr[i]) {
+			pos = append(pos, j)
+			i++
+		}
+	}
+	if i < len(tr) {
+		return nil
+	}
+	return pos
+}
+
+// highlightMention renders a candidate path with the runes matching token
+// accented and the rest muted, coalescing adjacent same-class runes into one
+// styled span so the output stays compact. With no match (or an empty token) the
+// whole name is muted, matching the menu's default look.
+func (m *model) highlightMention(name, token string) string {
+	pos := matchPositions(token, name)
+	if len(pos) == 0 {
+		return m.theme.Muted.Render(name)
+	}
+	hit := make(map[int]bool, len(pos))
+	for _, p := range pos {
+		hit[p] = true
+	}
+
+	runes := []rune(name)
+	var b strings.Builder
+	for i := 0; i < len(runes); {
+		on := hit[i]
+		j := i
+		for j < len(runes) && hit[j] == on {
+			j++
+		}
+		seg := string(runes[i:j])
+		if on {
+			b.WriteString(m.theme.Accent.Render(seg))
+		} else {
+			b.WriteString(m.theme.Muted.Render(seg))
+		}
+		i = j
+	}
+	return b.String()
+}
+
 // renderMentionHint formats the @-file completion menu for the input region,
 // matching renderSlashHint's one-row, token-by-token truncation so the layout
 // height is unchanged. It returns "" when there is nothing to show, leaving the
 // default prompt untouched. The path selected by an active Tab cycle is accented
-// and the rest are muted.
+// whole; every other entry has the runes matching the in-progress token accented
+// and the rest muted. During a cycle the buffer holds the selected path rather
+// than a search token, so per-rune highlighting is skipped.
 func (m *model) renderMentionHint(width int) string {
-	files, active := mentionHintFiles(m.input.String(), m.workspaceRoot, &m.inputHistory)
+	buffer := m.input.String()
+	files, active := mentionHintFiles(buffer, m.workspaceRoot, &m.inputHistory)
 	if len(files) == 0 || width <= 0 {
 		return ""
+	}
+
+	var token string
+	if active < 0 {
+		token, _ = activeMention(buffer)
 	}
 
 	const sep = "  "
@@ -257,9 +346,12 @@ func (m *model) renderMentionHint(width int) string {
 			break
 		}
 		used += next
-		if i == active {
+		switch {
+		case i == active:
 			parts = append(parts, m.theme.Accent.Render(f))
-		} else {
+		case token != "":
+			parts = append(parts, m.highlightMention(f, token))
+		default:
 			parts = append(parts, m.theme.Muted.Render(f))
 		}
 	}

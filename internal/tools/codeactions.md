@@ -37,6 +37,8 @@ reports one, and a note of how it would take effect — an inline edit, a
 server-side command, or both.
 
 When applying, a summary line plus a unified diff per file the action changed.
+If the applied action left any errors or warnings behind, the re-checked
+diagnostics are appended so you can fix them.
 
 Failure cases:
 

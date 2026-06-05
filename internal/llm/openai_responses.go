@@ -163,7 +163,7 @@ func buildResponsesRequest(req Request) (responsesRequest, error) {
 	// and Anthropic's thinking opt-ins. Effort is added only when configured, so
 	// an empty effort is simply dropped from the object rather than sent blank.
 	if isReasoningModel(req.Model) {
-		body.Reasoning = &responsesReasoning{Effort: normalizeOpenAIReasoningEffort(req.ReasoningEffort), Summary: "auto"}
+		body.Reasoning = &responsesReasoning{Effort: normalizeOpenAIReasoningEffort(req.ReasoningEffort, req.Model), Summary: "auto"}
 	} else {
 		body.Temperature = req.Temperature
 	}

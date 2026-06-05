@@ -208,11 +208,14 @@ func openRouterReasoning(req Request) *openAIReasoning {
 	}
 }
 
-// openAIReasoningEfforts is the set of reasoning_effort labels OpenAI's reasoning
-// models accept ("minimal" was added with the gpt-5 family). The provider-
-// independent ReasoningEffort knob also carries "auto"/"dynamic" — meaning "let
-// the model size its own reasoning" — which OpenAI does not accept and would 400
-// on, so normalizeOpenAIReasoningEffort drops anything outside this set.
+// openAIReasoningEfforts is the set of reasoning_effort labels every OpenAI
+// reasoning model accepts ("minimal" was added with the gpt-5 family). The gpt-5.1
+// generation adds "none", which the original gpt-5 family and o-series 400 on, so
+// it is gated per model in normalizeOpenAIReasoningEffort rather than listed here.
+// The provider-independent ReasoningEffort knob also carries "auto"/"dynamic" —
+// meaning "let the model size its own reasoning" — which OpenAI does not accept
+// and would 400 on, so normalizeOpenAIReasoningEffort drops anything outside the
+// accepted set.
 var openAIReasoningEfforts = map[string]struct{}{
 	"minimal": {},
 	"low":     {},
@@ -221,14 +224,21 @@ var openAIReasoningEfforts = map[string]struct{}{
 }
 
 // normalizeOpenAIReasoningEffort maps the provider-independent ReasoningEffort
-// onto a value OpenAI's reasoning models accept. A recognized label is returned
-// lowercased; an empty, "auto"/"dynamic", or otherwise unrecognized label returns
-// "" so the effort field is omitted and the model applies its own default rather
-// than the request 400-ing. This mirrors the graceful degradation the OpenRouter
-// and Gemini/Anthropic thinking paths already apply to the same knob.
-func normalizeOpenAIReasoningEffort(effort string) string {
+// onto a value the OpenAI reasoning model named by model accepts. A recognized
+// label is returned lowercased; an empty, "auto"/"dynamic", or otherwise
+// unrecognized label returns "" so the effort field is omitted and the model
+// applies its own default rather than the request 400-ing. The "none" label is
+// honored only for models that accept it (the gpt-5.1 generation) and otherwise
+// dropped to "", so a config that asks for no reasoning on an older model
+// degrades to that model's default instead of being rejected. This mirrors the
+// graceful degradation the OpenRouter and Gemini/Anthropic thinking paths already
+// apply to the same knob.
+func normalizeOpenAIReasoningEffort(effort, model string) string {
 	e := strings.ToLower(strings.TrimSpace(effort))
 	if _, ok := openAIReasoningEfforts[e]; ok {
+		return e
+	}
+	if e == "none" && modelSupportsNoneReasoningEffort(model) {
 		return e
 	}
 	return ""
@@ -284,7 +294,7 @@ func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error
 	// is normalized so the provider-independent "auto"/"dynamic" labels collapse
 	// to "" (omitted) rather than reaching OpenAI, which 400s on them.
 	if isReasoningModel(req.Model) {
-		body.ReasoningEffort = normalizeOpenAIReasoningEffort(req.ReasoningEffort)
+		body.ReasoningEffort = normalizeOpenAIReasoningEffort(req.ReasoningEffort, req.Model)
 		body.MaxCompletionTokens = req.MaxTokens
 	} else {
 		body.Temperature = req.Temperature

@@ -261,11 +261,16 @@ func TestResponsesProviderReasoningGating(t *testing.T) {
 	})
 }
 
-// TestResponsesProviderRejectsTools asserts a tools request is refused with
-// ErrUnsupportedFeature on this path (tool calling is a followup) rather than
-// silently dropping the tools.
-func TestResponsesProviderRejectsTools(t *testing.T) {
+// TestResponsesProviderRejectsToolsWhenUnsupported asserts a tools request is
+// refused with ErrUnsupportedFeature when the selected model does not advertise
+// tool support, rather than silently dropping the tools — mirroring the
+// chat/completions gate.
+func TestResponsesProviderRejectsToolsWhenUnsupported(t *testing.T) {
 	provider, _, _ := responsesProvider(t, "gpt-4o", cannedResponsesReply)
+	// responsesProvider's testConfig advertises tool support by default; flip it
+	// off on the wired registry's model to exercise the gate.
+	got := provider.(*openAIResponsesProvider)
+	got.models[0].SupportsTools = false
 
 	_, err := provider.Stream(context.Background(), Request{
 		Model:    "gpt-4o",
@@ -273,6 +278,152 @@ func TestResponsesProviderRejectsTools(t *testing.T) {
 		Tools:    []Tool{{Name: "lookup", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 	})
 	require.ErrorIs(t, err, ErrUnsupportedFeature)
+}
+
+// TestResponsesProviderSendsFlatFunctionTools asserts tool definitions are sent
+// as flat Responses function tools ({"type":"function","name":...,"parameters":...})
+// rather than the chat/completions nested {"function":{...}} shape, and that a
+// missing schema defaults to an empty object schema.
+func TestResponsesProviderSendsFlatFunctionTools(t *testing.T) {
+	provider, _, gotBody := responsesProvider(t, "gpt-4o", cannedResponsesReply)
+
+	_, err := provider.Stream(context.Background(), Request{
+		Model:    "gpt-4o",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+		Tools: []Tool{
+			{Name: "lookup", Description: "look something up", InputSchema: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
+			{Name: "noschema"},
+		},
+	})
+	require.NoError(t, err)
+
+	var probe struct {
+		Tools []struct {
+			Type        string          `json:"type"`
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(*gotBody, &probe))
+	require.Len(t, probe.Tools, 2)
+	require.Equal(t, "function", probe.Tools[0].Type)
+	require.Equal(t, "lookup", probe.Tools[0].Name)
+	require.Equal(t, "look something up", probe.Tools[0].Description)
+	require.JSONEq(t, `{"type":"object","properties":{"q":{"type":"string"}}}`, string(probe.Tools[0].Parameters))
+	// A tool with no schema defaults to an empty-object schema.
+	require.Equal(t, "noschema", probe.Tools[1].Name)
+	require.JSONEq(t, `{"type":"object","properties":{}}`, string(probe.Tools[1].Parameters))
+
+	// Flat shape: the nested chat/completions key must not appear.
+	require.NotContains(t, string(*gotBody), `"function":{`)
+}
+
+// TestResponsesProviderEmitsToolCall asserts a function_call output item is
+// parsed into ToolUseStart/End events carrying the call_id, name, and arguments,
+// so the agent loop can dispatch the tool.
+func TestResponsesProviderEmitsToolCall(t *testing.T) {
+	reply := `{
+	  "id": "resp_tc",
+	  "object": "response",
+	  "status": "completed",
+	  "model": "gpt-4o",
+	  "output": [
+	    {"type": "reasoning", "id": "rs_1", "summary": []},
+	    {"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "Looking that up."}]},
+	    {"type": "function_call", "id": "fc_1", "call_id": "call_abc", "name": "lookup", "arguments": "{\"q\":\"weather\"}", "status": "completed"}
+	  ],
+	  "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+	}`
+	provider, _, _ := responsesProvider(t, "gpt-4o", reply)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "gpt-4o",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "weather?"}}}},
+		Tools:    []Tool{{Name: "lookup", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	// The assistant text precedes the tool call.
+	text, ok := findEvent[DeltaTextEvent](got)
+	require.True(t, ok)
+	require.Equal(t, "Looking that up.", text.Text)
+
+	start, ok := findEvent[ToolUseStartEvent](got)
+	require.True(t, ok, "expected a ToolUseStartEvent")
+	require.Equal(t, "call_abc", start.ID, "the model addresses the call by call_id")
+	require.Equal(t, "lookup", start.Name)
+
+	end, ok := findEvent[ToolUseEndEvent](got)
+	require.True(t, ok, "expected a ToolUseEndEvent")
+	require.Equal(t, "call_abc", end.ID)
+	require.Equal(t, "lookup", end.Name)
+	require.JSONEq(t, `{"q":"weather"}`, string(end.Input))
+
+	// EndEvent still terminates the stream after the tool call.
+	_, hasEnd := findEvent[EndEvent](got)
+	require.True(t, hasEnd)
+}
+
+// TestResponsesRequestEncodesToolCallRoundTrip asserts a multi-turn transcript
+// (assistant tool call followed by a tool result) serializes to the Responses
+// function_call / function_call_output input items, so the model sees its own
+// prior call and the result on the next turn.
+func TestResponsesRequestEncodesToolCallRoundTrip(t *testing.T) {
+	provider, _, gotBody := responsesProvider(t, "gpt-4o", cannedResponsesReply)
+
+	_, err := provider.Stream(context.Background(), Request{
+		Model: "gpt-4o",
+		Tools: []Tool{{Name: "lookup", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		Messages: []message.Message{
+			{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "weather?"}}},
+			{Role: message.RoleAssistant, Content: []message.ContentBlock{
+				message.TextBlock{Text: "Checking."},
+				message.ToolUseBlock{ID: "call_abc", Name: "lookup", Input: json.RawMessage(`{"q":"weather"}`)},
+			}},
+			{Role: message.RoleTool, Content: []message.ContentBlock{
+				message.ToolResultBlock{ToolUseID: "call_abc", Content: "sunny"},
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	var probe struct {
+		Input []struct {
+			Type      string `json:"type"`
+			Role      string `json:"role"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+			Output    string `json:"output"`
+			Content   []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	require.NoError(t, json.Unmarshal(*gotBody, &probe))
+	require.Len(t, probe.Input, 4, "user msg, assistant msg, function_call, function_call_output")
+
+	// [0] user message.
+	require.Equal(t, "user", probe.Input[0].Role)
+	require.Equal(t, "input_text", probe.Input[0].Content[0].Type)
+
+	// [1] assistant message text (output_text), then [2] the function_call item.
+	require.Equal(t, "assistant", probe.Input[1].Role)
+	require.Equal(t, "output_text", probe.Input[1].Content[0].Type)
+	require.Equal(t, "Checking.", probe.Input[1].Content[0].Text)
+
+	require.Equal(t, "function_call", probe.Input[2].Type)
+	require.Equal(t, "call_abc", probe.Input[2].CallID)
+	require.Equal(t, "lookup", probe.Input[2].Name)
+	require.JSONEq(t, `{"q":"weather"}`, probe.Input[2].Arguments)
+
+	// [3] the tool result as a function_call_output addressed by the same call_id.
+	require.Equal(t, "function_call_output", probe.Input[3].Type)
+	require.Equal(t, "call_abc", probe.Input[3].CallID)
+	require.Equal(t, "sunny", probe.Input[3].Output)
 }
 
 // TestResponsesProviderSurfacesFailedStatus asserts a 200 reply that carries a

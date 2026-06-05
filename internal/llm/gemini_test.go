@@ -895,6 +895,107 @@ func TestGeminiCountTokensRequiresAPIKey(t *testing.T) {
 	require.ErrorIs(t, err, ErrAuth)
 }
 
+func TestSanitizeGeminiSchemaStripsUnsupportedKeys(t *testing.T) {
+	// A schema as a typical JSON Schema generator emits it: a top-level "$schema"
+	// and an "additionalProperties": false, plus the same keys buried in a nested
+	// object property and inside an anyOf branch. Gemini rejects every one.
+	raw := json.RawMessage(`{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"$id": "urn:tool",
+		"type": "object",
+		"additionalProperties": false,
+		"properties": {
+			"city": {"type": "string", "description": "city name"},
+			"opts": {
+				"type": "object",
+				"additionalProperties": false,
+				"patternProperties": {"^x-": {"type": "string"}},
+				"properties": {"unit": {"type": "string"}}
+			},
+			"either": {
+				"anyOf": [
+					{"type": "string"},
+					{"type": "object", "additionalProperties": false, "properties": {"n": {"type": "number"}}}
+				]
+			}
+		},
+		"required": ["city"]
+	}`)
+
+	got := sanitizeGeminiSchema(raw)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(got, &decoded))
+
+	// Top-level metadata and constraint keys are gone...
+	require.NotContains(t, decoded, "$schema")
+	require.NotContains(t, decoded, "$id")
+	require.NotContains(t, decoded, "additionalProperties")
+
+	// ...while the supported structure is preserved verbatim.
+	require.Equal(t, "object", decoded["type"])
+	require.Equal(t, []any{"city"}, decoded["required"])
+	props := decoded["properties"].(map[string]any)
+	require.Contains(t, props, "city")
+
+	// Nested object: unsupported keys stripped, real properties kept.
+	opts := props["opts"].(map[string]any)
+	require.NotContains(t, opts, "additionalProperties")
+	require.NotContains(t, opts, "patternProperties")
+	require.Contains(t, opts["properties"].(map[string]any), "unit")
+
+	// anyOf branch is recursed into as well.
+	branches := props["either"].(map[string]any)["anyOf"].([]any)
+	require.NotContains(t, branches[1].(map[string]any), "additionalProperties")
+	require.Contains(t, branches[1].(map[string]any)["properties"].(map[string]any), "n")
+}
+
+func TestSanitizeGeminiSchemaPassesThroughInvalidAndEmpty(t *testing.T) {
+	// A non-JSON schema is returned byte-for-byte rather than dropped, so the
+	// sanitizer never makes a request worse than the raw passthrough it replaced.
+	bad := json.RawMessage(`{not json`)
+	require.Equal(t, string(bad), string(sanitizeGeminiSchema(bad)))
+
+	// An empty schema stays empty so the caller's default-object fallback applies.
+	require.Len(t, sanitizeGeminiSchema(nil), 0)
+}
+
+func TestGeminiRequestSanitizesToolSchema(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+		Tools: []Tool{{
+			Name:        "get_weather",
+			InputSchema: json.RawMessage(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"properties":{"city":{"type":"string"}}}`),
+		}},
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	require.NotEmpty(t, rawBody)
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.Len(t, captured.Tools, 1)
+	require.Len(t, captured.Tools[0].FunctionDeclarations, 1)
+
+	var params map[string]any
+	require.NoError(t, json.Unmarshal(captured.Tools[0].FunctionDeclarations[0].Parameters, &params))
+	require.NotContains(t, params, "$schema")
+	require.NotContains(t, params, "additionalProperties")
+	require.Contains(t, params["properties"].(map[string]any), "city")
+}
+
 func textMsg(text string) message.Message {
 	return message.Message{
 		Role:    message.RoleUser,

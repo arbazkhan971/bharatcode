@@ -84,7 +84,7 @@ func (p *openAIResponsesProvider) Stream(ctx context.Context, req Request) (<-ch
 		return nil, fmt.Errorf("building responses request: %w", err)
 	}
 	body.Stream = true
-	resp, err := postJSON(ctx, p.client, p.baseURL+"/responses", apiKey, body)
+	resp, err := postJSON(ctx, p.client, appendPath(p.baseURL, "/responses"), apiKey, body)
 	if err != nil {
 		return nil, err
 	}

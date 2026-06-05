@@ -361,3 +361,64 @@ func TestIsReasoningModel(t *testing.T) {
 		require.Equalf(t, tc.want, isReasoningModel(tc.id), "isReasoningModel(%q)", tc.id)
 	}
 }
+
+// TestAppendPath asserts the endpoint path is inserted before any query string
+// already on the base URL. Azure OpenAI carries a required ?api-version=... on
+// the base, so a naive concat would corrupt the URL; bases without a query are
+// concatenated unchanged so non-Azure providers are unaffected.
+func TestAppendPath(t *testing.T) {
+	cases := []struct {
+		base string
+		path string
+		want string
+	}{
+		// No query: plain concatenation, the common case.
+		{"https://api.openai.com/v1", "/chat/completions", "https://api.openai.com/v1/chat/completions"},
+		// Azure-style base with a required api-version query: the path must land
+		// before the "?" so the query keeps trailing the full URL.
+		{
+			"https://x.openai.azure.com/openai/deployments/gpt-4o?api-version=2024-06-01",
+			"/chat/completions",
+			"https://x.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-06-01",
+		},
+		// Multiple query params are preserved as a unit.
+		{
+			"https://host/base?a=1&b=2",
+			"/responses",
+			"https://host/base/responses?a=1&b=2",
+		},
+	}
+	for _, tc := range cases {
+		require.Equalf(t, tc.want, appendPath(tc.base, tc.path), "appendPath(%q, %q)", tc.base, tc.path)
+	}
+}
+
+// TestOpenAICompatibleAzureBaseURLPreservesQuery asserts that an Azure-style
+// base URL carrying an api-version query reaches the server with the
+// chat/completions path inserted before the query, not appended after it, so
+// Azure OpenAI endpoints are reachable through the openai_compatible provider.
+func TestOpenAICompatibleAzureBaseURLPreservesQuery(t *testing.T) {
+	var gotPath, gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	cfg := testConfig("azure", config.ProviderOpenAICompatible,
+		server.URL+"/openai/deployments/gpt-4o?api-version=2024-06-01")
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	provider, err := reg.Get("azure")
+	require.NoError(t, err)
+
+	streamOnce(t, provider, Request{
+		Model:    "test-model",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+	})
+
+	require.Equal(t, "/openai/deployments/gpt-4o/chat/completions", gotPath)
+	require.Equal(t, "api-version=2024-06-01", gotQuery)
+}

@@ -17,6 +17,7 @@ Arguments:
 - `multiline` boolean, optional: match patterns that span line boundaries (like `rg -U --multiline-dotall`); `.` matches newlines. Context options are ignored in this mode.
 - `case_insensitive` boolean, optional: force case-insensitive matching (like `rg -i`), overriding the default smart-case behaviour.
 - `only_matching` boolean, optional: print only the matched (non-empty) parts of each line, one match per row (like `rg -o`), instead of the whole line. Content mode only; ignored in `multiline` mode and `context`/`before`/`after` do not apply.
+- `word` boolean, optional: match whole words only (like `rg -w`/`--word-regexp`); the pattern must be bounded by word boundaries, so `id` will not match `width` or `hidden`.
 - `offset` integer, optional: skip the first N result entries before `head_limit` is applied, like piping through `tail -n +N`. Pages through results across every `output_mode`. Defaults to `0` (skip nothing).
 - `head_limit` integer, optional: cap the output to the first N result entries after `offset`, like piping through `head -N`, across every `output_mode`. Defaults to `0` (no extra limit beyond the built-in match cap).
 
@@ -66,6 +67,15 @@ and supersedes `context`/`before`/`after` (no context rows are emitted). Both
 the ripgrep path and the Go fallback render identically. Use it to extract a
 clean list of identifiers, versions, or tokens — e.g. `func \w+` to list every
 function name without the surrounding signature.
+
+Whole-word matching:
+
+Set `word: true` to match only where the pattern is surrounded by word
+boundaries, the analogue of ripgrep's `-w`/`--word-regexp`. Searching `id`
+then matches the identifier `id` but not `width`, `hidden`, or `idle`. On the
+Go fallback this is implemented as ripgrep documents `-w` — wrapping the pattern
+in `\b(?:…)\b` — so both paths agree, and it composes with `case_insensitive`,
+`only_matching`, and `multiline`.
 
 Type filter:
 

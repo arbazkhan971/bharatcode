@@ -415,8 +415,29 @@ func (m *model) highlightMatch(name, token string) string {
 // than a search token, so per-rune highlighting is skipped.
 func (m *model) renderMentionHint(width int) string {
 	buffer := m.input.String()
+	if width <= 0 {
+		return ""
+	}
+
+	const sep = "  "
+	const indent = "  "
+
 	files, active := mentionHintFiles(buffer, m.workspaceRoot, &m.inputHistory)
-	if len(files) == 0 || width <= 0 {
+	if len(files) == 0 {
+		// An in-progress @-token that resolves to nothing still gets a quiet
+		// "no matching files" note, so the user learns the reference will not
+		// attach a file rather than wondering why the menu stayed empty — the way
+		// Claude Code and opencode report an empty picker. A bare "@" (empty
+		// token) is left silent: it lists the whole workspace, so an empty result
+		// there means an empty workspace, not a failed search, and the note would
+		// just be noise. The note is dropped when it would not fit one row, so the
+		// layout height is never exceeded.
+		if token, ok := activeMention(buffer); ok && token != "" {
+			const note = "no matching files"
+			if len([]rune(indent))+len([]rune(note)) <= width {
+				return indent + m.theme.Muted.Render(note)
+			}
+		}
 		return ""
 	}
 
@@ -424,9 +445,6 @@ func (m *model) renderMentionHint(width int) string {
 	if active < 0 {
 		token, _ = activeMention(buffer)
 	}
-
-	const sep = "  "
-	const indent = "  "
 
 	var parts []string
 	used := len([]rune(indent))

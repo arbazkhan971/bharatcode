@@ -32,6 +32,13 @@ func TestInferContextWindow(t *testing.T) {
 		{"mistral-large", 32_768},
 		{"qwen2.5-coder", 32_768},
 		{"deepseek-chat", 65_536},
+		// xAI Grok, Perplexity Sonar tiers, Codestral, Kimi and gpt-oss.
+		{"grok-2-latest", 131_072},
+		{"sonar", 128_000},
+		{"sonar-pro", 200_000},
+		{"codestral-latest", 256_000},
+		{"kimi-k2-0905-preview", 200_000},
+		{"gpt-oss-120b", 128_000},
 		// Case-insensitive and whitespace-tolerant.
 		{"  GPT-4O  ", 128_000},
 		// Unknown ids stay "unknown" (zero).

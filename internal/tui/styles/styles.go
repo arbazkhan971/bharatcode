@@ -70,6 +70,7 @@ type Theme struct {
 	DiffAdd    lipgloss.Style
 	DiffRemove lipgloss.Style
 	DiffHunk   lipgloss.Style
+	DiffHeader lipgloss.Style
 }
 
 // palette is the set of raw colors a theme is built from.
@@ -113,6 +114,10 @@ func build(p palette) Theme {
 		DiffAdd:    success,
 		DiffRemove: err,
 		DiffHunk:   accent,
+		// File-header lines (---, +++, diff --git, index) are bold-muted so
+		// file boundaries stand out from added/removed content in a multi-file
+		// diff without competing with the accent-colored hunk markers.
+		DiffHeader: muted.Bold(true),
 	}
 }
 

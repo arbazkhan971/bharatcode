@@ -30,3 +30,16 @@ func TestFieldsPresent(t *testing.T) {
 	require.Contains(t, first, "1s")
 	require.Contains(t, second, "2s")
 }
+
+// TestSearchSegment asserts the search-progress segment appears only when set,
+// so the bar is byte-identical to its no-search form until a search is active.
+func TestSearchSegment(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+	require.NotContains(t, bar.Render(160), "search", "an empty Search must add no segment")
+
+	bar.Search = "search 2/7"
+	require.Contains(t, bar.Render(160), "search 2/7", "a set Search must surface its segment")
+}

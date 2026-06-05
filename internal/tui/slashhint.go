@@ -94,6 +94,36 @@ func slashHintCommands(buffer string, st *inputState) (cmds []string, active int
 	return matches, -1
 }
 
+// slashHintNote returns the quiet one-line note shown beneath the prompt when an
+// in-progress "/command" name matches nothing, or "" when no note applies. It
+// mirrors the @-file picker's "no matching files" note so a mistyped command
+// gets immediate feedback while typing rather than only after submission, and
+// when a close built-in or recipe exists it appends a "did you mean" pointer
+// reusing the same suggester the unknown-command dialog uses — matching how
+// Claude Code and opencode steer a mistyped command toward its nearest match.
+//
+// The note fires only for a non-empty, whitespace-free command name (a bare "/"
+// lists everything, and text past a space is command arguments, not a name) that
+// no candidate matches even under the fuzzy subsequence fallback, so a command
+// the menu can still surface never draws a spurious "no matching" note.
+func slashHintNote(buffer string, st *inputState) string {
+	if !strings.HasPrefix(buffer, "/") {
+		return ""
+	}
+	name := buffer[1:]
+	if name == "" || strings.ContainsAny(name, " \t") {
+		return ""
+	}
+	if len(matchSlash(st.candidates(), buffer)) > 0 {
+		return ""
+	}
+	note := "no matching commands"
+	if s := suggestSlash(st.candidates(), name); s != "" {
+		note += " — did you mean " + s + "?"
+	}
+	return note
+}
+
 // renderSlashHint formats the slash-completion menu for the input region. It
 // returns "" when there is nothing to show, so the default prompt is byte-for-
 // byte unchanged. Command names are listed without their leading slash; the
@@ -102,8 +132,22 @@ func slashHintCommands(buffer string, st *inputState) (cmds []string, active int
 // not every match fits, so the menu never spills past one row.
 func (m *model) renderSlashHint(width int) string {
 	buffer := m.input.String()
+	if width <= 0 {
+		return ""
+	}
 	cmds, active := slashHintCommands(buffer, &m.inputHistory)
-	if len(cmds) == 0 || width <= 0 {
+	if len(cmds) == 0 {
+		// A "/command" prefix that matches nothing gets a quiet note (with a
+		// did-you-mean pointer when a close command exists) so the user learns
+		// the name is unknown while typing, the way the @-file picker reports an
+		// empty search. The note is dropped when it would not fit one row, so the
+		// layout height is never exceeded.
+		if note := slashHintNote(buffer, &m.inputHistory); note != "" {
+			const indent = "  "
+			if len([]rune(indent))+len([]rune(note)) <= width {
+				return indent + m.theme.Muted.Render(note)
+			}
+		}
 		return ""
 	}
 

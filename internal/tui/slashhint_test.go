@@ -215,3 +215,75 @@ func TestRenderSlashHint_HighlightsSubsequenceFallback(t *testing.T) {
 	require.NotContains(t, hint, m.theme.Muted.Render("search"),
 		"the matched runes are accented, so the name is not one muted span")
 }
+
+// TestSlashHintNote_UnknownCommand asserts a "/command" that matches nothing —
+// not even under the fuzzy subsequence fallback — yields the "no matching
+// commands" note, so a mistyped name gets feedback while typing.
+func TestSlashHintNote_UnknownCommand(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	require.Equal(t, "no matching commands", slashHintNote("/zzzqq", &st))
+}
+
+// TestSlashHintNote_SuggestsClosest asserts the note points a near-miss command
+// at its closest real one, reusing the same suggester the unknown-command dialog
+// uses, so "/exprot" steers toward "/export" inline.
+func TestSlashHintNote_SuggestsClosest(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	require.Equal(t, "no matching commands — did you mean /export?", slashHintNote("/exprot", &st))
+}
+
+// TestSlashHintNote_SilentCases asserts the note stays empty wherever feedback
+// would be noise: ordinary prose, a bare "/", a name the menu can still surface
+// (prefix or fuzzy), a fully typed command, and text past a space (arguments,
+// not a command name).
+func TestSlashHintNote_SilentCases(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	for _, buffer := range []string{
+		"hello world", // not a slash command
+		"/",           // bare slash lists everything
+		"/s",          // a real prefix the menu lists
+		"/srch",       // reachable via the fuzzy subsequence fallback
+		"/help",       // a complete, valid command
+		"/diff foo",   // a command name plus arguments
+	} {
+		require.Empty(t, slashHintNote(buffer, &st), "buffer %q must show no note", buffer)
+	}
+}
+
+// TestRenderSlashHint_UnknownCommandNote is the end-to-end contract: typing an
+// unknown "/command" surfaces the note in the rendered view, while a token the
+// fuzzy fallback can still resolve surfaces the command name rather than the
+// note.
+func TestRenderSlashHint_UnknownCommandNote(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/zzzqq")
+	require.Contains(t, stripANSI(m.viewString()), "no matching commands")
+
+	m2 := newSizedModel(t)
+	typeString(t, m2, "/srch")
+	view := stripANSI(m2.viewString())
+	require.Contains(t, view, "search", "a fuzzy-matchable token still lists the command")
+	require.NotContains(t, view, "no matching commands",
+		"a resolvable token must not draw the unknown-command note")
+}
+
+// TestRenderSlashHint_NoteDroppedWhenNarrow asserts the note is omitted rather
+// than wrapping when the row is too narrow to hold it, keeping the input region
+// height unchanged.
+func TestRenderSlashHint_NoteDroppedWhenNarrow(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.width = 8
+	typeString(t, m, "/zzzqq")
+	require.Empty(t, m.renderSlashHint(m.width),
+		"no room for the note, so nothing is rendered")
+}

@@ -78,6 +78,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseDartTestFailures(output)
 	case runnerJulia:
 		return parseJuliaTestFailures(output)
+	case runnerScala:
+		return parseScalaTestFailures(output)
 	default:
 		return nil
 	}
@@ -109,6 +111,7 @@ const (
 	runnerNextest
 	runnerDart
 	runnerJulia
+	runnerScala
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -178,6 +181,13 @@ var (
 	// "runtests.jl" or "pkg.test" token, which keeps ordinary "julia script.jl"
 	// invocations (not test runs) from matching.
 	juliaRe = regexp.MustCompile(`\bjulia\b.*\bruntests\.jl\b|\bjulia\b.*\bpkg\.test\b`)
+	// "sbt" drives Scala builds; "sbt test"/"sbt testOnly" run ScalaTest (or
+	// specs2/MUnit), whose default reporter marks each failing example with a
+	// "- <name> *** FAILED ***" line under the "[info]"/"[error]" sbt log prefix.
+	// \bsbt\b admits "sbt test", "sbt 'testOnly *Spec'", and "./sbt test" while
+	// keeping prose like "subtle changes" — and the unrelated "go test"/"cargo
+	// test" runners, which never contain "sbt" at a word boundary — from matching.
+	sbtRe = regexp.MustCompile(`\bsbt\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -306,6 +316,13 @@ func classifyTestRunner(command string) testRunner {
 		// Checked before the JS runners since a Julia invocation carries none of
 		// their substrings, but kept explicit to guard against future overlap.
 		return runnerJulia
+	case sbtRe.MatchString(c):
+		// `sbt test`/`sbt testOnly` drives ScalaTest (and specs2/MUnit), whose
+		// reporter prints each failing example as "- <name> *** FAILED ***" beneath
+		// sbt's "[info]"/"[error]" log prefix, with the assertion on the indented
+		// line below. Checked before the JS runners since an sbt invocation carries
+		// none of their substrings, but kept explicit to guard against future overlap.
+		return runnerScala
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1742,6 +1759,58 @@ func parseJuliaTestFailures(output string) []testFailure {
 			}
 			if d := juliaExprRe.FindStringSubmatch(lines[j]); d != nil {
 				f.Detail = strings.TrimSpace(d[1])
+				break
+			}
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "[info] " / "[error] " — the per-line log-level prefix sbt prepends to test
+	// reporter output. Stripping it first lets the failure and detail matchers key
+	// on the reporter's own text regardless of which stream sbt routed the line to.
+	sbtLogPrefixRe = regexp.MustCompile(`^\[(?:info|error|warn)\]\s?`)
+	// "- should add two numbers *** FAILED ***" — a failing example as ScalaTest's
+	// FlatSpec/FunSuite/WordSpec/FreeSpec reporters print it (after the sbt prefix
+	// is removed). The leaf name sits between the "- " bullet and the
+	// " *** FAILED ***" marker; the run summary "*** 1 TEST FAILED ***" has no "- "
+	// bullet, so it does not match.
+	scalaFailRe = regexp.MustCompile(`^- (.+?) \*\*\* FAILED \*\*\*\s*$`)
+)
+
+// parseScalaTestFailures extracts failing tests from sbt + ScalaTest output
+// (`sbt test`/`sbt testOnly`). The sbt "[info]"/"[error]" log prefix is stripped
+// from each line first; a failure then appears as "- <name> *** FAILED ***", and
+// the detail is the first non-empty line beneath it — the assertion message and
+// source location, e.g. "2 did not equal 3 (CalculatorSpec.scala:15)". Scanning
+// stops at the next example (any "- " line, failing or passing) so an entry
+// without a body does not borrow the following one's.
+func parseScalaTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		head := sbtLogPrefixRe.ReplaceAllString(lines[i], "")
+		m := scalaFailRe.FindStringSubmatch(head)
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			body := sbtLogPrefixRe.ReplaceAllString(lines[j], "")
+			// The next example (a "- " bullet, passing or failing) ends this block.
+			if strings.HasPrefix(strings.TrimSpace(body), "- ") {
+				break
+			}
+			if t := strings.TrimSpace(body); t != "" {
+				f.Detail = t
 				break
 			}
 		}

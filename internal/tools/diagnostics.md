@@ -8,6 +8,10 @@ Arguments:
 
 - `path` string, optional: workspace-relative file to inspect. Omit it to scan
   supported source files in the workspace.
+- `severity` string, optional: minimum severity to report — one of `error`,
+  `warning`, `info`, or `hint`. Only diagnostics at that level or more severe are
+  returned (`error` is most severe). Use `error` to focus on what blocks a build
+  when a workspace scan is noisy with hints. Omit it to report every severity.
 
 What success looks like:
 

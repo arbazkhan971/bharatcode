@@ -25,7 +25,7 @@ func TestSlashHintCommands_AmbiguousPrefixListsMatches(t *testing.T) {
 
 	var st inputState
 	cmds, active := slashHintCommands("/s", &st)
-	require.Equal(t, []string{"/sessions", "/status", "/save"}, cmds)
+	require.Equal(t, []string{"/sessions", "/status", "/save", "/search"}, cmds)
 	require.Equal(t, -1, active, "no Tab cycle is active, so nothing is selected")
 }
 

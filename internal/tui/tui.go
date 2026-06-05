@@ -380,6 +380,16 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+c":
+		// While a turn is in flight, Ctrl+C interrupts it rather than quitting, so a
+		// user watching the agent work — who typically has an empty prompt — can stop
+		// the run without tearing down the whole session by accident, matching how
+		// Claude Code and opencode treat the interrupt key during a run. Only when
+		// idle does Ctrl+C quit on an empty prompt; with text in the prompt it stays
+		// an interrupt (a harmless no-op when nothing is running) as before.
+		if m.running {
+			m.deps.Agent.Interrupt()
+			return m, nil
+		}
 		if m.input.Len() == 0 {
 			m.quitting = true
 			return m, tea.Quit
@@ -1094,7 +1104,7 @@ func keybindingHelpBody() string {
 		"Up/Down    recall previous prompts",
 		"PgUp/PgDn  scroll the chat a page at a time",
 		"Home/End   jump to the oldest/newest message",
-		"Ctrl+C     interrupt the agent, or quit on an empty prompt",
+		"Ctrl+C     interrupt the running turn, or quit on an empty idle prompt",
 		"Ctrl+T     new tab",
 		"Ctrl+W     close tab",
 		"Ctrl+←/→   switch to the previous/next tab (also Ctrl+Shift+Tab/Ctrl+Tab)",

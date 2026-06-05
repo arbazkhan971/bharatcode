@@ -239,6 +239,13 @@ var contextWindowRules = []struct {
 	// above does not match. The current Azure default ships a 16k window, so
 	// this rule keeps the dot-less ids from falling through to "unknown" (0).
 	{"gpt-35", 16_385},
+	// The reasoning gpt-5 family (gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-codex,
+	// and point releases such as gpt-5.1) exposes a 400k window. The chat-tuned
+	// variant gpt-5-chat-latest is the exception: it ships only a 128k window.
+	// Its id carries the "gpt-5" marker, so this specific rule must precede the
+	// family one to avoid resolving the chat model to more than 3x its real
+	// window — the same carve-out pattern as gpt-4.5 before gpt-4.
+	{"gpt-5-chat", 128_000},
 	{"gpt-5", 400_000},
 	// OpenAI o-series. The released o1 (and o3/o4-mini) expose a 200k window, but
 	// the earlier o1-preview and o1-mini shipped only 128k. Both carry the "o1"

@@ -545,6 +545,19 @@ var geminiUnsupportedSchemaKeys = map[string]struct{}{
 	"unevaluatedProperties": {},
 }
 
+// geminiSupportedStringFormats names the only "format" values Gemini's
+// generateContent Schema accepts on a STRING-typed property: "enum" and
+// "date-time". Any other format (the JSON Schema string formats common in
+// hand-written and generated tool schemas — "uri", "email", "uuid", "hostname",
+// "ipv4", "date", ...) is rejected with a 400 ("Invalid JSON payload ... format"),
+// so sanitizeGeminiSchema drops the field rather than fail the whole request.
+// Number/integer formats ("int32", "int64", "float", "double") live on a
+// differently-typed node and are left untouched.
+var geminiSupportedStringFormats = map[string]struct{}{
+	"enum":      {},
+	"date-time": {},
+}
+
 // sanitizeGeminiSchema returns raw with every Gemini-unsupported JSON Schema
 // keyword (see geminiUnsupportedSchemaKeys) recursively removed, so a tool
 // schema written for the OpenAI/Anthropic dialects is accepted by Gemini's
@@ -685,10 +698,19 @@ func deepCopyJSONValue(node any) any {
 
 // stripGeminiSchemaKeys walks an already-decoded JSON value, deleting
 // unsupported keys from every object it contains and recursing into the
-// remaining values and into array elements.
+// remaining values and into array elements. It additionally drops a "format"
+// that Gemini rejects on a STRING-typed node (see geminiSupportedStringFormats),
+// which would otherwise 400 the whole request.
 func stripGeminiSchemaKeys(node any) any {
 	switch v := node.(type) {
 	case map[string]any:
+		if t, ok := v["type"].(string); ok && t == "string" {
+			if f, ok := v["format"].(string); ok {
+				if _, supported := geminiSupportedStringFormats[f]; !supported {
+					delete(v, "format")
+				}
+			}
+		}
 		for key := range v {
 			if _, bad := geminiUnsupportedSchemaKeys[key]; bad {
 				delete(v, key)

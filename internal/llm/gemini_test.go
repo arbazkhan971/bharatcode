@@ -1062,6 +1062,52 @@ func TestSanitizeGeminiSchemaStripsUnsupportedKeys(t *testing.T) {
 	require.Contains(t, branches[1].(map[string]any)["properties"].(map[string]any), "n")
 }
 
+func TestSanitizeGeminiSchemaDropsUnsupportedStringFormats(t *testing.T) {
+	// Gemini's Schema accepts only "enum" and "date-time" as the "format" of a
+	// STRING property; the other JSON Schema string formats generators routinely
+	// emit ("uri", "email", "uuid", ...) 400 the whole request. They must be
+	// dropped, while the two supported string formats and all number/integer
+	// formats survive.
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"homepage": {"type": "string", "format": "uri"},
+			"contact": {"type": "string", "format": "email"},
+			"created": {"type": "string", "format": "date-time"},
+			"choice": {"type": "string", "format": "enum", "enum": ["a", "b"]},
+			"count": {"type": "integer", "format": "int64"},
+			"ratio": {"type": "number", "format": "double"},
+			"nested": {
+				"type": "object",
+				"properties": {"id": {"type": "string", "format": "uuid"}}
+			}
+		}
+	}`)
+
+	got := sanitizeGeminiSchema(raw)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(got, &decoded))
+	props := decoded["properties"].(map[string]any)
+
+	// Unsupported string formats are gone, but the property itself stays.
+	require.NotContains(t, props["homepage"].(map[string]any), "format")
+	require.Equal(t, "string", props["homepage"].(map[string]any)["type"])
+	require.NotContains(t, props["contact"].(map[string]any), "format")
+
+	// Supported string formats survive unchanged.
+	require.Equal(t, "date-time", props["created"].(map[string]any)["format"])
+	require.Equal(t, "enum", props["choice"].(map[string]any)["format"])
+
+	// Numeric formats live on non-string nodes and are left untouched.
+	require.Equal(t, "int64", props["count"].(map[string]any)["format"])
+	require.Equal(t, "double", props["ratio"].(map[string]any)["format"])
+
+	// The strip recurses into nested objects.
+	nestedID := props["nested"].(map[string]any)["properties"].(map[string]any)["id"].(map[string]any)
+	require.NotContains(t, nestedID, "format")
+}
+
 func TestSanitizeGeminiSchemaInlinesRefs(t *testing.T) {
 	// A schema as generators commonly emit it: a shared object factored into
 	// "$defs" and referenced by a local "#/$defs/Name" pointer, including from

@@ -62,6 +62,14 @@ type grepArgs struct {
 	// matches "width" or "hidden". On the Go fallback this is the documented
 	// equivalent of wrapping the pattern in \b…\b, keeping both paths aligned.
 	Word bool `json:"word,omitempty"`
+	// FixedStrings treats the pattern as a literal string rather than a regular
+	// expression (like rg -F / --fixed-strings), so regex metacharacters such as
+	// ( ) [ ] . * + ? $ | \ match themselves. Use it to search for literal code
+	// like "arr[i]", "fmt.Sprintf(" or "$PATH" without escaping. On the Go
+	// fallback this is the documented equivalent of regexp.QuoteMeta on the
+	// pattern, keeping both paths aligned; it composes with word, case_insensitive,
+	// only_matching, and multiline.
+	FixedStrings bool `json:"fixed_strings,omitempty"`
 	// Offset skips the first N result entries before HeadLimit is applied, the
 	// analogue of piping ripgrep through `tail -n +N` (0-based skip count). It
 	// pages through results across every output_mode. Zero (the default) skips
@@ -98,6 +106,7 @@ var (
     "case_insensitive": {"type": "boolean", "description": "Force case-insensitive matching (like rg -i), overriding the default smart-case behaviour."},
     "only_matching": {"type": "boolean", "description": "Print only the matched (non-empty) parts of each line, one match per row (like rg -o). Content mode only; ignored in multiline mode and context options do not apply."},
     "word": {"type": "boolean", "description": "Match whole words only (like rg -w / --word-regexp): the pattern must be bounded by word boundaries, so \"id\" will not match \"width\" or \"hidden\"."},
+    "fixed_strings": {"type": "boolean", "description": "Treat the pattern as a literal string, not a regex (like rg -F / --fixed-strings), so metacharacters like ( ) [ ] . * + ? $ | \\ match themselves. Use it to search for literal code such as \"arr[i]\" or \"fmt.Sprintf(\" without escaping."},
     "offset": {"type": "integer", "minimum": 0, "description": "Skip the first N result entries before applying head_limit (like piping through tail -n +N). Pages through results across every output_mode. Defaults to 0."},
     "head_limit": {"type": "integer", "minimum": 0, "description": "Cap output to the first N result entries after offset (like piping through head -N), across every output_mode. Defaults to 0 (no extra limit beyond the built-in match cap)."}
   }
@@ -255,6 +264,10 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 	if args.Word {
 		cmdArgs = append(cmdArgs, "--word-regexp")
 	}
+	if args.FixedStrings {
+		// Interpret the pattern literally; composes with -i/-w/-o/-U above.
+		cmdArgs = append(cmdArgs, "--fixed-strings")
+	}
 
 	switch args.OutputMode {
 	case "files_with_matches":
@@ -396,12 +409,24 @@ func loadRootGitignore(root string) map[string]bool {
 // if it contains any uppercase letter, it is compiled verbatim (exact case).
 // When ignoreCase is true the match is always case-insensitive, overriding
 // smart-case (mirrors rg -i).
-func compileSmartCase(pattern string, ignoreCase, word bool) (*regexp.Regexp, error) {
+func compileSmartCase(pattern string, ignoreCase, word, fixed bool) (*regexp.Regexp, error) {
 	flags := ""
 	if ignoreCase || !hasUpper(pattern) {
 		flags = "(?i)"
 	}
-	return regexp.Compile(flags + wordWrap(pattern, word))
+	return regexp.Compile(flags + wordWrap(literalize(pattern, fixed), word))
+}
+
+// literalize returns the regex-escaped form of pattern when fixed is set (rg
+// -F / --fixed-strings), so metacharacters match themselves; otherwise it
+// returns pattern unchanged. regexp.QuoteMeta only inserts backslashes, never
+// letters, so smart-case detection (hasUpper on the original pattern) is
+// unaffected.
+func literalize(pattern string, fixed bool) string {
+	if fixed {
+		return regexp.QuoteMeta(pattern)
+	}
+	return pattern
 }
 
 // wordWrap reproduces ripgrep's --word-regexp on the Go fallback path. rg
@@ -556,7 +581,7 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 		return runGoGrepMultiline(ctx, root, searchPath, args)
 	}
 
-	re, err := compileSmartCase(args.Pattern, args.CaseInsensitive, args.Word)
+	re, err := compileSmartCase(args.Pattern, args.CaseInsensitive, args.Word, args.FixedStrings)
 	if err != nil {
 		return "", fmt.Errorf("compiling grep pattern: %w", err)
 	}
@@ -763,7 +788,7 @@ func renderGrepResults(matches []grepFileResult, outputMode string, capped bool)
 // span several lines.  In content mode every line a match touches is emitted as
 // "path:lineNo:text" (mirroring rg -U output); context options do not apply.
 func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepArgs) (string, error) {
-	re, err := compileMultilineSmartCase(args.Pattern, args.CaseInsensitive, args.Word)
+	re, err := compileMultilineSmartCase(args.Pattern, args.CaseInsensitive, args.Word, args.FixedStrings)
 	if err != nil {
 		return "", fmt.Errorf("compiling grep pattern: %w", err)
 	}
@@ -882,12 +907,12 @@ func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepA
 // flag (?s) lets `.` cross newlines, and smart-case adds (?i) when the pattern
 // is all-lowercase — mirroring compileSmartCase plus rg --multiline-dotall.
 // When ignoreCase is true the (?i) flag is always added, overriding smart-case.
-func compileMultilineSmartCase(pattern string, ignoreCase, word bool) (*regexp.Regexp, error) {
+func compileMultilineSmartCase(pattern string, ignoreCase, word, fixed bool) (*regexp.Regexp, error) {
 	flags := "(?s)"
 	if ignoreCase || !hasUpper(pattern) {
 		flags = "(?is)"
 	}
-	return regexp.Compile(flags + wordWrap(pattern, word))
+	return regexp.Compile(flags + wordWrap(literalize(pattern, fixed), word))
 }
 
 // offsetToLine returns the 0-based line index containing byte offset off,

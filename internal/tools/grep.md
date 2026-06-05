@@ -9,6 +9,7 @@ Arguments:
 - `pattern` string, required: regular expression to search for.
 - `path` string, optional: workspace-relative file or directory. Defaults to the workspace root.
 - `include` string, optional: file-name glob such as `*.go` to narrow the search.
+- `type` string, optional: filter to a language by file type, like `rg --type go` (e.g. `go`, `py`, `js`, `ts`, `rust`, `java`, `c`, `cpp`, `html`, `css`, `json`, `yaml`, `md`). Combine with `include` to narrow further — both filters must pass.
 - `output_mode` string, optional: `content`, `files_with_matches`, or `count`.
 - `context` integer, optional: number of lines to show before **and** after each match (like `rg -C`). Takes precedence over `before`/`after` when all three are set.
 - `before` integer, optional: number of lines to show before each match (like `rg -B`). Ignored when `context` is set.
@@ -44,6 +45,19 @@ printed as `path:line:content`, exactly as ripgrep prints it. The `context`,
 `before`, and `after` options are ignored when `multiline` is set, so the
 ripgrep and Go-fallback paths stay consistent. Multiline reads whole files
 into memory, so prefer `include`/`path` scoping on large trees.
+
+Type filter:
+
+Set `type` to restrict the search to one language by file type, the analogue of
+ripgrep's `--type go`. The mapping is a curated, machine-independent table of the
+most common languages (e.g. `py` covers `.py`/`.pyi`/`.pyw`; `ts` covers
+`.ts`/`.tsx`/`.mts`/`.cts`; `cpp` covers the usual C++ header/source extensions).
+Both the ripgrep path and the Go fallback derive their filter from this single
+table — the ripgrep path through a synthetic `--type-add` definition rather than
+rg's own larger built-in type set — so a `type` query selects exactly the same
+files whether or not ripgrep is installed. `type` and `include` combine with AND
+semantics: a file must match both. An unknown type name returns an error listing
+the supported names.
 
 Match cap:
 

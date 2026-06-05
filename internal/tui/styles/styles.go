@@ -80,6 +80,12 @@ type Theme struct {
 	DiffRemoveEmph lipgloss.Style
 	DiffHunk       lipgloss.Style
 	DiffHeader     lipgloss.Style
+	// Match emphasizes the runs of a line that matched an active scrollback
+	// search, so the reader sees exactly what matched within the centered line —
+	// the reverse-video hit highlight an editor draws on a search result. It
+	// builds on the accent color with reverse video so the term reads as a solid
+	// block.
+	Match lipgloss.Style
 }
 
 // palette is the set of raw colors a theme is built from.
@@ -129,6 +135,7 @@ func build(p palette) Theme {
 		// file boundaries stand out from added/removed content in a multi-file
 		// diff without competing with the accent-colored hunk markers.
 		DiffHeader: muted.Bold(true),
+		Match:      accent.Reverse(true),
 	}
 }
 

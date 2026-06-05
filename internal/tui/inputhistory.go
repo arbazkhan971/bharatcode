@@ -146,13 +146,33 @@ func (s *inputState) completeSlash(current string) (string, bool) {
 	return matches[0], true
 }
 
-// matchSlash returns the slash commands whose name begins with prefix, in the
-// canonical order of slashCommands. An exact match still returns itself so the
-// user sees Tab confirm a fully typed command.
+// matchSlash returns the slash commands matching prefix, in the canonical order
+// of slashCommands. A leading-prefix match is preferred: an exact match still
+// returns itself so the user sees Tab confirm a fully typed command. Only when
+// no command begins with the prefix does it fall back to a case-insensitive
+// subsequence match on the command name, so a user who types the wrong start —
+// "/exp" finds "/export" as a prefix, but "/port" does not — can still reach the
+// command, matching the fuzzy command palettes of Claude Code and opencode. The
+// fallback never fires while a prefix matches, so prefix completion and the
+// existing Tab cycle are unchanged.
 func matchSlash(prefix string) []string {
 	var matches []string
 	for _, cmd := range slashCommands {
 		if strings.HasPrefix(cmd, prefix) {
+			matches = append(matches, cmd)
+		}
+	}
+	if len(matches) > 0 {
+		return matches
+	}
+
+	token := strings.ToLower(strings.TrimPrefix(prefix, "/"))
+	if !strings.HasPrefix(prefix, "/") || token == "" {
+		return nil
+	}
+	for _, cmd := range slashCommands {
+		name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
+		if isSubsequence(token, name) {
 			matches = append(matches, cmd)
 		}
 	}

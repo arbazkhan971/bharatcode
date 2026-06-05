@@ -75,6 +75,10 @@
       "type": "openai_compatible",
       "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
+      "headers": {
+        "HTTP-Referer": "https://github.com/arbazkhan971/bharatcode",
+        "X-Title": "BharatCode"
+      },
       "models": [
         "anthropic/claude-sonnet-4-5"
       ]

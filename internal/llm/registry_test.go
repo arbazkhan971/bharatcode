@@ -111,6 +111,83 @@ func TestOpenAICompatibleStreamsTextToolThinkingAndUsage(t *testing.T) {
 	require.Len(t, captured.Tools, 1)
 }
 
+// TestProviderHeadersReachTheWire proves the per-provider Headers map configured
+// on a provider (e.g. OpenRouter's HTTP-Referer / X-Title attribution) is
+// injected into the outgoing request by the registry's transport layer, without
+// clobbering the auth header the provider sets itself. This is the integration
+// the OpenRouter default preset relies on so requests are attributed and not
+// deprioritized on OpenRouter's rankings.
+func TestProviderHeadersReachTheWire(t *testing.T) {
+	var (
+		gotReferer string
+		gotTitle   string
+		gotAuth    string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotReferer = r.Header.Get("HTTP-Referer")
+		gotTitle = r.Header.Get("X-Title")
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	t.Setenv("TEST_API_KEY", "test-key")
+
+	cfg := testConfig("openrouter", config.ProviderOpenAICompatible, server.URL+"/v1")
+	cfg.Providers[0].APIKeyEnv = "TEST_API_KEY"
+	cfg.Providers[0].Headers = map[string]string{
+		"HTTP-Referer": "https://github.com/arbazkhan971/bharatcode",
+		"X-Title":      "BharatCode",
+	}
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	provider, err := reg.Get("openrouter")
+	require.NoError(t, err)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model: "test-model",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+	})
+	require.NoError(t, err)
+	collectEvents(events)
+
+	require.Equal(t, "https://github.com/arbazkhan971/bharatcode", gotReferer,
+		"configured HTTP-Referer header must reach the provider")
+	require.Equal(t, "BharatCode", gotTitle,
+		"configured X-Title header must reach the provider")
+	// The custom headers are additive and must never override the auth header the
+	// provider sets itself.
+	require.Equal(t, "Bearer test-key", gotAuth,
+		"a custom header must not clobber the Authorization the provider sets")
+}
+
+// TestDefaultConfigOpenRouterAttributionHeaders asserts the embedded default
+// config ships OpenRouter's attribution headers (HTTP-Referer / X-Title) on the
+// openrouter preset. OpenRouter uses these to attribute traffic and rank apps;
+// omitting them risks the requests being deprioritized. Combined with
+// TestProviderHeadersReachTheWire (which proves configured headers reach the
+// wire), this guards the preset against a silent regression. Fully offline.
+func TestDefaultConfigOpenRouterAttributionHeaders(t *testing.T) {
+	cfg := config.Default()
+
+	var found bool
+	for _, prov := range cfg.Providers {
+		if prov.Name != "openrouter" {
+			continue
+		}
+		found = true
+		require.Equal(t, "https://github.com/arbazkhan971/bharatcode", prov.Headers["HTTP-Referer"],
+			"openrouter preset should set the HTTP-Referer attribution header")
+		require.Equal(t, "BharatCode", prov.Headers["X-Title"],
+			"openrouter preset should set the X-Title attribution header")
+	}
+	require.True(t, found, "default config should define an openrouter provider")
+}
+
 func TestOpenAICompatibleConvertsToolResultHistory(t *testing.T) {
 	var captured openAIChatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

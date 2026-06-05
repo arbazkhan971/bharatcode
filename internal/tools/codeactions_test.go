@@ -155,6 +155,97 @@ func TestCodeActionsPropagatesServerError(t *testing.T) {
 	require.Contains(t, err.Error(), "server down")
 }
 
+func TestCodeActionsApplyWritesEditAndDiffs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range: lsp.Range{
+					Start: lsp.Position{Line: 0, Character: 0},
+					End:   lsp.Position{Line: 0, Character: 12},
+				},
+				NewText: "package widget",
+			}}},
+		}},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package widget\n", string(got))
+
+	require.Contains(t, result.Content, `applied "Organize Imports"`)
+	require.Contains(t, result.Content, "main.go (1 edit(s))")
+	// A unified diff of the change is surfaced, like the rename/edit tools.
+	require.Contains(t, result.Content, "-package main")
+	require.Contains(t, result.Content, "+package widget")
+	require.Equal(t, "Organize Imports", result.Metadata["applied"])
+}
+
+func TestCodeActionsApplyRejectsCommandOnlyAction(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Run go generate", Kind: "source", Command: &lsp.Command{Command: "gopls.generate"}},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "server-side command")
+	require.Contains(t, result.Content, "gopls.generate")
+}
+
+func TestCodeActionsApplyIndexOutOfRange(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{{Title: "Quick Fix", Kind: "quickfix"}}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 5,
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "only 1 action(s) available")
+}
+
+func TestCodeActionsApplyIndexMatchesListingOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	// Listing sorts by kind: "command" action (kind "source") sorts before the
+	// edit (kind "source.organizeImports"), so the edit is index 2.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range:   lsp.Range{Start: lsp.Position{Line: 0, Character: 0}, End: lsp.Position{Line: 0, Character: 12}},
+				NewText: "package widget",
+			}}},
+		}},
+		{Title: "Run go generate", Kind: "source", Command: &lsp.Command{Command: "gopls.generate"}},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 2,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, `applied "Organize Imports"`)
+}
+
 func TestCodeActionsRejectsMalformedJSON(t *testing.T) {
 	tool := &codeActionsTool{source: &fakeCodeActions{}, workDir: t.TempDir()}
 	result, err := tool.Run(context.Background(), json.RawMessage(`{bad`))

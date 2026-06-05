@@ -99,6 +99,72 @@ func TestRelatedFromWireEmpty(t *testing.T) {
 	}
 }
 
+func TestParsePullDiagnosticsTags(t *testing.T) {
+	raw := json.RawMessage(`{
+	  "items": [
+	    {
+	      "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 12}},
+	      "severity": 4,
+	      "message": "imported and not used",
+	      "source": "gopls",
+	      "tags": [1]
+	    },
+	    {
+	      "range": {"start": {"line": 5, "character": 2}, "end": {"line": 5, "character": 8}},
+	      "severity": 2,
+	      "message": "OldAPI is deprecated",
+	      "source": "gopls",
+	      "tags": [2, 99]
+	    }
+	  ]
+	}`)
+
+	diags, err := parsePullDiagnostics("main.go", raw)
+	if err != nil {
+		t.Fatalf("parsePullDiagnostics: %v", err)
+	}
+	if len(diags) != 2 {
+		t.Fatalf("got %d diagnostics, want 2", len(diags))
+	}
+	if len(diags[0].Tags) != 1 || diags[0].Tags[0] != Unnecessary {
+		t.Errorf("first tags = %v, want [unnecessary]", diags[0].Tags)
+	}
+	// The unrecognized tag 99 is dropped; only Deprecated survives.
+	if len(diags[1].Tags) != 1 || diags[1].Tags[0] != Deprecated {
+		t.Errorf("second tags = %v, want [deprecated]", diags[1].Tags)
+	}
+}
+
+func TestTagsFromWire(t *testing.T) {
+	if got := tagsFromWire(nil); got != nil {
+		t.Errorf("tagsFromWire(nil) = %v, want nil", got)
+	}
+	// Only unrecognized tags present: nothing survives.
+	if got := tagsFromWire([]int{0, 99}); got != nil {
+		t.Errorf("tagsFromWire(unknown) = %v, want nil", got)
+	}
+	got := tagsFromWire([]int{1, 2})
+	if len(got) != 2 || got[0] != Unnecessary || got[1] != Deprecated {
+		t.Errorf("tagsFromWire([1,2]) = %v, want [unnecessary deprecated]", got)
+	}
+}
+
+func TestDiagnosticTagString(t *testing.T) {
+	cases := []struct {
+		tag  DiagnosticTag
+		want string
+	}{
+		{Unnecessary, "unnecessary"},
+		{Deprecated, "deprecated"},
+		{DiagnosticTag(7), "tag(7)"},
+	}
+	for _, tc := range cases {
+		if got := tc.tag.String(); got != tc.want {
+			t.Errorf("DiagnosticTag(%d).String() = %q, want %q", int(tc.tag), got, tc.want)
+		}
+	}
+}
+
 func TestCodeFromWire(t *testing.T) {
 	cases := []struct {
 		name string

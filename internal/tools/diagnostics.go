@@ -343,6 +343,15 @@ func diagnosticTail(d lsp.Diagnostic) string {
 	if d.Source != "" {
 		fmt.Fprintf(&b, " (%s)", d.Source)
 	}
+	// Surface classification tags (unnecessary/deprecated) so the model can tell
+	// dead code and deprecated usages apart from ordinary warnings at a glance.
+	if len(d.Tags) > 0 {
+		labels := make([]string, len(d.Tags))
+		for i, t := range d.Tags {
+			labels[i] = t.String()
+		}
+		fmt.Fprintf(&b, " <%s>", strings.Join(labels, ", "))
+	}
 	return b.String()
 }
 

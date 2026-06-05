@@ -362,6 +362,53 @@ func TestNavigateReferencesAppendsSourceLines(t *testing.T) {
 	require.Equal(t, "2 references across 1 file:\nmain.go:3:6: func Run() {}\nmain.go:5:14: func main() { Run() }", result.Content)
 }
 
+func TestNavigateReferencesCapsLongList(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	// More distinct sites than the cap, so the rendered body is truncated while
+	// the header still reports the true total.
+	total := navigateLocationCap + 25
+	locs := make([]lsp.Location, 0, total)
+	for i := 0; i < total; i++ {
+		locs = append(locs, lsp.Location{Path: path, Range: lsp.Range{Start: lsp.Position{Line: i, Character: 0}}})
+	}
+	src := &fakeNavigate{references: locs}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "references",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The header counts every distinct reference, not just the shown ones.
+	require.True(t, strings.HasPrefix(result.Content, "225 references across 1 file:\n"), result.Content)
+	// Exactly navigateLocationCap entries are rendered, followed by the elision
+	// notice, so the body never floods the context with the full list.
+	require.Contains(t, result.Content, "... and 25 more (225 total) not shown")
+	require.Equal(t, navigateLocationCap, strings.Count(result.Content, "main.go:"))
+}
+
+func TestNavigateReferencesNoNoticeAtCapBoundary(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	// Exactly the cap: every entry fits, so no truncation notice is emitted.
+	locs := make([]lsp.Location, 0, navigateLocationCap)
+	for i := 0; i < navigateLocationCap; i++ {
+		locs = append(locs, lsp.Location{Path: path, Range: lsp.Range{Start: lsp.Position{Line: i, Character: 0}}})
+	}
+	src := &fakeNavigate{references: locs}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "references",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.NotContains(t, result.Content, "not shown")
+	require.Equal(t, navigateLocationCap, strings.Count(result.Content, "main.go:"))
+}
+
 func TestNavigateOmitsSnippetForOutOfRangeLine(t *testing.T) {
 	dir := t.TempDir()
 	path := writeNavFileContent(t, dir, "package main\n")

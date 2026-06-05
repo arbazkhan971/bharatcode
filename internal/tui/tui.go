@@ -1102,34 +1102,88 @@ func (m *model) slashHelpLines() []string {
 	return lines
 }
 
+// keyBinding is one row in the /keys overlay: a key (or key combo) and what it
+// does. Rows are grouped into keyGroups so related shortcuts read together.
+type keyBinding struct {
+	key  string
+	desc string
+}
+
+// keyGroup is a titled cluster of related shortcuts in the /keys overlay.
+type keyGroup struct {
+	title    string
+	bindings []keyBinding
+}
+
+// keybindingGroups is the source of truth for the /keys overlay, grouped the way
+// Claude Code and opencode cluster their shortcuts — navigation, tabs, panels —
+// so a reader scans by category instead of one long flat list. The rows mirror
+// the bindings handled in handleKey, so the two stay in step.
+var keybindingGroups = []keyGroup{
+	{title: "Navigation", bindings: []keyBinding{
+		{"Tab", "switch focus, or complete a /command or @file"},
+		{"Up/Down", "recall previous prompts"},
+		{"PgUp/PgDn", "scroll the chat a page at a time"},
+		{"Home/End", "jump to the oldest/newest message"},
+	}},
+	{title: "Tabs", bindings: []keyBinding{
+		{"Ctrl+T", "new tab"},
+		{"Ctrl+W", "close tab"},
+		{"Ctrl+←/→", "switch to the previous/next tab (also Ctrl+Shift+Tab/Ctrl+Tab)"},
+	}},
+	{title: "Panels & pickers", bindings: []keyBinding{
+		{"Ctrl+P", "open the model picker"},
+		{"Ctrl+A", "open the agent picker"},
+		{"Ctrl+S", "open settings"},
+		{"Ctrl+D", "show the latest edit diff"},
+		{"Ctrl+F", "toggle the file-tree panel"},
+	}},
+	{title: "Search", bindings: []keyBinding{
+		{"Ctrl+/", "jump to the next search match"},
+		{"Ctrl+\\", "jump to the previous search match"},
+	}},
+	{title: "Session", bindings: []keyBinding{
+		{"Ctrl+C", "interrupt the running turn, or quit on an empty idle prompt"},
+		{"Esc", "close a panel or dialog, clear the search, or hide help"},
+	}},
+}
+
 // keybindingHelpBody renders the global key shortcuts shown by /keys. The
 // slash-command listing in /help documents only commands typed at the prompt,
 // leaving the Ctrl-key bindings — which have no slash equivalent — otherwise
 // undiscoverable without reading the source. /keys collects them in one
-// overlay, the way Claude Code and opencode print their shortcuts, so a user
-// can learn the full keymap from a single place. The lines mirror the bindings
-// handled in handleKey, so the two stay in step. It lives in a dialog rather
-// than the chat help dump because the dialog is not height-clamped to the chat
-// viewport, leaving room for the whole keymap.
+// overlay, grouped under section headers the way Claude Code and opencode print
+// their shortcuts, so a user can learn the full keymap from a single place. It
+// lives in a dialog rather than the chat help dump because the dialog is not
+// height-clamped to the chat viewport, leaving room for the whole keymap.
+//
+// The key column is padded to a single width shared across every group so each
+// description starts at the same column regardless of which section it sits in,
+// keeping the overlay aligned. Width is measured in runes so a multi-byte key
+// glyph (the "←/→" arrows) lines up with the rest.
 func keybindingHelpBody() string {
-	return strings.Join([]string{
-		"Tab        switch focus, or complete a /command or @file",
-		"Up/Down    recall previous prompts",
-		"PgUp/PgDn  scroll the chat a page at a time",
-		"Home/End   jump to the oldest/newest message",
-		"Ctrl+C     interrupt the running turn, or quit on an empty idle prompt",
-		"Ctrl+T     new tab",
-		"Ctrl+W     close tab",
-		"Ctrl+←/→   switch to the previous/next tab (also Ctrl+Shift+Tab/Ctrl+Tab)",
-		"Ctrl+P     open the model picker",
-		"Ctrl+A     open the agent picker",
-		"Ctrl+S     open settings",
-		"Ctrl+D     show the latest edit diff",
-		"Ctrl+F     toggle the file-tree panel",
-		"Ctrl+/     jump to the next search match",
-		"Ctrl+\\     jump to the previous search match",
-		"Esc        close a panel or dialog, clear the search, or hide help",
-	}, "\n")
+	keyWidth := 0
+	for _, g := range keybindingGroups {
+		for _, b := range g.bindings {
+			if n := len([]rune(b.key)); n > keyWidth {
+				keyWidth = n
+			}
+		}
+	}
+
+	var b strings.Builder
+	for gi, g := range keybindingGroups {
+		if gi > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(g.title)
+		b.WriteByte('\n')
+		for _, kb := range g.bindings {
+			pad := strings.Repeat(" ", keyWidth-len([]rune(kb.key)))
+			b.WriteString("  " + kb.key + pad + "  " + kb.desc + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // firstNonEmptyLine returns the first non-blank line of s, trimmed and

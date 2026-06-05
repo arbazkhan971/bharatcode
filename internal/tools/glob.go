@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 type globTool struct {
@@ -93,7 +94,7 @@ func (t *globTool) Run(ctx context.Context, raw json.RawMessage) (res Result, er
 	if err != nil {
 		return Result{}, err
 	}
-	var matches []string
+	var matches []globMatch
 	err = filepath.WalkDir(base, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("walking glob path %s: %w", path, err)
@@ -117,18 +118,51 @@ func (t *globTool) Run(ctx context.Context, raw json.RawMessage) (res Result, er
 		}
 		relBase := relativeSlash(base, path)
 		if re.MatchString(relBase) || re.MatchString(relRoot) {
-			matches = append(matches, relRoot)
+			// Stat the entry for its modification time so results can be ordered
+			// newest-first (see sortGlobMatches). A stat failure (e.g. the file
+			// was removed mid-walk) falls back to the zero time, sinking the path
+			// to the bottom rather than dropping it.
+			var modTime time.Time
+			if fi, statErr := entry.Info(); statErr == nil {
+				modTime = fi.ModTime()
+			}
+			matches = append(matches, globMatch{path: relRoot, modTime: modTime})
 		}
 		return nil
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("matching glob: %w", err)
 	}
-	sort.Strings(matches)
 	if len(matches) == 0 {
 		return Result{Content: "No files matched."}, nil
 	}
-	return Result{Content: strings.Join(matches, "\n")}, nil
+	sortGlobMatches(matches)
+	paths := make([]string, len(matches))
+	for i, m := range matches {
+		paths[i] = m.path
+	}
+	return Result{Content: strings.Join(paths, "\n")}, nil
+}
+
+// globMatch pairs a matched workspace-relative path with its modification time
+// so results can be ordered by recency.
+type globMatch struct {
+	path    string
+	modTime time.Time
+}
+
+// sortGlobMatches orders matches newest-first by modification time, matching the
+// behavior of Claude Code's and opencode's glob tools — the most recently
+// touched files surface first, which is what an agent asking "what changed?"
+// wants. Ties (and zero-time stat failures) fall back to a lexicographic path
+// order so output stays deterministic.
+func sortGlobMatches(matches []globMatch) {
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].modTime.Equal(matches[j].modTime) {
+			return matches[i].path < matches[j].path
+		}
+		return matches[i].modTime.After(matches[j].modTime)
+	})
 }
 
 func globRegexp(pattern string) (*regexp.Regexp, error) {

@@ -31,6 +31,11 @@ func TestInferContextWindow(t *testing.T) {
 		{"gemini-1.5-flash", 1_048_576},
 		{"gemini-2.5-flash", 1_048_576},
 		{"llama-3.1-70b", 128_000},
+		// Llama 4 Scout (10M) and Maverick (1M) ship far larger windows than the
+		// 128k Llama 3.x default; their ids contain "llama", so the specific
+		// markers must win over the family rule.
+		{"meta-llama/Llama-4-Scout-17B-16E-Instruct", 10_485_760},
+		{"meta-llama/llama-4-maverick", 1_048_576},
 		{"mixtral-8x7b", 32_768},
 		{"mistral-large", 32_768},
 		// Ministral and Devstral ship a 128k window and do not contain the

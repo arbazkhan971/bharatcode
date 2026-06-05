@@ -65,6 +65,20 @@ func slashHintDescIndex(cmds []string, active int) int {
 	return -1
 }
 
+// slashDescription returns the terse gloss shown for a settled command in the
+// completion menu, or "" when none is known. A built-in is described by the
+// static slashCommandDescriptions table; a dynamic recipe or custom prompt is
+// described by the gloss captured at setup time, so user-defined commands are
+// documented inline just like the built-ins. The built-in table wins on the
+// rare name overlap, matching how the runtime resolves a built-in ahead of a
+// like-named dynamic command.
+func (m *model) slashDescription(cmd string) string {
+	if d := slashCommandDescriptions[cmd]; d != "" {
+		return d
+	}
+	return m.inputHistory.dynamicDescriptions[cmd]
+}
+
 // slashHintCommands returns the slash commands to surface in the completion
 // menu beneath the prompt for the current input buffer, plus the index of the
 // command currently selected by an active Tab cycle (-1 when none is selected).
@@ -202,7 +216,7 @@ func (m *model) renderSlashHint(width int) string {
 	// in an ellipsis and has no room, so the gloss is only added to a list that
 	// fully fit.
 	if di := slashHintDescIndex(cmds, active); di >= 0 {
-		if desc := slashCommandDescriptions[cmds[di]]; desc != "" {
+		if desc := m.slashDescription(cmds[di]); desc != "" {
 			suffix := " — " + desc
 			if used+len([]rune(suffix)) <= width {
 				line += m.theme.Muted.Render(suffix)

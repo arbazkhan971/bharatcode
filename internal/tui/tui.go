@@ -288,6 +288,7 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	// already documents are also completable as you type — not just discoverable
 	// after the fact.
 	m.inputHistory.setDynamicCommands(dynamicSlashNames(m.deps))
+	m.inputHistory.setDynamicDescriptions(dynamicSlashDescriptions(m.deps))
 	// Seed the single default tab from the freshly wired active state. With one
 	// tab the tab bar stays hidden, so the default render is unchanged.
 	m.initTabs()
@@ -1064,6 +1065,41 @@ func dynamicSlashNames(deps Dependencies) []string {
 		}
 	}
 	return names
+}
+
+// dynamicSlashDescriptions collects a terse one-line gloss for each
+// runtime-contributed slash command, keyed by its "/name". A recipe uses its
+// title (falling back to its description); a custom prompt uses its frontmatter
+// description (falling back to the first non-empty line of its template), the
+// same sources slashHelpLines documents — but without the argument hint so the
+// gloss stays short enough for the one-row completion menu. Commands with no
+// usable text are omitted so the menu never appends a bare "— ". It backs
+// setDynamicDescriptions; nil registries contribute nothing.
+func dynamicSlashDescriptions(deps Dependencies) map[string]string {
+	desc := make(map[string]string)
+	if deps.Recipes != nil {
+		for _, e := range deps.Recipes.List() {
+			gloss := e.Title
+			if gloss == "" {
+				gloss = e.Description
+			}
+			if gloss != "" {
+				desc["/"+e.Name] = gloss
+			}
+		}
+	}
+	if deps.Prompts != nil {
+		for _, p := range deps.Prompts.List() {
+			gloss := p.Description
+			if gloss == "" {
+				gloss = firstNonEmptyLine(p.Template)
+			}
+			if gloss != "" {
+				desc["/"+p.Name] = gloss
+			}
+		}
+	}
+	return desc
 }
 
 func (m *model) slashHelpLines() []string {

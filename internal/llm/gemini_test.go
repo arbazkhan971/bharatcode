@@ -82,6 +82,39 @@ func TestGeminiStreamsTextAndUsage(t *testing.T) {
 	require.Equal(t, 2, usage.CacheReadTokens)
 }
 
+func TestGeminiFoldsThoughtTokensIntoOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// A Gemini 2.5 thinking response reports reasoning tokens in
+		// thoughtsTokenCount, separately from candidatesTokenCount.
+		_, _ = io.WriteString(w, geminiSSE(
+			`{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"thoughtsTokenCount":20}}`,
+		))
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.NoError(t, err)
+	collected := collectEvents(events)
+
+	var usage Usage
+	for _, ev := range collected {
+		if e, ok := ev.(EndEvent); ok {
+			usage = e.Usage
+		}
+	}
+	require.Equal(t, 11, usage.InputTokens)
+	// Reasoning tokens are billed as output, so OutputTokens folds in the 20
+	// thought tokens on top of the 4 visible candidate tokens.
+	require.Equal(t, 24, usage.OutputTokens)
+}
+
 func TestGeminiEmitsFunctionCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -352,6 +385,71 @@ func TestGeminiOmitsThinkingConfigForUnsupportedModel(t *testing.T) {
 	if captured.GenerationConfig != nil {
 		require.Nil(t, captured.GenerationConfig.ThinkingConfig, "unsupported model must not carry a thinkingConfig")
 	}
+}
+
+func TestGeminiCountTokensUsesNativeEndpoint(t *testing.T) {
+	t.Setenv("GEMINI_TEST_KEY", "secret")
+
+	var gotPath, gotKey string
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotKey = r.Header.Get("x-goog-api-key")
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"totalTokens":42,"totalBillableCharacters":99}`)
+	}))
+	defer server.Close()
+
+	cfg := testConfig("gemini", config.ProviderGemini, server.URL)
+	cfg.Providers[0].APIKeyEnv = "GEMINI_TEST_KEY"
+	provider := geminiProviderFor(t, cfg)
+
+	counter, ok := provider.(TokenCounter)
+	require.True(t, ok, "gemini provider must satisfy TokenCounter")
+
+	n, err := counter.CountTokens(context.Background(), Request{
+		Model:        "test-model",
+		Messages:     []message.Message{textMsg("count me")},
+		SystemPrompt: "be brief",
+		Tools:        []Tool{{Name: "get_weather", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 42, n)
+
+	// The native countTokens method and the request key both ride through.
+	require.Equal(t, "/models/test-model:countTokens", gotPath)
+	require.Equal(t, "secret", gotKey)
+
+	// The body wraps a generateContentRequest carrying the fully qualified model
+	// resource name plus the same contents, system instruction, and tools the
+	// stream path would send (so the count reflects the real prompt).
+	var captured geminiCountTokensRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.Equal(t, "models/test-model", captured.GenerateContentRequest.Model)
+	require.Len(t, captured.GenerateContentRequest.Contents, 1)
+	require.NotNil(t, captured.GenerateContentRequest.SystemInstruction)
+	require.Equal(t, "be brief", captured.GenerateContentRequest.SystemInstruction.Parts[0].Text)
+	require.Len(t, captured.GenerateContentRequest.Tools, 1)
+	// generationConfig is irrelevant to counting and must be dropped.
+	require.Nil(t, captured.GenerateContentRequest.GenerationConfig)
+}
+
+func TestGeminiCountTokensRequiresAPIKey(t *testing.T) {
+	t.Setenv("GEMINI_TEST_KEY", "")
+
+	cfg := testConfig("gemini", config.ProviderGemini, "http://example.invalid")
+	cfg.Providers[0].APIKeyEnv = "GEMINI_TEST_KEY"
+	provider := geminiProviderFor(t, cfg)
+
+	counter, ok := provider.(TokenCounter)
+	require.True(t, ok)
+
+	_, err := counter.CountTokens(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{textMsg("hi")},
+	})
+	require.ErrorIs(t, err, ErrAuth)
 }
 
 func textMsg(text string) message.Message {

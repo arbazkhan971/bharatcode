@@ -106,6 +106,61 @@ func (p *geminiProvider) Stream(ctx context.Context, req Request) (<-chan Event,
 	return events, nil
 }
 
+// CountTokens reports the prompt token count for req using Gemini's native
+// models/{model}:countTokens endpoint, satisfying the TokenCounter interface.
+// It builds the same generateContent payload Stream would send (so system
+// instruction, tools, and inline images are all counted) and wraps it in a
+// countTokens request. Callers should fall back to EstimateMessageTokens on a
+// non-nil error, since this performs a network round trip.
+func (p *geminiProvider) CountTokens(ctx context.Context, req Request) (int, error) {
+	apiKey := ""
+	if p.apiKeyEnv != "" {
+		apiKey = os.Getenv(p.apiKeyEnv)
+		if apiKey == "" {
+			return 0, fmt.Errorf("reading %s: %w", p.apiKeyEnv, ErrAuth)
+		}
+	}
+
+	inner, err := p.buildGeminiRequest(req)
+	if err != nil {
+		return 0, fmt.Errorf("building provider request: %w", err)
+	}
+	// countTokens does not run inference, so generationConfig (temperature,
+	// thinking budget, output cap) is irrelevant and dropped to keep the request
+	// to the fields that affect the prompt size.
+	inner.GenerationConfig = nil
+
+	body := geminiCountTokensRequest{
+		GenerateContentRequest: geminiGenerateContentRequest{
+			// The countTokens generateContentRequest requires a fully qualified
+			// model resource name (models/<id>), unlike the URL path segment.
+			Model:         "models/" + req.Model,
+			geminiRequest: inner,
+		},
+	}
+
+	headers := map[string]string{
+		"Content-Type": "application/json",
+		"Accept":       "application/json",
+	}
+	if apiKey != "" {
+		headers["x-goog-api-key"] = apiKey
+	}
+
+	url := fmt.Sprintf("%s/models/%s:countTokens", p.baseURL, req.Model)
+	resp, err := postJSONWithHeaders(ctx, p.client, url, headers, body)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	var out geminiCountTokensResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, fmt.Errorf("decoding provider response: %w", err)
+	}
+	return out.TotalTokens, nil
+}
+
 func (p *geminiProvider) readResponse(ctx context.Context, resp *http.Response, model string, events chan<- Event) {
 	defer close(events)
 	defer resp.Body.Close()
@@ -368,6 +423,28 @@ type geminiRequest struct {
 	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
+// geminiCountTokensRequest is the body of a models/{model}:countTokens call.
+// The endpoint counts a full generateContent payload (so system instruction and
+// tools are reflected), which it accepts under the generateContentRequest field.
+type geminiCountTokensRequest struct {
+	GenerateContentRequest geminiGenerateContentRequest `json:"generateContentRequest"`
+}
+
+// geminiGenerateContentRequest embeds geminiRequest so its contents, system
+// instruction, and tool fields flatten into the JSON, adding only the fully
+// qualified model resource name that countTokens requires.
+type geminiGenerateContentRequest struct {
+	Model string `json:"model"`
+	geminiRequest
+}
+
+// geminiCountTokensResponse carries the prompt token total reported by the
+// countTokens endpoint. Other fields (billable characters, per-modality detail)
+// are ignored.
+type geminiCountTokensResponse struct {
+	TotalTokens int `json:"totalTokens"`
+}
+
 type geminiContent struct {
 	Role  string       `json:"role,omitempty"`
 	Parts []geminiPart `json:"parts"`
@@ -435,12 +512,17 @@ type geminiUsageMetadata struct {
 	PromptTokenCount        int `json:"promptTokenCount"`
 	CandidatesTokenCount    int `json:"candidatesTokenCount"`
 	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	// ThoughtsTokenCount counts tokens spent on native reasoning by a Gemini 2.5
+	// thinking model. The API reports these separately and excludes them from
+	// CandidatesTokenCount, yet bills them as output, so they are folded into
+	// OutputTokens below to keep token accounting and cost estimates accurate.
+	ThoughtsTokenCount int `json:"thoughtsTokenCount"`
 }
 
 func (u geminiUsageMetadata) toUsage() Usage {
 	return Usage{
 		InputTokens:     u.PromptTokenCount,
-		OutputTokens:    u.CandidatesTokenCount,
+		OutputTokens:    u.CandidatesTokenCount + u.ThoughtsTokenCount,
 		CacheReadTokens: u.CachedContentTokenCount,
 	}
 }

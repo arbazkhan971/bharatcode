@@ -128,8 +128,22 @@ var contextWindowRules = []struct {
 	// Mistral's Codestral exposes a 256k window, far larger than the rest of the
 	// Mistral line, so its specific marker precedes the family one.
 	{"codestral", 256_000},
+	// Mistral's Pixtral vision variant exposes a 128k window and does not contain
+	// the "mistral" marker, so it needs its own rule above the family one.
+	{"pixtral", 128_000},
 	{"mistral", 32_768},
 	{"qwen", 32_768},
+	// Google Gemma open-weight line — Gemma 3 lifted the window to 128k while
+	// Gemma 1/2 shipped 8k, so the specific "gemma-3" marker precedes the family.
+	{"gemma-3", 128_000},
+	{"gemma", 8_192},
+	// Cohere Command — Command A exposes a 256k window, the Command R/R+ tier
+	// 128k, so the specific marker precedes the family one.
+	{"command-a", 256_000},
+	{"command", 128_000},
+	// Zhipu GLM-4 and Nvidia Nemotron both expose a 128k window.
+	{"glm", 128_000},
+	{"nemotron", 128_000},
 	// Moonshot Kimi K2 exposes a 200k window.
 	{"kimi", 200_000},
 	{"deepseek", 65_536},

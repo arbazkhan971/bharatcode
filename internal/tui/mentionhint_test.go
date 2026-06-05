@@ -184,7 +184,9 @@ func TestRenderMentionHint_VisibleAfterTyping(t *testing.T) {
 	m.workspaceRoot = mentionWorkspace(t, "main.go", "internal/mainframe.go")
 
 	typeString(t, m, "@main")
-	view := m.viewString()
+	// Strip ANSI before matching: the picker accents the matched runes, so the
+	// styled "main.go" is split across spans in the raw output.
+	view := stripANSI(m.viewString())
 	require.Contains(t, view, "main.go")
 
 	// Tab completes the in-progress mention to the best match.
@@ -207,6 +209,41 @@ func TestRenderMentionHint_FitsOneRow(t *testing.T) {
 	require.NotEmpty(t, hint)
 	require.NotContains(t, hint, "\n", "the menu must stay on one row")
 	require.Contains(t, hint, "…", "an over-long match set is truncated")
+}
+
+// TestMatchPositions_ContiguousAndSubsequence asserts the picker locates the
+// runes a token matched: a case-insensitive contiguous run is preferred, and a
+// scattered subsequence is reported rune-by-rune when no contiguous run exists.
+func TestMatchPositions_ContiguousAndSubsequence(t *testing.T) {
+	t.Parallel()
+
+	// Contiguous, case-insensitive: "Main" matches "main" in "cmd/main.go".
+	require.Equal(t, []int{4, 5, 6, 7}, matchPositions("Main", "cmd/main.go"))
+
+	// The first contiguous run wins when several exist.
+	require.Equal(t, []int{0, 1}, matchPositions("aa", "aaa.go"))
+
+	// Subsequence fallback: "mng" is scattered through "mention.go" — m at 0,
+	// the second n at 2, g at 8.
+	require.Equal(t, []int{0, 2, 8}, matchPositions("mng", "mention.go"))
+
+	// No match and an empty token both yield nil.
+	require.Nil(t, matchPositions("zzz", "main.go"))
+	require.Nil(t, matchPositions("", "main.go"))
+}
+
+// TestHighlightMention_PreservesVisibleText asserts that highlighting changes
+// only styling, never the visible characters: the rune sequence of the rendered
+// candidate is identical to the input path regardless of which runes matched.
+func TestHighlightMention_PreservesVisibleText(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	// A contiguous match, a subsequence match, and a no-match all round-trip the
+	// path's visible text intact once the highlight styling is stripped.
+	require.Equal(t, "internal/main.go", stripANSI(m.highlightMention("internal/main.go", "main")))
+	require.Equal(t, "internal/main.go", stripANSI(m.highlightMention("internal/main.go", "itl")))
+	require.Equal(t, "internal/main.go", stripANSI(m.highlightMention("internal/main.go", "zzz")))
 }
 
 // TestTab_MentionDoesNotToggleFocus asserts Tab on an active mention completes it

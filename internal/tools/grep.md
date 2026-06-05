@@ -15,6 +15,7 @@ Arguments:
 - `before` integer, optional: number of lines to show before each match (like `rg -B`). Ignored when `context` is set.
 - `after` integer, optional: number of lines to show after each match (like `rg -A`). Ignored when `context` is set.
 - `multiline` boolean, optional: match patterns that span line boundaries (like `rg -U --multiline-dotall`); `.` matches newlines. Context options are ignored in this mode.
+- `case_insensitive` boolean, optional: force case-insensitive matching (like `rg -i`), overriding the default smart-case behaviour.
 
 What success looks like:
 
@@ -32,7 +33,10 @@ When the pattern is entirely lowercase the search is case-insensitive, so
 `myfunction` matches `MyFunction`, `MYFUNCTION`, and `myfunction` alike. When
 the pattern contains any uppercase letter the search is case-sensitive and
 exact. This mirrors ripgrep's `--smart-case` behaviour and applies on both
-the rg path and the Go fallback.
+the rg path and the Go fallback. Set `case_insensitive: true` to force a
+case-insensitive search regardless of the pattern's case (like `rg -i`), which
+overrides smart-case — useful to match a mixed-case pattern such as `HTTP`
+against `http` and `Http` alike.
 
 Multiline patterns:
 

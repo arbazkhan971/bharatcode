@@ -47,6 +47,10 @@ type grepArgs struct {
 	// languages (see grepTypeExtensions); combine with Include to narrow
 	// further (both filters must pass).  Empty means no type filter.
 	Type string `json:"type,omitempty"`
+	// CaseInsensitive forces case-insensitive matching (like rg -i), overriding
+	// the default smart-case behaviour.  Use it to match a mixed-case pattern
+	// regardless of case (e.g. find "http" given the pattern "HTTP").
+	CaseInsensitive bool `json:"case_insensitive,omitempty"`
 }
 
 var (
@@ -66,7 +70,8 @@ var (
     "before": {"type": "integer", "minimum": 0, "description": "Number of lines to show before each match (like rg -B). Ignored when context is set."},
     "after": {"type": "integer", "minimum": 0, "description": "Number of lines to show after each match (like rg -A). Ignored when context is set."},
     "multiline": {"type": "boolean", "description": "Match patterns across line boundaries (like rg -U --multiline-dotall); . matches newlines. Context options are ignored in this mode."},
-    "type": {"type": "string", "description": "Filter to a language by file type, like rg --type go (e.g. go, py, js, ts, rust, java, c, cpp). Combine with include to narrow further."}
+    "type": {"type": "string", "description": "Filter to a language by file type, like rg --type go (e.g. go, py, js, ts, rust, java, c, cpp). Combine with include to narrow further."},
+    "case_insensitive": {"type": "boolean", "description": "Force case-insensitive matching (like rg -i), overriding the default smart-case behaviour."}
   }
 }`)
 )
@@ -151,6 +156,12 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 		// cap individual line width so minified/generated files don't flood output.
 		"--max-columns", "500",
 		"--max-columns-preview",
+	}
+
+	// An explicit case_insensitive request forces -i, which overrides the
+	// --smart-case above (rg applies the last case flag given).
+	if args.CaseInsensitive {
+		cmdArgs = append(cmdArgs, "--ignore-case")
 	}
 
 	switch args.OutputMode {
@@ -282,18 +293,24 @@ func loadRootGitignore(root string) map[string]bool {
 // compileSmartCase compiles the pattern using smart-case semantics:
 // if the pattern is entirely lowercase, the returned regexp is case-insensitive;
 // if it contains any uppercase letter, it is compiled verbatim (exact case).
-func compileSmartCase(pattern string) (*regexp.Regexp, error) {
-	caseSensitive := false
-	for _, r := range pattern {
-		if r >= 'A' && r <= 'Z' {
-			caseSensitive = true
-			break
-		}
-	}
-	if !caseSensitive {
+// When ignoreCase is true the match is always case-insensitive, overriding
+// smart-case (mirrors rg -i).
+func compileSmartCase(pattern string, ignoreCase bool) (*regexp.Regexp, error) {
+	if ignoreCase || !hasUpper(pattern) {
 		return regexp.Compile("(?i)" + pattern)
 	}
 	return regexp.Compile(pattern)
+}
+
+// hasUpper reports whether pattern contains an ASCII uppercase letter, the
+// signal smart-case uses to switch to exact-case matching.
+func hasUpper(pattern string) bool {
+	for _, r := range pattern {
+		if r >= 'A' && r <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
 
 // contextLines resolves before/after line counts from the three context
@@ -417,7 +434,7 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 		return runGoGrepMultiline(ctx, root, searchPath, args)
 	}
 
-	re, err := compileSmartCase(args.Pattern)
+	re, err := compileSmartCase(args.Pattern, args.CaseInsensitive)
 	if err != nil {
 		return "", fmt.Errorf("compiling grep pattern: %w", err)
 	}
@@ -603,7 +620,7 @@ func renderGrepResults(matches []grepFileResult, outputMode string, capped bool)
 // span several lines.  In content mode every line a match touches is emitted as
 // "path:lineNo:text" (mirroring rg -U output); context options do not apply.
 func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepArgs) (string, error) {
-	re, err := compileMultilineSmartCase(args.Pattern)
+	re, err := compileMultilineSmartCase(args.Pattern, args.CaseInsensitive)
 	if err != nil {
 		return "", fmt.Errorf("compiling grep pattern: %w", err)
 	}
@@ -721,16 +738,10 @@ func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepA
 // compileMultilineSmartCase compiles pattern for multiline matching: the dotall
 // flag (?s) lets `.` cross newlines, and smart-case adds (?i) when the pattern
 // is all-lowercase — mirroring compileSmartCase plus rg --multiline-dotall.
-func compileMultilineSmartCase(pattern string) (*regexp.Regexp, error) {
-	caseSensitive := false
-	for _, r := range pattern {
-		if r >= 'A' && r <= 'Z' {
-			caseSensitive = true
-			break
-		}
-	}
+// When ignoreCase is true the (?i) flag is always added, overriding smart-case.
+func compileMultilineSmartCase(pattern string, ignoreCase bool) (*regexp.Regexp, error) {
 	flags := "(?s)"
-	if !caseSensitive {
+	if ignoreCase || !hasUpper(pattern) {
 		flags = "(?is)"
 	}
 	return regexp.Compile(flags + pattern)

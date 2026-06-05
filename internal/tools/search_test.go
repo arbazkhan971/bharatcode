@@ -152,6 +152,43 @@ func TestGrepSmartCaseMixedIsExact(t *testing.T) {
 	require.Equal(t, "No matches found.", result.Content, "mixed-case pattern must be exact")
 }
 
+// TestGrepCaseInsensitiveForcesInsensitive checks that case_insensitive:true
+// overrides smart-case so a mixed-case pattern still matches differing case.
+func TestGrepCaseInsensitiveForcesInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "app.go"), []byte("var url = httpClient\n"), 0o644))
+
+	forceFallback(t)
+	tool := newGrepTool(Dependencies{WorkDir: dir})
+
+	// Without the flag, the mixed-case pattern "HTTP" is exact and finds nothing.
+	exact, err := tool.Run(context.Background(), json.RawMessage(`{"pattern":"HTTP"}`))
+	require.NoError(t, err)
+	require.False(t, exact.IsError)
+	require.Equal(t, "No matches found.", exact.Content, "mixed-case pattern is exact by default")
+
+	// With case_insensitive:true the same pattern matches "http".
+	result, err := tool.Run(context.Background(), json.RawMessage(`{"pattern":"HTTP","case_insensitive":true}`))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "app.go", "case_insensitive must override smart-case")
+}
+
+// TestGrepCaseInsensitiveMultiline checks that case_insensitive:true also forces
+// insensitivity on the multiline path.
+func TestGrepCaseInsensitiveMultiline(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "doc.txt"), []byte("alpha\nBETA\n"), 0o644))
+
+	forceFallback(t)
+	tool := newGrepTool(Dependencies{WorkDir: dir})
+	// Mixed-case "Alpha.*beta" spanning a newline only matches case-insensitively.
+	result, err := tool.Run(context.Background(), json.RawMessage(`{"pattern":"Alpha.*beta","multiline":true,"case_insensitive":true}`))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "doc.txt", "case_insensitive must apply on the multiline path")
+}
+
 // TestGrepFallbackGitignoreRespected asserts that a directory listed in
 // .gitignore at the workspace root is skipped by the Go fallback.
 func TestGrepFallbackGitignoreRespected(t *testing.T) {

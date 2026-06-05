@@ -122,6 +122,15 @@
       ]
     },
     {
+      "name": "cohere",
+      "type": "openai_compatible",
+      "base_url": "https://api.cohere.ai/compatibility/v1",
+      "api_key_env": "COHERE_API_KEY",
+      "models": [
+        "command-a-03-2025"
+      ]
+    },
+    {
       "name": "cerebras",
       "type": "openai_compatible",
       "base_url": "https://api.cerebras.ai/v1",
@@ -373,6 +382,15 @@
       "context_window": 256000,
       "input_price_per_mtok_usd": 0.30,
       "output_price_per_mtok_usd": 0.90,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "command-a-03-2025",
+      "provider": "cohere",
+      "context_window": 256000,
+      "input_price_per_mtok_usd": 2.50,
+      "output_price_per_mtok_usd": 10.00,
       "supports_images": false,
       "supports_tools": true
     },

@@ -81,6 +81,24 @@ func TestMentionMatches_EmptyTokenListsWorkspace(t *testing.T) {
 	require.Len(t, got, maxMentionHints, "the bare-@ listing is capped")
 }
 
+// TestMentionMatches_EmptyTokenPrefersShallowFiles asserts a bare "@" surfaces
+// top-level files ahead of deeply-nested ones that merely sort earlier
+// lexically, matching how Claude Code reveals the workspace for a bare "@".
+func TestMentionMatches_EmptyTokenPrefersShallowFiles(t *testing.T) {
+	t.Parallel()
+
+	root := mentionWorkspace(t,
+		"aaa/bbb/deep.go",
+		"README.md",
+		"main.go",
+	)
+	got := mentionMatches("", root)
+	require.NotEmpty(t, got)
+	// The top-level files come first (depth 0, shorter before longer), with the
+	// nested file last, even though "aaa/bbb/deep.go" would sort first lexically.
+	require.Equal(t, []string{"main.go", "README.md", "aaa/bbb/deep.go"}, got)
+}
+
 // TestMentionMatches_SubsequenceFallback asserts a non-contiguous subsequence
 // still matches when no prefix or substring does.
 func TestMentionMatches_SubsequenceFallback(t *testing.T) {

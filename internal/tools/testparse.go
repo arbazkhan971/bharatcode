@@ -44,6 +44,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseJestFailures(output)
 	case runnerCargo:
 		return parseCargoTestFailures(output)
+	case runnerNextest:
+		return parseNextestFailures(output)
 	case runnerRSpec:
 		return parseRSpecFailures(output)
 	case runnerPHPUnit:
@@ -100,6 +102,7 @@ const (
 	runnerCTest
 	runnerPlaywright
 	runnerMinitest
+	runnerNextest
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -109,6 +112,13 @@ const (
 var (
 	goTestRe    = regexp.MustCompile(`\bgo test\b`)
 	cargoTestRe = regexp.MustCompile(`\bcargo test\b`)
+	// "cargo nextest run" drives cargo-nextest, a third-party Rust runner whose
+	// per-test "FAIL [   0.005s] <binary> <test>" output differs from libtest's
+	// "test <name> ... FAILED". cargoTestRe ("cargo test") never matches a
+	// "cargo nextest" invocation, so this is checked first to claim it for the
+	// nextest parser. \b after "nextest" admits "cargo nextest run --no-fail-fast"
+	// while keeping prose like "cargo nextesting" from matching.
+	nextestRe = regexp.MustCompile(`\bcargo nextest\b`)
 	// \brspec\b matches "rspec", "bundle exec rspec", and "bin/rspec" (the slash
 	// is a word boundary) without firing on prose like "rspecs are great".
 	rspecRe = regexp.MustCompile(`\brspec\b`)
@@ -157,6 +167,12 @@ var (
 func classifyTestRunner(command string) testRunner {
 	c := strings.ToLower(command)
 	switch {
+	case nextestRe.MatchString(c):
+		// `cargo nextest run` drives cargo-nextest, whose reporter prints
+		// "FAIL [   0.005s] <binary> <test>" per failure (repeated in the final
+		// Summary block). Checked before the libtest `cargo test` runner since a
+		// "cargo nextest" invocation never contains "cargo test" at a word boundary.
+		return runnerNextest
 	case cargoTestRe.MatchString(c):
 		return runnerCargo
 	case goTestRe.MatchString(c):
@@ -646,6 +662,64 @@ func parseCargoTestFailures(output string) []testFailure {
 				name += " (" + m[2] + ")"
 			}
 			failures = append(failures, testFailure{Name: name + " [build failed]", Detail: compileErr})
+		}
+	}
+	return failures
+}
+
+var (
+	// "        FAIL [   0.005s] my-crate tests::it_works" — cargo-nextest's
+	// per-failure line. Group 1 is the binary id (package "::" target, no
+	// spaces), group 2 the libtest test path. TIMEOUT marks a test killed for
+	// exceeding its slow-timeout, which nextest also counts as a failure. The
+	// same line is reprinted in the trailing "Summary" block, so callers dedupe.
+	nextestFailRe = regexp.MustCompile(`^\s*(?:FAIL|TIMEOUT)\s+\[[^\]]*\]\s+(\S+)\s+(\S+)\s*$`)
+)
+
+// parseNextestFailures collects cargo-nextest "FAIL [..] <binary> <test>" lines
+// (Name is "<binary> <test>") and attaches the matching "thread '<test>'
+// panicked at ..." detail when present, reusing the libtest panic matcher since
+// nextest relays the same captured panic line. The failure line is emitted both
+// inline and in the closing Summary block, so duplicates are dropped. A crate
+// that fails to compile emits no FAIL lines, so a "could not compile `crate`"
+// marker is surfaced as a "[build failed]" entry as in parseCargoTestFailures.
+func parseNextestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	panics := map[string]string{}
+	compileErr := ""
+	for _, ln := range lines {
+		if m := cargoPanicRe.FindStringSubmatch(ln); m != nil {
+			panics[m[1]] = strings.TrimSpace(m[2])
+		}
+		if compileErr == "" {
+			if m := cargoCompileErrRe.FindStringSubmatch(ln); m != nil {
+				compileErr = strings.TrimSpace(m[1])
+			}
+		}
+	}
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		if m := nextestFailRe.FindStringSubmatch(ln); m != nil {
+			name := m[1] + " " + m[2]
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			failures = append(failures, testFailure{Name: name, Detail: panics[m[2]]})
+			continue
+		}
+		if m := cargoCompileFailRe.FindStringSubmatch(ln); m != nil {
+			name := m[1]
+			if m[2] != "" {
+				name += " (" + m[2] + ")"
+			}
+			name += " [build failed]"
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			failures = append(failures, testFailure{Name: name, Detail: compileErr})
 		}
 	}
 	return failures

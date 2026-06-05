@@ -41,9 +41,11 @@ For `definition`, `type_definition`, `implementation`, `references`,
 `incoming_calls`, and `outgoing_calls`, a sorted list of
 `path:line:column: <source line>` entries, workspace-relative where possible;
 the trailing source line is the trimmed code at that site (omitted when the
-file or line cannot be read). `references` additionally leads with a summary
-line (`N references across M files:`) so you can gauge a symbol's blast radius
-at a glance. For `hover`, the language server's text.
+file or line cannot be read). `references`, `incoming_calls`, and
+`outgoing_calls` additionally lead with a summary line (`N references across M
+files:`, `N callers across M files:`, `N callees across M files:`) so you can
+gauge a symbol's blast radius or call-hierarchy fan-out at a glance. For
+`hover`, the language server's text.
 
 Failure cases:
 

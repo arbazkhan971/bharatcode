@@ -27,7 +27,7 @@ import (
 // It includes "skill" because loading a skill's instruction body is a
 // read-only operation and the task agent should be able to consult the
 // same skills as the coder agent.
-var readOnlyTaskTools = []string{"diagnostics", "glob", "grep", "ls", "skill", "symbols", "view", "web_fetch", "web_search"}
+var readOnlyTaskTools = []string{"diagnostics", "glob", "grep", "ls", "navigate", "skill", "symbols", "view", "web_fetch", "web_search"}
 
 // readOnlySet is the membership form of readOnlyTaskTools, used by the Loop's
 // plan-mode restriction to decide whether a tool is read-only. Both share one

@@ -54,6 +54,14 @@ func TestInferContextWindow(t *testing.T) {
 		{"magistral-small-2506", 128_000},
 		{"magistral-medium-latest", 128_000},
 		{"qwen2.5-coder", 32_768},
+		// Qwen3 lifted the window past the 32k Qwen2.x default: Qwen3-Coder is 256k
+		// and the Qwen3 2507 instruct line 128k. Both ids carry the "qwen" marker, so
+		// the specific rules must win over the family default rather than fall to 32k.
+		{"qwen3-coder-480b-a35b-instruct", 262_144},
+		{"qwen3-235b-a22b-instruct-2507", 131_072},
+		{"qwen3-32b", 131_072},
+		// Qwen2.x ids still resolve to the conservative 32k family default.
+		{"qwen2.5-72b-instruct", 32_768},
 		// Microsoft Phi: the hosted Phi-3/3.5 line is 128k, Phi-4 is 16k. The
 		// "dolphin" finetunes contain the substring "phi" but must not match the
 		// specific "phi-3"/"phi-4" markers (they fall through to their base window).

@@ -40,6 +40,8 @@ func TestClassifyTestRunner(t *testing.T) {
 		"node --test":                         runnerTAP,
 		"node --test test/*.js":               runnerTAP,
 		"npx tape test/*.js":                  runnerTAP,
+		"deno test":                           runnerDeno,
+		"deno test --allow-read mod_test.ts":  runnerDeno,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
@@ -674,6 +676,58 @@ ok 2 - subtracts numbers
 1..2`
 	if got := parseTestFailures("node --test", out); got != nil {
 		t.Errorf("expected nil for passing TAP run, got %v", got)
+	}
+}
+
+func TestParseDenoTestFailures(t *testing.T) {
+	out := `running 3 tests from ./math_test.ts
+add ... ok (1ms)
+subtract a number ... FAILED (2ms)
+divide ... FAILED (1ms)
+
+ ERRORS
+
+subtract a number => ./math_test.ts:6:6
+error: AssertionError: Values are not equal.
+    at assertEquals (https://deno.land/std/assert/mod.ts:1:1)
+
+divide => ./math_test.ts:12:6
+error: Error: division by zero
+
+ FAILURES
+
+subtract a number => ./math_test.ts:6:6
+divide => ./math_test.ts:12:6
+
+FAILED | 1 passed | 2 failed (5ms)`
+	got := parseTestFailures("deno test", out)
+	want := []testFailure{
+		{Name: "subtract a number", Detail: "AssertionError: Values are not equal."},
+		{Name: "divide", Detail: "Error: division by zero"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseDenoTestFailures_NoErrorBlock(t *testing.T) {
+	// Only the running outcome lines, no trailing ERRORS block: names still surface.
+	out := `running 2 tests from ./mod_test.ts
+works ... ok (0ms)
+breaks ... FAILED (3ms)`
+	got := parseTestFailures("deno test --allow-read", out)
+	want := []testFailure{
+		{Name: "breaks"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseDenoTestFailures_NoFailures(t *testing.T) {
+	out := `running 2 tests from ./mod_test.ts
+add ... ok (1ms)
+subtract ... ok (0ms)
+
+ok | 2 passed | 0 failed (2ms)`
+	if got := parseTestFailures("deno test", out); got != nil {
+		t.Errorf("expected nil for passing Deno run, got %v", got)
 	}
 }
 

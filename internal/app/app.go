@@ -21,6 +21,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
 	"github.com/arbazkhan971/bharatcode/internal/mcp"
+	"github.com/arbazkhan971/bharatcode/internal/offline"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -52,6 +53,10 @@ type Options struct {
 	YOLO bool
 	// Verbose enables debug logging.
 	Verbose bool
+	// Offline forces sovereignty offline mode on regardless of the
+	// BHARATCODE_OFFLINE environment variable: non-localhost providers are
+	// rejected and the web_fetch/web_search tools are withheld.
+	Offline bool
 }
 
 // App is the assembled BharatCode service graph.
@@ -159,6 +164,19 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		return rollback(fmt.Errorf("constructing config: %w", err))
 	}
 
+	// Sovereignty offline mode: enabled by flag or the BHARATCODE_OFFLINE env
+	// var. When active, every configured provider must be a localhost endpoint
+	// (so prompts and code never leave the machine) and the egress tools are
+	// withheld below. Reject the run early with an actionable error rather than
+	// silently contacting a remote model.
+	offlineMode := opts.Offline || offline.EnabledFromEnv()
+	if offlineMode {
+		if err := offline.CheckProviders(app.Cfg); err != nil {
+			return rollback(err)
+		}
+		logger.Info(offline.Banner)
+	}
+
 	app.Ledger = ledger.New(app.DB, &app.Cfg.Ledger, app.Cfg.Models, app.Bus.Ledger)
 	app.Sessions = session.NewRepo(app.DB)
 	app.FileTracker = filetracker.NewTracker(app.DB, app.Bus.FileChanges)
@@ -205,6 +223,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Bus:         app.Bus.ToolCalls,
 		TodoBus:     app.Bus.Todo,
 		WorkDir:     projectDir,
+		Offline:     offlineMode,
 	})
 
 	providers := configuredProviders(app.Cfg, app.LLM)

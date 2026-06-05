@@ -8,7 +8,10 @@ lightbulb. Typical results are "organize imports", "remove unused declaration",
 By default this tool lists the available actions. To apply one, call it again
 with `apply` set to the action's 1-based number from the listing — useful for
 "organize imports" or a specific quick fix. Only edit-based actions can be
-applied; server-side commands cannot, and the tool says so. For changes the
+applied; server-side commands cannot, and the tool says so. Refactorings that
+the server returns without an inline edit (it computes one on demand, as gopls
+and rust-analyzer do for "extract function") are resolved automatically when
+applied. For changes the
 server does not offer, make the edit yourself with `edit`/`multiedit`, or call
 `format` for whole-file reformatting.
 

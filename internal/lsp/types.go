@@ -137,6 +137,12 @@ type CodeAction struct {
 	Kind    string
 	Edit    WorkspaceEdit
 	Command *Command
+	// Data is the raw JSON of the original action object as the server sent it.
+	// Servers that advertise resolveProvider often return an action with an empty
+	// Edit and rely on a follow-up codeAction/resolve request — which echoes this
+	// exact object back — to compute the edit lazily. It is nil for bare Command
+	// responses, which are not resolvable.
+	Data json.RawMessage
 }
 
 // Command names a server-side command a code action runs, identified by the

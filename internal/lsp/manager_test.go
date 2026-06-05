@@ -470,6 +470,14 @@ func TestCodeActionsReturnsActions(t *testing.T) {
 	rng := Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}}
 	actions, err := manager.CodeActions(ctx, source, rng)
 	require.NoError(t, err)
+	// A CodeAction entry retains the raw server object as resolve data; a bare
+	// command entry does not. Assert that distinction, then clear Data so the rest
+	// of the structure can be compared against fixed expectations.
+	require.NotEmpty(t, actions[0].Data, "CodeAction entry should carry resolve data")
+	require.Empty(t, actions[1].Data, "bare command entry should carry no resolve data")
+	for i := range actions {
+		actions[i].Data = nil
+	}
 	require.Equal(t, []CodeAction{
 		{
 			Title: "Remove unused import",

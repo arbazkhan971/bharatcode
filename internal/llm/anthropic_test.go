@@ -740,21 +740,23 @@ func TestAnthropicThinkingBudgetLiftsMaxTokens(t *testing.T) {
 		defer server.Close()
 
 		provider := newAnthropicThinkingProvider(t, server.URL)
-		// No explicit MaxTokens, so it resolves to defaultAnthropicMaxTokens, which
-		// is below this budget and must be lifted above it.
+		// No explicit MaxTokens, so it resolves to the model's inferred output cap
+		// (64k for claude-sonnet-4). A budget at that cap leaves no room for a
+		// visible answer, so the cap must be lifted strictly above the budget.
+		const budget = 64_000
 		events, err := provider.Stream(context.Background(), Request{
 			Model: "claude-sonnet-4-20250514",
 			Messages: []message.Message{{
 				Role:    message.RoleUser,
 				Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
 			}},
-			Thinking: &ThinkingConfig{BudgetTokens: 8192},
+			Thinking: &ThinkingConfig{BudgetTokens: budget},
 		})
 		require.NoError(t, err)
 		_ = collectEvents(events)
 
-		require.Equal(t, 8192, captured.Thinking.BudgetTokens)
-		require.Equal(t, 8192+defaultAnthropicMaxTokens, captured.MaxTokens)
+		require.Equal(t, budget, captured.Thinking.BudgetTokens)
+		require.Equal(t, budget+defaultAnthropicMaxTokens, captured.MaxTokens)
 		require.Greater(t, captured.MaxTokens, captured.Thinking.BudgetTokens)
 	})
 
@@ -784,6 +786,52 @@ func TestAnthropicThinkingBudgetLiftsMaxTokens(t *testing.T) {
 		// The caller's cap already exceeds the budget, so it is left untouched.
 		require.Equal(t, 4096, captured.MaxTokens)
 	})
+}
+
+// TestAnthropicDefaultMaxTokensIsModelAware asserts that a request leaving
+// MaxTokens unset defaults to the model's inferred output cap (so long answers
+// from the modern Claude line are not truncated at the old flat 4096), while a
+// model id outside the known families still falls back to that conservative
+// default. An explicit MaxTokens always wins over both.
+func TestAnthropicDefaultMaxTokensIsModelAware(t *testing.T) {
+	cases := []struct {
+		name      string
+		model     string
+		maxTokens int
+		want      int
+	}{
+		{"modern claude defaults to inferred cap", "claude-sonnet-4-5", 0, 64_000},
+		{"opus 4 defaults to its 32k cap", "claude-opus-4-20250514", 0, 32_000},
+		{"unknown id falls back to flat default", "test-model", 0, defaultAnthropicMaxTokens},
+		{"explicit max_tokens wins", "claude-sonnet-4-5", 1234, 1234},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured anthropicRequest
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				require.NoError(t, json.Unmarshal(b, &captured))
+				writeMinimalAnthropicSSE(w, `{"input_tokens":4,"output_tokens":1}`)
+			}))
+			defer server.Close()
+
+			provider := newAnthropicTestProvider(t, server.URL)
+			events, err := provider.Stream(context.Background(), Request{
+				Model:     tc.model,
+				MaxTokens: tc.maxTokens,
+				Messages: []message.Message{{
+					Role:    message.RoleUser,
+					Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+				}},
+			})
+			require.NoError(t, err)
+			_ = collectEvents(events)
+
+			require.Equal(t, tc.want, captured.MaxTokens)
+		})
+	}
 }
 
 // TestAnthropicSkipsRedactedThinking asserts a redacted_thinking content block

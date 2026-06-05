@@ -66,6 +66,44 @@ testing.tRunner.func1.2(...)
 	assertFailures(t, got, want)
 }
 
+func TestParseGoTestFailures_BuildFailed(t *testing.T) {
+	out := `# github.com/x/y [github.com/x/y.test]
+./y_test.go:10:2: undefined: helper
+./y_test.go:14:6: f declared and not used
+FAIL	github.com/x/y [build failed]`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "github.com/x/y [build failed]", Detail: "./y_test.go:10:2: undefined: helper"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_SetupFailed(t *testing.T) {
+	out := "FAIL\tgithub.com/x/y [setup failed]"
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "github.com/x/y [setup failed]"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_BuildFailedPerPackage(t *testing.T) {
+	// Each "# pkg" header scopes the compiler error that follows, so a build
+	// failure picks up its own package's error rather than a stale one.
+	out := `# github.com/x/a [github.com/x/a.test]
+./a_test.go:3:2: undefined: a
+FAIL	github.com/x/a [build failed]
+# github.com/x/b [github.com/x/b.test]
+./b_test.go:5:9: undefined: b
+FAIL	github.com/x/b [build failed]`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "github.com/x/a [build failed]", Detail: "./a_test.go:3:2: undefined: a"},
+		{Name: "github.com/x/b [build failed]", Detail: "./b_test.go:5:9: undefined: b"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseGoTestNoFailures(t *testing.T) {
 	out := "ok  \tgithub.com/x/y\t0.123s\n"
 	if got := parseTestFailures("go test ./...", out); got != nil {

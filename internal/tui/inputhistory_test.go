@@ -228,6 +228,31 @@ func TestMatchSlash_FuzzyFallback(t *testing.T) {
 		"a token that is not even a subsequence still matches nothing")
 }
 
+// TestMatchSlash_FuzzyRanksByRelevance asserts the fuzzy fallback orders its
+// matches by relevance rather than canonical order: a command that contains the
+// token as a contiguous substring sorts ahead of ones that only match it as a
+// scattered subsequence, and within the subsequence band the tighter match span
+// wins. For "/et", "/budget" contains "et" outright, so it leads "/agent" and
+// "/export"; "/agent" then precedes "/export" because its e..t span is tighter.
+func TestMatchSlash_FuzzyRanksByRelevance(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, []string{"/budget", "/agent", "/export"}, matchSlash("/et"),
+		"substring match leads, then subsequence matches by tightest span")
+}
+
+// TestMatchSlash_FuzzyRankedTabCompletesBest asserts the relevance ranking flows
+// through Tab completion, so the first Tab lands on the best fuzzy match.
+func TestMatchSlash_FuzzyRankedTabCompletesBest(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/et")
+	_, _ = m.Update(keyTab())
+	require.Equal(t, "/budget", m.input.String(),
+		"Tab completes the highest-ranked fuzzy match first")
+}
+
 // TestMatchSlash_FuzzyCompletesViaTab asserts the fuzzy fallback flows through
 // the end-to-end Tab completion path, not just the matcher in isolation.
 func TestMatchSlash_FuzzyCompletesViaTab(t *testing.T) {

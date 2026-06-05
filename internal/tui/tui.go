@@ -659,7 +659,14 @@ func (m *model) handleUnknownSlash(text string) (tea.Model, tea.Cmd) {
 	if handled, model, cmd := m.handleRegistryRecipe(name, args); handled {
 		return model, cmd
 	}
-	m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Unknown command", Body: text, Theme: m.theme})
+	body := text
+	if s := suggestSlash(name); s != "" {
+		// Point a likely typo at its closest built-in command so the user can
+		// fix it without reopening /help, matching how git and the Claude Code /
+		// opencode command palettes suggest the nearest command.
+		body += "\n\nDid you mean " + s + "?"
+	}
+	m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Unknown command", Body: body, Theme: m.theme})
 	return m, nil
 }
 

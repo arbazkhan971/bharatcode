@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -154,8 +155,11 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 }
 
 // locationsResult renders LSP locations as a sorted, deduplicated list of
-// `path:line:column` entries, paths made workspace-relative where possible. An
-// empty input returns the supplied empty message.
+// `path:line:column: <source line>` entries, paths made workspace-relative
+// where possible. The trailing source line is the trimmed text at the location
+// so the model sees the code at each site, not just coordinates (matching how
+// goose/opencode surface navigation results); it is omitted when the file or
+// line cannot be read. An empty input returns the supplied empty message.
 func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
 	if len(locs) == 0 {
 		return Result{Content: emptyMsg}
@@ -171,6 +175,7 @@ func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
 		return locs[i].Range.Start.Character < locs[j].Range.Start.Character
 	})
 
+	lineCache := map[string][]string{}
 	var b strings.Builder
 	var last string
 	for _, l := range locs {
@@ -184,8 +189,30 @@ func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
 		}
 		last = entry
 		b.WriteString(entry)
+		if snippet := sourceLine(lineCache, l.Path, l.Range.Start.Line); snippet != "" {
+			b.WriteString(": ")
+			b.WriteString(snippet)
+		}
 		b.WriteByte('\n')
 	}
 
 	return Result{Content: strings.TrimRight(b.String(), "\n")}
+}
+
+// sourceLine returns the trimmed text of the zero-based line in path, reading
+// and caching the file's lines on first access. It returns "" when the file
+// cannot be read or the line is out of range, so callers fall back to bare
+// coordinates rather than failing.
+func sourceLine(cache map[string][]string, path string, line int) string {
+	lines, ok := cache[path]
+	if !ok {
+		if data, err := os.ReadFile(path); err == nil {
+			lines = strings.Split(string(data), "\n")
+		}
+		cache[path] = lines
+	}
+	if line < 0 || line >= len(lines) {
+		return ""
+	}
+	return strings.TrimSpace(lines[line])
 }

@@ -190,6 +190,76 @@ func TestCodeActionsApplyWritesEditAndDiffs(t *testing.T) {
 	require.Equal(t, "Organize Imports", result.Metadata["applied"])
 }
 
+func TestCodeActionsApplySurfacesPostWriteDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range: lsp.Range{
+					Start: lsp.Position{Line: 0, Character: 0},
+					End:   lsp.Position{Line: 0, Character: 12},
+				},
+				NewText: "package widget",
+			}}},
+		}},
+	}}
+	tool := &codeActionsTool{
+		source:  src,
+		workDir: dir,
+		diag: &fakeDiagnoser{diags: []lsp.Diagnostic{
+			diag(path, 0, 0, lsp.Error, "package name mismatch"),
+		}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The applied edit lands and its diff is shown, then the re-check surfaces the
+	// error the action introduced, matching the edit/write/rename tools.
+	require.Contains(t, result.Content, `applied "Organize Imports"`)
+	require.Contains(t, result.Content, "package name mismatch")
+	require.Contains(t, result.Content, "please fix")
+	require.Contains(t, result.Metadata["diagnostics"], "package name mismatch")
+}
+
+func TestCodeActionsApplyOmitsDiagnosticsWhenClean(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range: lsp.Range{
+					Start: lsp.Position{Line: 0, Character: 0},
+					End:   lsp.Position{Line: 0, Character: 12},
+				},
+				NewText: "package widget",
+			}}},
+		}},
+	}}
+	// Only hint-level diagnostics: nothing actionable should be appended.
+	tool := &codeActionsTool{
+		source:  src,
+		workDir: dir,
+		diag: &fakeDiagnoser{diags: []lsp.Diagnostic{
+			diag(path, 0, 0, lsp.Hint, "consider simplifying"),
+		}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.NotContains(t, result.Content, "Diagnostics after editing")
+	require.Nil(t, result.Metadata["diagnostics"])
+}
+
 func TestCodeActionsApplyRejectsCommandOnlyAction(t *testing.T) {
 	dir := t.TempDir()
 	writeCodeActionsFile(t, dir)

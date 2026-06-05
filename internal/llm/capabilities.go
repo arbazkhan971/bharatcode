@@ -318,6 +318,12 @@ var contextWindowRules = []struct {
 	// specific rules must precede the family one to avoid falling through to 32k.
 	{"mistral-medium", 128_000},
 	{"mistral-nemo", 128_000},
+	// Mistral Small 3 / 3.1 / 3.2 (mistral-small-2501/2503/2506, and the
+	// mistral-small-latest alias that now tracks them) ship a 128k window, four
+	// times the 32k of the original Mistral Small 2402. The id carries the
+	// "mistral" marker, so this specific rule must precede the family one to
+	// avoid resolving the current Small line to a quarter of its real window.
+	{"mistral-small", 128_000},
 	{"mistral", 32_768},
 	// Alibaba Qwen — the Qwen3 generation lifted the window well past the 32k
 	// Qwen2.x default: the Qwen3-Max flagship and Qwen3-Coder line ship a 256k

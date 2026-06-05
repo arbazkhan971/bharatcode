@@ -166,7 +166,12 @@ func mentionsContextLimit(s string) bool {
 	s = strings.ToLower(s)
 	return strings.Contains(s, "context length") ||
 		strings.Contains(s, "maximum context") ||
-		strings.Contains(s, "too many tokens")
+		strings.Contains(s, "too many tokens") ||
+		// Gemini phrases an over-budget prompt as "The input token count (X)
+		// exceeds the maximum number of tokens allowed (Y)." rather than using the
+		// OpenAI/Anthropic wording above, so match its marker too.
+		strings.Contains(s, "exceeds the maximum number of tokens") ||
+		strings.Contains(s, "input token count")
 }
 
 type sseEvent struct {

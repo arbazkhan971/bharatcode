@@ -37,11 +37,26 @@ var dollarArgPattern = regexp.MustCompile(`\$(\$|@|ARGUMENTS|[0-9]+)`)
 // directory. Its Name is the source filename with the .md extension
 // stripped, and Template is the trimmed file body, which may contain
 // {{var}} placeholders interpolated at render time.
+//
+// A prompt file may begin with an optional YAML-style frontmatter block,
+// fenced by lines containing only "---". Recognised keys are description
+// (a one-line summary shown in /help listings) and argument-hint (a short
+// usage hint such as "<file> <concern>"). The frontmatter is stripped from
+// the file before Template is computed, so placeholders never see it.
+// Matching Claude Code / opencode custom-command conventions, the keys are
+// case-insensitive and argument_hint is accepted as a synonym for
+// argument-hint. Unknown keys are ignored.
 type Prompt struct {
 	// Name is the invokable prompt name, e.g. "triage" for triage.md.
 	Name string `json:"name"`
 	// Template is the trimmed Markdown body with {{var}} placeholders.
 	Template string `json:"template"`
+	// Description is the optional one-line summary from frontmatter, shown in
+	// command listings. It is empty when the file declares no description.
+	Description string `json:"description,omitempty"`
+	// ArgumentHint is the optional usage hint from frontmatter, e.g.
+	// "<file> <concern>". It is empty when the file declares none.
+	ArgumentHint string `json:"argument_hint,omitempty"`
 	// Source is the absolute path of the file the prompt was loaded from.
 	Source string `json:"source"`
 }
@@ -102,10 +117,17 @@ func (r *PromptRegistry) loadDir(dir string) error {
 			return fmt.Errorf("reading prompt file %s: %w", path, err)
 		}
 		promptName := strings.TrimSuffix(name, filepath.Ext(name))
+		meta, body := parseFrontmatter(string(data))
+		hint := meta["argument-hint"]
+		if hint == "" {
+			hint = meta["argument_hint"]
+		}
 		r.prompts[promptName] = Prompt{
-			Name:     promptName,
-			Template: strings.TrimSpace(string(data)),
-			Source:   path,
+			Name:         promptName,
+			Template:     strings.TrimSpace(body),
+			Description:  meta["description"],
+			ArgumentHint: hint,
+			Source:       path,
 		}
 	}
 	return nil
@@ -127,6 +149,73 @@ func (r *PromptRegistry) Names() []string {
 func (r *PromptRegistry) Get(name string) (Prompt, bool) {
 	p, ok := r.prompts[name]
 	return p, ok
+}
+
+// List returns every registered prompt, including its frontmatter metadata,
+// sorted by Name. The result is a fresh slice the caller may modify freely; it
+// lets command listings present custom prompts with their descriptions and
+// argument hints.
+func (r *PromptRegistry) List() []Prompt {
+	out := make([]Prompt, 0, len(r.prompts))
+	for _, p := range r.prompts {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// parseFrontmatter splits an optional leading YAML-style frontmatter block from
+// the prompt body. The block must start at the very beginning of the file
+// (after an optional UTF-8 BOM) with a line containing only "---" and end at
+// the next such line; its interior is parsed as case-insensitive "key: value"
+// pairs with surrounding quotes stripped from values. When no well-formed block
+// is present the whole input is returned as the body and meta is nil, so a
+// document that merely contains a "---" horizontal rule mid-text is untouched.
+func parseFrontmatter(raw string) (meta map[string]string, body string) {
+	s := strings.TrimPrefix(raw, "\ufeff")
+	lines := strings.Split(s, "\n")
+	if len(lines) == 0 || strings.TrimRight(lines[0], "\r") != "---" {
+		return nil, raw
+	}
+	end := -1
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimRight(lines[i], "\r") == "---" {
+			end = i
+			break
+		}
+	}
+	if end == -1 {
+		// No closing fence: treat the whole file as body to avoid swallowing it.
+		return nil, raw
+	}
+	meta = make(map[string]string)
+	for _, line := range lines[1:end] {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		meta[key] = unquoteValue(strings.TrimSpace(value))
+	}
+	return meta, strings.Join(lines[end+1:], "\n")
+}
+
+// unquoteValue strips a single pair of matching surrounding single or double
+// quotes from a frontmatter value, leaving unquoted values untouched.
+func unquoteValue(v string) string {
+	if len(v) >= 2 {
+		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
+			return v[1 : len(v)-1]
+		}
+	}
+	return v
 }
 
 // Render looks up the named prompt and interpolates its {{var}}

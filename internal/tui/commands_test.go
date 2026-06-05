@@ -620,3 +620,27 @@ func TestSlashHelp_ListsRegisteredRecipes(t *testing.T) {
 	require.Contains(t, out, "/daily-standup", "registered recipe name must appear in /help output")
 	require.Contains(t, out, "Daily standup", "registered recipe title must appear in /help output")
 }
+
+// TestSlashHelp_ListsCustomPromptsWithFrontmatter asserts that registered
+// custom prompts appear in /help, documented by their frontmatter description
+// and argument hint.
+func TestSlashHelp_ListsCustomPromptsWithFrontmatter(t *testing.T) {
+	m := newSizedModel(t)
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "triage.md"),
+		[]byte("---\ndescription: Triage a flaky test\nargument-hint: <test-name>\n---\nTriage {{input}} now."),
+		0o644,
+	))
+	reg, err := config.LoadPromptRegistry(dir)
+	require.NoError(t, err)
+	m.deps.Prompts = reg
+
+	m.helpVisible = true
+	out := plainText(m.renderMain())
+
+	require.Contains(t, out, "/triage", "registered prompt name must appear in /help output")
+	require.Contains(t, out, "<test-name>", "prompt argument hint must appear in /help output")
+	require.Contains(t, out, "Triage a flaky test", "prompt description must appear in /help output")
+}

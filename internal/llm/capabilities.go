@@ -139,7 +139,13 @@ var contextWindowRules = []struct {
 	// specific "sonar-pro" marker must precede the bare "sonar".
 	{"sonar-pro", 200_000},
 	{"sonar", 128_000},
-	// Common open-weight families served via openai_compatible/ollama.
+	// Common open-weight families served via openai_compatible/ollama. The
+	// Llama 4 line lifted the window far above the 128k Llama 3.x default —
+	// Scout to 10M and Maverick to 1M — and both ids carry the "llama" marker,
+	// so the specific "llama-4-scout"/"llama-4" rules must precede the family
+	// one to avoid falling through to 128k.
+	{"llama-4-scout", 10_485_760},
+	{"llama-4", 1_048_576},
 	{"llama", 128_000},
 	{"mixtral", 32_768},
 	// Mistral's Codestral exposes a 256k window, far larger than the rest of the

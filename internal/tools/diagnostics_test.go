@@ -185,6 +185,33 @@ func TestDiagnosticsSummaryHeaderHelper(t *testing.T) {
 	require.Equal(t, "2 diagnostics across 1 file (1 error, 1 hint):", got)
 }
 
+// TestDiagnosticsShowsOffendingSourceLine asserts the rendered output places the
+// trimmed source line at fault indented beneath each diagnostic, so the model
+// sees the code without a separate view, and that a diagnostic pointing past the
+// end of the file degrades to the message line alone.
+func TestDiagnosticsShowsOffendingSourceLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n\nfunc main() { undefined() }\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 13}}, Severity: lsp.Error, Message: "undefined: undefined"},
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 9, Character: 0}}, Severity: lsp.Warning, Message: "phantom"},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// The error's source line is shown, trimmed and indented, on its own line.
+	require.Contains(t, result.Content, "main.go:3:14: error: undefined: undefined")
+	require.Contains(t, result.Content, "\n    func main() { undefined() }\n")
+	// The out-of-range warning falls back to the message line with no snippet.
+	require.Contains(t, result.Content, "main.go:10:1: warning: phantom")
+	require.NotContains(t, result.Content, "    phantom")
+}
+
 // TestDiagnosticFilesScansRootNamedLikeIgnored guards the path != root exception:
 // when the workspace root itself is named like an ignored directory, its files
 // are still scanned rather than the whole tree being skipped.

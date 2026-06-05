@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,5 +91,80 @@ func TestWebFetchRunReturnsCodeBlock(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "```\ngo build ./...\ngo test ./...\n```") {
 		t.Fatalf("fetched code block not preserved.\ngot:\n%s", res.Content)
+	}
+}
+
+func TestIsBlockedFetchIP(t *testing.T) {
+	cases := []struct {
+		ip      string
+		blocked bool
+	}{
+		// Cloud-metadata endpoint (link-local) — the headline SSRF target.
+		{"169.254.169.254", true},
+		{"169.254.0.1", true},
+		// Private networks.
+		{"10.0.0.1", true},
+		{"172.16.5.4", true},
+		{"192.168.1.1", true},
+		{"fd00::1", true}, // IPv6 unique-local (fc00::/7)
+		// Other non-public ranges.
+		{"0.0.0.0", true},
+		{"::", true},
+		{"224.0.0.1", true}, // multicast
+		{"fe80::1", true},   // IPv6 link-local
+		// Allowed: loopback (localhost dev servers) and public addresses.
+		{"127.0.0.1", false},
+		{"::1", false},
+		{"8.8.8.8", false},
+		{"1.1.1.1", false},
+		{"2606:4700:4700::1111", false},
+	}
+	for _, c := range cases {
+		ip := net.ParseIP(c.ip)
+		if ip == nil {
+			t.Fatalf("test bug: unparseable IP %q", c.ip)
+		}
+		if got := isBlockedFetchIP(ip); got != c.blocked {
+			t.Errorf("isBlockedFetchIP(%s) = %v, want %v", c.ip, got, c.blocked)
+		}
+	}
+}
+
+func TestWebFetchBlocksMetadataEndpoint(t *testing.T) {
+	// The model must not be able to point web_fetch at the cloud-metadata IP.
+	// The guard rejects the dial before any TCP connection, so this is fast.
+	tool := newWebFetchTool(Dependencies{})
+	args, _ := json.Marshal(map[string]string{"url": "http://169.254.169.254/latest/meta-data/"})
+	res, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected an error result for the metadata endpoint, got: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "non-public") {
+		t.Fatalf("error message should explain the block.\ngot:\n%s", res.Content)
+	}
+}
+
+func TestWebFetchBlocksRedirectToPrivate(t *testing.T) {
+	// A public-looking page that redirects into a blocked range must still be
+	// refused: the Control hook runs on every dial, including the redirect's.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://10.0.0.1/internal", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	tool := newWebFetchTool(Dependencies{})
+	args, _ := json.Marshal(map[string]string{"url": srv.URL})
+	res, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected redirect into a private range to be refused, got: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "non-public") {
+		t.Fatalf("error message should explain the block.\ngot:\n%s", res.Content)
 	}
 }

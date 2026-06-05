@@ -53,6 +53,15 @@ func TestFormatAppliesEditsAndWritesFile(t *testing.T) {
 	require.Contains(t, result.Content, "formatted main.go")
 	require.Contains(t, result.Content, "1 edit")
 
+	// The result surfaces a unified diff of the reformatting, both inline in the
+	// content and as structured metadata, mirroring the edit tool.
+	require.Contains(t, result.Content, "func  f(){}")
+	require.Contains(t, result.Content, "func f() {}")
+	diff, ok := result.Metadata["diff"].(string)
+	require.True(t, ok, "expected a diff in metadata")
+	require.Contains(t, diff, "+func f() {}")
+	require.Contains(t, diff, "-func  f(){}")
+
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "package main\nfunc f() {}\n", string(got))

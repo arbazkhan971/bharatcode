@@ -24,8 +24,11 @@ What success looks like:
 
 The result is a sorted list formatted as `path:line:column: kind name`. In a file
 outline the symbol's signature or type is appended when the language server
-supplies one (e.g. `function Add func(a int, b int) int`), and the enclosing
-container is appended as `(in container)` when present.
+supplies one (e.g. `function Add func(a int, b int) int`). A full file outline is
+rendered as an indented tree: nested symbols (a struct's fields, a class's
+methods) are indented two spaces per level beneath their container. A workspace
+search or a filtered outline stays flat and appends the enclosing container as
+`(in container)` when present.
 
 Failure cases:
 

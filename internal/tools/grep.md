@@ -9,6 +9,7 @@ Arguments:
 - `pattern` string, required: regular expression to search for.
 - `path` string, optional: workspace-relative file or directory. Defaults to the workspace root.
 - `include` string, optional: file-name glob such as `*.go` to narrow the search.
+- `exclude` string, optional: file-name glob to skip, the inverse of `include` (like `rg -g '!pattern'`); e.g. `*_test.go` to search everything except Go test files. Combine with `include` — a file must match `include` AND not match `exclude`.
 - `type` string, optional: filter to a language by file type, like `rg --type go` (e.g. `go`, `py`, `js`, `ts`, `rust`, `java`, `c`, `cpp`, `html`, `css`, `json`, `yaml`, `md`). Combine with `include` to narrow further — both filters must pass.
 - `output_mode` string, optional: `content`, `files_with_matches`, or `count`.
 - `context` integer, optional: number of lines to show before **and** after each match (like `rg -C`). Takes precedence over `before`/`after` when all three are set.
@@ -101,6 +102,17 @@ rg's own larger built-in type set — so a `type` query selects exactly the same
 files whether or not ripgrep is installed. `type` and `include` combine with AND
 semantics: a file must match both. An unknown type name returns an error listing
 the supported names.
+
+Excluding files:
+
+Set `exclude` to a file-name glob to skip files that match it, the inverse of
+`include` and the analogue of ripgrep's `rg -g '!pattern'`. For example,
+`exclude: "*_test.go"` searches every Go file except test files, and
+`exclude: "*.min.js"` skips minified bundles. When both `include` and `exclude`
+are given the filters AND: a file must match `include` and must not match
+`exclude`. On the ripgrep path this becomes a negated `--glob`; the Go fallback
+matches the glob against each file's base name, so both paths select the same
+files whether or not ripgrep is installed. A malformed glob returns an error.
 
 Match cap:
 

@@ -167,6 +167,22 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 			b.WriteString(snippet)
 			b.WriteByte('\n')
 		}
+		// Surface any related locations the server linked to this diagnostic (the
+		// conflicting declaration, the import's use site) so the model can act on
+		// the cross-reference without a separate lookup, matching goose/opencode.
+		for _, rel := range d.Related {
+			relPath := rel.Location.Path
+			if r, err := filepath.Rel(root, rel.Location.Path); err == nil && !strings.HasPrefix(r, "..") {
+				relPath = filepath.ToSlash(r)
+			}
+			fmt.Fprintf(
+				&b, "    related: %s:%d:%d: %s\n",
+				relPath,
+				rel.Location.Range.Start.Line+1,
+				rel.Location.Range.Start.Character+1,
+				rel.Message,
+			)
+		}
 	}
 
 	return Result{

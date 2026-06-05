@@ -289,7 +289,7 @@ func (m *model) handleDiff() (tea.Model, tea.Cmd) {
 	// Lead with a diffstat summary so the scope of the change is visible before
 	// scrolling, matching the header Claude Code and opencode show above a diff.
 	// A multi-file change gets a per-file breakdown beneath the aggregate line.
-	if stat := viewer.StatLines(patch); stat != "" {
+	if stat := viewer.StatLines(patch, max(1, m.width-6)); stat != "" {
 		rendered = stat + "\n\n" + rendered
 	}
 	m.dialogs.Push(&dialog.Text{DialogID: "diff", Title: "Diff", Body: rendered, Theme: m.theme})

@@ -148,6 +148,12 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 			symbolKindString(s.Kind),
 			s.Name,
 		)
+		// The server-supplied signature/type (e.g. "func(x int) error") makes the
+		// outline far more useful than bare names, matching how goose/opencode
+		// render document outlines. Only document symbols carry it.
+		if s.Detail != "" {
+			fmt.Fprintf(&b, " %s", s.Detail)
+		}
 		if s.ContainerName != "" {
 			fmt.Fprintf(&b, " (in %s)", s.ContainerName)
 		}

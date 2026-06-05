@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
+	"github.com/arbazkhan971/bharatcode/internal/audit"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
@@ -58,6 +59,7 @@ type Options struct {
 type App struct {
 	Cfg         *config.Config
 	DB          *db.DB
+	Audit       *audit.Store
 	Bus         *Bus
 	LLM         *llm.Registry
 	Sessions    *session.Repo
@@ -148,6 +150,15 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		return app.DB.Close()
 	}})
 
+	auditPath := filepath.Join(filepath.Dir(dbPath), "audit.db")
+	app.Audit, err = audit.Open(rootCtx, auditPath)
+	if err != nil {
+		return rollback(fmt.Errorf("constructing audit log: %w", err))
+	}
+	closers = append(closers, closeStep{name: "audit", close: func(context.Context) error {
+		return app.Audit.Close()
+	}})
+
 	app.Bus = newBus()
 	closers = append(closers, closeStep{name: "pubsub", close: func(context.Context) error {
 		app.Bus.Close()
@@ -170,6 +181,9 @@ func New(ctx context.Context, opts Options) (*App, error) {
 
 	app.Permission = permission.New(app.Cfg, app.Bus.Permission)
 	app.Permission.SetYolo(opts.YOLO)
+	// Record every permission decision in the append-only audit log so the user
+	// can later prove exactly what the agent was authorized to do.
+	app.Permission.SetAuditLogger(app.Audit.PermissionLogger())
 
 	app.Shell = shell.New(app.Bus.Shell, shell.WithSandboxMode(shell.ParseSandboxMode(app.Cfg.Sandbox.Mode)))
 	closers = append(closers, closeStep{name: "shell", close: func(context.Context) error {
@@ -275,6 +289,7 @@ func newBus() *Bus {
 func (a *App) closeSteps() []closeStep {
 	return []closeStep{
 		{name: "db", close: closeDB(a.DB)},
+		{name: "audit", close: closeAudit(a.Audit)},
 		{name: "pubsub", close: closeBus(a.Bus)},
 		{name: "shell", close: closeShell(a.Shell)},
 		{name: "lsp", close: closeLSP(a.LSP)},
@@ -324,6 +339,15 @@ func closeBus(b *Bus) func(context.Context) error {
 	return func(context.Context) error {
 		b.Close()
 		return nil
+	}
+}
+
+func closeAudit(store *audit.Store) func(context.Context) error {
+	return func(context.Context) error {
+		if store == nil {
+			return nil
+		}
+		return store.Close()
 	}
 }
 

@@ -1090,7 +1090,7 @@ func keybindingHelpBody() string {
 		"Ctrl+C     interrupt the agent, or quit on an empty prompt",
 		"Ctrl+T     new tab",
 		"Ctrl+W     close tab",
-		"Ctrl+←/→   switch to the previous/next tab",
+		"Ctrl+←/→   switch to the previous/next tab (also Ctrl+Shift+Tab/Ctrl+Tab)",
 		"Ctrl+P     open the model picker",
 		"Ctrl+A     open the agent picker",
 		"Ctrl+S     open settings",

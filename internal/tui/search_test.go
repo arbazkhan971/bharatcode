@@ -176,6 +176,49 @@ func TestSearchNextPrev_CyclesThroughMatches(t *testing.T) {
 	require.Contains(t, rendered(), matchLine(1))
 }
 
+// TestSearchEscClears asserts that pressing Esc while a search is active
+// cancels it: the matches are dropped and the status segment goes empty, the
+// way an editor or pager clears its search on Esc.
+func TestSearchEscClears(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	chatH := m.layout.chat.H
+
+	total := chatH * 4
+	hits := []int{3, chatH + 5, 3*chatH + 2}
+	seedScrollableTranscript(m, total, hits)
+
+	m.input.WriteString("/search ZZNEEDLE")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+	require.True(t, m.search.active(), "the search must be active before Esc")
+	// Dismiss the transient result dialog so Esc reaches the chat key handler
+	// rather than the dialog's own dismissal.
+	m.dialogs.Pop()
+
+	_, _ = m.Update(keySpecial("esc", tea.KeyEsc))
+	require.False(t, m.search.active(), "Esc must clear the active search")
+	require.Equal(t, "", m.search.statusSegment(),
+		"a cleared search contributes no status segment")
+	require.Equal(t, "", m.status.Search,
+		"Esc must also clear the status bar's search segment")
+}
+
+// TestSearchEsc_InertWhenNoSearch asserts that Esc does not disturb an
+// un-searched view: with no active search it falls through to its other roles
+// (hiding the help listing) rather than consuming the keypress for the search.
+func TestSearchEsc_InertWhenNoSearch(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.helpVisible = true
+
+	_, _ = m.Update(keySpecial("esc", tea.KeyEsc))
+	require.False(t, m.helpVisible, "Esc with no active search must hide the help listing")
+}
+
 // TestSlashSearch_RepeatedSameTermAdvances asserts re-running /search with the
 // same term walks to the next match rather than re-anchoring to the first, so
 // repeated invocations cycle like an editor's search-again.

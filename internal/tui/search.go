@@ -95,7 +95,7 @@ func (m *model) startSearch(term string) tea.Model {
 	m.dialogs.Push(&dialog.Text{
 		DialogID: "search",
 		Title:    "Search",
-		Body:     fmt.Sprintf("Match 1 of %d for %q. /search again or Ctrl+/ for next; Ctrl+\\ for previous.", len(matches), term),
+		Body:     fmt.Sprintf("Match 1 of %d for %q. /search again or Ctrl+/ for next; Ctrl+\\ for previous; Esc to clear.", len(matches), term),
 		Theme:    m.theme,
 	})
 	return m

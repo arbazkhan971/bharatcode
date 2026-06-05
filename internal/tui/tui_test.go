@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
@@ -315,4 +316,29 @@ func TestStatusbar_UptimeTickMonotonic(t *testing.T) {
 	second := m.status.Render(120)
 	require.Contains(t, first, "1s")
 	require.Contains(t, second, "2s")
+}
+
+func TestFirstNonEmptyLine_SkipsBlankLeadingLines(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "real content", firstNonEmptyLine("\n  \n\treal content\nsecond"))
+	require.Equal(t, "", firstNonEmptyLine("\n   \n\t\n"))
+}
+
+func TestFirstNonEmptyLine_TruncatesByRuneWithoutSplitting(t *testing.T) {
+	t.Parallel()
+
+	// A line of multi-byte runes whose byte length exceeds the cap but whose
+	// rune count does not must pass through untouched, and a genuinely over-long
+	// multi-byte line must be cut on a rune boundary into valid UTF-8 with an
+	// ellipsis — never sliced mid-rune into a replacement character.
+	short := strings.Repeat("é", 40) // 40 runes, 80 bytes
+	require.Equal(t, short, firstNonEmptyLine(short))
+
+	long := strings.Repeat("é", 80) // 80 runes, 160 bytes
+	got := firstNonEmptyLine(long)
+	require.True(t, utf8.ValidString(got), "truncation must produce valid UTF-8")
+	require.True(t, strings.HasSuffix(got, "…"))
+	require.Equal(t, 60, utf8.RuneCountInString(got), "result should be capped at the rune limit")
+	require.NotContains(t, got, "�", "no rune should be split into the replacement character")
 }

@@ -1043,8 +1043,11 @@ func firstNonEmptyLine(s string) string {
 			continue
 		}
 		const maxLen = 60
-		if len(line) > maxLen {
-			return line[:maxLen-1] + "…"
+		// Measure and cut by rune, not byte, so a multi-byte character (an
+		// accented letter, CJK glyph, or emoji in a prompt template) is never
+		// sliced mid-rune into invalid UTF-8.
+		if runes := []rune(line); len(runes) > maxLen {
+			return string(runes[:maxLen-1]) + "…"
 		}
 		return line
 	}

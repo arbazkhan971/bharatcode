@@ -130,6 +130,12 @@ func shallowerFirst(a, b string) bool {
 // file-name relevance ahead of matches that merely borrow from directory
 // segments, matching how fuzzy file pickers in Claude Code and opencode favour
 // the file name over its location.
+//
+// Between the contiguous and the subsequence bands sit two acronym bands: 3 when
+// the token spells the initials of the base name's words, 4 when it spells them
+// across the whole path. An abbreviation that lands on word starts ("sb" for
+// "status_bar.go") therefore outranks one that merely threads scattered letters,
+// matching how fzf and opencode reward word-start hits.
 func mentionScore(token, path string) (int, bool) {
 	base := path
 	if i := strings.LastIndexByte(path, '/'); i >= 0 {
@@ -144,13 +150,61 @@ func mentionScore(token, path string) (int, bool) {
 	if strings.Contains(path, token) {
 		return 2, true
 	}
-	if isSubsequence(token, base) {
+	if initialsPositions(token, base) != nil {
 		return 3, true
 	}
-	if isSubsequence(token, path) {
+	if initialsPositions(token, path) != nil {
 		return 4, true
 	}
+	if isSubsequence(token, base) {
+		return 5, true
+	}
+	if isSubsequence(token, path) {
+		return 6, true
+	}
 	return 0, false
+}
+
+// wordStartIndices returns the rune indices in s that begin a "word": the first
+// rune, and any rune immediately following a separator (one of / . _ -). These
+// are the anchors an acronym search jumps between, so an abbreviation like "its"
+// can hop across the segments of "internal/tui/statusbar" or "sb" can land on
+// the words of "status_bar.go".
+func wordStartIndices(s string) []int {
+	var starts []int
+	prevSep := true
+	for i, r := range []rune(s) {
+		sep := r == '/' || r == '.' || r == '_' || r == '-'
+		if !sep && prevSep {
+			starts = append(starts, i)
+		}
+		prevSep = sep
+	}
+	return starts
+}
+
+// initialsPositions reports the rune indices of path whose word-start letters
+// spell token as an ordered subsequence (skipping non-matching words is allowed),
+// or nil when token is not such an acronym. Comparison is per-rune lower-casing
+// so indices line up with path's own runes and the caller need not pre-lower; an
+// empty token yields nil.
+func initialsPositions(token, path string) []int {
+	if token == "" {
+		return nil
+	}
+	pr, tr := []rune(path), []rune(token)
+	var pos []int
+	i := 0
+	for _, s := range wordStartIndices(path) {
+		if unicode.ToLower(pr[s]) == unicode.ToLower(tr[i]) {
+			pos = append(pos, s)
+			i++
+			if i == len(tr) {
+				return pos
+			}
+		}
+	}
+	return nil
 }
 
 // isSubsequence reports whether every rune of token appears in s in order (not
@@ -235,10 +289,12 @@ func mentionHintFiles(buffer, root string, st *inputState) (files []string, acti
 // picker can emphasize exactly the characters that connected the search to the
 // candidate, the way fuzzy file pickers in Claude Code, opencode, and fzf
 // highlight a match. A contiguous (case-insensitive) substring is preferred so
-// the highlighted run reads as one block; when the token only matches as a
-// scattered subsequence the individual matched runes are returned instead.
-// Comparison is per-rune lower-casing so indices line up with path's own runes,
-// and an empty or unmatched token yields nil.
+// the highlighted run reads as one block; failing that, a word-start acronym
+// (e.g. "sb" lighting the s and b of "status_bar.go") is highlighted on its
+// anchors; and when the token only matches as a scattered subsequence the
+// individual matched runes are returned instead. Comparison is per-rune
+// lower-casing so indices line up with path's own runes, and an empty or
+// unmatched token yields nil.
 func matchPositions(token, path string) []int {
 	if token == "" {
 		return nil
@@ -261,6 +317,12 @@ func matchPositions(token, path string) []int {
 			}
 			return pos
 		}
+	}
+
+	// Next prefer a word-start acronym, so the highlighted runes are the segment
+	// initials the abbreviation jumped between rather than a scattered spray.
+	if pos := initialsPositions(token, path); pos != nil {
+		return pos
 	}
 
 	// Fall back to a scattered subsequence, recording each rune that advanced it.

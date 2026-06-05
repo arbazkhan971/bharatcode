@@ -16,6 +16,7 @@ type rootOptions struct {
 	verbose    bool
 	yolo       bool
 	projectDir string
+	offline    bool
 }
 
 var (
@@ -76,6 +77,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVar(&opts.verbose, "verbose", false, "enable debug logging")
 	root.PersistentFlags().BoolVar(&opts.yolo, "yolo", false, "approve tool calls without prompting")
 	root.PersistentFlags().StringVar(&opts.projectDir, "project-dir", "", "project directory")
+	root.PersistentFlags().BoolVar(&opts.offline, "offline", false, "offline mode: reject non-localhost providers and disable web tools (code will not leave this machine)")
 	root.SetContext(withRootOptions(context.Background(), opts))
 
 	root.AddCommand(
@@ -108,6 +110,7 @@ func buildApp(ctx context.Context, opts *rootOptions) (*app.App, error) {
 		ProjectDir: opts.projectDir,
 		YOLO:       opts.yolo,
 		Verbose:    opts.verbose,
+		Offline:    opts.offline,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("constructing app: %w", err)

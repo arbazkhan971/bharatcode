@@ -35,6 +35,8 @@ func TestClassifyTestRunner(t *testing.T) {
 		"gradle test":                         runnerGradle,
 		"./gradlew test --tests FooTest":      runnerGradle,
 		"gradlew check":                       runnerGradle,
+		"mix test":                            runnerExUnit,
+		"mix test test/foo_test.exs:12":       runnerExUnit,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
@@ -567,6 +569,58 @@ func TestParseGradleTestFailures_NoFailures(t *testing.T) {
 
 BUILD SUCCESSFUL in 2s`
 	if got := parseTestFailures("gradle test", out); got != nil {
+		t.Errorf("expected nil for passing run, got %v", got)
+	}
+}
+
+func TestParseExUnitFailures(t *testing.T) {
+	out := `..
+
+  1) test adds two numbers (CalculatorTest)
+     test/calculator_test.exs:8
+     Assertion with == failed
+     code:  assert Calculator.add(1, 2) == 4
+     left:  3
+     right: 4
+     stacktrace:
+       test/calculator_test.exs:9: (test)
+
+  2) test divides by zero (CalculatorTest)
+     test/calculator_test.exs:13
+     ** (ArithmeticException) bad argument in arithmetic expression
+     stacktrace:
+       (calc 0.1.0) lib/calculator.ex:5: Calculator.div/2
+
+Finished in 0.03 seconds
+3 tests, 2 failures`
+	got := parseTestFailures("mix test", out)
+	want := []testFailure{
+		{Name: "test adds two numbers (CalculatorTest)", Detail: "Assertion with == failed"},
+		{Name: "test divides by zero (CalculatorTest)", Detail: "** (ArithmeticException) bad argument in arithmetic expression"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseExUnitFailures_LocationFallback(t *testing.T) {
+	// A failure whose body carries only the source location (no message line)
+	// falls back to that location as the detail.
+	out := `  1) test something (MyTest)
+     test/my_test.exs:42
+
+1 test, 1 failure`
+	got := parseTestFailures("mix test test/my_test.exs", out)
+	want := []testFailure{
+		{Name: "test something (MyTest)", Detail: "test/my_test.exs:42"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseExUnitFailures_NoFailures(t *testing.T) {
+	out := `....
+
+Finished in 0.02 seconds
+4 tests, 0 failures`
+	if got := parseTestFailures("mix test", out); got != nil {
 		t.Errorf("expected nil for passing run, got %v", got)
 	}
 }

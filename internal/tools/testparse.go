@@ -54,6 +54,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseMavenTestFailures(output)
 	case runnerGradle:
 		return parseGradleTestFailures(output)
+	case runnerExUnit:
+		return parseExUnitFailures(output)
 	default:
 		return nil
 	}
@@ -73,6 +75,7 @@ const (
 	runnerDotnet
 	runnerMaven
 	runnerGradle
+	runnerExUnit
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -119,6 +122,11 @@ func classifyTestRunner(command string) testRunner {
 		// "<Class> > <test> FAILED" header regardless of the JUnit/TestNG/Spock
 		// framework underneath.
 		return runnerGradle
+	case strings.Contains(c, "mix test"):
+		// `mix test` drives Elixir's ExUnit, whose failure report numbers each
+		// failing test ("  1) test <name> (<Module>)") and prints the source
+		// location and assertion/exception message on the indented lines beneath.
+		return runnerExUnit
 	case strings.Contains(c, "dotnet test"):
 		// `dotnet test` drives VSTest, whose console logger prints "Failed
 		// <FQN> [<time>]" per failure regardless of the underlying framework
@@ -801,6 +809,72 @@ func parseGradleTestFailures(output string) []testFailure {
 			}
 			f.Detail = text
 			break
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "  1) test adds two numbers (CalculatorTest)" — the numbered header of an
+	// entry in ExUnit's failure report (`mix test`). ExUnit numbers failures
+	// sequentially; the captured group is the full "test <name> (<Module>)"
+	// descriptor (or "doctest ..."/"property ..." variant), which identifies the
+	// failing test. `describe` blocks fold their label into <name>.
+	exunitHeaderRe = regexp.MustCompile(`^\s*\d+\) (.+)$`)
+	// "     test/calculator_test.exs:8" — the source location ExUnit prints on the
+	// first indented line beneath a failure header. It is skipped when looking for
+	// the assertion message, and serves as the fallback detail when no message
+	// line follows. Both ".ex" and ".exs" sources appear in stacktraces.
+	exunitLocationRe = regexp.MustCompile(`^\s+\S+\.exs?:\d+$`)
+)
+
+// parseExUnitFailures extracts failing tests from Elixir ExUnit output
+// (`mix test`). Each failure opens with a "  N) test <name> (<Module>)" header;
+// the detail is the first indented, non-location message line beneath it — the
+// assertion summary ("Assertion with == failed") or raised exception
+// ("** (RuntimeError) boom") — located before the next failure header so an
+// entry without a message does not borrow the following one's. The source
+// location line is used as the detail only when no message line is present.
+func parseExUnitFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := exunitHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		location := ""
+		for j := i + 1; j < len(lines); j++ {
+			if exunitHeaderRe.MatchString(lines[j]) {
+				break
+			}
+			if strings.TrimSpace(lines[j]) == "" {
+				continue
+			}
+			// The failure body is indented under the header; an unindented line
+			// ends the block (e.g. the run summary or the next section).
+			if lines[j][0] != ' ' && lines[j][0] != '\t' {
+				break
+			}
+			if exunitLocationRe.MatchString(lines[j]) {
+				if location == "" {
+					location = strings.TrimSpace(lines[j])
+				}
+				continue
+			}
+			f.Detail = strings.TrimSpace(lines[j])
+			break
+		}
+		if f.Detail == "" {
+			f.Detail = location
 		}
 		failures = append(failures, f)
 	}

@@ -11,7 +11,7 @@ Use this for new files, generated fixtures, or full-file rewrites. For an existi
 
 ## Success
 
-The parent directory is created when needed, the file is written atomically, and the file tracker records a create or edit with before and after hashes.
+The parent directory is created when needed, the file is written atomically, and the file tracker records a create or edit with before and after hashes. When a language server is configured for the file, any errors and warnings it reports for the written file are appended to the result — fix the errors before moving on.
 
 ## Failures
 

@@ -56,6 +56,45 @@ func TestDiagnosticsPullStartsServerAndDeduplicatesPublishes(t *testing.T) {
 	require.NoError(t, manager.Shutdown(ctx))
 }
 
+// TestNotifyChangeResyncsDiagnostics proves NotifyChange sends a didChange to an
+// already-open document so the next Diagnostics call reflects the edited text
+// rather than the version the server first opened. The fake server returns a
+// distinct message once it has seen a didChange.
+func TestNotifyChangeResyncsDiagnostics(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	before, err := manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+	require.Equal(t, "fake diagnostic", before[0].Message)
+
+	// NotifyChange on an unconfigured file is a no-op (no server, no error).
+	require.NoError(t, manager.NotifyChange(ctx, filepath.Join(tmp, "notes.txt")))
+
+	require.NoError(t, manager.NotifyChange(ctx, source))
+
+	after, err := manager.Diagnostics(ctx, source)
+	require.NoError(t, err)
+	require.Len(t, after, 1)
+	require.Equal(t, "fake diagnostic (changed)", after[0].Message,
+		"diagnostics after NotifyChange must reflect the didChange the server observed")
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
 // TestDiagnosticsSurvivesServerInitiatedRequest proves that a server->client
 // request carrying an id that collides with the client's own request ids does
 // not corrupt the client's pending response. On the old id-first routing, the
@@ -507,6 +546,9 @@ func TestFakeLSPServer(t *testing.T) {
 func runFakeLSPServer() {
 	reader := bufio.NewReader(os.Stdin)
 	mode := os.Getenv("BHARATCODE_FAKE_LSP_MODE")
+	// changed flips once the client sends a didChange notification, letting the
+	// pull-diagnostics path return a different message before vs. after an edit.
+	changed := false
 	for {
 		raw, err := readPayload(reader)
 		if err != nil {
@@ -571,6 +613,10 @@ func runFakeLSPServer() {
 					Params:  map[string]any{"items": []map[string]any{{"section": "fake"}}},
 				})
 			}
+			message := "fake diagnostic"
+			if changed {
+				message = "fake diagnostic (changed)"
+			}
 			_ = writePayload(os.Stdout, responseMessage{
 				JSONRPC: jsonRPCVersion,
 				ID:      *msg.ID,
@@ -579,11 +625,13 @@ func runFakeLSPServer() {
 					"items": []map[string]any{{
 						"range":    fakeRange(),
 						"severity": int(Error),
-						"message":  "fake diagnostic",
+						"message":  message,
 						"source":   "fake",
 					}},
 				}),
 			})
+		case "textDocument/didChange":
+			changed = true
 		case "textDocument/hover":
 			_ = writePayload(os.Stdout, responseMessage{
 				JSONRPC: jsonRPCVersion,

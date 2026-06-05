@@ -17,6 +17,7 @@ import (
 // MultiEditTool applies ordered text replacements with one atomic rewrite.
 type MultiEditTool struct {
 	deps Dependencies
+	diag editDiagnoser
 }
 
 //go:embed multiedit.md
@@ -48,7 +49,11 @@ var multiEditSchema = json.RawMessage(`{
 
 // newMultiEditTool constructs the ordered batch edit tool.
 func newMultiEditTool(deps Dependencies) *MultiEditTool {
-	return &MultiEditTool{deps: deps}
+	t := &MultiEditTool{deps: deps}
+	if deps.LSP != nil {
+		t.diag = deps.LSP
+	}
+	return t
 }
 
 // Name returns the tool name.
@@ -168,6 +173,10 @@ func (t *MultiEditTool) Run(ctx context.Context, args json.RawMessage) (res Resu
 	}
 	if flexible > 0 {
 		metadata["flexible_edits"] = flexible
+	}
+	if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, path); note != "" {
+		content += "\n\n" + note
+		metadata["diagnostics"] = note
 	}
 	return Result{Content: content, Metadata: metadata}, nil
 }

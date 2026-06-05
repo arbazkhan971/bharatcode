@@ -16,6 +16,7 @@ import (
 // WriteTool creates a new file or overwrites a previously viewed file.
 type WriteTool struct {
 	deps Dependencies
+	diag editDiagnoser
 }
 
 //go:embed write.md
@@ -34,7 +35,11 @@ var writeSchema = json.RawMessage(`{
 
 // newWriteTool constructs the workspace file writer.
 func newWriteTool(deps Dependencies) *WriteTool {
-	return &WriteTool{deps: deps}
+	t := &WriteTool{deps: deps}
+	if deps.LSP != nil {
+		t.diag = deps.LSP
+	}
+	return t
 }
 
 // Name returns the tool name.
@@ -101,12 +106,18 @@ func (t *WriteTool) Run(ctx context.Context, args json.RawMessage) (res Result, 
 	if exists {
 		action = "wrote"
 	}
+	content := fmt.Sprintf("%s %s (%d bytes)", action, path, len(newContent))
+	metadata := map[string]any{
+		"path":  path,
+		"bytes": len(newContent),
+	}
+	if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, path); note != "" {
+		content += "\n\n" + note
+		metadata["diagnostics"] = note
+	}
 	return Result{
-		Content: fmt.Sprintf("%s %s (%d bytes)", action, path, len(newContent)),
-		Metadata: map[string]any{
-			"path":  path,
-			"bytes": len(newContent),
-		},
+		Content:  content,
+		Metadata: metadata,
 	}, nil
 }
 

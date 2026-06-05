@@ -26,6 +26,7 @@ type codeActionsTool struct {
 	source  CodeActionSource
 	workDir string
 	deps    Dependencies
+	diag    editDiagnoser
 }
 
 type codeActionsArgs struct {
@@ -86,6 +87,10 @@ func newCodeActionsTool(deps Dependencies) Tool {
 	// when the manager is actually present.
 	if deps.LSP != nil {
 		t.source = deps.LSP
+		// The same manager re-checks each touched file afterwards so the model
+		// sees any errors the applied action introduced, matching the
+		// edit/write/rename tools.
+		t.diag = deps.LSP
 	}
 	return t
 }
@@ -258,6 +263,25 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, ordered []lsp.Cod
 	if len(diffs) > 0 {
 		metadata["diffs"] = diffs
 	}
+
+	// Applying a quick fix or refactor can introduce errors (a now-unused import,
+	// a name collision), so re-check each touched file and surface the problems,
+	// as the edit/write/rename tools do. Files are processed in the same
+	// sorted-path order for deterministic output.
+	if t.diag != nil {
+		var notes []string
+		for _, u := range updates {
+			if note := postWriteDiagnostics(ctx, t.diag, t.workDir, u.path); note != "" {
+				notes = append(notes, note)
+			}
+		}
+		if len(notes) > 0 {
+			joined := strings.Join(notes, "\n\n")
+			fmt.Fprintf(&b, "\n%s", joined)
+			metadata["diagnostics"] = joined
+		}
+	}
+
 	return Result{Content: strings.TrimRight(b.String(), "\n"), Metadata: metadata}, nil
 }
 

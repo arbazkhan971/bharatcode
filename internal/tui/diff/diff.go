@@ -138,6 +138,12 @@ const statBarWidth = 32
 // the list still reflects every file.
 const maxStatFiles = 20
 
+// minStatPathCol is the floor the per-file diffstat path column is shrunk to
+// when width forces elision: a path narrower than this would lose its base name,
+// so on a very narrow terminal the rows may overrun rather than collapse the
+// name into nothing. It keeps enough room for "…" plus a short base name.
+const minStatPathCol = 12
+
 // StatLines renders a multi-line diffstat: the aggregate Stat header followed,
 // when more than one file changed, by one indented row per file showing its path,
 // its own "+A -B" counts, and a git-style "+++---" histogram bar visualizing the
@@ -147,7 +153,15 @@ const maxStatFiles = 20
 // place. A single-file or content-free patch returns just the Stat header (or ""
 // when empty), so the common case is unchanged. Unnamed bare hunks are labelled
 // with a muted placeholder.
-func (v *Viewer) StatLines(patch string) string {
+//
+// width caps the row layout so a long path cannot overrun the diff dialog and
+// wrap (the diff body below is clamped the same way). The path column is sized to
+// the widest name but no wider than the room left after the count column and the
+// histogram bar; paths past that are elided from the left with a leading "…" so
+// the base name — the part a reviewer scans for — stays visible, the way git's
+// "--stat" shortens long paths. A non-positive width means unbounded, leaving the
+// rows their natural width.
+func (v *Viewer) StatLines(patch string, width int) string {
 	header := v.Stat(patch)
 	if header == "" {
 		return ""
@@ -165,13 +179,10 @@ func (v *Viewer) StatLines(patch string) string {
 		files = files[:maxStatFiles]
 	}
 
-	// Size the path column to the widest name and the count column to the widest
-	// "+A -B" string so every histogram bar begins at the same offset.
-	nameWidth, countWidth, maxTotal := 0, 0, 0
+	// Size the count column to the widest "+A -B" string so every histogram bar
+	// begins at the same offset, and find the busiest file to scale the bars.
+	countWidth, maxTotal := 0, 0
 	for _, f := range files {
-		if n := len([]rune(displayPath(f.Path))); n > nameWidth {
-			nameWidth = n
-		}
 		if n := len(fmt.Sprintf("+%d -%d", f.Added, f.Removed)); n > countWidth {
 			countWidth = n
 		}
@@ -180,9 +191,33 @@ func (v *Viewer) StatLines(patch string) string {
 		}
 	}
 
+	// Size the path column to the widest name, but cap it so the indent, count
+	// column, gaps, and a full-width bar still fit within width. The fixed cost is
+	// the 2-space indent, the two 2-space gaps, the count column, and the bar.
+	names := make([]string, len(files))
+	nameWidth := 0
+	for i, f := range files {
+		names[i] = displayPath(f.Path)
+		if n := len([]rune(names[i])); n > nameWidth {
+			nameWidth = n
+		}
+	}
+	if width > 0 {
+		budget := width - (2 + 2 + countWidth + 2 + statBarWidth)
+		if budget < minStatPathCol {
+			budget = minStatPathCol
+		}
+		if nameWidth > budget {
+			nameWidth = budget
+			for i := range names {
+				names[i] = elidePath(names[i], nameWidth)
+			}
+		}
+	}
+
 	out := header
-	for _, f := range files {
-		name := displayPath(f.Path)
+	for i, f := range files {
+		name := names[i]
 		namePad := strings.Repeat(" ", nameWidth-len([]rune(name)))
 		count := fmt.Sprintf("+%d -%d", f.Added, f.Removed)
 		countPad := strings.Repeat(" ", countWidth-len(count))
@@ -251,6 +286,23 @@ func displayPath(p string) string {
 		return "(unnamed)"
 	}
 	return p
+}
+
+// elidePath shortens p to at most width runes by dropping leading path segments
+// and prefixing a "…", so the base name — the part a reviewer scans for — is
+// what survives, matching how git's "--stat" trims a long path. A path already
+// within width is returned unchanged; a width too small for even "…x" collapses
+// to a lone ellipsis. Measured and cut by rune so multi-byte names are never
+// split mid-rune.
+func elidePath(p string, width int) string {
+	runes := []rune(p)
+	if len(runes) <= width {
+		return p
+	}
+	if width <= 1 {
+		return "…"
+	}
+	return "…" + string(runes[len(runes)-(width-1):])
 }
 
 // FileStat is the per-file portion of a diffstat: the new-file path and the

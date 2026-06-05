@@ -232,7 +232,7 @@ func TestStatLines_PerFileBreakdown(t *testing.T) {
 
 	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,3 @@\n package main\n-func old() {}\n+func new() {}\n" +
 		"--- a/util.go\n+++ b/util.go\n@@ -1,1 +1,2 @@\n+// added\n+func helper() {}\n"
-	got := New(styles.Theme{}).StatLines(patch)
+	got := New(styles.Theme{}).StatLines(patch, 0)
 	lines := strings.Split(got, "\n")
 
 	require.Equal(t, "2 files changed, +3 -1", lines[0])
@@ -247,7 +247,7 @@ func TestStatLines_SingleFileIsHeaderOnly(t *testing.T) {
 	t.Parallel()
 
 	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
-	got := New(styles.Theme{}).StatLines(patch)
+	got := New(styles.Theme{}).StatLines(patch, 0)
 	require.Equal(t, "1 file changed, +1 -1", got)
 }
 
@@ -258,7 +258,7 @@ func TestStatLines_AlignsPaths(t *testing.T) {
 
 	patch := "--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n-x\n+y\n" +
 		"--- a/longer.go\n+++ b/longer.go\n@@ -0,0 +1,1 @@\n+z\n"
-	got := New(styles.Theme{}).StatLines(patch)
+	got := New(styles.Theme{}).StatLines(patch, 0)
 	lines := strings.Split(got, "\n")
 
 	require.Equal(t, "  a.go       +1 -1  +-", lines[1])
@@ -279,7 +279,7 @@ func TestStatLines_BarScalesAndBoundsWidth(t *testing.T) {
 	}
 	patch := big.String() + "--- a/tiny.go\n+++ b/tiny.go\n@@ -0,0 +1,1 @@\n+x\n"
 
-	lines := strings.Split(New(styles.Theme{}).StatLines(patch), "\n")
+	lines := strings.Split(New(styles.Theme{}).StatLines(patch, 0), "\n")
 	require.Len(t, lines, 3)
 
 	bigBar := barOf(t, lines[1])
@@ -302,9 +302,61 @@ func TestStatLines_BarsAlignAcrossCountWidths(t *testing.T) {
 	}
 	patch := wide.String() + "--- a/x.go\n+++ b/x.go\n@@ -1,1 +1,1 @@\n-a\n+b\n"
 
-	lines := strings.Split(New(styles.Theme{}).StatLines(patch), "\n")
+	lines := strings.Split(New(styles.Theme{}).StatLines(patch, 0), "\n")
 	require.Len(t, lines, 3)
 	require.Equal(t, barStart(lines[1]), barStart(lines[2]), "bars should start at the same column")
+}
+
+// TestStatLines_ElidesLongPathToWidth checks that when a path is too long to fit
+// the given width, the row is shortened from the left with a leading "…" so the
+// base name survives and the rendered row stays within width — keeping the
+// per-file summary from wrapping past the diff dialog.
+func TestStatLines_ElidesLongPathToWidth(t *testing.T) {
+	t.Parallel()
+
+	long := "internal/very/deeply/nested/package/handler.go"
+	patch := "--- a/" + long + "\n+++ b/" + long + "\n@@ -1,1 +1,1 @@\n-x\n+y\n" +
+		"--- a/short.go\n+++ b/short.go\n@@ -0,0 +1,1 @@\n+z\n"
+
+	const width = 40
+	lines := strings.Split(New(styles.Theme{}).StatLines(patch, width), "\n")
+	require.Len(t, lines, 3)
+
+	// The long path is elided from the left but keeps its base name.
+	require.Contains(t, lines[1], "…")
+	require.Contains(t, lines[1], "handler.go")
+	require.NotContains(t, lines[1], "internal/very")
+
+	// Every row fits within the requested width.
+	for _, row := range lines[1:] {
+		require.LessOrEqual(t, len([]rune(row)), width, "row should fit width: %q", row)
+	}
+}
+
+// TestStatLines_NoElisionWhenUnbounded checks that a non-positive width leaves
+// long paths intact, so the unbounded call path is byte-for-byte unchanged.
+func TestStatLines_NoElisionWhenUnbounded(t *testing.T) {
+	t.Parallel()
+
+	long := "internal/very/deeply/nested/package/handler.go"
+	patch := "--- a/" + long + "\n+++ b/" + long + "\n@@ -1,1 +1,1 @@\n-x\n+y\n" +
+		"--- a/short.go\n+++ b/short.go\n@@ -0,0 +1,1 @@\n+z\n"
+
+	lines := strings.Split(New(styles.Theme{}).StatLines(patch, 0), "\n")
+	require.Len(t, lines, 3)
+	require.Contains(t, lines[1], long)
+	require.NotContains(t, lines[1], "…")
+}
+
+// TestElidePath_KeepsTail checks the path-shortening helper keeps the trailing
+// runes behind a leading ellipsis and collapses to a lone "…" when there is no
+// room for even one tail rune.
+func TestElidePath_KeepsTail(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "abc.go", elidePath("abc.go", 10), "short path is unchanged")
+	require.Equal(t, "…e.go", elidePath("longname.go", 5), "long path keeps tail behind ellipsis")
+	require.Equal(t, "…", elidePath("longname.go", 1), "no room for a tail collapses to ellipsis")
 }
 
 // barOf extracts the trailing run of "+"/"-" histogram cells from a per-file
@@ -339,7 +391,7 @@ func TestStatLines_CapsFileRows(t *testing.T) {
 		fmt.Fprintf(&b, "--- a/f%02d.go\n+++ b/f%02d.go\n@@ -1,1 +1,1 @@\n-old\n+new\n", i, i)
 	}
 
-	lines := strings.Split(New(styles.Theme{}).StatLines(b.String()), "\n")
+	lines := strings.Split(New(styles.Theme{}).StatLines(b.String(), 0), "\n")
 
 	// 1 header + maxStatFiles rows + 1 overflow summary.
 	require.Len(t, lines, 1+maxStatFiles+1)
@@ -357,7 +409,7 @@ func TestStatLines_OverflowSingularNoun(t *testing.T) {
 		fmt.Fprintf(&b, "--- a/f%02d.go\n+++ b/f%02d.go\n@@ -1,1 +1,1 @@\n-old\n+new\n", i, i)
 	}
 
-	lines := strings.Split(New(styles.Theme{}).StatLines(b.String()), "\n")
+	lines := strings.Split(New(styles.Theme{}).StatLines(b.String(), 0), "\n")
 	require.Equal(t, "  … and 1 more file", lines[len(lines)-1])
 }
 
@@ -371,7 +423,7 @@ func TestStatLines_NoOverflowAtCap(t *testing.T) {
 		fmt.Fprintf(&b, "--- a/f%02d.go\n+++ b/f%02d.go\n@@ -1,1 +1,1 @@\n-old\n+new\n", i, i)
 	}
 
-	lines := strings.Split(New(styles.Theme{}).StatLines(b.String()), "\n")
+	lines := strings.Split(New(styles.Theme{}).StatLines(b.String(), 0), "\n")
 	require.Len(t, lines, 1+maxStatFiles)
 	require.NotContains(t, lines[len(lines)-1], "more file")
 }
@@ -380,7 +432,7 @@ func TestStatLines_NoOverflowAtCap(t *testing.T) {
 func TestStatLines_EmptyPatch(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, "", New(styles.Theme{}).StatLines(""))
+	require.Equal(t, "", New(styles.Theme{}).StatLines("", 0))
 }
 
 // TestUnified_TruncatesWithEllipsis checks that a line wider than the render

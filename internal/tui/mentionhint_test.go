@@ -313,6 +313,40 @@ func TestRenderMentionHint_FitsOneRow(t *testing.T) {
 	require.Regexp(t, `\+\d+`, hint, "truncation reports how many matches are hidden")
 }
 
+// TestRenderMentionHint_NoMatchingFiles asserts that an in-progress @-token with
+// no matching file surfaces a "no matching files" note, so the picker reports an
+// empty search instead of silently rendering nothing.
+func TestRenderMentionHint_NoMatchingFiles(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.workspaceRoot = mentionWorkspace(t, "main.go", "internal/mainframe.go")
+
+	typeString(t, m, "@zzzzz")
+	hint := stripANSI(m.renderMentionHint(m.width))
+	require.Contains(t, hint, "no matching files")
+	require.NotContains(t, hint, "\n", "the note must stay on one row")
+}
+
+// TestRenderMentionHint_BareAtNoNote asserts a bare "@" (empty token) never shows
+// the "no matching files" note: it lists the workspace, and an empty workspace is
+// not a failed search. It also confirms a no-match note is dropped when it would
+// not fit the available width.
+func TestRenderMentionHint_BareAtNoNote(t *testing.T) {
+	t.Parallel()
+
+	// Empty workspace, bare "@": no listing, but no note either.
+	m := newSizedModel(t)
+	m.workspaceRoot = mentionWorkspace(t)
+	typeString(t, m, "@")
+	require.Empty(t, m.renderMentionHint(m.width), "a bare @ stays silent")
+
+	// A non-empty token with no match would show the note, but not when the
+	// width cannot hold it.
+	typeString(t, m, "zzzzz")
+	require.Empty(t, m.renderMentionHint(5), "the note is dropped when it does not fit")
+}
+
 // TestMatchPositions_ContiguousAndSubsequence asserts the picker locates the
 // runes a token matched: a case-insensitive contiguous run is preferred, and a
 // scattered subsequence is reported rune-by-rune when no contiguous run exists.

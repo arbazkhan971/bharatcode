@@ -78,7 +78,7 @@ func (p *geminiProvider) Stream(ctx context.Context, req Request) (<-chan Event,
 		}
 	}
 
-	body, err := buildGeminiRequest(req)
+	body, err := p.buildGeminiRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("building provider request: %w", err)
 	}
@@ -197,7 +197,7 @@ func classifyGeminiStreamError(status string, code int, msg string) error {
 	return fmt.Errorf("provider stream error: %s", msg)
 }
 
-func buildGeminiRequest(req Request) (geminiRequest, error) {
+func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) {
 	contents, err := buildGeminiContents(req.Messages)
 	if err != nil {
 		return geminiRequest{}, err
@@ -231,6 +231,22 @@ func buildGeminiRequest(req Request) (geminiRequest, error) {
 		out.GenerationConfig = &geminiGenerationConfig{
 			Temperature:     req.Temperature,
 			MaxOutputTokens: req.MaxTokens,
+		}
+	}
+
+	// Native extended thinking is opt-in per request and only emitted for a
+	// Gemini 2.5 model that supports thinkingConfig. Like Anthropic's path, an
+	// unsupported thinking request is silently dropped rather than rejected: the
+	// support check is an approximate model-id heuristic, so degrading gracefully
+	// beats 400-ing a valid request on a false negative. IncludeThoughts asks the
+	// API for thought summaries, which the stream surfaces as ThinkingEvents.
+	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 && modelSupportsGeminiThinking(p.models, req.Model) {
+		if out.GenerationConfig == nil {
+			out.GenerationConfig = &geminiGenerationConfig{}
+		}
+		out.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{
+			IncludeThoughts: true,
+			ThinkingBudget:  &req.Thinking.BudgetTokens,
 		}
 	}
 
@@ -391,8 +407,19 @@ type geminiFunctionDecl struct {
 }
 
 type geminiGenerationConfig struct {
-	Temperature     float64 `json:"temperature,omitempty"`
-	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	Temperature     float64               `json:"temperature,omitempty"`
+	MaxOutputTokens int                   `json:"maxOutputTokens,omitempty"`
+	ThinkingConfig  *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// geminiThinkingConfig controls native extended thinking on Gemini 2.5 models.
+// IncludeThoughts requests thought summaries in the stream. ThinkingBudget caps
+// the tokens spent reasoning; it is a pointer so an explicit zero (which disables
+// thinking on Flash) is distinguishable from "unset", though the request builder
+// only sets a positive budget today.
+type geminiThinkingConfig struct {
+	IncludeThoughts bool `json:"includeThoughts,omitempty"`
+	ThinkingBudget  *int `json:"thinkingBudget,omitempty"`
 }
 
 type geminiStreamChunk struct {

@@ -139,7 +139,14 @@ func (t *ViewTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 		return Result{}, err
 	}
 
-	content, span := numberedLines(string(data), in.Offset, in.Limit)
+	text := string(data)
+	if isNotebookPath(path) {
+		if rendered, ok := renderNotebook(data); ok {
+			text = rendered
+		}
+	}
+
+	content, span := numberedLines(text, in.Offset, in.Limit)
 	content = truncateContent(content, span, maxToolOutputBytes(t.deps.Config))
 	return Result{
 		Content: content,

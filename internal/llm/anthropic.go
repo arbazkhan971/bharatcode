@@ -404,7 +404,13 @@ func (p *anthropicProvider) buildAnthropicRequest(req Request) (anthropicRequest
 
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
-		maxTokens = defaultAnthropicMaxTokens
+		// When the caller leaves max_tokens unset, default to the model's full
+		// output allowance so long answers from the modern Claude line (32k–64k
+		// output) are not silently truncated. Unknown ids fall back to the
+		// conservative flat default.
+		if maxTokens = inferAnthropicMaxOutput(req.Model); maxTokens <= 0 {
+			maxTokens = defaultAnthropicMaxTokens
+		}
 	}
 
 	out := anthropicRequest{

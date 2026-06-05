@@ -313,6 +313,32 @@ func TestRenderMentionHint_FitsOneRow(t *testing.T) {
 	require.Regexp(t, `\+\d+`, hint, "truncation reports how many matches are hidden")
 }
 
+// TestRenderMentionHint_OverflowReportsTrueTotal asserts the overflow count
+// reflects every match, not just the displayed cap: when more than
+// maxMentionHints files match a token but the displayed subset fits the width,
+// the menu still appends "+N" for the matches beyond the cap, so a broad token in
+// a large workspace does not silently imply only maxMentionHints files qualify.
+func TestRenderMentionHint_OverflowReportsTrueTotal(t *testing.T) {
+	t.Parallel()
+
+	// Build more matches than the cap, with short names so the capped display
+	// still fits comfortably on one wide row (no width truncation in play).
+	const extra = 5
+	var rels []string
+	for i := 0; i < maxMentionHints+extra; i++ {
+		rels = append(rels, "ma"+string(rune('a'+i/10))+string(rune('0'+i%10))+".go")
+	}
+	m := newSizedModel(t)
+	m.workspaceRoot = mentionWorkspace(t, rels...)
+	typeString(t, m, "@ma")
+
+	hint := stripANSI(m.renderMentionHint(400))
+	require.NotEmpty(t, hint)
+	require.NotContains(t, hint, "\n", "the menu must stay on one row")
+	// maxMentionHints are shown; the remaining `extra` are reported as hidden.
+	require.Contains(t, hint, "+5", "overflow must count matches beyond the displayed cap")
+}
+
 // TestRenderMentionHint_NoMatchingFiles asserts that an in-progress @-token with
 // no matching file surfaces a "no matching files" note, so the picker reports an
 // empty search instead of silently rendering nothing.

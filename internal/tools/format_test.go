@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
+	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/stretchr/testify/require"
 )
 
@@ -73,6 +75,69 @@ func TestFormatAppliesEditsAndWritesFile(t *testing.T) {
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "package main\nfunc f() {}\n", string(got))
+}
+
+func TestFormatPreviewShowsDiffWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	original := "package main\nfunc  f(){}\n"
+	path := writeFormatFile(t, dir, original)
+	src := &fakeFormat{edits: []lsp.TextEdit{
+		{
+			Range: lsp.Range{
+				Start: lsp.Position{Line: 1, Character: 0},
+				End:   lsp.Position{Line: 2, Character: 0},
+			},
+			NewText: "func f() {}\n",
+		},
+	}}
+	tool := &formatTool{source: src, deps: Dependencies{WorkDir: dir}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go", "preview": true}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The preview announces itself, says nothing was written, and still surfaces
+	// the diff both inline and in metadata.
+	require.Contains(t, result.Content, "preview")
+	require.Contains(t, result.Content, "nothing written")
+	require.Contains(t, result.Content, "+func f() {}")
+	require.Contains(t, result.Content, "-func  f(){}")
+	require.Equal(t, true, result.Metadata["preview"])
+	diff, ok := result.Metadata["diff"].(string)
+	require.True(t, ok, "expected a diff in metadata")
+	require.Contains(t, diff, "+func f() {}")
+
+	// The file on disk is untouched.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, original, string(got))
+}
+
+func TestFormatPreviewSkipsPermissionCheck(t *testing.T) {
+	dir := t.TempDir()
+	writeFormatFile(t, dir, "package main\nfunc  f(){}\n")
+	src := &fakeFormat{edits: []lsp.TextEdit{
+		{
+			Range:   lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 2, Character: 0}},
+			NewText: "func f() {}\n",
+		},
+	}}
+	// A permission policy that denies the format tool outright: an applying format
+	// would be blocked, but a preview writes nothing and so never consults it.
+	cfg := &config.Config{}
+	cfg.Permissions.Deny = []string{"format"}
+	tool := &formatTool{source: src, deps: Dependencies{WorkDir: dir, Permission: permission.New(cfg, nil)}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go", "preview": true}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "preview")
+
+	// The same format without preview is denied, confirming the policy is live.
+	denied, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go"}))
+	require.NoError(t, err)
+	require.True(t, denied.IsError)
+	require.Contains(t, denied.Content, "permission denied")
 }
 
 func TestFormatRangeFormatsOnlyTheSpan(t *testing.T) {

@@ -265,16 +265,28 @@ var geminiBlockingFinishReasons = map[string]bool{
 }
 
 // classifyGeminiStreamError maps a Gemini mid-stream error object onto a
-// retryable sentinel so the failover and backoff layers can recover. Gemini
-// reports transient capacity loss with status UNAVAILABLE and quota exhaustion
-// with RESOURCE_EXHAUSTED; other statuses are returned without a retryable
-// sentinel so they are not retried.
+// sentinel so the failover and backoff layers can react. Gemini reports
+// transient capacity loss with status UNAVAILABLE and quota exhaustion with
+// RESOURCE_EXHAUSTED (both retryable), and terminal conditions such as a bad
+// key or unknown model with UNAUTHENTICATED/NOT_FOUND. This mirrors the
+// pre-stream classifyHTTPError mapping so the same failure is classified the
+// same whether it arrives before or during the stream; an unrecognized status
+// is returned without a sentinel so it is not retried.
 func classifyGeminiStreamError(status string, code int, msg string) error {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
 	case "RESOURCE_EXHAUSTED":
 		return fmt.Errorf("provider stream error: %s: %w", msg, ErrRateLimit)
 	case "UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED":
 		return fmt.Errorf("provider stream error: %s: %w", msg, ErrServer)
+	case "UNAUTHENTICATED", "PERMISSION_DENIED":
+		// A missing/invalid key or a project without access to the model arrives
+		// mid-stream with these statuses; map them to ErrAuth so the caller
+		// surfaces a credential error rather than a generic, retried failure.
+		return fmt.Errorf("provider stream error: %s: %w", msg, ErrAuth)
+	case "NOT_FOUND":
+		// An unknown or unavailable model id is reported as NOT_FOUND; surface it
+		// as ErrModelNotFound to match the pre-stream HTTP classification.
+		return fmt.Errorf("provider stream error: %s: %w", msg, ErrModelNotFound)
 	case "INVALID_ARGUMENT":
 		// A prompt that overflows the model context window comes back as
 		// INVALID_ARGUMENT whose message names the token overflow. Surface it as
@@ -284,10 +296,16 @@ func classifyGeminiStreamError(status string, code int, msg string) error {
 			return fmt.Errorf("provider stream error: %s: %w", msg, ErrContextLimit)
 		}
 	}
-	if code == http.StatusTooManyRequests {
+	// Some relays omit the status string and carry only the HTTP code, so fall
+	// back to the same code-based mapping classifyHTTPError uses.
+	switch {
+	case code == http.StatusTooManyRequests:
 		return fmt.Errorf("provider stream error: %s: %w", msg, ErrRateLimit)
-	}
-	if code >= 500 {
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return fmt.Errorf("provider stream error: %s: %w", msg, ErrAuth)
+	case code == http.StatusNotFound:
+		return fmt.Errorf("provider stream error: %s: %w", msg, ErrModelNotFound)
+	case code >= 500:
 		return fmt.Errorf("provider stream error: %s: %w", msg, ErrServer)
 	}
 	return fmt.Errorf("provider stream error: %s", msg)

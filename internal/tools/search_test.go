@@ -343,6 +343,27 @@ func TestGlobMatchesRecursiveGoFiles(t *testing.T) {
 	require.Equal(t, "pkg/x.go", result.Content)
 }
 
+func TestGlobHonorsGitignore(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "node_modules", "dep"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "node_modules", "dep", "vendored.js"), []byte("x\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "app.js"), []byte("y\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "build.js"), []byte("z\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("node_modules/\nbuild.js\n"), 0o644))
+
+	tool := newGlobTool(Dependencies{WorkDir: dir})
+	result, err := tool.Run(context.Background(), json.RawMessage(`{"pattern":"**/*.js"}`))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// Only the non-ignored file survives; the ignored directory and the
+	// ignored file are both pruned.
+	require.Equal(t, "src/app.js", result.Content)
+	require.NotContains(t, result.Content, "node_modules")
+	require.NotContains(t, result.Content, "build.js")
+}
+
 func TestLSHonorsGitignore(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "node_modules"), 0o755))

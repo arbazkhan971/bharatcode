@@ -37,6 +37,11 @@ type grepArgs struct {
 	Context int `json:"context,omitempty"`
 	Before  int `json:"before,omitempty"`
 	After   int `json:"after,omitempty"`
+	// Multiline enables patterns that span line boundaries (like rg
+	// -U --multiline-dotall): the file is searched as a single buffer so
+	// `.` matches newlines.  Context (before/after/context) is ignored in
+	// this mode.
+	Multiline bool `json:"multiline,omitempty"`
 }
 
 var (
@@ -54,7 +59,8 @@ var (
     "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"], "description": "Shape of the search results."},
     "context": {"type": "integer", "minimum": 0, "description": "Number of lines of context to show before and after each match (like rg -C). Takes precedence over before/after when set."},
     "before": {"type": "integer", "minimum": 0, "description": "Number of lines to show before each match (like rg -B). Ignored when context is set."},
-    "after": {"type": "integer", "minimum": 0, "description": "Number of lines to show after each match (like rg -A). Ignored when context is set."}
+    "after": {"type": "integer", "minimum": 0, "description": "Number of lines to show after each match (like rg -A). Ignored when context is set."},
+    "multiline": {"type": "boolean", "description": "Match patterns across line boundaries (like rg -U --multiline-dotall); . matches newlines. Context options are ignored in this mode."}
   }
 }`)
 )
@@ -148,13 +154,20 @@ func runRipgrep(ctx context.Context, rg, root, searchPath string, args grepArgs)
 		cmdArgs = append(cmdArgs, "--max-count", "100")
 	}
 
-	// Context lines: -C takes precedence over -A/-B (rg semantics).
-	ctxBefore, ctxAfter := contextLines(args)
-	if ctxBefore > 0 {
-		cmdArgs = append(cmdArgs, "--before-context", fmt.Sprintf("%d", ctxBefore))
-	}
-	if ctxAfter > 0 {
-		cmdArgs = append(cmdArgs, "--after-context", fmt.Sprintf("%d", ctxAfter))
+	if args.Multiline {
+		// -U lets a pattern span newlines; --multiline-dotall makes `.`
+		// match across them.  Context lines are not combined with
+		// multiline mode (so the rg and Go paths stay consistent).
+		cmdArgs = append(cmdArgs, "--multiline", "--multiline-dotall")
+	} else {
+		// Context lines: -C takes precedence over -A/-B (rg semantics).
+		ctxBefore, ctxAfter := contextLines(args)
+		if ctxBefore > 0 {
+			cmdArgs = append(cmdArgs, "--before-context", fmt.Sprintf("%d", ctxBefore))
+		}
+		if ctxAfter > 0 {
+			cmdArgs = append(cmdArgs, "--after-context", fmt.Sprintf("%d", ctxAfter))
+		}
 	}
 
 	if args.Include != "" {
@@ -371,7 +384,20 @@ func buildContextOutput(rel string, allLines []string, re *regexp.Regexp, ctxBef
 	return formatted, matchCount
 }
 
+// grepFileResult holds one file's contribution to the grep output: the
+// formatted content-mode lines and the per-file match count.  It is shared by
+// the line-oriented and multiline Go fallbacks so both render identically.
+type grepFileResult struct {
+	path  string
+	lines []string // formatted output lines (content mode)
+	count int
+}
+
 func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (string, error) {
+	if args.Multiline {
+		return runGoGrepMultiline(ctx, root, searchPath, args)
+	}
+
 	re, err := compileSmartCase(args.Pattern)
 	if err != nil {
 		return "", fmt.Errorf("compiling grep pattern: %w", err)
@@ -381,14 +407,8 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 	ctxBefore, ctxAfter := contextLines(args)
 	needContext := (ctxBefore > 0 || ctxAfter > 0) && (args.OutputMode == "content" || args.OutputMode == "")
 
-	type fileMatch struct {
-		path  string
-		lines []string // formatted output lines (content mode)
-		count int
-	}
-
 	var (
-		matches   []fileMatch
+		matches   []grepFileResult
 		totalRows int  // content lines accumulated across all files
 		capped    bool // true when we hit grepMatchCap and bailed early
 	)
@@ -428,7 +448,7 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 		}
 
 		rel := relativeSlash(root, path)
-		var fm fileMatch
+		var fm grepFileResult
 		fm.path = rel
 
 		if needContext {
@@ -520,14 +540,22 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 		return "", fmt.Errorf("searching files: %w", walkErr)
 	}
 
+	return renderGrepResults(matches, args.OutputMode, capped), nil
+}
+
+// renderGrepResults sorts per-file results by path and renders them in the
+// shape dictated by outputMode (content / files_with_matches / count),
+// appending the cap notice when capped is true.  It is the shared tail of the
+// line-oriented and multiline Go fallbacks.
+func renderGrepResults(matches []grepFileResult, outputMode string, capped bool) string {
 	sort.Slice(matches, func(i, j int) bool { return matches[i].path < matches[j].path })
 	if len(matches) == 0 {
-		return "No matches found.", nil
+		return "No matches found."
 	}
 
 	var b strings.Builder
 	for _, match := range matches {
-		switch args.OutputMode {
+		switch outputMode {
 		case "files_with_matches":
 			b.WriteString(match.path)
 			b.WriteByte('\n')
@@ -544,7 +572,162 @@ func runGoGrep(ctx context.Context, root, searchPath string, args grepArgs) (str
 	if capped {
 		result += fmt.Sprintf("\n[results capped: showing first %d matches]", grepMatchCap)
 	}
-	return result, nil
+	return result
+}
+
+// runGoGrepMultiline is the multiline counterpart of runGoGrep.  Each file is
+// read into a single buffer and searched with a dotall pattern, so a match may
+// span several lines.  In content mode every line a match touches is emitted as
+// "path:lineNo:text" (mirroring rg -U output); context options do not apply.
+func runGoGrepMultiline(ctx context.Context, root, searchPath string, args grepArgs) (string, error) {
+	re, err := compileMultilineSmartCase(args.Pattern)
+	if err != nil {
+		return "", fmt.Errorf("compiling grep pattern: %w", err)
+	}
+
+	gitignoreDirs := loadRootGitignore(root)
+	contentMode := args.OutputMode == "content" || args.OutputMode == ""
+
+	var (
+		matches   []grepFileResult
+		totalRows int
+		capped    bool
+	)
+	capErr := errors.New("cap reached")
+
+	walkErr := filepath.WalkDir(searchPath, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("walking grep path %s: %w", path, err)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if path != searchPath && (ignoredDirs[name] || gitignoreDirs[name]) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if args.Include != "" {
+			ok, matchErr := filepath.Match(args.Include, entry.Name())
+			if matchErr != nil {
+				return fmt.Errorf("matching include glob %q: %w", args.Include, matchErr)
+			}
+			if !ok {
+				return nil
+			}
+		}
+
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil //nolint:nilerr
+		}
+		if isBinaryChunk(probeChunk(data)) {
+			return nil
+		}
+		content := string(data)
+		locs := re.FindAllStringIndex(content, -1)
+		if len(locs) == 0 {
+			return nil
+		}
+
+		rel := relativeSlash(root, path)
+		fm := grepFileResult{path: rel, count: len(locs)}
+
+		if contentMode {
+			allLines := strings.Split(content, "\n")
+			lineHit := make(map[int]bool)
+			for _, loc := range locs {
+				start := offsetToLine(content, loc[0])
+				end := loc[1]
+				if end > loc[0] {
+					end-- // last byte of the match
+				}
+				endLine := offsetToLine(content, end)
+				for ln := start; ln <= endLine; ln++ {
+					lineHit[ln] = true
+				}
+			}
+			ordered := make([]int, 0, len(lineHit))
+			for ln := range lineHit {
+				ordered = append(ordered, ln)
+			}
+			sort.Ints(ordered)
+			for _, ln := range ordered {
+				if ln < 0 || ln >= len(allLines) {
+					continue
+				}
+				if totalRows >= grepMatchCap {
+					capped = true
+					break
+				}
+				fm.lines = append(fm.lines, fmt.Sprintf("%s:%d:%s", rel, ln+1, allLines[ln]))
+				totalRows++
+			}
+		}
+
+		matches = append(matches, fm)
+
+		switch args.OutputMode {
+		case "files_with_matches", "count":
+			if len(matches) >= grepMatchCap {
+				capped = true
+				return capErr
+			}
+		default:
+			if capped || totalRows >= grepMatchCap {
+				capped = true
+				return capErr
+			}
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, capErr) {
+		return "", fmt.Errorf("searching files: %w", walkErr)
+	}
+
+	return renderGrepResults(matches, args.OutputMode, capped), nil
+}
+
+// compileMultilineSmartCase compiles pattern for multiline matching: the dotall
+// flag (?s) lets `.` cross newlines, and smart-case adds (?i) when the pattern
+// is all-lowercase — mirroring compileSmartCase plus rg --multiline-dotall.
+func compileMultilineSmartCase(pattern string) (*regexp.Regexp, error) {
+	caseSensitive := false
+	for _, r := range pattern {
+		if r >= 'A' && r <= 'Z' {
+			caseSensitive = true
+			break
+		}
+	}
+	flags := "(?s)"
+	if !caseSensitive {
+		flags = "(?is)"
+	}
+	return regexp.Compile(flags + pattern)
+}
+
+// offsetToLine returns the 0-based line index containing byte offset off,
+// counting the newlines that precede it.
+func offsetToLine(content string, off int) int {
+	if off < 0 {
+		return 0
+	}
+	if off > len(content) {
+		off = len(content)
+	}
+	return strings.Count(content[:off], "\n")
+}
+
+// probeChunk returns the leading bytes used for binary detection, capped at
+// the same 8 KB window the streaming path probes.
+func probeChunk(data []byte) []byte {
+	if len(data) > 8192 {
+		return data[:8192]
+	}
+	return data
 }
 
 func relativeSlash(root, path string) string {

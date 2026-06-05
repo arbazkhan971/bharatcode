@@ -51,6 +51,8 @@ func TestClassifyTestRunner(t *testing.T) {
 		"bun test":                            runnerBun,
 		"bun test ./math.test.ts":             runnerBun,
 		"bun run test":                        runnerNone,
+		"mocha":                               runnerMocha,
+		"npx mocha test/*.js":                 runnerMocha,
 		"ls -la":                              runnerNone,
 		"echo go testing the waters":          runnerNone,
 		"echo rspecs are great":               runnerNone,
@@ -850,6 +852,65 @@ func TestParseBunTestFailures_NoFailures(t *testing.T) {
  1 pass
  0 fail`
 	if got := parseTestFailures("bun test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseMochaFailures(t *testing.T) {
+	out := `  Array
+    #indexOf()
+      ✓ returns the index when present
+      1) returns -1 when not present
+  Math
+      2) adds
+
+  1 passing (12ms)
+  2 failing
+
+  1) Array
+       #indexOf()
+         returns -1 when not present:
+
+      AssertionError: expected -1 to equal 0
+      + expected - actual
+
+      at Context.<anonymous> (test/array.test.js:8:25)
+
+  2) Math
+       adds:
+      TypeError: add is not a function
+      at Context.<anonymous> (test/math.test.js:4:10)
+`
+	got := parseTestFailures("npx mocha", out)
+	want := []testFailure{
+		{Name: "Array #indexOf() returns -1 when not present", Detail: "AssertionError: expected -1 to equal 0"},
+		{Name: "Math adds", Detail: "TypeError: add is not a function"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseMochaFailures_FlatTitle(t *testing.T) {
+	// A test with no surrounding describe block: the title sits on the header line
+	// itself, already ending in a colon.
+	out := `  1 failing
+
+  1) should work:
+     Error: boom
+`
+	got := parseTestFailures("mocha", out)
+	want := []testFailure{
+		{Name: "should work", Detail: "Error: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseMochaFailures_NoFailures(t *testing.T) {
+	out := `  Array
+    ✓ works
+
+  1 passing (3ms)
+`
+	if got := parseTestFailures("mocha", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

@@ -331,20 +331,20 @@ func TestHighlightTerm(t *testing.T) {
 		"each occurrence must be wrapped, case-insensitively")
 }
 
-// TestHighlightCurrentMatch_PlainLine asserts highlightCurrentMatch emphasizes
-// the active term only on the current match line, leaving the rest untouched,
-// and is a no-op when no search is active.
-func TestHighlightCurrentMatch_PlainLine(t *testing.T) {
+// TestHighlightMatches_PlainLine asserts highlightMatches emphasizes the active
+// term on the current match line, leaving non-match lines untouched, and is a
+// no-op when no search is active.
+func TestHighlightMatches_PlainLine(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
 	body := "line0\nhere is a foo hit\nline2"
 
-	require.Equal(t, body, m.highlightCurrentMatch(body),
+	require.Equal(t, body, m.highlightMatches(body),
 		"with no active search the body must be unchanged")
 
 	m.search = searchState{term: "foo", matches: []int{1}, current: 0}
-	got := m.highlightCurrentMatch(body)
+	got := m.highlightMatches(body)
 	require.Contains(t, got, m.theme.Match.Render("foo"),
 		"the current match line must carry the styled term")
 	lines := strings.Split(got, "\n")
@@ -352,33 +352,65 @@ func TestHighlightCurrentMatch_PlainLine(t *testing.T) {
 	require.Equal(t, "line2", lines[2], "non-match lines must be left untouched")
 }
 
-// TestHighlightCurrentMatch_SkipsStyledLine asserts a match line that already
-// carries ANSI styling (a markdown-rendered line) is left byte-for-byte
-// unchanged, so splicing a highlight span never corrupts existing escapes.
-func TestHighlightCurrentMatch_SkipsStyledLine(t *testing.T) {
+// TestHighlightMatches_AllHits asserts highlightMatches marks every match line —
+// the current one in the reverse-video Match style and the others in the
+// MatchOther style — so all occurrences are visible at once with the active hit
+// distinguished.
+func TestHighlightMatches_AllHits(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	body := "foo one\nfoo two\nfoo three"
+
+	m.search = searchState{term: "foo", matches: []int{0, 1, 2}, current: 1}
+	got := m.highlightMatches(body)
+	lines := strings.Split(got, "\n")
+
+	require.Contains(t, lines[1], m.theme.Match.Render("foo"),
+		"the current match line uses the reverse-video Match style")
+	require.NotContains(t, lines[1], m.theme.MatchOther.Render("foo"),
+		"the current line must not also carry the secondary style")
+	for _, i := range []int{0, 2} {
+		require.Contains(t, lines[i], m.theme.MatchOther.Render("foo"),
+			"a non-current match line uses the MatchOther style")
+		require.NotContains(t, lines[i], m.theme.Match.Render("foo"),
+			"a non-current line must not carry the current-match style")
+	}
+}
+
+// TestHighlightMatches_SkipsStyledLine asserts a match line that already carries
+// ANSI styling (a markdown-rendered line) is left byte-for-byte unchanged, so
+// splicing a highlight span never corrupts existing escapes, while a plain
+// sibling match is still highlighted.
+func TestHighlightMatches_SkipsStyledLine(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
 	styledLine := "\x1b[31mhere is a foo hit\x1b[0m"
-	body := "line0\n" + styledLine + "\nline2"
+	body := "plain foo line\n" + styledLine
 
-	m.search = searchState{term: "foo", matches: []int{1}, current: 0}
-	require.Equal(t, body, m.highlightCurrentMatch(body),
+	m.search = searchState{term: "foo", matches: []int{0, 1}, current: 1}
+	got := m.highlightMatches(body)
+	lines := strings.Split(got, "\n")
+	require.Equal(t, styledLine, lines[1],
 		"a line with existing ANSI styling must be left unchanged")
+	require.Contains(t, lines[0], m.theme.MatchOther.Render("foo"),
+		"a plain sibling match must still be highlighted")
 }
 
-// TestHighlightCurrentMatch_OutOfRange asserts a stale match index (past the end
-// of the current body, e.g. after the transcript shrank) is ignored rather than
-// panicking, and the body is returned unchanged.
-func TestHighlightCurrentMatch_OutOfRange(t *testing.T) {
+// TestHighlightMatches_OutOfRange asserts a stale match index (past the end of
+// the current body, e.g. after the transcript shrank) is skipped rather than
+// panicking, while valid siblings are still highlighted.
+func TestHighlightMatches_OutOfRange(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
 	body := "only\ntwo lines"
 
-	m.search = searchState{term: "x", matches: []int{99}, current: 0}
-	require.Equal(t, body, m.highlightCurrentMatch(body),
-		"an out-of-range match index must be ignored")
+	m.search = searchState{term: "two", matches: []int{1, 99}, current: 0}
+	got := m.highlightMatches(body)
+	require.Contains(t, got, m.theme.Match.Render("two"),
+		"the in-range match must still be highlighted")
 }
 
 // TestSearchHighlightsVisibleMatch asserts that after /search the centered match

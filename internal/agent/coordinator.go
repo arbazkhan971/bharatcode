@@ -72,6 +72,13 @@ type Coordinator struct {
 	// skill's full SKILL.md body without bloating the base prompt.
 	skillTool *skillTool
 
+	// taskTool dispatches subagents on demand. It is built once in Start over
+	// the configured agent set and folded into every agent's effective tool
+	// set; the per-agent allow-list then gates who may actually call it (the
+	// read-only "task" agent's allow-list excludes it, so dispatched subagents
+	// cannot recurse).
+	taskTool *taskTool
+
 	// plans holds the most recent plan text for each session, written after a
 	// plan-mode turn completes and consumed by ApprovePlan when the user
 	// approves. planStore carries its own mutex so it is safe for concurrent
@@ -124,6 +131,12 @@ func (c *Coordinator) Start(ctx context.Context) error {
 	// load failure is non-fatal: the tool is still registered over an empty
 	// set so allow-listing "skill" never fails tool validation.
 	c.skillTool = c.loadSkillTool()
+
+	// Build the subagent-dispatch tool over the configured agent set so the
+	// model can fan out work to subagents. It is built after the agent set is
+	// known but before prompts render, so it appears in every agent's tool
+	// listing; the per-agent allow-list decides who may call it.
+	c.taskTool = c.loadTaskTool()
 
 	for i := range c.agents {
 		c.applyConfigAgent(&c.agents[i])
@@ -370,13 +383,28 @@ func (c *Coordinator) loadSkillTool() *skillTool {
 	return newSkillTool(set)
 }
 
+// loadTaskTool builds the subagent-dispatch tool over the configured agent
+// names, binding it to the Coordinator's DispatchParallel. Callers hold the
+// Coordinator write lock (Start), so it reads c.agents directly.
+func (c *Coordinator) loadTaskTool() *taskTool {
+	names := make([]string, 0, len(c.agents))
+	for _, def := range c.agents {
+		names = append(names, def.name)
+	}
+	return newTaskTool(c.DispatchParallel, names)
+}
+
 // extraTools returns the agent-package tools folded into every agent's
 // effective tool set, independent of the shared tools registry.
 func (c *Coordinator) extraTools() []tools.Tool {
-	if c.skillTool == nil {
-		return nil
+	var out []tools.Tool
+	if c.skillTool != nil {
+		out = append(out, c.skillTool)
 	}
-	return []tools.Tool{c.skillTool}
+	if c.taskTool != nil {
+		out = append(out, c.taskTool)
+	}
+	return out
 }
 
 func (c *Coordinator) mcpTools() []tools.Tool {

@@ -185,11 +185,17 @@ func inferAnthropicMaxOutput(id string) int {
 
 // anthropic1MContextSubstrings lists case-insensitive markers in Anthropic
 // model ids whose models can serve the 1M-token context window behind the
-// context-1m beta. Only the Claude Sonnet 4 line (claude-sonnet-4 and
-// claude-sonnet-4-5) offers it today; the Opus and Haiku lines stay at the
-// standard 200k window, so enabling the beta for them would be a no-op at best.
+// context-1m beta. The Claude Sonnet 4 line (claude-sonnet-4 and
+// claude-sonnet-4-5) has offered it since the beta launched, and the Claude
+// Opus 4.8 generation joined it. The marker for Opus is deliberately the
+// specific "claude-opus-4-8" rather than the bare "claude-opus-4": the earlier
+// Opus 4.0/4.1/4.5 releases stayed at the standard 200k window, so a broad
+// family marker would wrongly unlock the beta — and bill long-context premium
+// rates — for ids that 400 on it. The Haiku line stays at 200k, so it carries
+// no marker.
 var anthropic1MContextSubstrings = []string{
 	"claude-sonnet-4",
+	"claude-opus-4-8",
 }
 
 // anthropic1MContextThreshold is the standard Claude context window. A configured

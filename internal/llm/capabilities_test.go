@@ -330,9 +330,21 @@ func TestModelSupportsAnthropic1MContext(t *testing.T) {
 			want:   false,
 		},
 		{
-			name:   "opus is not 1M-capable even with large window",
+			name:   "legacy opus is not 1M-capable even with large window",
 			models: []Model{{ID: "claude-opus-4-1", ContextWindow: 1_000_000}},
 			id:     "claude-opus-4-1",
+			want:   false,
+		},
+		{
+			name:   "opus 4.8 with 1M window opts in",
+			models: []Model{{ID: "claude-opus-4-8", ContextWindow: 1_000_000}},
+			id:     "claude-opus-4-8",
+			want:   true,
+		},
+		{
+			name:   "opus 4.8 at standard window stays off",
+			models: []Model{{ID: "claude-opus-4-8", ContextWindow: 200_000}},
+			id:     "claude-opus-4-8",
 			want:   false,
 		},
 		{

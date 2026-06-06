@@ -437,6 +437,19 @@ var contextWindowRules = []struct {
 	{"qwen3-next", 262_144},
 	{"qwen3-vl", 262_144},
 	{"qwen3", 131_072},
+	// Alibaba's commercial DashScope aliases (served via the Model Studio
+	// openai_compatible endpoint, not the open-weight "qwenN-..." ids) carry no
+	// version digit, so they slip past every "qwen3" rule above and land on the
+	// bare "qwen" family default below — a 32k window that badly undercounts the
+	// long-context tiers. Qwen-Turbo and the newer Qwen-Flash both expose a 1M
+	// window, and Qwen-Plus a 128k window; spell each out so it resolves to its
+	// real budget. Qwen-Max stays on the family default (its commercial alias is
+	// the 32k tier), so it needs no rule. These must precede the bare "qwen" rule
+	// for the same reason the qwen3 lines do; none contains the "qwen3" marker, so
+	// their order relative to those rules is immaterial.
+	{"qwen-turbo", 1_000_000},
+	{"qwen-flash", 1_000_000},
+	{"qwen-plus", 131_072},
 	{"qwen", 32_768},
 	// Qwen's QwQ reasoning line and QVQ vision-reasoning line both ship a 128k
 	// window, but their ids ("qwq-32b", "qvq-72b-preview") carry neither the

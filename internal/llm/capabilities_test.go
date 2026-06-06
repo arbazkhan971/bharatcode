@@ -129,6 +129,18 @@ func TestInferContextWindow(t *testing.T) {
 		{"qwen3-vl-235b-a22b-instruct", 262_144},
 		{"qwen3-235b-a22b-instruct-2507", 131_072},
 		{"qwen3-32b", 131_072},
+		// Alibaba's commercial DashScope aliases carry no version digit, so they
+		// must NOT fall through to the bare "qwen" rule (32k): Qwen-Turbo and
+		// Qwen-Flash are 1M and Qwen-Plus is 128k. The "-latest" snapshots resolve
+		// the same way (Contains-based matching). Qwen-Max keeps the 32k family
+		// default — its commercial alias is the short-context tier — and is asserted
+		// below.
+		{"qwen-turbo", 1_000_000},
+		{"qwen-turbo-latest", 1_000_000},
+		{"qwen-flash", 1_000_000},
+		{"qwen-plus", 131_072},
+		{"qwen-plus-latest", 131_072},
+		{"qwen-max", 32_768},
 		// Qwen2.x ids still resolve to the conservative 32k family default.
 		{"qwen2.5-72b-instruct", 32_768},
 		// Qwen's QwQ reasoning and QVQ vision-reasoning lines ship a 128k window but

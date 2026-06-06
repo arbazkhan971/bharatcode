@@ -134,6 +134,23 @@ func (f *filetree) moveCursor(delta int) {
 	}
 }
 
+// cursorTo sets the cursor to index i, clamped to the listing bounds, so a
+// jump-to-edge binding (Home/End) lands on a valid row no matter how the listing
+// has been narrowed. An empty listing pins the cursor to 0.
+func (f *filetree) cursorTo(i int) {
+	if len(f.files) == 0 {
+		f.cursor = 0
+		return
+	}
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(f.files) {
+		i = len(f.files) - 1
+	}
+	f.cursor = i
+}
+
 // selected returns the workspace-relative path under the cursor, or "" when the
 // listing is empty.
 func (f *filetree) selected() string {
@@ -526,6 +543,16 @@ func (m *model) handleFiletreeKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.C
 	case "down":
 		m.filetree.moveCursor(1)
 		return true, nil
+	case "home":
+		// Jump to the first entry, mirroring the session picker's Home binding so
+		// the two panels navigate alike.
+		m.filetree.cursorTo(0)
+		return true, nil
+	case "end":
+		// Jump to the last entry, the counterpart of Home, so a long listing's tail
+		// is one keystroke away rather than a held Down arrow.
+		m.filetree.cursorTo(len(m.filetree.files) - 1)
+		return true, nil
 	case "/":
 		// Enter quick-filter mode; subsequent keystrokes narrow the listing.
 		m.filetree.filtering = true
@@ -565,6 +592,14 @@ func (m *model) handleFiletreeFilterKey(msg tea.KeyPressMsg) (consumed bool, cmd
 		return true, nil
 	case "down":
 		m.filetree.moveCursor(1)
+		return true, nil
+	case "home":
+		// Jump to the first match without leaving capture mode, so a narrowed
+		// listing can be walked to its edges while the filter is still being typed.
+		m.filetree.cursorTo(0)
+		return true, nil
+	case "end":
+		m.filetree.cursorTo(len(m.filetree.files) - 1)
 		return true, nil
 	case "backspace":
 		m.filetree.backspaceFilter()

@@ -268,6 +268,65 @@ func TestFiletreePanel_FocusedNavigation_DoesNotEditInput(t *testing.T) {
 	require.False(t, m.filetree.focused)
 }
 
+func TestFiletreePanel_HomeEndJumpToEdges(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for i := 0; i < 6; i++ {
+		writeFile(t, root, fmt.Sprintf("file%d.go", i), "package main\n")
+	}
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+	require.Len(t, m.filetree.files, 6)
+	require.Equal(t, 0, m.filetree.cursor)
+
+	// End jumps to the last entry in one keystroke.
+	_, _ = m.Update(keySpecial("end", tea.KeyEnd))
+	require.Equal(t, 5, m.filetree.cursor)
+
+	// A second End is a no-op clamp, never running past the final row.
+	_, _ = m.Update(keySpecial("end", tea.KeyEnd))
+	require.Equal(t, 5, m.filetree.cursor)
+
+	// Home jumps back to the first entry, and the input buffer is never touched.
+	_, _ = m.Update(keySpecial("home", tea.KeyHome))
+	require.Equal(t, 0, m.filetree.cursor)
+	require.Empty(t, m.input.String())
+}
+
+func TestFiletreeFilter_HomeEndNavigateNarrowedView(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "album.go", "")
+	writeFile(t, root, "alley.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	// Filter down to the three "al" matches while staying in capture mode.
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("al"))
+	require.True(t, m.filetree.filtering)
+	require.Len(t, m.filetree.files, 3)
+	require.Equal(t, 0, m.filetree.cursor)
+
+	// End lands on the last match within the narrowed view without leaving the
+	// filter or reaching the prompt; the filter token is unchanged.
+	_, _ = m.Update(keySpecial("end", tea.KeyEnd))
+	require.Equal(t, 2, m.filetree.cursor)
+	require.Equal(t, "al", m.filetree.filter)
+	require.Empty(t, m.input.String())
+
+	// Home returns to the first match.
+	_, _ = m.Update(keySpecial("home", tea.KeyHome))
+	require.Equal(t, 0, m.filetree.cursor)
+}
+
 func TestFiletreeFilter_NarrowsListingAndConsumesKeys(t *testing.T) {
 	t.Parallel()
 

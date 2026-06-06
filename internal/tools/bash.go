@@ -46,6 +46,12 @@ type bashTool struct {
 	// default to that directory — parity with Claude Code / goose shell state.
 	cwdMu   sync.Mutex
 	lastCWD string
+	// defaultTimeout, when positive, is the per-call timeout applied to
+	// foreground bash commands that don't supply their own timeout= arg.
+	// Populated from config.Options.BashDefaultTimeoutSec at construction;
+	// zero means no default (unlimited). This prevents a hung command from
+	// stalling the agent indefinitely — matching Claude Code's 120s default.
+	defaultTimeout time.Duration
 }
 
 // cwdWrappedCommand wraps cmd so that the shell's final working directory is
@@ -124,12 +130,16 @@ var bashSchema = json.RawMessage(`{
 var bashDescription string
 
 func newBashTool(deps Dependencies) Tool {
-	return &bashTool{
+	t := &bashTool{
 		permission: deps.Permission,
 		shell:      deps.Shell,
 		workDir:    deps.WorkDir,
 		offline:    deps.Offline,
 	}
+	if deps.Config != nil && deps.Config.Options.BashDefaultTimeoutSec > 0 {
+		t.defaultTimeout = time.Duration(deps.Config.Options.BashDefaultTimeoutSec) * time.Second
+	}
+	return t
 }
 
 func (t *bashTool) Name() string {
@@ -197,8 +207,15 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 			opts.Cwd = t.workDir
 		}
 	}
-	if args.TimeoutSec > 0 {
+	switch {
+	case args.TimeoutSec > 0:
+		// Explicit per-call timeout overrides everything.
 		opts.Timeout = time.Duration(args.TimeoutSec) * time.Second
+	case t.defaultTimeout > 0:
+		// Fall back to the configured default so a hung command cannot stall
+		// the agent indefinitely. The model can always pass a larger timeout=
+		// arg when it genuinely needs more time (e.g. a slow build).
+		opts.Timeout = t.defaultTimeout
 	}
 
 	if args.Background {

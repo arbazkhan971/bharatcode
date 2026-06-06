@@ -279,6 +279,13 @@ type Options struct {
 	// the in-memory history so the next turn does not overflow. A value of 0
 	// disables auto-compaction (the default). Typical values are 0.85–0.95.
 	AutoCompactThreshold float64 `json:"auto_compact_threshold,omitempty"`
+	// BashDefaultTimeoutSec is the per-call timeout applied to foreground bash
+	// commands that do not supply their own timeout. A positive value caps how
+	// long a single bash call may run; zero or negative disables the default (no
+	// cap — the command runs until it finishes or the agent turn is cancelled).
+	// This prevents hung commands (sleep infinity, ping, blocking I/O) from
+	// stalling the agent indefinitely. Typical values: 120 (matches Claude Code).
+	BashDefaultTimeoutSec int `json:"bash_default_timeout_sec,omitempty"`
 }
 
 // UnmarshalJSON customizes unmarshaling of Options.

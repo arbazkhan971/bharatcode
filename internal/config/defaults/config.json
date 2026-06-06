@@ -117,6 +117,8 @@
       "base_url": "https://api.x.ai/v1",
       "api_key_env": "XAI_API_KEY",
       "models": [
+        "grok-4",
+        "grok-4-fast",
         "grok-3",
         "grok-3-mini",
         "grok-2-latest"
@@ -449,6 +451,24 @@
       "supports_images": true,
       "supports_tools": true,
       "thinking_budget": 16384
+    },
+    {
+      "id": "grok-4",
+      "provider": "xai",
+      "context_window": 256000,
+      "input_price_per_mtok_usd": 3.00,
+      "output_price_per_mtok_usd": 15.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "grok-4-fast",
+      "provider": "xai",
+      "context_window": 2000000,
+      "input_price_per_mtok_usd": 3.00,
+      "output_price_per_mtok_usd": 15.00,
+      "supports_images": true,
+      "supports_tools": true
     },
     {
       "id": "grok-3",

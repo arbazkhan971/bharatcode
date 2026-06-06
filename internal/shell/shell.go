@@ -52,6 +52,11 @@ type RunOpts struct {
 	Cwd     string
 	Timeout time.Duration
 	Env     map[string]string
+	// Stdin, when non-empty, is written to the command's standard input. This
+	// lets callers feed content to a command (e.g. patch -p1, python3 -, tee,
+	// jq) without embedding it as fragile heredoc/quoted text in the command
+	// string. When empty the process inherits the default (no input → EOF).
+	Stdin string
 }
 
 // MaxCaptureSize is the maximum size (10 MB) of captured stdout/stderr.
@@ -163,6 +168,10 @@ func (s *Shell) Start(ctx context.Context, cmdStr string, opts RunOpts) (string,
 
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
+	}
+
+	if opts.Stdin != "" {
+		cmd.Stdin = strings.NewReader(opts.Stdin)
 	}
 
 	// Merge environment variables.

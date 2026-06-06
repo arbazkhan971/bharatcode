@@ -94,6 +94,24 @@ func TestBashEnvVarSurvivesPipeline(t *testing.T) {
 	require.Contains(t, result.Content, "downstream")
 }
 
+// TestBashStdinPipedToCommand asserts that the stdin argument is delivered to
+// the command's standard input verbatim, so content with shell metacharacters
+// reaches the command without quoting bugs.
+func TestBashStdinPipedToCommand(t *testing.T) {
+	tool, ok := NewRegistry(shellDeps(t, &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+	})).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), json.RawMessage(
+		`{"command":"cat","stdin":"alpha\n$(danger)\nomega\n"}`))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "alpha")
+	require.Contains(t, result.Content, "$(danger)")
+	require.Contains(t, result.Content, "omega")
+}
+
 // TestBashTestFailuresSurfacedInMetadata asserts that a bash command classified
 // as a test runner has its failed tests parsed into Result.Metadata and appended
 // as a compact summary to Result.Content. The "# go test" trailing comment makes

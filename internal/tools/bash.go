@@ -36,6 +36,7 @@ type bashArgs struct {
 	Cwd        string            `json:"cwd,omitempty"`
 	Background bool              `json:"background,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
+	Stdin      string            `json:"stdin,omitempty"`
 }
 
 var bashSchema = json.RawMessage(`{
@@ -52,6 +53,10 @@ var bashSchema = json.RawMessage(`{
       "type": "object",
       "additionalProperties": {"type": "string"},
       "description": "Extra environment variables for this command, merged over the inherited environment. Use this instead of inline VAR=val prefixes so values survive across pipelines and quoting."
+    },
+    "stdin": {
+      "type": "string",
+      "description": "Text written to the command's standard input. Use this to feed content to a command that reads stdin (e.g. patch -p1, git apply, python3 -, tee FILE, jq) instead of embedding it as a heredoc or quoted string in the command, which avoids shell-quoting bugs."
     }
   }
 }`)
@@ -108,7 +113,7 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 		}
 	}
 
-	opts := shell.RunOpts{Cwd: args.Cwd, Env: args.Env}
+	opts := shell.RunOpts{Cwd: args.Cwd, Env: args.Env, Stdin: args.Stdin}
 	if opts.Cwd == "" {
 		opts.Cwd = t.workDir
 	}

@@ -144,11 +144,17 @@ func (m *model) paletteBody() string {
 			if e.desc != "" {
 				row += " — " + e.desc
 			}
+			if key := slashCommandKeys[e.name]; key != "" {
+				row += m.theme.Muted.Render("  (" + key + ")")
+			}
 			lines = append(lines, row)
 		} else {
 			row := "  " + e.name
 			if e.desc != "" {
 				row += " — " + e.desc
+			}
+			if key := slashCommandKeys[e.name]; key != "" {
+				row += "  (" + key + ")"
 			}
 			lines = append(lines, m.theme.Muted.Render(row))
 		}

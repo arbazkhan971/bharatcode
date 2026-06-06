@@ -322,6 +322,13 @@ func TestInferContextWindow(t *testing.T) {
 		{"solar-pro-2", 65_536},
 		{"solar-pro", 32_768},
 		{"solar-mini", 32_768},
+		// Writer Palmyra: the X5 flagship is 1M, the X4 and rest of the line 128k.
+		// The specific "palmyra-x5" rule must win over the 128k family default, and
+		// the family default covers X4 and the Bedrock/OpenRouter-namespaced ids.
+		{"palmyra-x5", 1_000_000},
+		{"writer/palmyra-x5", 1_000_000},
+		{"palmyra-x4", 128_000},
+		{"palmyra-med", 128_000},
 		// Case-insensitive and whitespace-tolerant.
 		{"  GPT-4O  ", 128_000},
 		// Unknown ids stay "unknown" (zero).

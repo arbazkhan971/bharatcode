@@ -87,6 +87,64 @@ func TestTruncateMarksClip(t *testing.T) {
 	require.Equal(t, "hello", truncateLine("hello", 0), "a non-positive width is treated as unbounded")
 }
 
+// TestNarrowBarKeepsLiveProgress asserts that when the window is too narrow for
+// the whole bar, the live working segment survives while the static identity
+// fields (session id, uptime) are dropped first — so a user watching a running
+// turn keeps the progress readout instead of losing it to a tail clip.
+func TestNarrowBarKeepsLiveProgress(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{
+		Theme:     styles.Default(),
+		Model:     "m",
+		Agent:     "a",
+		SessionID: "id",
+		StartedAt: start,
+		Now:       start,
+		Working:   "⠙ working 3s",
+	}
+
+	// Wide enough that everything fits: the bar is the plain joined form.
+	full := bar.Render(160)
+	require.Contains(t, full, "session id")
+	require.Contains(t, full, "⠙ working 3s")
+
+	// Narrow enough that not every field fits: the live working segment is kept
+	// and the lower-priority identity fields are shed rather than the spinner.
+	narrow := bar.Render(20)
+	require.Contains(t, narrow, "⠙ working 3s", "the live working segment must survive a narrow window")
+	require.NotContains(t, narrow, "session", "the session id is dropped before the live progress")
+	require.NotContains(t, narrow, "up ", "the uptime is dropped before the live progress")
+	require.NotContains(t, narrow, "…", "dropping whole segments avoids an ellipsis clip")
+}
+
+// TestNarrowBarRanksSegments asserts the drop order follows segment priority:
+// search outranks the scroll position, which outranks the static identity
+// fields, so the most useful field for the current moment is the last to go.
+func TestNarrowBarRanksSegments(t *testing.T) {
+	t.Parallel()
+
+	segs := []segment{
+		{"model", prioModel},
+		{"agent", prioAgent},
+		{"session abcd", prioSession},
+		{"up 5s", prioUptime},
+		{"search 2/7", prioSearch},
+		{"↓ 9 below", prioScroll},
+	}
+
+	// Room for the model anchor plus exactly the highest-priority extra.
+	got := fitSegments(segs, len([]rune("model · search 2/7")))
+	require.Equal(t, "model · search 2/7", got, "search outranks scroll and the identity fields")
+
+	// A non-positive width is unbounded: every segment is kept in order.
+	require.Equal(t, "model · agent · session abcd · up 5s · search 2/7 · ↓ 9 below", fitSegments(segs, 0))
+
+	// When only the anchor fits, it is returned whole for the caller to clip.
+	require.Equal(t, "model", fitSegments(segs, 3))
+}
+
 // TestRenderClipsWideBar asserts Render routes through the ellipsis truncation,
 // so a long line surfaces the marker and a non-positive width stays unbounded.
 func TestRenderClipsWideBar(t *testing.T) {

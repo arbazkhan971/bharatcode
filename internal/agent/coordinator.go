@@ -61,6 +61,10 @@ type Dependencies struct {
 	// so each agent's tool invocations are recorded in the append-only audit log.
 	// It is nil by default, leaving tool auditing off.
 	ToolAuditor ToolAuditor
+	// LLMAuditor, when set, is forwarded to every Loop the Coordinator creates so
+	// each agent's model-provider turns are recorded in the append-only audit
+	// log. It is nil by default, leaving LLM auditing off.
+	LLMAuditor LLMAuditor
 }
 
 // Coordinator manages configured named agents.
@@ -302,6 +306,7 @@ func (c *Coordinator) Agent(name string) (*Loop, error) {
 				ToolAllowList: def.tools,
 				Router:        c.deps.Router,
 				ToolAuditor:   c.deps.ToolAuditor,
+				LLMAuditor:    c.deps.LLMAuditor,
 			}), nil
 		}
 	}

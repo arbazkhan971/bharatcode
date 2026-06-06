@@ -265,6 +265,9 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		// sovereignty proof layer captures what the agent did, not just the
 		// permission decisions it was granted.
 		ToolAuditor: toolAuditLogger{store: app.Audit},
+		// Record every model-provider turn so the audit log also captures the
+		// egress to the model — which provider/model the prompt was sent to.
+		LLMAuditor: llmAuditLogger{store: app.Audit},
 	})
 	if err != nil {
 		return rollback(fmt.Errorf("constructing agent: %w", err))

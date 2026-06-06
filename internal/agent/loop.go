@@ -236,6 +236,13 @@ type Config struct {
 	// sovereignty proof layer captures the tool calls the agent ran, not just
 	// the permission decisions it was granted.
 	ToolAuditor ToolAuditor
+	// LLMAuditor, when set, records every model-provider turn in the append-only
+	// audit log. It is nil by default, leaving LLM auditing off — the
+	// non-breaking default. The app wires an audit-backed logger here so the
+	// sovereignty proof layer captures the egress to the model: which provider
+	// and model the prompt was sent to, alongside the local tool calls and
+	// permission decisions already recorded.
+	LLMAuditor LLMAuditor
 }
 
 // Loop runs a single named agent for one session at a time.
@@ -742,6 +749,10 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		}
 
 		assistant, pendingToolCalls, usage, err := l.callProviderWithRetry(runCtx, history)
+		// Record the egress to the model — which provider/model the prompt was
+		// sent to, and the outcome — before handling success or failure, so a
+		// failed turn is audited just like a successful one.
+		l.auditLLM(runCtx, sessionID, history, usage, err)
 		if err != nil {
 			failure := textMessage(sessionID, message.RoleAssistant, "provider failed: "+err.Error())
 			_ = l.cfg.Sessions.AppendMessage(runCtx, sessionID, failure)

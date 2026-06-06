@@ -7,36 +7,41 @@ import (
 	"os"
 
 	"github.com/arbazkhan971/bharatcode/internal/app"
+	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tui"
 	"github.com/spf13/cobra"
 )
 
 type rootOptions struct {
-	configPath string
-	verbose    bool
-	yolo       bool
-	projectDir string
-	offline    bool
+	configPath      string
+	verbose         bool
+	yolo            bool
+	projectDir      string
+	offline         bool
+	continueSession bool
 }
 
 var (
 	newApp = app.New
-	runTUI = func(ctx context.Context, application *app.App) error {
+	// runTUI launches the interactive TUI. initialSessionID is non-empty when
+	// --continue / -c was passed and a prior session was found for the project.
+	runTUI = func(ctx context.Context, application *app.App, initialSessionID string) error {
 		loop, err := application.Agent.Agent("coder")
 		if err != nil {
 			return fmt.Errorf("resolving default agent: %w", err)
 		}
 		return tui.Run(ctx, tui.Dependencies{
-			Agent:       loop,
-			Coordinator: application.Agent,
-			Sessions:    application.Sessions,
-			Cfg:         application.Cfg,
-			Bus:         application.Bus.Agent,
-			Permission:  application.Permission,
-			Ledger:      application.Ledger,
-			FileTracker: application.FileTracker,
-			Logger:      application.Logger,
-			MCP:         application.MCP,
+			Agent:            loop,
+			Coordinator:      application.Agent,
+			Sessions:         application.Sessions,
+			Cfg:              application.Cfg,
+			Bus:              application.Bus.Agent,
+			Permission:       application.Permission,
+			Ledger:           application.Ledger,
+			FileTracker:      application.FileTracker,
+			Logger:           application.Logger,
+			MCP:              application.MCP,
+			InitialSessionID: initialSessionID,
 		})
 	}
 )
@@ -67,7 +72,8 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			defer closeApp(ctx, application)
-			if err := runTUI(ctx, application); err != nil {
+			initialSessionID := resolveInitialSession(ctx, application, opts)
+			if err := runTUI(ctx, application, initialSessionID); err != nil {
 				return fmt.Errorf("running tui: %w", err)
 			}
 			return nil
@@ -79,6 +85,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVar(&opts.yolo, "yolo", false, "approve tool calls without prompting")
 	root.PersistentFlags().StringVar(&opts.projectDir, "project-dir", "", "project directory")
 	root.PersistentFlags().BoolVar(&opts.offline, "offline", false, "offline mode: reject non-localhost providers and disable web tools (code will not leave this machine)")
+	root.Flags().BoolVarP(&opts.continueSession, "continue", "c", false, "continue the most recent session for this project")
 	root.SetContext(withRootOptions(context.Background(), opts))
 
 	root.AddCommand(
@@ -106,6 +113,29 @@ func newRootCmd() *cobra.Command {
 		newCompletionCmd(),
 	)
 	return root
+}
+
+// resolveInitialSession returns the ID of the most recently updated session for
+// the current project when --continue / -c is set, or "" otherwise. A failure
+// to list sessions is silently ignored; the TUI starts fresh in that case.
+func resolveInitialSession(ctx context.Context, application *app.App, opts *rootOptions) string {
+	if !opts.continueSession || application == nil || application.Sessions == nil {
+		return ""
+	}
+	projectPath := opts.projectDir
+	if projectPath == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			projectPath = cwd
+		}
+	}
+	sessions, err := application.Sessions.List(ctx, session.ListFilter{
+		ProjectPath: projectPath,
+		Limit:       1,
+	})
+	if err != nil || len(sessions) == 0 {
+		return ""
+	}
+	return sessions[0].ID
 }
 
 func buildApp(ctx context.Context, opts *rootOptions) (*app.App, error) {

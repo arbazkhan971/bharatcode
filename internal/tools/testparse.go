@@ -459,10 +459,12 @@ func classifyTestRunner(command string) testRunner {
 		// <FQN> [<time>]" per failure regardless of the underlying framework
 		// (xUnit/NUnit/MSTest), so one parser covers all three.
 		return runnerDotnet
-	case strings.Contains(c, "phpunit"):
-		// "phpunit", "vendor/bin/phpunit", "php artisan test" wrappers all carry
-		// the binary name; matching it before the JS/Python runners avoids any
-		// overlap (none of those substrings appear in a phpunit invocation).
+	case strings.Contains(c, "phpunit"), strings.Contains(c, "artisan test"):
+		// "phpunit", "vendor/bin/phpunit" carry the binary name. "php artisan
+		// test" is Laravel's Artisan wrapper for PHPUnit; it does not contain
+		// "phpunit" in the command but produces identical PHPUnit text output.
+		// Both are matched before the JS/Python runners since neither substring
+		// appears in any of their invocations.
 		return runnerPHPUnit
 	case strings.Contains(c, "pytest"), strings.Contains(c, "py.test"):
 		return runnerPytest

@@ -50,6 +50,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"bin/rspec":                                  runnerRSpec,
 		"vendor/bin/phpunit":                         runnerPHPUnit,
 		"phpunit --filter testFoo":                   runnerPHPUnit,
+		"php artisan test":                           runnerPHPUnit,
+		"php artisan test --filter testFoo":          runnerPHPUnit,
+		"php8.1 artisan test":                        runnerPHPUnit,
 		"dotnet test":                                runnerDotnet,
 		"dotnet test ./MyApp.sln -v normal":          runnerDotnet,
 		"mvn test":                                   runnerMaven,
@@ -1245,6 +1248,48 @@ Failed asserting that 3 matches expected 4.
 		{Name: "MathTest::testAdd with data set #0 (1, 2, 4)", Detail: "Failed asserting that 3 matches expected 4."},
 	}
 	assertFailures(t, got, want)
+}
+
+func TestParsePHPUnitFailures_ArtisanWrapper(t *testing.T) {
+	// Laravel's `php artisan test` drives PHPUnit and produces identical text
+	// output, but the command does not contain "phpunit". Verify the artisan
+	// case routes to the PHPUnit parser so failures are structured correctly.
+	out := `PHPUnit 10.5.0 by Sebastian Bergmann and contributors.
+
+.F                                                                  2 / 2 (100%)
+
+Time: 00:00.045, Memory: 6.00 MB
+
+There was 1 failure:
+
+1) Tests\Feature\ExampleTest::test_the_application_returns_a_successful_response
+Failed asserting that 500 matches expected 200.
+
+/app/tests/Feature/ExampleTest.php:19
+
+FAILURES!
+Tests: 2, Assertions: 2, Failures: 1.`
+	got := parseTestFailures("php artisan test", out)
+	want := []testFailure{
+		{
+			Name:   `Tests\Feature\ExampleTest::test_the_application_returns_a_successful_response`,
+			Detail: "Failed asserting that 500 matches expected 200.",
+		},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParsePHPUnitFailures_ArtisanWrapperNoFailures(t *testing.T) {
+	out := `PHPUnit 10.5.0 by Sebastian Bergmann and contributors.
+
+..                                                                  2 / 2 (100%)
+
+Time: 00:00.020, Memory: 6.00 MB
+
+OK (2 tests, 2 assertions)`
+	if got := parseTestFailures("php artisan test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
 }
 
 func TestParseDotnetTestFailures(t *testing.T) {

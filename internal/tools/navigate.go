@@ -14,6 +14,29 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
 )
 
+// Metadata keys the navigate tool sets on results so downstream consumers
+// (the agent loop, the TUI) can react to individual locations rather than
+// re-parsing the free-form coordinate text — the same pattern as
+// MetadataTestFailures in the bash tool.
+const (
+	// MetadataLocations holds a []navigateLocation for the resolved sites.
+	// Only set when at least one location was found.
+	MetadataLocations = "locations"
+	// MetadataTotal holds the true count of distinct locations before any
+	// navigateLocationCap truncation is applied, so callers know the rendered
+	// list is complete when total == len(MetadataLocations).
+	MetadataTotal = "total"
+)
+
+// navigateLocation is one resolved site returned in navigate metadata. Path is
+// workspace-relative when the file is inside the workspace, otherwise absolute.
+// Line and Column are 1-based, matching the coordinates in the rendered Content.
+type navigateLocation struct {
+	Path   string `json:"path"`
+	Line   int    `json:"line"`
+	Column int    `json:"column"`
+}
+
 // NavigateSource is the LSP capability consumed by the navigate tool. The
 // *lsp.Manager satisfies it; tests substitute a fake.
 type NavigateSource interface {
@@ -148,44 +171,72 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if err != nil {
 			return Result{}, fmt.Errorf("resolving definition at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No definition found.", "definition"), nil
+		res := locationsResult(root, locs, "No definition found.", "definition")
+		if len(locs) > 0 {
+			res.Metadata = navigateLocationsMetadata(root, locs)
+		}
+		return res, nil
 	case "declaration":
 		locs, err := t.source.Declaration(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("resolving declaration at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No declaration found.", "declaration"), nil
+		res := locationsResult(root, locs, "No declaration found.", "declaration")
+		if len(locs) > 0 {
+			res.Metadata = navigateLocationsMetadata(root, locs)
+		}
+		return res, nil
 	case "type_definition":
 		locs, err := t.source.TypeDefinition(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("resolving type definition at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No type definition found.", "type definition"), nil
+		res := locationsResult(root, locs, "No type definition found.", "type definition")
+		if len(locs) > 0 {
+			res.Metadata = navigateLocationsMetadata(root, locs)
+		}
+		return res, nil
 	case "implementation":
 		locs, err := t.source.Implementation(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("finding implementations at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No implementations found.", "implementation"), nil
+		res := locationsResult(root, locs, "No implementations found.", "implementation")
+		if len(locs) > 0 {
+			res.Metadata = navigateLocationsMetadata(root, locs)
+		}
+		return res, nil
 	case "references":
 		includeDecl := args.IncludeDeclaration == nil || *args.IncludeDeclaration
 		locs, err := t.source.References(ctx, path, line0, col0, includeDecl)
 		if err != nil {
 			return Result{}, fmt.Errorf("finding references at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return referencesResult(root, locs), nil
+		res := referencesResult(root, locs)
+		if len(locs) > 0 {
+			res.Metadata = navigateLocationsMetadata(root, locs)
+		}
+		return res, nil
 	case "incoming_calls":
 		locs, err := t.source.IncomingCalls(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("finding callers at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return callsResult(root, locs, "caller", "callers", "No callers found."), nil
+		res := callsResult(root, locs, "caller", "callers", "No callers found.")
+		if len(locs) > 0 {
+			res.Metadata = navigateLocationsMetadata(root, locs)
+		}
+		return res, nil
 	case "outgoing_calls":
 		locs, err := t.source.OutgoingCalls(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("finding callees at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return callsResult(root, locs, "callee", "callees", "No callees found."), nil
+		res := callsResult(root, locs, "callee", "callees", "No callees found.")
+		if len(locs) > 0 {
+			res.Metadata = navigateLocationsMetadata(root, locs)
+		}
+		return res, nil
 	case "hover":
 		text, err := t.source.Hover(ctx, path, line0, col0)
 		if err != nil {
@@ -194,7 +245,10 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if strings.TrimSpace(text) == "" {
 			return Result{Content: "No hover information found."}, nil
 		}
-		return Result{Content: boundHoverText(strings.TrimRight(text, "\n"))}, nil
+		return Result{
+			Content:  boundHoverText(strings.TrimRight(text, "\n")),
+			Metadata: map[string]any{"path": args.Path, "line": args.Line, "column": col},
+		}, nil
 	case "signature":
 		text, err := t.source.SignatureHelp(ctx, path, line0, col0)
 		if err != nil {
@@ -203,7 +257,10 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if strings.TrimSpace(text) == "" {
 			return Result{Content: "No signature help found."}, nil
 		}
-		return Result{Content: boundHoverText(strings.TrimRight(text, "\n"))}, nil
+		return Result{
+			Content:  boundHoverText(strings.TrimRight(text, "\n")),
+			Metadata: map[string]any{"path": args.Path, "line": args.Line, "column": col},
+		}, nil
 	default:
 		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, declaration, type_definition, implementation, references, incoming_calls, outgoing_calls, hover, or signature)", action)), nil
 	}
@@ -262,6 +319,44 @@ func boundHoverText(text string) string {
 		elided++
 	}
 	return text[:cut] + fmt.Sprintf("\n... [%d more %s truncated]", elided, plural(elided, "line", "lines"))
+}
+
+// navigateLocationsMetadata builds the MetadataLocations/MetadataTotal payload
+// for a non-empty location slice. It applies the same sort and dedup logic as
+// renderLocations so the structured slice and the rendered Content are always
+// consistent. Paths are workspace-relative when possible, matching renderLocations.
+func navigateLocationsMetadata(root string, locs []lsp.Location) map[string]any {
+	sort.Slice(locs, func(i, j int) bool {
+		if locs[i].Path != locs[j].Path {
+			return locs[i].Path < locs[j].Path
+		}
+		if locs[i].Range.Start.Line != locs[j].Range.Start.Line {
+			return locs[i].Range.Start.Line < locs[j].Range.Start.Line
+		}
+		return locs[i].Range.Start.Character < locs[j].Range.Start.Character
+	})
+	var out []navigateLocation
+	var last string
+	for _, l := range locs {
+		p := l.Path
+		if rel, err := filepath.Rel(root, l.Path); err == nil && !strings.HasPrefix(rel, "..") {
+			p = filepath.ToSlash(rel)
+		}
+		coord := fmt.Sprintf("%s:%d:%d", p, l.Range.Start.Line+1, l.Range.Start.Character+1)
+		if coord == last {
+			continue
+		}
+		last = coord
+		out = append(out, navigateLocation{
+			Path:   p,
+			Line:   l.Range.Start.Line + 1,
+			Column: l.Range.Start.Character + 1,
+		})
+	}
+	return map[string]any{
+		MetadataLocations: out,
+		MetadataTotal:     len(out),
+	}
 }
 
 // locationsResult renders LSP locations as a sorted, deduplicated list of

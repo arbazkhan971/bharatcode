@@ -27,6 +27,44 @@ func TestSearchStatusSegment(t *testing.T) {
 	require.Equal(t, "search 3/3", s.statusSegment(), "advancing must move the 1-based position")
 }
 
+// TestSearchWrapAnnounced asserts the status segment gains a "(wrapped)" note
+// only on the navigation step that rolls past an end of the buffer — advancing
+// off the last match back to the first, or stepping back off the first to the
+// last — and drops the note again on any in-range step, the way vim and less
+// announce a search that wraps around the end of the file.
+func TestSearchWrapAnnounced(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+
+	// Three matches; start anchored on the first, as startSearch leaves it.
+	m.search = searchState{term: "x", matches: []int{2, 5, 9}, current: 0}
+	require.Equal(t, "search 1/3", m.search.statusSegment(),
+		"a fresh search must not be marked wrapped")
+
+	// Advancing within range moves the position without a wrap note.
+	m.searchNext()
+	require.Equal(t, "search 2/3", m.search.statusSegment(),
+		"an in-range next must not announce a wrap")
+
+	// Advancing off the last match rolls back to the first and announces it.
+	m.searchNext()
+	m.searchNext()
+	require.Equal(t, "search 1/3 (wrapped)", m.search.statusSegment(),
+		"advancing past the last match must announce the wrap")
+
+	// A following in-range step clears the note again.
+	m.searchNext()
+	require.Equal(t, "search 2/3", m.search.statusSegment(),
+		"the wrap note must clear on the next in-range step")
+
+	// Stepping back off the first match rolls to the last and announces it.
+	m.searchPrev()
+	m.searchPrev()
+	require.Equal(t, "search 3/3 (wrapped)", m.search.statusSegment(),
+		"stepping back past the first match must announce the wrap")
+}
+
 // matchLine returns a distinct, searchable line that carries the search needle,
 // tagged with n so each match is individually identifiable in the rendered view.
 func matchLine(n int) string {

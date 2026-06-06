@@ -187,10 +187,16 @@ func (u openAIUsage) toUsage() Usage {
 	if cacheRead == 0 && u.PromptTokensDetails != nil {
 		cacheRead = u.PromptTokensDetails.CachedTokens
 	}
+	// CacheWriteTokens counts tokens written to the provider cache (Anthropic's
+	// cache-creation charge, surfaced as cache_creation_input_tokens by relays
+	// that forward Anthropic usage through the OpenAI shape). DeepSeek's
+	// prompt_cache_miss_tokens is deliberately NOT mapped here: a cache miss is
+	// ordinary, full-rate input — DeepSeek caches automatically with no separate
+	// creation charge — and the miss count already lands in InputTokens via the
+	// prompt_tokens - cacheRead subtraction below (hit + miss == prompt_tokens).
+	// Treating it as a cache write would double-report those tokens (once as
+	// input, once as a write) and imply a cache-creation cost that never occurred.
 	cacheWrite := u.CacheCreationInputToken
-	if cacheWrite == 0 {
-		cacheWrite = u.PromptCacheMissTokens
-	}
 	// prompt_tokens is the total prompt size *including* the cached tokens
 	// (OpenAI reports cache hits as a subset under prompt_tokens_details, and
 	// DeepSeek's prompt_cache_hit_tokens + prompt_cache_miss_tokens sum to

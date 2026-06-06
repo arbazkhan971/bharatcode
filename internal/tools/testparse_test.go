@@ -114,6 +114,10 @@ func TestClassifyTestRunner(t *testing.T) {
 		"./build/calc_test --gtest_filter=Calc.*":    runnerGTest,
 		"./mytest --gtest_color=no":                  runnerGTest,
 		"build/run_tests --gtest_output=xml:r.xml":   runnerGTest,
+		"robot tests/":                               runnerRobot,
+		"python -m robot suite.robot":                runnerRobot,
+		"pabot --processes 4 tests/":                 runnerRobot,
+		"echo the robotics demo":                     runnerNone,
 		"echo the trumpeters tune up":                runnerNone,
 		"echo forge testbed":                         runnerNone,
 		"echo subtle differences":                    runnerNone,
@@ -1481,6 +1485,59 @@ func TestParseGTestFailures_NoFailures(t *testing.T) {
 [==========] 1 test from 1 test suite ran. (0 ms total)
 [  PASSED  ] 1 test.`
 	if got := parseTestFailures("./calc_test --gtest_filter=*", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseRobotFailures(t *testing.T) {
+	out := `==============================================================================
+Calc :: Arithmetic tests
+==============================================================================
+Addition Works                                                        | PASS |
+------------------------------------------------------------------------------
+Subtraction Works                                                     | FAIL |
+1 != 2
+------------------------------------------------------------------------------
+Division Works                                                        | FAIL |
+ZeroDivisionError: integer division or modulo by zero
+------------------------------------------------------------------------------
+Calc :: Arithmetic tests                                              | FAIL |
+3 tests, 1 passed, 2 failed
+==============================================================================`
+	got := parseTestFailures("robot tests/calc.robot", out)
+	want := []testFailure{
+		{Name: "Subtraction Works", Detail: "1 != 2"},
+		{Name: "Division Works", Detail: "ZeroDivisionError: integer division or modulo by zero"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseRobotFailures_MessageLessAndCritical(t *testing.T) {
+	// A failure whose next line is a separator (no message) yields no detail, and
+	// the older "N critical tests, ..." suite statistics line still suppresses the
+	// suite-summary row. The pabot wrapper routes to the same parser.
+	out := `==============================================================================
+Smoke                                                                 | FAIL |
+------------------------------------------------------------------------------
+Smoke                                                                 | FAIL |
+1 critical test, 0 passed, 1 failed
+1 test total, 0 passed, 1 failed
+==============================================================================`
+	got := parseTestFailures("pabot tests/", out)
+	want := []testFailure{
+		{Name: "Smoke"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseRobotFailures_NoFailures(t *testing.T) {
+	out := `==============================================================================
+Calc                                                                  | PASS |
+------------------------------------------------------------------------------
+Calc                                                                  | PASS |
+1 test, 1 passed, 0 failed
+==============================================================================`
+	if got := parseTestFailures("robot tests/", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

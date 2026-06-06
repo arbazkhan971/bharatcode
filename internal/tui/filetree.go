@@ -550,12 +550,39 @@ func (m *model) editDiffMessages() []message.Message {
 	return msgs
 }
 
+// insertFileMention appends an @-file reference for the workspace-relative path
+// rel to the prompt buffer and hands keyboard focus back to the input line, so a
+// file chosen in the side panel lands in the message the way Claude Code and
+// opencode let you pick a file from their tree into the prompt. A separating
+// space is inserted before the "@" when the buffer is non-empty and does not
+// already end at a mention boundary, so the reference is recognised by
+// mentionPattern (and never fuses onto the preceding word); a trailing space
+// follows the path so the user can keep typing after it. The panel stays visible
+// but yields focus, and any recall or completion cycle is reset since the buffer
+// was edited. An empty rel is a no-op.
+func (m *model) insertFileMention(rel string) {
+	if rel == "" {
+		return
+	}
+	buf := m.input.String()
+	if r := []rune(buf); len(r) > 0 && !isMentionBoundary(r[len(r)-1]) {
+		buf += " "
+	}
+	buf += "@" + rel + " "
+	m.setInput(buf)
+	m.inputHistory.resetRecall()
+	m.inputHistory.resetCompletion()
+	m.filetree.focused = false
+	m.focus = focusInput
+}
+
 // handleFiletreeKey processes a key while the panel has focus. It reports
 // whether the key was consumed; unconsumed keys fall through to the normal
-// input handling. Up/Down move the cursor, Tab returns focus to the input line
-// (leaving the panel visible), "/" starts a quick-filter, and Esc clears an
-// active filter before falling through to close the panel. Ctrl+F continues to
-// toggle the panel.
+// input handling. Up/Down move the cursor, Enter inserts the selected file as an
+// @-mention into the prompt (handing focus back to the input line), Tab returns
+// focus to the input line (leaving the panel visible), "/" starts a quick-filter,
+// and Esc clears an active filter before falling through to close the panel.
+// Ctrl+F continues to toggle the panel.
 func (m *model) handleFiletreeKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.Cmd) {
 	if m.filetree.filtering {
 		return m.handleFiletreeFilterKey(msg)
@@ -566,6 +593,15 @@ func (m *model) handleFiletreeKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.C
 		return true, nil
 	case "down":
 		m.filetree.moveCursor(1)
+		return true, nil
+	case "enter":
+		// Pick the highlighted file into the prompt as an @-mention. With an empty
+		// listing there is nothing to insert, so the key falls through unconsumed.
+		sel := m.filetree.selected()
+		if sel == "" {
+			return false, nil
+		}
+		m.insertFileMention(sel)
 		return true, nil
 	case "home":
 		// Jump to the first entry, mirroring the session picker's Home binding so

@@ -244,6 +244,53 @@ func TestFiletreePanel_LongListing_KeepsCursorOnScreen(t *testing.T) {
 	require.Contains(t, out, "more")
 }
 
+func TestFiletreePanel_EnterInsertsSelectedFileAsMention(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "beta.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	// Move to the second entry, then Enter picks it into the prompt as an @mention
+	// and returns focus to the input line while keeping the panel open.
+	_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	require.Equal(t, "beta.go", m.filetree.selected())
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	require.Equal(t, "@beta.go ", m.input.String())
+	require.Equal(t, focusInput, m.focus)
+	require.False(t, m.filetree.focused)
+	require.True(t, m.filetree.visible, "the panel stays open after a pick")
+
+	// The inserted reference is a real, recognised mention: it resolves to the file
+	// the picker selected.
+	_, refs := expandFileMentions(m.input.String(), root)
+	require.Equal(t, []string{"beta.go"}, refs)
+}
+
+func TestFiletreePanel_EnterAppendsAfterExistingPromptText(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	m.input.WriteString("review")
+	_, _ = m.Update(ctrlKey('f'))
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	// A separating space is inserted before the "@" so the mention sits at a
+	// boundary the parser recognises and never fuses onto the preceding word.
+	require.Equal(t, "review @alpha.go ", m.input.String())
+	_, refs := expandFileMentions(m.input.String(), root)
+	require.Equal(t, []string{"alpha.go"}, refs)
+}
+
 func TestFiletreePanel_FocusedNavigation_DoesNotEditInput(t *testing.T) {
 	t.Parallel()
 

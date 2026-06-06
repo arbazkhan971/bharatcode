@@ -187,6 +187,12 @@ type model struct {
 	// tool returns (and at turn end), so an empty value means the agent is
 	// thinking between tools.
 	currentActivity string
+	// turnToolCount is the number of tool calls made so far in the in-flight
+	// turn. It is reset to zero at turn start and incremented on each
+	// EventToolCalled, so the running status can show "[N]" when the agent has
+	// made multiple calls — giving the user a sense of progress without having
+	// to scroll up to count "[tool: ...]" lines in the chat.
+	turnToolCount int
 	// lastTurnTokens is the formatted token-count segment for the most recently
 	// completed turn (e.g. "1.2k in · 234 out"). It is cleared when a new turn
 	// starts and set once the turn finishes, so the bar shows idle-turn stats
@@ -1070,7 +1076,7 @@ func (m *model) renderMain() string {
 	if tabBar != "" {
 		parts = append(parts, tabBar)
 	}
-	m.status.Working = runningStatus(m.turnStartedAt, m.now, m.currentActivity)
+	m.status.Working = runningStatus(m.turnStartedAt, m.now, m.currentActivity, m.turnToolCount)
 	m.status.TurnTokens = m.lastTurnTokens
 	m.status.ContextPct = m.lastContextPct
 	m.status.Search = m.search.statusSegment()
@@ -1248,12 +1254,16 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const interruptHintAfter = 10 * time.Second
 
 // runningStatus returns the status-bar segment shown while a turn is in flight:
-// a cycling spinner, a label for what the agent is doing, and how long the turn
-// has run, e.g. "⠙ working 3s" or "⠙ Bash 3s". The label is the name of the tool
-// currently running (activity), falling back to "working" while the agent is
-// thinking between tools, so the reader can tell a long turn is shelling out or
-// editing rather than merely stalled — the way Claude Code and opencode name the
-// active step. It returns "" when no turn is running (a zero start time), so the
+// a cycling spinner, a label for what the agent is doing, the elapsed time,
+// and — when the turn has invoked at least one tool — a "[N]" count of total
+// tool calls so far, e.g. "⠙ working 3s" or "⠙ Bash 3s [2]". The "[N]" count
+// gives the user a progress signal — they can see how many tool invocations
+// have accumulated without scrolling up to count "[tool: ...]" chat lines,
+// matching the step-counter Claude Code and opencode show in their progress
+// indicators. The label is the name of the tool currently running (activity),
+// falling back to "working" while the agent is thinking between tools, so the
+// reader can tell a long turn is shelling out or editing rather than merely
+// stalled. It returns "" when no turn is running (a zero start time), so the
 // bar reverts to its idle form the moment the agent finishes. The elapsed time
 // is taken from now-started and the spinner frame from the whole-second elapsed
 // count, so the glyph advances in step with the one-second tick that drives the
@@ -1264,7 +1274,7 @@ const interruptHintAfter = 10 * time.Second
 // "(ctrl+c to interrupt)" hint, so a user watching a long run learns how to stop
 // it without quitting the session — Ctrl+C interrupts a turn in flight rather
 // than quitting (see the key handler) but nothing else advertises that.
-func runningStatus(started, now time.Time, activity string) string {
+func runningStatus(started, now time.Time, activity string, toolCount int) string {
 	if started.IsZero() {
 		return ""
 	}
@@ -1278,6 +1288,9 @@ func runningStatus(started, now time.Time, activity string) string {
 	}
 	frame := spinnerFrames[int(elapsed/time.Second)%len(spinnerFrames)]
 	seg := frame + " " + label + " " + util.HumanDuration(elapsed)
+	if toolCount > 0 {
+		seg += fmt.Sprintf(" [%d]", toolCount)
+	}
 	if elapsed >= interruptHintAfter {
 		seg += " (ctrl+c to interrupt)"
 	}

@@ -40,6 +40,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parsePytestFailures(output)
 	case runnerUnittest:
 		return parseUnittestFailures(output)
+	case runnerTox:
+		return parseToxFailures(output)
 	case runnerJest:
 		return parseJestFailures(output)
 	case runnerCargo:
@@ -121,6 +123,7 @@ const (
 	runnerClojure
 	runnerFoundry
 	runnerGinkgo
+	runnerTox
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -217,6 +220,17 @@ var (
 	// "Summarizing N Failures" block differs from the "--- FAIL:" lines goTestRe
 	// keys on).
 	ginkgoRe = regexp.MustCompile(`\bginkgo\b`)
+	// `tox` and `nox` are Python automation tools that, in the overwhelmingly
+	// common case, run pytest (or stdlib unittest) inside their managed
+	// environments and relay that runner's output verbatim — including the
+	// "FAILED <id> - <msg>" / "FAIL: <id>" lines the Python parsers key on. tox's
+	// and nox's own per-environment summary lines ("py311: FAILED ...") are
+	// indented or prefixed and so do not collide with those column-0 markers. \b
+	// keeps prose like "intoxicated" / "obnoxious" / "Knox" from matching while
+	// admitting "tox", "tox -e py311", "nox -s tests", and "uvx tox". A "pytest"
+	// or "python -m unittest" invocation is classified by its own (earlier) case,
+	// so this only claims bare tox/nox driver commands.
+	toxRe = regexp.MustCompile(`\b(?:tox|nox)\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -290,6 +304,13 @@ func classifyTestRunner(command string) testRunner {
 	// against future overlap.
 	case strings.Contains(c, "unittest"), noseRe.MatchString(c):
 		return runnerUnittest
+	case toxRe.MatchString(c):
+		// `tox`/`nox` drive Python test automation that almost always runs pytest
+		// (or stdlib unittest) underneath and relays its output, so the failures are
+		// extracted by the same Python parsers. Checked after the explicit pytest and
+		// unittest cases so a "tox -e py -- pytest ..." command — which carries the
+		// "pytest" substring — is claimed by the more specific pytest case first.
+		return runnerTox
 	case tapRe.MatchString(c), batsRe.MatchString(c):
 		return runnerTAP
 	case strings.Contains(c, "deno test"):
@@ -708,6 +729,26 @@ func parseUnittestFailures(output string) []testFailure {
 		failures = append(failures, f)
 	}
 	return failures
+}
+
+// The footer stdlib unittest prints after every run ("Ran 3 tests in 0.001s").
+// pytest never emits it, so it reliably tells the two Python runners apart in
+// tox/nox output — and notably keeps unittest's own "FAILED (failures=1)"
+// summary line from being misread as a pytest "FAILED <node-id>" entry.
+var unittestRanRe = regexp.MustCompile(`(?m)^Ran \d+ tests? in `)
+
+// parseToxFailures extracts failing tests from `tox`/`nox` output. Both tools
+// run a Python test runner inside a managed environment and stream its output,
+// so the failures are whatever that runner printed. A stdlib-unittest run is
+// recognized by its "Ran N tests in ..." footer and parsed as unittest;
+// everything else is treated as pytest (the dominant choice), whose
+// "FAILED <id> - <msg>" summary lines the pytest parser handles. Returns nil
+// when no failure markers appear.
+func parseToxFailures(output string) []testFailure {
+	if unittestRanRe.MatchString(output) {
+		return parseUnittestFailures(output)
+	}
+	return parsePytestFailures(output)
 }
 
 var (

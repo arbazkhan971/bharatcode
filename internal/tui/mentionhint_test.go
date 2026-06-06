@@ -432,6 +432,89 @@ func TestHighlightMention_PreservesVisibleText(t *testing.T) {
 	require.Equal(t, "internal/main.go", stripANSI(m.highlightMention("internal/main.go", "zzz")))
 }
 
+// TestHumanizeBytes_FormatsUnits asserts byte counts render as short, 1024-based
+// human sizes: bare bytes below 1 KiB, then KB and MB to one decimal place.
+func TestHumanizeBytes_FormatsUnits(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "0 B", humanizeBytes(0))
+	require.Equal(t, "512 B", humanizeBytes(512))
+	require.Equal(t, "1023 B", humanizeBytes(1023))
+	require.Equal(t, "1.0 KB", humanizeBytes(1024))
+	require.Equal(t, "1.5 KB", humanizeBytes(1536))
+	require.Equal(t, "1.0 MB", humanizeBytes(1024*1024))
+	require.Equal(t, "2.5 MB", humanizeBytes(2*1024*1024+512*1024))
+}
+
+// TestMentionHintSizeIndex_SettledChoice asserts the size annotation targets a
+// settled choice only: the active Tab-cycle entry, or the sole match, and never a
+// multi-entry browse list.
+func TestMentionHintSizeIndex_SettledChoice(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 1, mentionHintSizeIndex([]string{"a.go", "b.go"}, 1), "active cycle entry")
+	require.Equal(t, 0, mentionHintSizeIndex([]string{"only.go"}, -1), "sole match")
+	require.Equal(t, -1, mentionHintSizeIndex([]string{"a.go", "b.go"}, -1), "ambiguous browse list")
+	require.Equal(t, -1, mentionHintSizeIndex(nil, -1), "no files")
+	require.Equal(t, -1, mentionHintSizeIndex([]string{"a.go", "b.go"}, 5), "out-of-range active index")
+}
+
+// TestMentionSizeSuffix_ReportsSizeAndTruncation asserts the suffix carries the
+// file's human size, flags files over the per-file inline cap as truncated, and
+// stays empty for a path that does not resolve to a regular file in root.
+func TestMentionSizeSuffix_ReportsSizeAndTruncation(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "small.go"), make([]byte, 2048), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "big.go"), make([]byte, maxMentionFileBytes+1), 0o644))
+
+	require.Equal(t, " — 2.0 KB", mentionSizeSuffix("small.go", root))
+
+	big := mentionSizeSuffix("big.go", root)
+	require.Contains(t, big, "(truncated)", "a file over the inline cap is flagged truncated")
+
+	require.Empty(t, mentionSizeSuffix("nope.go", root), "an unresolved path yields no suffix")
+}
+
+// TestRenderMentionHint_ShowsSettledFileSize is the end-to-end contract: when an
+// @-token narrows to a single file the rendered picker appends that file's size,
+// the way the slash menu glosses a settled command.
+func TestRenderMentionHint_ShowsSettledFileSize(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.go"), make([]byte, 3072), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "other.txt"), nil, 0o644))
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+
+	typeString(t, m, "@main")
+	hint := stripANSI(m.renderMentionHint(400))
+	require.Contains(t, hint, "main.go")
+	require.Contains(t, hint, "3.0 KB", "a settled single match shows its size")
+}
+
+// TestRenderMentionHint_NoSizeForAmbiguousList asserts the size annotation is
+// withheld while the picker still lists several candidates, so only a settled
+// choice is measured.
+func TestRenderMentionHint_NoSizeForAmbiguousList(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "alpha.go"), make([]byte, 1024), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "alphabet.go"), make([]byte, 1024), 0o644))
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+
+	typeString(t, m, "@alpha")
+	hint := stripANSI(m.renderMentionHint(400))
+	require.Contains(t, hint, "alpha.go")
+	require.NotContains(t, hint, "KB", "an ambiguous list shows no per-file size")
+}
+
 // TestTab_MentionDoesNotToggleFocus asserts Tab on an active mention completes it
 // rather than moving focus to the chat pane.
 func TestTab_MentionDoesNotToggleFocus(t *testing.T) {

@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -503,6 +505,71 @@ func (m *model) renderMentionHint(width int) string {
 	hidden := total - len(parts)
 	if truncated || hidden > 0 {
 		line += m.theme.Muted.Render(overflowSuffix(hidden))
+		return line
+	}
+
+	// Once the picker has settled on a single file — the active Tab-cycle entry or
+	// the sole remaining match — append its size so the user can see how much
+	// context the attachment adds, with a truncation note when it exceeds the
+	// per-file inline cap. This mirrors the slash menu's settled-command gloss and,
+	// like it, is only added to a list that fully fit, so the menu never spills past
+	// one row.
+	if si := mentionHintSizeIndex(files, active); si >= 0 {
+		if suffix := mentionSizeSuffix(files[si], m.workspaceRoot); suffix != "" && used+len([]rune(suffix)) <= width {
+			line += m.theme.Muted.Render(suffix)
+		}
 	}
 	return line
+}
+
+// mentionHintSizeIndex returns the index of the file whose size annotation
+// should be shown, or -1 when none applies. The size is shown for the file the
+// user has settled on: the entry marked active during a Tab cycle, or the sole
+// match when the token narrows to one file. It mirrors slashHintDescIndex so the
+// @-file picker annotates a settled choice the way the slash menu glosses one.
+func mentionHintSizeIndex(files []string, active int) int {
+	if active >= 0 && active < len(files) {
+		return active
+	}
+	if len(files) == 1 {
+		return 0
+	}
+	return -1
+}
+
+// mentionSizeSuffix formats the trailing size annotation shown for a settled
+// @-file choice: the human-readable size of the file that would be attached, with
+// a "truncated" note when it exceeds maxMentionFileBytes so the user knows only
+// part of it will be inlined. It returns "" when rel cannot be resolved or
+// stat-ed as a regular file inside root, so an unreadable entry simply shows no
+// annotation. The leading " — " mirrors the slash menu's description suffix.
+func mentionSizeSuffix(rel, root string) string {
+	_, abs, ok := resolveMention(rel, root)
+	if !ok {
+		return ""
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	suffix := " — " + humanizeBytes(info.Size())
+	if info.Size() > maxMentionFileBytes {
+		suffix += " (truncated)"
+	}
+	return suffix
+}
+
+// humanizeBytes formats a byte count as a short human-readable size — bytes below
+// 1 KiB, then KB or MB to one decimal place — so the @-file picker can show how
+// much context an attachment adds at a glance. The 1024-based units match the
+// per-file and total inline caps, which are expressed in KiB.
+func humanizeBytes(n int64) string {
+	switch {
+	case n < 1024:
+		return strconv.FormatInt(n, 10) + " B"
+	case n < 1024*1024:
+		return strconv.FormatFloat(float64(n)/1024, 'f', 1, 64) + " KB"
+	default:
+		return strconv.FormatFloat(float64(n)/(1024*1024), 'f', 1, 64) + " MB"
+	}
 }

@@ -1943,6 +1943,58 @@ func TestParseCucumberFailures_None(t *testing.T) {
 	}
 }
 
+func TestParseBehaveFailures(t *testing.T) {
+	// behave (Python Gherkin BDD) closes a failing run with a "Failing scenarios:"
+	// block of indented "<file>.feature:<line>  <scenario name>" entries. Name is
+	// the scenario name and Detail the re-runnable location. The verbose run's
+	// per-scenario "Scenario: <name>  # <file>:<line>" trace lines printed earlier
+	// must not be mistaken for failures.
+	out := `Feature: Calculator # features/calc.feature:1
+
+  Scenario: Add two numbers  # features/calc.feature:5
+    Given I have entered 50  # features/steps/calc.py:3
+    Then the result should be 99  # features/steps/calc.py:9
+      Assertion Failed: 70 != 99
+
+Failing scenarios:
+  features/calc.feature:5  Add two numbers
+  features/calc.feature:12  Subtract two numbers
+
+0 features passed, 1 failed, 0 skipped
+1 scenario passed, 2 failed, 0 skipped`
+	got := parseTestFailures("python -m behave", out)
+	want := []testFailure{
+		{Name: "Add two numbers", Detail: "features/calc.feature:5"},
+		{Name: "Subtract two numbers", Detail: "features/calc.feature:12"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseBehaveFailures_None(t *testing.T) {
+	// A passing run prints no "Failing scenarios:" block, so nothing is extracted —
+	// and the per-scenario trace lines outside that block are never matched.
+	out := `Feature: Calculator # features/calc.feature:1
+
+  Scenario: Add two numbers  # features/calc.feature:5
+    Then the result should be 99  # features/steps/calc.py:9
+
+1 feature passed, 0 failed, 0 skipped
+1 scenario passed, 0 failed, 0 skipped`
+	if got := parseTestFailures("behave", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseBehaveFailures_NotMisbehave(t *testing.T) {
+	// "\bbehave\b" must not fire on prose like "misbehave", so a command that only
+	// mentions it in passing is not classified as a behave run.
+	out := `Failing scenarios:
+  features/calc.feature:5  Add two numbers`
+	if got := parseTestFailures("echo the tests misbehave", out); len(got) != 0 {
+		t.Errorf("expected no failures for non-behave command, got %v", got)
+	}
+}
+
 func TestParseKarmaFailures(t *testing.T) {
 	// Karma's progress reporter prints "<browser> <suite> <test> FAILED" per
 	// failing spec, with the assertion on the tab-indented line beneath. The

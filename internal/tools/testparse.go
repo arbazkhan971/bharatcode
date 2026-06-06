@@ -99,6 +99,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseRobotFailures(output)
 	case runnerCucumber:
 		return parseCucumberFailures(output)
+	case runnerBehave:
+		return parseBehaveFailures(output)
 	case runnerKarma:
 		return parseKarmaFailures(output)
 	default:
@@ -142,6 +144,7 @@ const (
 	runnerGTest
 	runnerRobot
 	runnerCucumber
+	runnerBehave
 	runnerKarma
 )
 
@@ -291,6 +294,16 @@ var (
 	// at no trailing word boundary — from matching. A Cucumber invocation carries
 	// none of the other runners' substrings.
 	cucumberRe = regexp.MustCompile(`\bcucumber\b`)
+	// `behave`/`python -m behave` drive behave, the dominant Python Gherkin BDD
+	// runner, whose default reporter closes a failing run with a "Failing
+	// scenarios:" block listing each failed scenario as an indented
+	// "<file>.feature:<line>  <scenario name>" line (two spaces separating the
+	// re-runnable location from the name). \bbehave\b admits "behave",
+	// "python -m behave", and "behave features/" while keeping prose like
+	// "misbehave" / "behaves oddly" — where "behave" sits at no surrounding word
+	// boundary — from matching. A behave invocation carries none of the other
+	// runners' substrings, and shares no command name with Ruby/JS Cucumber.
+	behaveRe = regexp.MustCompile(`\bbehave\b`)
 	// `karma start`/`npx karma`/`ng test` drive Karma (the dominant Angular test
 	// runner), whose progress/dots reporter prints each failing spec as
 	// "<browser> <suite> <test> FAILED" with the assertion on the tab-indented
@@ -532,6 +545,14 @@ func classifyTestRunner(command string) testRunner {
 		// the jest runners since a "cucumber" invocation carries none of their
 		// substrings, but kept explicit to guard against future overlap.
 		return runnerCucumber
+	case behaveRe.MatchString(c):
+		// `behave`/`python -m behave` drive behave, Python's Gherkin BDD runner,
+		// whose report closes with a "Failing scenarios:" block of indented
+		// "<file>.feature:<line>  <scenario name>" lines. Checked after Cucumber (a
+		// behave invocation never contains "cucumber" at a word boundary) and before
+		// the JS runners since a behave invocation carries none of their substrings,
+		// but kept explicit to guard against future overlap.
+		return runnerBehave
 	case karmaRe.MatchString(c):
 		// `karma`/`ng test` drive Karma, whose progress reporter marks each failing
 		// spec with a "<browser> <suite> <test> FAILED" line and prints the assertion
@@ -1225,6 +1246,64 @@ func parseCucumberFailures(output string) []testFailure {
 		}
 		seen[name] = true
 		failures = append(failures, testFailure{Name: name, Detail: detail})
+	}
+	return failures
+}
+
+var (
+	// behave closes a failing run with this exact block header, beneath which it
+	// lists one indented entry per failed scenario.
+	behaveFailingHeaderRe = regexp.MustCompile(`^Failing scenarios:\s*$`)
+	// "  features/calc.feature:5  Add two numbers" — one entry in behave's
+	// "Failing scenarios:" block. Group 1 is the re-runnable
+	// "<file>.feature:<line>" location (no spaces); group 2 is the scenario name,
+	// which behave separates from the location with two spaces. Requiring at least
+	// two spaces as the separator keeps a feature path that itself contained a
+	// single space from being split mid-location, and the scenario name (which may
+	// contain single spaces) is captured whole to its trailing non-space.
+	behaveScenarioRe = regexp.MustCompile(`^\s+(\S+\.feature:\d+)\s{2,}(.+\S)\s*$`)
+)
+
+// parseBehaveFailures extracts failing scenarios from behave output (`behave`,
+// `python -m behave`). behave's reporter closes a failing run with a "Failing
+// scenarios:" block whose indented entries are re-runnable
+// "<file>.feature:<line>  <scenario name>" lines; Name is the scenario name and
+// Detail the re-runnable location. Only lines inside that block are considered,
+// so the verbose run's per-scenario "Scenario: <name>  # <file>:<line>" trace
+// lines (printed before the summary) are not mistaken for failures. The block
+// ends at the first line that is not an entry — the blank line before behave's
+// "N scenarios passed, M failed" statistics. Scenarios are deduplicated by name
+// so a scenario outline whose examples each failed does not produce duplicates.
+func parseBehaveFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	inBlock := false
+	for _, ln := range lines {
+		if !inBlock {
+			if behaveFailingHeaderRe.MatchString(ln) {
+				inBlock = true
+			}
+			continue
+		}
+		m := behaveScenarioRe.FindStringSubmatch(ln)
+		if m == nil {
+			// The first non-entry line (the blank separator before the statistics
+			// footer) closes the block; a later second "Failing scenarios:" block,
+			// if any, reopens it.
+			inBlock = false
+			continue
+		}
+		loc := strings.TrimSpace(m[1])
+		name := strings.TrimSpace(m[2])
+		if name == "" {
+			name = loc
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: loc})
 	}
 	return failures
 }

@@ -258,10 +258,11 @@ func (m *Manager) Implementation(ctx context.Context, path string, line, col int
 }
 
 // References returns every location referencing the symbol at the position in
-// path, including its declaration, starting a server if needed. A nil slice
-// with a nil error means no server is configured for the file or the symbol has
-// no references.
-func (m *Manager) References(ctx context.Context, path string, line, col int) ([]Location, error) {
+// path, starting a server if needed. When includeDeclaration is true the
+// symbol's own declaration is included among the results; when false only the
+// use sites are returned. A nil slice with a nil error means no server is
+// configured for the file or the symbol has no references.
+func (m *Manager) References(ctx context.Context, path string, line, col int, includeDeclaration bool) ([]Location, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolving references path: %w", err)
@@ -280,7 +281,7 @@ func (m *Manager) References(ctx context.Context, path string, line, col int) ([
 		return nil, nil
 	}
 
-	locations, err := c.references(ctx, abs, line, col)
+	locations, err := c.references(ctx, abs, line, col, includeDeclaration)
 	if err != nil {
 		return nil, err
 	}

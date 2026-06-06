@@ -740,9 +740,14 @@ func TestDefaultConfigOpenAIPreset(t *testing.T) {
 	}{
 		{"gpt-4o", 128_000, true, true},
 		{"gpt-4o-mini", 128_000, true, true},
-		// gpt-4.1 exposes a ~1M context window; the catalog value must not
-		// undercount the family heuristic.
+		// The gpt-4.1 family (gpt-4.1, gpt-4.1-mini, gpt-4.1-nano) all expose a
+		// ~1M context window; the catalog values must not undercount the family
+		// heuristic. gpt-4.1-nano is the cheapest tier ($0.10/$0.40 per MTok),
+		// useful for fast, low-cost completions where the full 1M context is still
+		// needed.
 		{"gpt-4.1", 1_047_576, true, true},
+		{"gpt-4.1-mini", 1_047_576, true, true},
+		{"gpt-4.1-nano", 1_047_576, true, true},
 		// o3 and o4-mini are reasoning models with a 200k context window.
 		{"o3", 200_000, true, true},
 		{"o4-mini", 200_000, true, true},

@@ -1,6 +1,6 @@
 {
   "name": "bharatcode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "BharatCode — an open, sovereign terminal coding agent. OpenCode for India. This npm package downloads the correct prebuilt binary for your platform from GitHub Releases.",
   "keywords": [
     "bharatcode",

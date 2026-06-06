@@ -103,6 +103,21 @@ func slashArgHint(buffer string) string {
 	return slashCommandArgHints[buffer[:sp]]
 }
 
+// slashCommandKeys maps a built-in slash command to the keyboard shortcut that
+// invokes the very same action, so the completion menu can teach the binding next
+// to the command once the user settles on it — the way Claude Code and opencode
+// surface a command's shortcut inline so a returning user learns the faster path.
+// Only commands whose key opens exactly what the command does are listed (Ctrl+P
+// is the model picker, Ctrl+A the agent picker, Ctrl+D the latest-edit diff); a
+// command with no clean one-key equivalent simply has no entry. The shortcuts
+// mirror the rows in keybindingGroups and the handlers in handleKey, so the
+// inline cue, the /keys overlay, and the actual binding all agree.
+var slashCommandKeys = map[string]string{
+	"/model": "Ctrl+P",
+	"/agent": "Ctrl+A",
+	"/diff":  "Ctrl+D",
+}
+
 // slashHintDescIndex returns the index of the command whose description should
 // be shown, or -1 when none applies. A description is shown for the command the
 // user has settled on: the one marked active during a Tab cycle, or the sole
@@ -286,15 +301,23 @@ func (m *model) renderSlashHint(width int) string {
 	}
 
 	// Once the user has settled on a single command, append its description on
-	// the same row when there is spare width. A truncated name list already ends
-	// in an ellipsis and has no room, so the gloss is only added to a list that
-	// fully fit.
+	// the same row when there is spare width, followed by the keyboard shortcut
+	// that runs the same action when the command has one — so a returning user
+	// discovers the faster path inline rather than only from the /keys overlay. A
+	// truncated name list already ends in an ellipsis and has no room, so the gloss
+	// is only added to a list that fully fit. The description and shortcut are
+	// built into one suffix and width-guarded together, so the menu still never
+	// spills past a single row.
 	if di := slashHintDescIndex(cmds, active); di >= 0 {
+		suffix := ""
 		if desc := m.slashDescription(cmds[di]); desc != "" {
-			suffix := " — " + desc
-			if used+len([]rune(suffix)) <= width {
-				line += m.theme.Muted.Render(suffix)
-			}
+			suffix += " — " + desc
+		}
+		if key := slashCommandKeys[cmds[di]]; key != "" {
+			suffix += " (" + key + ")"
+		}
+		if suffix != "" && used+len([]rune(suffix)) <= width {
+			line += m.theme.Muted.Render(suffix)
 		}
 	}
 	return line

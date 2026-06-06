@@ -120,10 +120,21 @@ func TestInferContextWindow(t *testing.T) {
 		{"qwq-32b", 131_072},
 		{"qwq-32b-preview", 131_072},
 		{"qvq-72b-preview", 131_072},
-		// Microsoft Phi: the hosted Phi-3/3.5 line is 128k, Phi-4 is 16k. The
-		// "dolphin" finetunes contain the substring "phi" but must not match the
-		// specific "phi-3"/"phi-4" markers (they fall through to their base window).
+		// Microsoft Phi: the hosted Phi-3/3.5 line is 128k, the flagship Phi-4 (14B)
+		// is 16k, but the Phi-4 refresh variants diverge — Phi-4-mini and
+		// Phi-4-multimodal are 128k and Phi-4-reasoning is 32k — so the specific
+		// markers must win over the bare "phi-4" family rule. The "dolphin" finetunes
+		// contain the substring "phi" but must not match the specific "phi-3"/"phi-4"
+		// markers (they fall through to their base window).
 		{"phi-4", 16_384},
+		{"microsoft/phi-4", 16_384},
+		{"phi-4-mini-instruct", 128_000},
+		{"phi-4-multimodal-instruct", 128_000},
+		{"phi-4-reasoning", 32_768},
+		{"phi-4-reasoning-plus", 32_768},
+		// Phi-4-mini-reasoning is 128k: the "phi-4-mini" rule must claim it before
+		// the 32k "phi-4-reasoning" rule does.
+		{"phi-4-mini-reasoning", 128_000},
 		{"phi-3.5-mini-instruct", 128_000},
 		{"microsoft/phi-3-medium-128k-instruct", 128_000},
 		{"dolphin-2.9-llama3-8b", 128_000},

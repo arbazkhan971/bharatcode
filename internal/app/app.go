@@ -258,6 +258,10 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Bus:         app.Bus.Agent,
 		Providers:   providers,
 		Router:      routerFromConfig(app.Cfg),
+		// Record every tool invocation in the append-only audit log so the
+		// sovereignty proof layer captures what the agent did, not just the
+		// permission decisions it was granted.
+		ToolAuditor: toolAuditLogger{store: app.Audit},
 	})
 	if err != nil {
 		return rollback(fmt.Errorf("constructing agent: %w", err))

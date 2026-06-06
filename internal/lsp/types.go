@@ -251,6 +251,18 @@ type TextEdit struct {
 	NewText string
 }
 
+// PrepareRenameResult is the outcome of a textDocument/prepareRename check. It
+// reports whether the symbol at a position is renamable and, when so, the
+// range that would be selected for renaming and the current name. Placeholder
+// is empty when the server returned only a bare range or the defaultBehavior
+// form. DefaultBehavior is true when the server will use the word under the
+// cursor and did not supply an explicit range.
+type PrepareRenameResult struct {
+	Range           Range
+	Placeholder     string
+	DefaultBehavior bool
+}
+
 type languageSpec struct {
 	name       string
 	extension  map[string]struct{}

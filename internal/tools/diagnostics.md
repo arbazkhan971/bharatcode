@@ -26,7 +26,10 @@ rule code follows in brackets and the reporting source in parentheses, e.g.
 `main.rs:3:9: error: cannot find value `x` [E0425] (rustc)`. When the language
 server classifies a diagnostic, its tags follow in angle brackets, e.g.
 `main.go:3:8: hint: imported and not used (gopls) <unnecessary>` for dead code or
-`<deprecated>` for a deprecated symbol. When the offending source line can be
+`<deprecated>` for a deprecated symbol. When the server links the rule to its
+documentation, the URL follows as `see <url>`, e.g.
+`app.js:1:1: warning: Unexpected console statement. [no-console] (eslint) see https://eslint.org/docs/latest/rules/no-console`.
+When the offending source line can be
 read it is shown, trimmed, indented beneath the message so you see the code at
 fault without a separate view. When the language server links
 other locations to a diagnostic (the conflicting prior declaration, an unused

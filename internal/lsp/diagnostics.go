@@ -17,12 +17,19 @@ type wireDiagnostic struct {
 	// Code is the rule identifier. The LSP spec allows a string or an integer
 	// here, so it is decoded as raw JSON and normalized by codeFromWire.
 	Code json.RawMessage `json:"code,omitempty"`
+	// CodeDescription carries a link to the documentation for the rule named by
+	// Code, per the LSP codeDescription field. Only its href is used.
+	CodeDescription *wireCodeDescription `json:"codeDescription,omitempty"`
 	// Tags classify the diagnostic beyond its severity (1=Unnecessary,
 	// 2=Deprecated).
 	Tags []int `json:"tags,omitempty"`
 	// RelatedInformation links other source locations to this diagnostic, such as
 	// the conflicting prior declaration behind a redeclaration error.
 	RelatedInformation []wireRelatedInformation `json:"relatedInformation,omitempty"`
+}
+
+type wireCodeDescription struct {
+	Href string `json:"href"`
 }
 
 type wireRelatedInformation struct {
@@ -72,6 +79,7 @@ func convertDiagnostics(path string, items []wireDiagnostic) []Diagnostic {
 			Message:  item.Message,
 			Source:   item.Source,
 			Code:     codeFromWire(item.Code),
+			CodeHref: hrefFromWire(item.CodeDescription),
 			Tags:     tagsFromWire(item.Tags),
 			Related:  relatedFromWire(item.RelatedInformation),
 		})
@@ -155,6 +163,16 @@ func codeFromWire(raw json.RawMessage) string {
 		return n.String()
 	}
 	return ""
+}
+
+// hrefFromWire extracts the documentation URL from a diagnostic's
+// codeDescription, trimming surrounding whitespace. It returns "" when the
+// server attached no codeDescription or an empty href.
+func hrefFromWire(cd *wireCodeDescription) string {
+	if cd == nil {
+		return ""
+	}
+	return strings.TrimSpace(cd.Href)
 }
 
 func severityFromWire(value int) Severity {

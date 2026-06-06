@@ -353,6 +353,11 @@ var contextWindowRules = []struct {
 	{"llama-4-scout", 10_485_760},
 	{"llama-4", 1_048_576},
 	{"llama", 128_000},
+	// Mixtral 8x22B (open-mixtral-8x22b) doubled the window to 64k, twice the 32k
+	// of the original 8x7B. Its id carries the "mixtral" marker, so this specific
+	// rule must precede the family one to avoid resolving it to half its real
+	// window.
+	{"mixtral-8x22b", 65_536},
 	{"mixtral", 32_768},
 	// Mistral's Codestral exposes a 256k window, far larger than the rest of the
 	// Mistral line, so its specific marker precedes the family one.

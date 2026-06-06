@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -25,6 +26,10 @@ const (
 	MetadataTestFailures = "test_failures"
 	// MetadataTestFailedCount holds the int count of failed tests.
 	MetadataTestFailedCount = "test_failed_count"
+	// MetadataTestPassCount holds the int count of tests that passed.
+	MetadataTestPassCount = "test_pass_count"
+	// MetadataTestTotalCount holds the int total count of tests that ran.
+	MetadataTestTotalCount = "test_total_count"
 )
 
 // parseTestFailures recognizes the command as a go/pytest/jest(npm)/cargo test
@@ -3429,4 +3434,235 @@ func truncateDetail(detail string) string {
 	}
 	runes := []rune(detail)
 	return string(runes[:maxFailureDetailWidth]) + "…"
+}
+
+// testCounts holds the aggregate pass and total counts extracted from a test
+// run's summary output. It is populated by parseTestCounts alongside the
+// per-test failure list populated by parseTestFailures.
+type testCounts struct {
+	passed int
+	total  int
+}
+
+// Regexes used by the per-runner count parsers. Compiled once at package init.
+var (
+	// Go text: "--- PASS: TestFoo (0.00s)"
+	goPassLineCountRe = regexp.MustCompile(`^\s*--- PASS: `)
+
+	// pytest/tox summary: "3 passed, 1 failed in 0.12s" — the "passed" token
+	// can be preceded by any run count and status words.
+	pytestPassCountRe = regexp.MustCompile(`\b(\d+) passed\b`)
+	pytestFailCountRe = regexp.MustCompile(`\b(\d+) (?:failed|error)\b`)
+
+	// jest/vitest: "Tests:       2 failed, 10 passed, 12 total"
+	// vitest also emits "Tests  2 failed | 10 passed (12)" — the prefix
+	// "Tests" with optional ":" covers both.
+	jestTestsLinePrefixRe = regexp.MustCompile(`^Tests[:\s]`)
+	jestPassedCountRe     = regexp.MustCompile(`(\d+) passed`)
+	jestTotalCountRe      = regexp.MustCompile(`(\d+) total`)
+
+	// cargo libtest: "test result: ok. 42 passed; 3 failed; ..."
+	cargoSummaryCountRe = regexp.MustCompile(`^test result:.*?(\d+) passed; (\d+) failed`)
+
+	// cargo nextest: "Summary [  1.234s] 12 tests run: 10 passed ..."
+	nextestSummaryCountRe = regexp.MustCompile(`(\d+) tests run:.*?(\d+) passed`)
+
+	// rspec / crystal spec: "5 examples, 2 failures" or "5 examples, 0 failures"
+	rspecExamplesCountRe = regexp.MustCompile(`(\d+) examples?, (\d+) failures?`)
+
+	// dotnet vstest: "Failed: 2, Passed: 8, Skipped: 0, Total: 10, ..."
+	dotnetPassedCountRe = regexp.MustCompile(`Passed: (\d+)`)
+	dotnetTotalCountRe  = regexp.MustCompile(`Total: (\d+)`)
+)
+
+// parseTestCounts extracts aggregate pass and total counts from the output of
+// a recognized test runner invocation. It returns nil when the runner is not
+// recognized or no summary line could be located. The function is safe to call
+// unconditionally alongside parseTestFailures — both share the same runner
+// classification and work on the same combined output.
+func parseTestCounts(command, output string) *testCounts {
+	switch classifyTestRunner(command) {
+	case runnerGo, runnerGotestsum:
+		return parseGoTestCounts(output)
+	case runnerPytest, runnerTox:
+		return parsePytestCounts(output)
+	case runnerJest:
+		return parseJestCounts(output)
+	case runnerCargo:
+		return parseCargoTestCounts(output)
+	case runnerNextest:
+		return parseNextestCounts(output)
+	case runnerRSpec, runnerCrystal:
+		return parseRSpecCounts(output)
+	case runnerDotnet:
+		return parseDotnetCounts(output)
+	default:
+		return nil
+	}
+}
+
+// parseGoTestCounts counts "--- PASS:" and "--- FAIL:" lines in `go test`
+// verbose or JSON output. JSON output is delegated to parseGoTestJSONCounts
+// so gotestsum and CI-style invocations are also covered.
+func parseGoTestCounts(output string) *testCounts {
+	if looksLikeGoTestJSON(output) {
+		return parseGoTestJSONCounts(output)
+	}
+	passed, failed := 0, 0
+	for _, ln := range splitLines(output) {
+		switch {
+		case goPassLineCountRe.MatchString(ln):
+			passed++
+		case goFailRe.MatchString(ln):
+			failed++
+		}
+	}
+	total := passed + failed
+	if total == 0 {
+		return nil
+	}
+	return &testCounts{passed: passed, total: total}
+}
+
+// parseGoTestJSONCounts counts pass/fail test events from a `go test -json`
+// event stream, reusing the JSON detection logic from parseGoTestJSONFailures.
+func parseGoTestJSONCounts(output string) *testCounts {
+	passed, failed := 0, 0
+	for _, ln := range splitLines(output) {
+		ln = strings.TrimSpace(ln)
+		if !strings.HasPrefix(ln, "{") {
+			continue
+		}
+		var ev goJSONEvent
+		if err := json.Unmarshal([]byte(ln), &ev); err != nil || ev.Test == "" {
+			continue
+		}
+		switch ev.Action {
+		case "pass":
+			passed++
+		case "fail":
+			failed++
+		}
+	}
+	total := passed + failed
+	if total == 0 {
+		return nil
+	}
+	return &testCounts{passed: passed, total: total}
+}
+
+// parsePytestCounts reads the pytest/tox short summary line, e.g.
+// "3 passed, 1 failed, 1 warning in 0.12s" — only lines carrying both a
+// "passed" and/or "failed" token are inspected to avoid false matches on
+// per-test PASSED/FAILED rows from --verbose output.
+func parsePytestCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		passM := pytestPassCountRe.FindStringSubmatch(ln)
+		failM := pytestFailCountRe.FindStringSubmatch(ln)
+		if passM == nil && failM == nil {
+			continue
+		}
+		passed, failed := 0, 0
+		if passM != nil {
+			passed, _ = strconv.Atoi(passM[1])
+		}
+		if failM != nil {
+			failed, _ = strconv.Atoi(failM[1])
+		}
+		total := passed + failed
+		if total > 0 {
+			return &testCounts{passed: passed, total: total}
+		}
+	}
+	return nil
+}
+
+// parseJestCounts reads jest/vitest's "Tests: N failed, M passed, P total"
+// summary line. vitest uses slightly different spacing but always leads with
+// the "Tests" keyword, which jestTestsLinePrefixRe matches.
+func parseJestCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if !jestTestsLinePrefixRe.MatchString(strings.TrimSpace(ln)) {
+			continue
+		}
+		passedM := jestPassedCountRe.FindStringSubmatch(ln)
+		if passedM == nil {
+			continue
+		}
+		passed, _ := strconv.Atoi(passedM[1])
+		total := passed
+		if totalM := jestTotalCountRe.FindStringSubmatch(ln); totalM != nil {
+			if t, err := strconv.Atoi(totalM[1]); err == nil && t > 0 {
+				total = t
+			}
+		}
+		if total > 0 {
+			return &testCounts{passed: passed, total: total}
+		}
+	}
+	return nil
+}
+
+// parseCargoTestCounts reads cargo libtest's "test result:" summary line, e.g.
+// "test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured".
+func parseCargoTestCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if m := cargoSummaryCountRe.FindStringSubmatch(ln); m != nil {
+			passed, _ := strconv.Atoi(m[1])
+			failed, _ := strconv.Atoi(m[2])
+			total := passed + failed
+			if total > 0 {
+				return &testCounts{passed: passed, total: total}
+			}
+		}
+	}
+	return nil
+}
+
+// parseNextestCounts reads cargo-nextest's "Summary" line, e.g.
+// "Summary [  1.234s] 12 tests run: 10 passed (0 leaky), 2 failed, 1 skipped".
+func parseNextestCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if m := nextestSummaryCountRe.FindStringSubmatch(ln); m != nil {
+			total, _ := strconv.Atoi(m[1])
+			passed, _ := strconv.Atoi(m[2])
+			if total > 0 {
+				return &testCounts{passed: passed, total: total}
+			}
+		}
+	}
+	return nil
+}
+
+// parseRSpecCounts reads RSpec/Crystal's "N examples, M failures" summary line.
+// passed = total examples − failures.
+func parseRSpecCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if m := rspecExamplesCountRe.FindStringSubmatch(ln); m != nil {
+			total, _ := strconv.Atoi(m[1])
+			failures, _ := strconv.Atoi(m[2])
+			if total > 0 {
+				return &testCounts{passed: total - failures, total: total}
+			}
+		}
+	}
+	return nil
+}
+
+// parseDotnetCounts reads dotnet test's "Failed: N, Passed: M, ..., Total: P"
+// summary line emitted by the VSTest console logger.
+func parseDotnetCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		passedM := dotnetPassedCountRe.FindStringSubmatch(ln)
+		totalM := dotnetTotalCountRe.FindStringSubmatch(ln)
+		if passedM == nil || totalM == nil {
+			continue
+		}
+		passed, _ := strconv.Atoi(passedM[1])
+		total, _ := strconv.Atoi(totalM[1])
+		if total > 0 {
+			return &testCounts{passed: passed, total: total}
+		}
+	}
+	return nil
 }

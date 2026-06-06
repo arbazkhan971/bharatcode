@@ -238,7 +238,7 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 
 	return Result{
 		Content:  strings.TrimRight(b.String(), "\n"),
-		Metadata: diagnosticsMetadata(all, counts),
+		Metadata: diagnosticsMetadata(root, all, counts),
 	}, nil
 }
 
@@ -252,6 +252,11 @@ const (
 	MetadataDiagnosticErrors = "diagnostic_errors"
 	// MetadataDiagnosticWarnings holds the int count of warning-severity diagnostics.
 	MetadataDiagnosticWarnings = "diagnostic_warnings"
+	// MetadataDiagnosticErrorFiles holds a []string of workspace-relative paths
+	// (absolute when outside the workspace) that carry at least one error-level
+	// diagnostic, sorted for determinism. Absent when no error diagnostics were
+	// found, so callers can test for nil/missing rather than an empty slice.
+	MetadataDiagnosticErrorFiles = "error_files"
 )
 
 // parseSeverityFilter maps the optional severity argument to the minimum
@@ -326,14 +331,38 @@ func diagnosticsSummary(diags []lsp.Diagnostic, counts [5]int) string {
 	return header + ":"
 }
 
-// diagnosticsMetadata exposes the total and the error/warning tallies so the TUI
-// and agent loop can surface counts without re-parsing the rendered list.
-func diagnosticsMetadata(diags []lsp.Diagnostic, counts [5]int) map[string]any {
-	return map[string]any{
+// diagnosticsMetadata exposes the total, error/warning tallies, and the sorted
+// list of files that carry at least one error-level diagnostic so the TUI and
+// agent loop can react to individual problem sites without re-parsing text.
+// root is used to relativize paths; pass "" to keep them absolute.
+func diagnosticsMetadata(root string, diags []lsp.Diagnostic, counts [5]int) map[string]any {
+	m := map[string]any{
 		MetadataDiagnosticCount:    len(diags),
 		MetadataDiagnosticErrors:   counts[lsp.Error],
 		MetadataDiagnosticWarnings: counts[lsp.Warning],
 	}
+	if counts[lsp.Error] > 0 {
+		seen := make(map[string]struct{})
+		for _, d := range diags {
+			if d.Severity != lsp.Error {
+				continue
+			}
+			p := d.Path
+			if root != "" {
+				if rel, err := filepath.Rel(root, d.Path); err == nil && !strings.HasPrefix(rel, "..") {
+					p = filepath.ToSlash(rel)
+				}
+			}
+			seen[p] = struct{}{}
+		}
+		files := make([]string, 0, len(seen))
+		for p := range seen {
+			files = append(files, p)
+		}
+		sort.Strings(files)
+		m[MetadataDiagnosticErrorFiles] = files
+	}
+	return m
 }
 
 // pluralize appends an "s" to word when n is not 1. The severity labels and the

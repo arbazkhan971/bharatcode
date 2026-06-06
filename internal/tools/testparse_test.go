@@ -407,6 +407,61 @@ func TestParseGoTestFailures_JSONTestFailNoBuildEntry(t *testing.T) {
 	assertFailures(t, got, want)
 }
 
+func TestParseGoTestFailures_JSONTimeout(t *testing.T) {
+	// When `go test -json -timeout` fires, the timeout panic and "running tests:"
+	// block arrive as package-scoped output events; there are no test-level "fail"
+	// events. The JSON parser must recover the hanging tests from that block.
+	out := `{"Action":"run","Test":"TestHangs","Package":"github.com/x/y"}
+{"Action":"output","Package":"github.com/x/y","Output":"panic: test timed out after 10s\n"}
+{"Action":"output","Package":"github.com/x/y","Output":"running tests:\n"}
+{"Action":"output","Package":"github.com/x/y","Output":"\tTestHangs (9.9s)\n"}
+{"Action":"output","Package":"github.com/x/y","Output":"goroutine 1 [running]:\n"}
+{"Action":"fail","Package":"github.com/x/y","Elapsed":10}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "TestHangs", Detail: "panic: test timed out after 10s"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_JSONTimeoutMultiple(t *testing.T) {
+	// Multiple tests hanging at timeout are all recovered; tests with their own
+	// "fail" events (from a previous run or parallel test) are not double-counted.
+	out := `{"Action":"run","Test":"TestSlowA","Package":"pkg"}
+{"Action":"run","Test":"TestSlowB","Package":"pkg"}
+{"Action":"output","Package":"pkg","Output":"panic: test timed out after 30s\n"}
+{"Action":"output","Package":"pkg","Output":"running tests:\n"}
+{"Action":"output","Package":"pkg","Output":"\tTestSlowA (29.1s)\n"}
+{"Action":"output","Package":"pkg","Output":"\tTestSlowB (28.9s)\n"}
+{"Action":"fail","Package":"pkg","Elapsed":30}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "TestSlowA", Detail: "panic: test timed out after 30s"},
+		{Name: "TestSlowB", Detail: "panic: test timed out after 30s"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_JSONTimeoutNoDoubleCount(t *testing.T) {
+	// A test that already has a "fail" event must not appear again when it also
+	// shows up in the "running tests:" block (e.g. it was the failing test that
+	// triggered the timeout assertion before the binary was killed).
+	out := `{"Action":"run","Test":"TestAlreadyFailed","Package":"pkg"}
+{"Action":"output","Test":"TestAlreadyFailed","Output":"    x_test.go:5: boom\n"}
+{"Action":"fail","Test":"TestAlreadyFailed","Package":"pkg","Elapsed":0.01}
+{"Action":"output","Package":"pkg","Output":"panic: test timed out after 5s\n"}
+{"Action":"output","Package":"pkg","Output":"running tests:\n"}
+{"Action":"output","Package":"pkg","Output":"\tTestAlreadyFailed (5.0s)\n"}
+{"Action":"output","Package":"pkg","Output":"\tTestOtherHang (4.9s)\n"}
+{"Action":"fail","Package":"pkg","Elapsed":5}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "TestAlreadyFailed", Detail: "x_test.go:5: boom"},
+		{Name: "TestOtherHang", Detail: "panic: test timed out after 5s"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseGoTestFailures_BuildFailed(t *testing.T) {
 	out := `# github.com/x/y [github.com/x/y.test]
 ./y_test.go:10:2: undefined: helper

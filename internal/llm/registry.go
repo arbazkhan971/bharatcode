@@ -122,6 +122,15 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 			// An empty BaseURL falls through to the Google API default inside the
 			// provider constructor.
 			provider = newGeminiProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
+		case config.ProviderAzure:
+			// Azure OpenAI speaks the OpenAI chat-completions wire format but
+			// authenticates via the "api-key" header instead of "Authorization:
+			// Bearer". The deployment-scoped base_url encodes both the resource
+			// name and the api-version query parameter; isAzureOpenAI detects the
+			// host at request time and selects the correct auth scheme, so no
+			// additional plumbing is required here beyond routing to the compatible
+			// provider.
+			provider = newOpenAICompatibleProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
 		default:
 			return nil, fmt.Errorf("constructing provider %q: %w", p.Name, ErrUnsupportedFeature)
 		}

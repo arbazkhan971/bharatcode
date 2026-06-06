@@ -856,6 +856,65 @@ func TestDefaultConfigXAIPreset(t *testing.T) {
 	}
 }
 
+// TestAzureProviderIsRegistered proves the "azure" provider type registers
+// successfully and resolves to the OpenAI-compatible client. Azure OpenAI speaks
+// the same chat-completions wire format as OpenAI but authenticates differently,
+// so the correct registration matters: it must not fall through to the default
+// error path. Stream is pointed at a missing API-key env so it fails with
+// ErrAuth before any network call, which additionally proves the auth check is
+// enforced for the azure type.
+func TestAzureProviderIsRegistered(t *testing.T) {
+	const azureBaseURL = "https://my-resource.openai.azure.com/openai/deployments/gpt-4o?api-version=2024-06-01"
+	cfg := testConfig("azure", config.ProviderAzure, azureBaseURL)
+	cfg.Providers[0].APIKeyEnv = "MISSING_AZURE_OPENAI_KEY"
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	provider, err := reg.Get("azure")
+	require.NoError(t, err)
+	_, ok := provider.(*openAICompatibleProvider)
+	require.True(t, ok, "azure type should resolve to the openai_compatible client")
+	require.Equal(t, "azure", provider.Name())
+	require.True(t, provider.SupportsTools())
+
+	// Stream must fail with ErrAuth (missing key), not ErrNotYetSupported.
+	_, err = provider.Stream(context.Background(), Request{Model: "test-model"})
+	require.ErrorIs(t, err, ErrAuth)
+	require.NotErrorIs(t, err, ErrNotYetSupported)
+}
+
+// TestAzureProviderUsesApiKeyHeader asserts that a request aimed at an Azure
+// OpenAI endpoint carries the key in the "api-key" header and omits the
+// "Authorization: Bearer" header that every non-Azure OpenAI-dialect provider
+// uses. Azure OpenAI Service rejects Bearer-authenticated requests, so the
+// correct scheme is load-bearing. The test drives postOpenAIJSON directly with
+// an Azure base URL (for isAzureOpenAI detection) and a local stub as the HTTP
+// target, keeping the test fully offline.
+func TestAzureProviderUsesApiKeyHeader(t *testing.T) {
+	var gotAPIKey, gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("api-key")
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	// isAzureOpenAI detects the auth scheme from the base URL host; the actual
+	// HTTP request is sent to the stub server so no real Azure endpoint is needed.
+	const azureBaseURL = "https://my-resource.openai.azure.com/openai/deployments/gpt-4o?api-version=2024-06-01"
+	body := openAIChatRequest{Model: "gpt-4o", Stream: false}
+	resp, err := postOpenAIJSON(context.Background(), server.Client(), azureBaseURL, server.URL+"/chat/completions", "azure-key-abc123", body)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	require.Equal(t, "azure-key-abc123", gotAPIKey,
+		"Azure endpoint must receive the key in the api-key header")
+	require.Empty(t, gotAuth,
+		"Azure endpoint must not receive an Authorization header")
+}
+
 func collectEvents(events <-chan Event) []Event {
 	var out []Event
 	for event := range events {

@@ -314,3 +314,83 @@ func TestDiagnosticFilesNilExtensionsFallsBackToDefaults(t *testing.T) {
 	// The fallback must be derived from the LSP specs, not an independent list.
 	require.Contains(t, lsp.DefaultExtensions(), ".go")
 }
+
+// diagnosticsByPath is a DiagnosticSource that returns the diagnostics keyed by
+// the exact path queried, so a test can assert which files a scan actually
+// asked about (unlike fakeDiagnostics, which returns the same items for any
+// path). It records every queried path for that assertion.
+type diagnosticsByPath struct {
+	byPath  map[string][]lsp.Diagnostic
+	queried *[]string
+}
+
+func (f diagnosticsByPath) Diagnostics(_ context.Context, path string) ([]lsp.Diagnostic, error) {
+	if f.queried != nil {
+		*f.queried = append(*f.queried, path)
+	}
+	return f.byPath[path], nil
+}
+
+// TestDiagnosticsDirectoryScopesToSubtree asserts that passing a directory path
+// scans only the supported files inside that subtree — reporting diagnostics
+// from files within it and never opening files in a sibling directory — a middle
+// ground between one file and the whole workspace.
+func TestDiagnosticsDirectoryScopesToSubtree(t *testing.T) {
+	root := t.TempDir()
+	inPkg := writeDiagFile(t, root, "pkg/a.go")
+	alsoPkg := writeDiagFile(t, root, "pkg/b.go")
+	outside := writeDiagFile(t, root, "other/c.go")
+
+	var queried []string
+	tool := &diagnosticsTool{
+		source: diagnosticsByPath{
+			byPath: map[string][]lsp.Diagnostic{
+				inPkg:   {{Path: inPkg, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "boom in a"}},
+				alsoPkg: {{Path: alsoPkg, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Warning, Message: "meh in b"}},
+				outside: {{Path: outside, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "boom in c"}},
+			},
+			queried: &queried,
+		},
+		workDir: root,
+		exts:    map[string]struct{}{".go": {}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "pkg"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Both files in the subtree are reported, rendered workspace-relative.
+	require.Contains(t, result.Content, "pkg/a.go:1:1: error: boom in a")
+	require.Contains(t, result.Content, "pkg/b.go:1:1: warning: meh in b")
+	// The sibling directory's file is neither queried nor reported.
+	require.NotContains(t, result.Content, "boom in c")
+	require.NotContains(t, result.Content, "other/c.go")
+	require.ElementsMatch(t, []string{inPkg, alsoPkg}, queried)
+}
+
+// TestDiagnosticsFilePathStillScopesToOneFile asserts the directory branch did
+// not change the single-file case: a file path queries only that file, leaving
+// its package siblings untouched.
+func TestDiagnosticsFilePathStillScopesToOneFile(t *testing.T) {
+	root := t.TempDir()
+	target := writeDiagFile(t, root, "pkg/a.go")
+	sibling := writeDiagFile(t, root, "pkg/b.go")
+
+	var queried []string
+	tool := &diagnosticsTool{
+		source: diagnosticsByPath{
+			byPath: map[string][]lsp.Diagnostic{
+				target:  {{Path: target, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "only a"}},
+				sibling: {{Path: sibling, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "only b"}},
+			},
+			queried: &queried,
+		},
+		workDir: root,
+		exts:    map[string]struct{}{".go": {}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "pkg/a.go"}))
+	require.NoError(t, err)
+	require.Contains(t, result.Content, "only a")
+	require.NotContains(t, result.Content, "only b")
+	require.Equal(t, []string{target}, queried)
+}

@@ -247,6 +247,24 @@ func TestInferContextWindow(t *testing.T) {
 		// broader family marker, so without it these fall through to 0.
 		{"hunyuan-a13b-instruct", 262_144},
 		{"tencent/hunyuan-large", 262_144},
+		// 01-AI Yi: Yi-Coder (coding line) is 128k, Yi-Lightning (commercial
+		// flagship API) is 16k, Yi-Large (commercial large tier) is 32k, and the
+		// original open-weight line (Yi-34B-Chat, Yi-6B) caps at 4k. All ids
+		// carry the bare "yi" marker, so the specific rules must win over the
+		// family default (4k) rather than undercounting Yi-Coder/Large/Lightning
+		// by up to 32x, or falling through to "unknown" (0) without any rule.
+		{"yi-coder-9b-chat", 131_072},
+		{"yi-coder-34b-chat", 131_072},
+		{"01-ai/yi-coder-9b-chat", 131_072},
+		{"yi-lightning", 16_384},
+		{"01-ai/yi-lightning", 16_384},
+		{"yi-large", 32_768},
+		{"yi-large-turbo", 32_768},
+		{"01-ai/yi-large", 32_768},
+		// The original open-weight Yi line (Yi-34B, Yi-6B) falls back to the
+		// conservative 4k family default via the bare "yi" rule.
+		{"yi-34b-chat", 4_096},
+		{"yi-6b-chat", 4_096},
 		// ByteDance Doubao (Volcengine Ark): the classic pro/lite endpoints encode
 		// the window in the id, so the size suffix wins over the family default; the
 		// Doubao-1.5 generation reuses the suffix in both dot and dash spellings; and

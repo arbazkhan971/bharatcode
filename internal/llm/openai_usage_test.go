@@ -72,8 +72,8 @@ func TestOpenAIUsageInputClampsAtZero(t *testing.T) {
 	require.Equal(t, 250, got.CacheReadTokens)
 }
 
-// TestOpenAIUsageFlatCacheFieldsWin asserts the DeepSeek-style flat cache
-// fields take precedence over prompt_tokens_details when both are present, so a
+// TestOpenAIUsageFlatCacheFieldsWin asserts the DeepSeek-style flat cache hit
+// field takes precedence over prompt_tokens_details when both are present, so a
 // provider that emits both shapes is not double-read inconsistently.
 func TestOpenAIUsageFlatCacheFieldsWin(t *testing.T) {
 	raw := `{
@@ -89,7 +89,48 @@ func TestOpenAIUsageFlatCacheFieldsWin(t *testing.T) {
 
 	got := u.toUsage()
 	require.Equal(t, 300, got.CacheReadTokens, "flat hit count must win over details")
-	require.Equal(t, 500, got.CacheWriteTokens)
+}
+
+// TestOpenAIUsageMissTokensAreNotCacheWrites asserts DeepSeek's
+// prompt_cache_miss_tokens is treated as ordinary full-rate input, not as a
+// cache write. The miss tokens already land in InputTokens (prompt_tokens minus
+// the cache hits), so reporting them again under CacheWriteTokens would
+// double-count them and imply a cache-creation charge DeepSeek never makes.
+func TestOpenAIUsageMissTokensAreNotCacheWrites(t *testing.T) {
+	raw := `{
+		"prompt_tokens": 800,
+		"completion_tokens": 50,
+		"prompt_cache_hit_tokens": 300,
+		"prompt_cache_miss_tokens": 500
+	}`
+
+	var u openAIUsage
+	require.NoError(t, json.Unmarshal([]byte(raw), &u))
+
+	got := u.toUsage()
+	require.Equal(t, 500, got.InputTokens, "miss tokens are ordinary input")
+	require.Equal(t, 300, got.CacheReadTokens)
+	require.Equal(t, 0, got.CacheWriteTokens, "a cache miss is not a cache write")
+}
+
+// TestOpenAIUsageCacheCreationMapsToWrites asserts a genuine cache-creation
+// count (Anthropic usage forwarded through the OpenAI shape) still maps to
+// CacheWriteTokens. This is the only source that should populate it.
+func TestOpenAIUsageCacheCreationMapsToWrites(t *testing.T) {
+	raw := `{
+		"prompt_tokens": 1000,
+		"completion_tokens": 80,
+		"cache_read_input_tokens": 200,
+		"cache_creation_input_tokens": 150
+	}`
+
+	var u openAIUsage
+	require.NoError(t, json.Unmarshal([]byte(raw), &u))
+
+	got := u.toUsage()
+	require.Equal(t, 800, got.InputTokens)
+	require.Equal(t, 200, got.CacheReadTokens)
+	require.Equal(t, 150, got.CacheWriteTokens)
 }
 
 // TestOpenAIUsageNoCacheDetails asserts a usage object with neither flat fields

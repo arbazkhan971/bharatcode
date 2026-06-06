@@ -806,6 +806,12 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 			return nil
 		}
 
+		// Fan out all calls in the batch concurrently when every call is a
+		// read-only tool (view, grep, glob, navigate, symbols, …). Sequential
+		// execution is used for any batch that contains a write-class tool or
+		// an unknown tool name. A nil batchResults signals "use sequential".
+		batchResults := l.maybeFanOutReadOnly(runCtx, sessionID, pendingToolCalls)
+
 		var stopTurnAfterBatch bool
 		for i, call := range pendingToolCalls {
 			callHash, err := toolCallHash(call.Name, call.Input)
@@ -824,17 +830,24 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 				return l.tripLoopGuard(runCtx, sessionID, pendingToolCalls[i:])
 			}
 
-			result := l.runTool(runCtx, sessionID, call)
-			l.fireFileEditHook(runCtx, sessionID, call, result)
+			var result tools.Result
+			if batchResults != nil {
+				// Parallel path: results were already computed concurrently;
+				// read-only tools never fire file-edit hooks or verify commands.
+				result = batchResults[i]
+			} else {
+				result = l.runTool(runCtx, sessionID, call)
+				l.fireFileEditHook(runCtx, sessionID, call, result)
 
-			// Run any verify_command configured on matching FileEdit hooks. When
-			// verification fails, override the result with the synthesized error
-			// so the model sees the failure. The original tool result is
-			// discarded: the verify output is more actionable than the success
-			// message from the write itself. When verification is not configured
-			// (the common case), verifyResult is nil and result is unchanged.
-			if verifyResult := l.runVerifyCommands(runCtx, call, result); verifyResult != nil {
-				result = *verifyResult
+				// Run any verify_command configured on matching FileEdit hooks. When
+				// verification fails, override the result with the synthesized error
+				// so the model sees the failure. The original tool result is
+				// discarded: the verify output is more actionable than the success
+				// message from the write itself. When verification is not configured
+				// (the common case), verifyResult is nil and result is unchanged.
+				if verifyResult := l.runVerifyCommands(runCtx, call, result); verifyResult != nil {
+					result = *verifyResult
+				}
 			}
 
 			// Record the executed (call,result) pair. A true return means the recent
@@ -1153,6 +1166,34 @@ func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCa
 	}
 	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolResult, ToolName: call.Name})
 	return result
+}
+
+// maybeFanOutReadOnly runs all calls in the batch concurrently when every call
+// resolves to a tools.ReadOnlyTool. It returns nil when any call is not
+// read-only (or the tool name is unknown) — the caller must fall through to
+// the sequential path. Single-call batches always return nil since concurrency
+// adds no benefit there. The returned slice is in the same order as calls.
+func (l *Loop) maybeFanOutReadOnly(ctx context.Context, sessionID string, calls []pendingToolCall) []tools.Result {
+	if len(calls) <= 1 {
+		return nil
+	}
+	for _, call := range calls {
+		t, ok := l.cfg.Tools.Get(call.Name)
+		if !ok || !tools.IsReadOnly(t) {
+			return nil
+		}
+	}
+	results := make([]tools.Result, len(calls))
+	var wg sync.WaitGroup
+	wg.Add(len(calls))
+	for i, call := range calls {
+		go func(idx int, c pendingToolCall) {
+			defer wg.Done()
+			results[idx] = l.runTool(ctx, sessionID, c)
+		}(i, call)
+	}
+	wg.Wait()
+	return results
 }
 
 // runToolSafely runs the tool and converts any panic into an error so a single

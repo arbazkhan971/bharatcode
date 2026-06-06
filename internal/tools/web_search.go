@@ -51,6 +51,8 @@ func (t *webSearchTool) Name() string {
 	return "web_search"
 }
 
+func (t *webSearchTool) IsReadOnly() bool { return true }
+
 func (t *webSearchTool) Description() string {
 	return webSearchDescription
 }

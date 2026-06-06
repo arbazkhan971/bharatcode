@@ -38,6 +38,8 @@ func (t *jobOutputTool) Name() string {
 	return "job_output"
 }
 
+func (t *jobOutputTool) IsReadOnly() bool { return true }
+
 func (t *jobOutputTool) Description() string {
 	return jobOutputDescription
 }

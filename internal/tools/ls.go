@@ -52,6 +52,8 @@ func (t *lsTool) Name() string {
 	return "ls"
 }
 
+func (t *lsTool) IsReadOnly() bool { return true }
+
 func (t *lsTool) Description() string {
 	return lsDescription
 }

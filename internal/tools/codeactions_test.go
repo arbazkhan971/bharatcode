@@ -125,6 +125,45 @@ func TestCodeActionsMarksPreferredAndDisabled(t *testing.T) {
 	)
 }
 
+func TestCodeActionsListsFixedDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	// A quick fix keyed on a diagnostic carries the offending message(s); the
+	// listing names them so the model can match a fix to the error it saw without
+	// guessing from the title. A refactor that fixes no diagnostic gets no note.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Import \"fmt\"", Kind: "quickfix", Diagnostics: []string{"undefined: fmt"}, Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{filepath.Join(dir, "main.go"): {{NewText: "x"}}},
+		}},
+		{Title: "Remove unused", Kind: "quickfix", Diagnostics: []string{"declared and not used: x", "imported and not used: io"}, Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{filepath.Join(dir, "main.go"): {{NewText: "y"}}},
+		}},
+		{Title: "Extract function", Kind: "refactor.extract", Data: json.RawMessage(`{"title":"Extract function"}`)},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t,
+		"1. Import \"fmt\" [quickfix] (fixes \"undefined: fmt\") (edit, 1 file)\n"+
+			"2. Remove unused [quickfix] (fixes \"declared and not used: x\" +1 more) (edit, 1 file)\n"+
+			"3. Extract function [refactor.extract] (resolve to apply)",
+		result.Content,
+	)
+}
+
+func TestCodeActionFixesNoteClipsLongMessage(t *testing.T) {
+	long := "this is an extraordinarily long diagnostic message that the language server attached to the quick fix and which should be clipped"
+	note := codeActionFixesNote([]string{long})
+	require.Contains(t, note, "characters truncated")
+	require.True(t, len(note) < len(long), "expected the note to be shorter than the raw message")
+
+	require.Equal(t, "", codeActionFixesNote(nil))
+}
+
 func TestCodeActionsApplyRefusesDisabledAction(t *testing.T) {
 	dir := t.TempDir()
 	writeCodeActionsFile(t, dir)

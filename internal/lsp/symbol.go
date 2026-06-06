@@ -636,6 +636,9 @@ func parseCodeAction(raw json.RawMessage) (CodeAction, error) {
 		Disabled    *struct {
 			Reason string `json:"reason"`
 		} `json:"disabled"`
+		Diagnostics []struct {
+			Message string `json:"message"`
+		} `json:"diagnostics"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return CodeAction{}, fmt.Errorf("parsing code action: %w", err)
@@ -643,6 +646,14 @@ func parseCodeAction(raw json.RawMessage) (CodeAction, error) {
 	action := CodeAction{Title: wire.Title, Kind: wire.Kind, IsPreferred: wire.IsPreferred, Data: append(json.RawMessage(nil), raw...)}
 	if wire.Disabled != nil {
 		action.Disabled = strings.TrimSpace(wire.Disabled.Reason)
+	}
+	// Surface the messages of the diagnostics this action resolves so a consumer
+	// can tell which error each quick fix addresses. Blank messages are dropped so
+	// a server that lists a diagnostic without a message contributes no empty entry.
+	for _, d := range wire.Diagnostics {
+		if msg := strings.TrimSpace(d.Message); msg != "" {
+			action.Diagnostics = append(action.Diagnostics, msg)
+		}
 	}
 	if len(wire.Edit) > 0 && string(wire.Edit) != "null" {
 		edit, err := parseWorkspaceEdit(wire.Edit)

@@ -461,6 +461,13 @@ func codeActionEntry(a lsp.CodeAction) string {
 	if a.IsPreferred {
 		line.WriteString(" (preferred)")
 	}
+	// When the action is a quick fix keyed on one or more diagnostics, name the
+	// problem(s) it resolves so the model can match a fix to the error it saw from
+	// the diagnostics tool without guessing from the title alone.
+	if note := codeActionFixesNote(a.Diagnostics); note != "" {
+		line.WriteString(" ")
+		line.WriteString(note)
+	}
 	if a.Disabled != "" {
 		// A disabled action cannot be applied; show why instead of an apply note so
 		// the model does not waste an apply call on it.
@@ -469,6 +476,30 @@ func codeActionEntry(a lsp.CodeAction) string {
 		fmt.Fprintf(&line, " (%s)", note)
 	}
 	return line.String()
+}
+
+// codeActionFixesMessageCap bounds how many characters of a single diagnostic
+// message codeActionFixesNote renders. A server can key a quick fix on a
+// diagnostic whose message runs to a paragraph (a type-mismatch dump, a long
+// rustc explanation); the note is an inline annotation on a one-line list entry,
+// so an over-long message is clipped to keep each entry scannable. The cap
+// mirrors the navigate tool's snippet truncation philosophy.
+const codeActionFixesMessageCap = 80
+
+// codeActionFixesNote renders the parenthesized "fixes …" annotation naming the
+// diagnostic(s) an action resolves, e.g. `(fixes "undefined: foo")`. The first
+// message is shown (clipped to codeActionFixesMessageCap); when an action
+// resolves several diagnostics a "(+N more)" tail records the rest so the entry
+// stays one line. Returns "" when the action fixes no diagnostic.
+func codeActionFixesNote(messages []string) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	first := truncateLine(strings.TrimSpace(messages[0]), codeActionFixesMessageCap)
+	if len(messages) == 1 {
+		return fmt.Sprintf("(fixes %q)", first)
+	}
+	return fmt.Sprintf("(fixes %q +%d more)", first, len(messages)-1)
 }
 
 // codeActionsResult renders an already-ordered action list as a numbered list.

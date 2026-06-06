@@ -1258,3 +1258,247 @@ func TestSlashSessions_WindowsLongListAroundCursor(t *testing.T) {
 	require.NotContains(t, bottom, "more below", "no rows are hidden below the last row")
 	require.Contains(t, bottom, "> "+last.Title, "the selected last row must stay on screen")
 }
+
+// --- Interactive model picker tests ---
+
+// newSizedModelWithModels builds a model pre-loaded with a specific set of
+// config.Models so picker tests do not depend on testDeps' single "kimi-k2"
+// default.
+func newSizedModelWithModels(t *testing.T, models []config.Model) *model {
+	t.Helper()
+	deps := testDeps()
+	deps.Cfg = &config.Config{
+		Models: models,
+		Agents: []config.Agent{{Name: "coder", Model: models[0].ID}},
+		Ledger: config.LedgerConfig{MaxInrPerMonth: 100},
+	}
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	return m
+}
+
+// TestSlashModel_OpensPicker asserts /model opens the interactive model picker
+// dialog with each configured model visible and the hint line present.
+func TestSlashModel_OpensPicker(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "claude-3-5-sonnet", Provider: "anthropic"},
+		{ID: "gpt-4o", Provider: "openai"},
+	})
+
+	_, _ = m.Update(keyText("/"))
+	m.input.WriteString("model")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	require.True(t, m.dialogs.Contains("model_picker"), "model picker dialog must be open")
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "anthropic/claude-3-5-sonnet", "first model must appear")
+	require.Contains(t, body, "openai/gpt-4o", "second model must appear")
+	require.Contains(t, body, "enter to select", "keybinding hint must appear")
+}
+
+// TestSlashModel_ArrowKeysMovesCursor asserts up/down arrow navigation moves
+// the highlighted cursor row, matching the session picker's navigation pattern.
+func TestSlashModel_ArrowKeysMovesCursor(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "alpha", Provider: "p"},
+		{ID: "beta", Provider: "p"},
+		{ID: "gamma", Provider: "p"},
+	})
+
+	m.pushModelPicker()
+	require.True(t, m.dialogs.Contains("model_picker"))
+	require.Equal(t, 0, m.modelCursor, "picker opens at first row")
+
+	_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	require.Equal(t, 1, m.modelCursor, "down must advance cursor")
+
+	_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	require.Equal(t, 2, m.modelCursor, "second down must advance again")
+
+	_, _ = m.Update(keySpecial("up", tea.KeyUp))
+	require.Equal(t, 1, m.modelCursor, "up must retreat cursor")
+}
+
+// TestSlashModel_CursorClampsAtBounds asserts up at the first row and down at
+// the last row are no-ops, so the cursor never goes out of range.
+func TestSlashModel_CursorClampsAtBounds(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "only", Provider: "p"},
+	})
+
+	m.pushModelPicker()
+
+	_, _ = m.Update(keySpecial("up", tea.KeyUp))
+	require.Equal(t, 0, m.modelCursor, "up at first row is a no-op")
+
+	_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	require.Equal(t, 0, m.modelCursor, "down at last row is a no-op")
+}
+
+// TestSlashModel_TypeToFilterNarrows asserts typing while the picker is open
+// narrows the visible models, the "N of M" tally updates, and resetting with
+// Backspace restores the full list.
+func TestSlashModel_TypeToFilterNarrows(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "claude-3-5-sonnet", Provider: "anthropic"},
+		{ID: "gpt-4o", Provider: "openai"},
+		{ID: "claude-haiku", Provider: "anthropic"},
+	})
+
+	m.pushModelPicker()
+
+	// Type "claude" — should narrow to the two anthropic models.
+	for _, ch := range "claude" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+	require.Equal(t, "claude", m.modelFilter)
+	visible := m.visibleModels()
+	require.Len(t, visible, 2, "filter 'claude' must match exactly two models")
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "2 of 3", "tally must show filtered vs total count")
+
+	// Backspace once removes the last rune of the filter.
+	_, _ = m.Update(keySpecial("backspace", tea.KeyBackspace))
+	require.Equal(t, "claud", m.modelFilter)
+
+	// Keep backspacing until filter is empty.
+	for range "claud" {
+		_, _ = m.Update(keySpecial("backspace", tea.KeyBackspace))
+	}
+	require.Equal(t, "", m.modelFilter)
+	require.Len(t, m.visibleModels(), 3, "empty filter must restore all models")
+}
+
+// TestSlashModel_EnterSelectsModel asserts pressing Enter while the picker is
+// open applies the selected model to m.status.Model and closes the dialog.
+func TestSlashModel_EnterSelectsModel(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "model-a", Provider: "p"},
+		{ID: "model-b", Provider: "p"},
+	})
+	m.status.Model = "model-a"
+
+	m.pushModelPicker()
+
+	// Move down to select "model-b".
+	_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	require.Equal(t, 1, m.modelCursor)
+
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	require.False(t, m.dialogs.Contains("model_picker"), "picker must close after selection")
+	require.Equal(t, "model-b", m.status.Model, "status bar must reflect the chosen model")
+	require.Nil(t, m.modelCandidates, "candidates must be cleared after selection")
+}
+
+// TestSlashModel_MarksActiveModel asserts the picker body shows the currently
+// active model with the filled-dot marker so the user can see which one is in
+// use before navigating.
+func TestSlashModel_MarksActiveModel(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "model-x", Provider: "p"},
+		{ID: "model-y", Provider: "p"},
+	})
+	m.status.Model = "model-y"
+
+	m.pushModelPicker()
+
+	body := plainText(m.dialogs.Render(200))
+	// The active model row carries "● " and the inactive one carries "  " (two
+	// spaces), so both labels appear in the body but only the active one is
+	// preceded by the filled dot.
+	require.Contains(t, body, "● p/model-y", "active model must carry a filled-dot marker")
+}
+
+// TestSlashModel_CursorSeededAtActiveModel asserts the picker opens with the
+// cursor already on the currently active model, so the user sees their current
+// choice highlighted without having to navigate to it first.
+func TestSlashModel_CursorSeededAtActiveModel(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "first", Provider: "p"},
+		{ID: "second", Provider: "p"},
+		{ID: "third", Provider: "p"},
+	})
+	m.status.Model = "third"
+
+	m.pushModelPicker()
+
+	require.Equal(t, 2, m.modelCursor, "cursor must be seeded at the active model row")
+}
+
+// TestSlashModel_EmptyFilterMatchMessage asserts an impossible filter shows
+// the "(no models match)" message rather than an empty body.
+func TestSlashModel_EmptyFilterMatchMessage(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "alpha", Provider: "p"},
+	})
+
+	m.pushModelPicker()
+
+	for _, ch := range "zzz" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "no models match", "impossible filter must show no-match message")
+}
+
+// TestVisibleModels_ThreeTierRanking asserts the fuzzy filter applies the same
+// prefix > substring > subsequence ranking as the session and @-file pickers.
+func TestVisibleModels_ThreeTierRanking(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModelWithModels(t, []config.Model{
+		{ID: "haiku-3-5", Provider: "anthropic"},     // subsequence matches "h5"
+		{ID: "claude-haiku", Provider: "anthropic"},  // ID prefix matches "claud"
+		{ID: "claude-sonnet", Provider: "anthropic"}, // ID prefix matches "claud"
+	})
+
+	// Prefix tier: "claude" at the start of the ID must rank before haiku.
+	m.pushModelPicker()
+	for _, ch := range "claude" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+	visible := m.visibleModels()
+	require.Len(t, visible, 2)
+	require.Equal(t, "claude-haiku", visible[0].ID, "prefix match first")
+	require.Equal(t, "claude-sonnet", visible[1].ID, "prefix match second")
+}
+
+// TestModelWindowBounds mirrors TestSessionWindowBounds to ensure the model
+// picker's window arithmetic is correct.
+func TestModelWindowBounds(t *testing.T) {
+	t.Parallel()
+
+	// When the list fits entirely inside the window, return the full range.
+	start, end := modelWindowBounds(0, 3)
+	require.Equal(t, 0, start)
+	require.Equal(t, 3, end)
+
+	// When the list is larger than the window, the window is centred on the cursor.
+	start, end = modelWindowBounds(5, 20)
+	require.Equal(t, modelWindow, end-start, "window must always be exactly modelWindow rows")
+	require.LessOrEqual(t, start, 5, "cursor must be at or after start")
+	require.Less(t, 5, end, "cursor must be before end")
+
+	// At the very last row the window clamps to the end.
+	start, end = modelWindowBounds(19, 20)
+	require.Equal(t, 20, end)
+	require.Equal(t, 20-modelWindow, start)
+}

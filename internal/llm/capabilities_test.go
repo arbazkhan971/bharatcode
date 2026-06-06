@@ -858,3 +858,70 @@ func TestDefaultsCatalogOpenRouterPopular(t *testing.T) {
 			"openrouter provider must list model %q in its models", e.id)
 	}
 }
+
+// TestDefaultsCatalogQwen3OpenRouter verifies that the two Qwen3 models added to
+// the OpenRouter catalog ship with the correct context windows and capabilities,
+// and that the heuristic resolves their vendor-namespaced ids independently of
+// what the catalog says — catching any future catalog/capabilities drift.
+func TestDefaultsCatalogQwen3OpenRouter(t *testing.T) {
+	cfg := config.Default()
+
+	byID := make(map[string]config.Model, len(cfg.Models))
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+
+	entries := []struct {
+		id            string
+		wantCtxWindow int
+		wantImages    bool
+		wantTools     bool
+	}{
+		// Qwen3-Coder-480B is the flagship open-source coding model; its id contains
+		// "qwen3-coder" which maps to the 256k (262144) window rule.
+		{"qwen/qwen3-coder-480b-a35b-instruct", 262_144, false, true},
+		// Qwen3-235B-A22B-Instruct-2507 is a dense instruction model; its id carries
+		// only the bare "qwen3" marker, resolving to the 128k (131072) window.
+		{"qwen/qwen3-235b-a22b-instruct-2507", 131_072, false, true},
+	}
+
+	for _, e := range entries {
+		m, ok := byID[e.id]
+		require.Truef(t, ok, "defaults catalog must include openrouter model %q", e.id)
+		require.Equalf(t, "openrouter", m.Provider, "model %q has wrong provider", e.id)
+		require.Equalf(t, e.wantCtxWindow, m.ContextWindow, "model %q has wrong context_window", e.id)
+		require.Equalf(t, e.wantImages, m.SupportsImages, "model %q SupportsImages mismatch", e.id)
+		require.Equalf(t, e.wantTools, m.SupportsTools, "model %q SupportsTools mismatch", e.id)
+	}
+
+	// The heuristic must resolve these ids by itself, independent of the catalog.
+	heuristicCases := []struct {
+		id   string
+		want int
+	}{
+		{"qwen/qwen3-coder-480b-a35b-instruct", 262_144},
+		{"qwen/qwen3-235b-a22b-instruct-2507", 131_072},
+	}
+	for _, tc := range heuristicCases {
+		require.Equalf(t, tc.want, inferContextWindow(tc.id),
+			"inferContextWindow must recognize openrouter Qwen3 id %q", tc.id)
+	}
+
+	// Both models must appear in the openrouter provider's model list.
+	var openrouterProvider *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "openrouter" {
+			openrouterProvider = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, openrouterProvider, "defaults must include a provider named 'openrouter'")
+	providerModels := make(map[string]bool, len(openrouterProvider.Models))
+	for _, id := range openrouterProvider.Models {
+		providerModels[id] = true
+	}
+	for _, e := range entries {
+		require.Truef(t, providerModels[e.id],
+			"openrouter provider must list model %q in its models", e.id)
+	}
+}

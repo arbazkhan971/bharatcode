@@ -755,6 +755,11 @@ func parseGoTestFailures(output string) []testFailure {
 
 	lines := splitLines(output)
 	var failures []testFailure
+	// seen deduplicates test names so that `go test -count=N` output — which
+	// reruns each test N times and prints one "--- FAIL:" block per run — does
+	// not produce N copies of the same failure entry. The JSON parser already
+	// deduplicates via its failed-map; this keeps the two code paths consistent.
+	seen := map[string]bool{}
 	// The first compiler error since the current package's "# pkg" header, used
 	// as the detail when that package reports a build failure.
 	compileErr := ""
@@ -771,11 +776,15 @@ func parseGoTestFailures(output string) []testFailure {
 			continue
 		}
 		if m := goBuildFailRe.FindStringSubmatch(line); m != nil {
-			f := testFailure{Name: m[1] + " [" + m[2] + "]"}
-			if compileErr != "" {
-				f.Detail = compileErr
+			name := m[1] + " [" + m[2] + "]"
+			if !seen[name] {
+				seen[name] = true
+				f := testFailure{Name: name}
+				if compileErr != "" {
+					f.Detail = compileErr
+				}
+				failures = append(failures, f)
 			}
-			failures = append(failures, f)
 			compileErr = ""
 			continue
 		}
@@ -783,7 +792,12 @@ func parseGoTestFailures(output string) []testFailure {
 		if m == nil {
 			continue
 		}
-		f := testFailure{Name: m[1]}
+		name := m[1]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
 		for j := i + 1; j < len(lines); j++ {
 			if strings.HasPrefix(strings.TrimSpace(lines[j]), "--- ") {
 				break

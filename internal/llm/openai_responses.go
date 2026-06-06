@@ -17,8 +17,9 @@ import (
 // instead of chat/completions. It is an opt-in alternative for OpenAI models
 // that prefer the Responses request shape (top-level instructions plus an
 // input-items array) and parses the Responses output[] array into BharatCode's
-// event types. Streaming is not yet implemented here, so requests are sent with
-// stream=false and the full response is parsed at once.
+// event types. Requests are sent with stream=true and the server-sent-event
+// payload is parsed incrementally; a server that ignores the flag and replies
+// with a single JSON body is handled via the buffered fallback in readResponse.
 type openAIResponsesProvider struct {
 	name      string
 	baseURL   string
@@ -384,7 +385,20 @@ func emitResponsesStream(ctx context.Context, body io.Reader, events chan<- Even
 			if e.Response != nil {
 				usage = e.Response.Usage.toUsage()
 			}
-		case "response.failed", "response.incomplete":
+		case "response.incomplete":
+			// Hitting the output-token cap is a completed (truncated) turn, not a
+			// retryable failure: the text already streamed is valid and erroring
+			// would discard it and trigger a futile retry. Capture the usage and
+			// fall through to the terminal EndEvent, mirroring the chat/completions
+			// path (which treats finish_reason "length" as a normal completion) and
+			// the buffered Responses path (which emits the partial output). Any
+			// other incomplete reason (e.g. content_filter) stays an error.
+			if e.Response.hitMaxOutputTokens() {
+				usage = e.Response.Usage.toUsage()
+				return nil
+			}
+			return responsesStreamError(e.Type, e.Response)
+		case "response.failed":
 			return responsesStreamError(e.Type, e.Response)
 		case "error":
 			msg := e.Message

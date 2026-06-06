@@ -149,6 +149,50 @@ func (t *webFetchTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 	return Result{Content: strings.TrimSpace(text)}, nil
 }
 
+// FetchPageText fetches rawURL and returns its content as a markdown-like string.
+// HTML is converted using htmlToMarkdown. The body is capped at maxBytes (0 means
+// no cap up to the 2 MiB hard limit). truncated reports whether the cap was hit.
+// It uses the same SSRF-safe transport as the web_fetch tool so private-network
+// addresses are blocked (loopback excepted). This is intended for use by @URL
+// mention expansion in the TUI, which runs inside the agent goroutine.
+func FetchPageText(ctx context.Context, rawURL string, maxBytes int) (text string, truncated bool, err error) {
+	const hardLimit = 2 * 1024 * 1024
+	if maxBytes <= 0 || maxBytes > hardLimit {
+		maxBytes = hardLimit
+	}
+	parsed, parseErr := url.Parse(rawURL)
+	if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", false, fmt.Errorf("invalid URL %q", rawURL)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return "", false, err
+	}
+	req.Header.Set("User-Agent", "BharatCode/0.1")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false, fmt.Errorf("HTTP %s", resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
+	if err != nil {
+		return "", false, err
+	}
+	if len(body) > maxBytes {
+		body = body[:maxBytes]
+		truncated = true
+	}
+	content := string(body)
+	if shouldRenderHTML(resp.Header.Get("Content-Type"), content) {
+		content = htmlToMarkdown(content)
+	}
+	return strings.TrimSpace(content), truncated, nil
+}
+
 // shouldRenderHTML decides whether a fetched body should be reduced from HTML to
 // markdown. It trusts an explicit Content-Type first: an HTML type always
 // converts, and any other recognized textual or structured type (JSON, source

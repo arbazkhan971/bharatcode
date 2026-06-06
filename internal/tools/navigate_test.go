@@ -803,3 +803,145 @@ func TestNavigateRejectsMalformedJSON(t *testing.T) {
 	require.True(t, result.IsError)
 	require.Contains(t, result.Content, "invalid navigate arguments")
 }
+
+func TestNavigateDefinitionHasLocationsMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{definition: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 4}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "definition",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.NotNil(t, result.Metadata)
+	locs, ok := result.Metadata[MetadataLocations].([]navigateLocation)
+	require.True(t, ok, "MetadataLocations must be []navigateLocation")
+	require.Len(t, locs, 1)
+	require.Equal(t, "main.go", locs[0].Path)
+	require.Equal(t, 3, locs[0].Line)
+	require.Equal(t, 5, locs[0].Column)
+	total, ok := result.Metadata[MetadataTotal].(int)
+	require.True(t, ok)
+	require.Equal(t, 1, total)
+}
+
+func TestNavigateReferencesHasLocationsMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	other := filepath.Join(dir, "other.go")
+	require.NoError(t, os.WriteFile(other, []byte("package main\n"), 0o644))
+	src := &fakeNavigate{references: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: other, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 1}}},
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}}, // duplicate
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "references",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	locs, ok := result.Metadata[MetadataLocations].([]navigateLocation)
+	require.True(t, ok)
+	// Duplicate is deduplicated: 2 distinct locations, sorted by path then line.
+	require.Len(t, locs, 2)
+	total, ok := result.Metadata[MetadataTotal].(int)
+	require.True(t, ok)
+	require.Equal(t, 2, total)
+	// Sorted: main.go < other.go alphabetically.
+	require.Equal(t, "main.go", locs[0].Path)
+	require.Equal(t, 1, locs[0].Line)
+	require.Equal(t, "other.go", locs[1].Path)
+	require.Equal(t, 3, locs[1].Line)
+}
+
+func TestNavigateIncomingCallsHasLocationsMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{incomingCalls: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 5, Character: 0}}},
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 9, Character: 3}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "incoming_calls",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	locs, ok := result.Metadata[MetadataLocations].([]navigateLocation)
+	require.True(t, ok)
+	require.Len(t, locs, 2)
+	require.Equal(t, 6, locs[0].Line)
+	require.Equal(t, 10, locs[1].Line)
+}
+
+func TestNavigateHoverHasPositionMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{hover: "func Foo() int\n"}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 7, "column": 3, "action": "hover",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.NotNil(t, result.Metadata)
+	require.Equal(t, "main.go", result.Metadata["path"])
+	require.Equal(t, 7, result.Metadata["line"])
+	require.Equal(t, 3, result.Metadata["column"])
+}
+
+func TestNavigateSignatureHasPositionMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{signature: "→ Foo(x int)\n"}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 4, "column": 12, "action": "signature",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "main.go", result.Metadata["path"])
+	require.Equal(t, 4, result.Metadata["line"])
+	require.Equal(t, 12, result.Metadata["column"])
+}
+
+func TestNavigateEmptyResultHasNoMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	for _, action := range []string{"definition", "declaration", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls"} {
+		result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+			"path": "main.go", "line": 1, "action": action,
+		}))
+		require.NoError(t, err, "action %s", action)
+		require.False(t, result.IsError, "action %s", action)
+		require.Nil(t, result.Metadata, "action %s should have no metadata on empty result", action)
+	}
+}
+
+func TestNavigateLocationsMetadataDeduplicates(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	// Two identical locations plus one distinct one.
+	locs := []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}}},
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}}},
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 3, Character: 2}}},
+	}
+	meta := navigateLocationsMetadata(dir, locs)
+	out, ok := meta[MetadataLocations].([]navigateLocation)
+	require.True(t, ok)
+	require.Len(t, out, 2, "duplicate location must be removed")
+	require.Equal(t, 2, meta[MetadataTotal])
+}

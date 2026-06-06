@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -760,4 +761,196 @@ func TestFiletreePanel_LongPathKeepsBaseName(t *testing.T) {
 	require.Contains(t, listingRow, "handler.go", "the base name stays visible")
 	require.Contains(t, listingRow, "…", "the dropped leading segments are marked")
 	require.NotContains(t, listingRow, "internal/very", "the over-long path is elided, not shown intact")
+}
+
+// initGitRepo creates a minimal git repository in root with a first commit
+// containing the given files, then returns true. If git is not available or the
+// init fails it returns false and the caller should skip the test.
+func initGitRepo(t *testing.T, root string, files map[string]string) bool {
+	t.Helper()
+	cmds := [][]string{
+		{"git", "-C", root, "init"},
+		{"git", "-C", root, "config", "user.email", "test@example.com"},
+		{"git", "-C", root, "config", "user.name", "Test"},
+	}
+	for _, c := range cmds {
+		if err := exec.Command(c[0], c[1:]...).Run(); err != nil {
+			return false
+		}
+	}
+	for rel, content := range files {
+		writeFile(t, root, rel, content)
+	}
+	if len(files) > 0 {
+		paths := make([]string, 0, len(files))
+		for rel := range files {
+			paths = append(paths, filepath.Join(root, filepath.FromSlash(rel)))
+		}
+		args := append([]string{"-C", root, "add"}, paths...)
+		if err := exec.Command("git", args...).Run(); err != nil {
+			return false
+		}
+		if err := exec.Command("git", "-C", root, "commit", "-m", "init").Run(); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func TestLoadGitStatus_NotARepo_ReturnsNil(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	require.Nil(t, loadGitStatus(root), "non-repo root must yield nil")
+}
+
+func TestLoadGitStatus_ParsesPorcelainOutput(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if !initGitRepo(t, root, map[string]string{
+		"modified.go": "package main\n",
+		"deleted.go":  "package main\n",
+	}) {
+		t.Skip("git not available")
+	}
+
+	// Modify one committed file, delete another, add a new staged file, and
+	// leave one file untracked — covering the four most common status codes.
+	// Use relative paths with -C so git interprets them against root.
+	writeFile(t, root, "modified.go", "package main\nfunc main(){}\n")
+	// Use distinct content for new.go so git does not detect a rename from deleted.go.
+	writeFile(t, root, "new.go", "package newfile\n\nfunc New() {}\n")
+	require.NoError(t, exec.Command("git", "-C", root, "add", "new.go").Run())
+	require.NoError(t, exec.Command("git", "-C", root, "rm", "deleted.go").Run())
+	writeFile(t, root, "untracked.go", "package main\n")
+
+	status := loadGitStatus(root)
+	require.NotNil(t, status)
+	require.Equal(t, byte('A'), status["new.go"], "staged new file → 'A'")
+	require.Equal(t, byte('D'), status["deleted.go"], "git rm → 'D'")
+	require.Equal(t, byte('?'), status["untracked.go"], "untracked file → '?'")
+	// modified.go: worktree change, not yet staged → 'M' from worktree column.
+	require.Equal(t, byte('M'), status["modified.go"], "modified file → 'M'")
+}
+
+func TestFiletreeGitStatusFor(t *testing.T) {
+	t.Parallel()
+
+	f := &filetree{
+		gitStatus: map[string]byte{
+			"modified.go": 'M',
+			"added.go":    'A',
+			"deleted.go":  'D',
+		},
+	}
+	require.Equal(t, byte('M'), f.gitStatusFor("modified.go"))
+	require.Equal(t, byte('A'), f.gitStatusFor("added.go"))
+	require.Equal(t, byte('D'), f.gitStatusFor("deleted.go"))
+	// Files absent from the map → clean (space).
+	require.Equal(t, byte(' '), f.gitStatusFor("clean.go"))
+
+	// nil gitStatus → always returns space regardless of path.
+	f2 := &filetree{}
+	require.Equal(t, byte(' '), f2.gitStatusFor("anything.go"))
+}
+
+// TestFiletreePanel_ShowsGitStatusMarkers verifies that the file-tree listing
+// includes the appropriate single-character git status marker in the second
+// gutter column: 'M' for modified, 'A' for added, and a plain space for a
+// clean file. The markers are injected directly into the model's gitStatus
+// map so the test does not depend on git being installed.
+func TestFiletreePanel_ShowsGitStatusMarkers(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "package main\n")
+	writeFile(t, root, "beta.go", "package main\n")
+	writeFile(t, root, "gamma.go", "package main\n")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+	require.Equal(t, []string{"alpha.go", "beta.go", "gamma.go"}, m.filetree.files)
+
+	// Inject git status after the panel opens (refresh clears any prior state).
+	m.filetree.gitStatus = map[string]byte{
+		"beta.go":  'M',
+		"gamma.go": 'A',
+	}
+
+	out := plainText(m.renderMain())
+	// Cursor is on alpha.go: it uses the "> " indicator, not a git marker.
+	require.Contains(t, out, "> alpha.go")
+	// beta.go carries an 'M' marker in gutter column 2; alpha is not the cursor.
+	require.Contains(t, out, "Mbeta.go", "modified file shows 'M' marker")
+	// gamma.go carries an 'A' marker.
+	require.Contains(t, out, "Agamma.go", "added file shows 'A' marker")
+	// A clean file (alpha.go) must not show any git status character.
+	require.NotContains(t, out, "Malpha.go")
+	require.NotContains(t, out, "Aalpha.go")
+}
+
+// TestFiletreePanel_GitMarkerDoesNotBreakAgentEditMarker verifies that when a
+// file has both an agent-edit ("●") marker and a git 'M' status, both appear
+// in their respective gutter columns and neither overwrites the other.
+func TestFiletreePanel_GitMarkerDoesNotBreakAgentEditMarker(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "package main\n")
+	writeFile(t, root, "beta.go", "package main\n")
+
+	editInput, err := json.Marshal(map[string]string{
+		"path":       filepath.Join(root, "beta.go"),
+		"old_string": "old",
+		"new_string": "new",
+	})
+	require.NoError(t, err)
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	m.editDiffSource = func() []message.Message {
+		return []message.Message{{
+			Role: message.RoleAssistant,
+			Content: []message.ContentBlock{
+				message.ToolUseBlock{ID: "t1", Name: "edit", Input: editInput},
+			},
+		}}
+	}
+
+	_, _ = m.Update(ctrlKey('f'))
+	// Inject git status: beta.go is also modified in git.
+	m.filetree.gitStatus = map[string]byte{"beta.go": 'M'}
+
+	out := plainText(m.renderMain())
+	// beta.go must show the agent-edit '●' in col 1 and 'M' in col 2.
+	require.Contains(t, out, "●Mbeta.go", "both agent-edit and git markers appear together")
+	// The existing test-compat form: just '●' adjacent to the file name is gone
+	// because col 2 now carries 'M' instead of a space.
+	require.NotContains(t, out, "● beta.go", "'● ' (space) replaced by '●M' when git-modified")
+}
+
+// TestFiletreePanel_NoGitMarkers_CleanWorkspace verifies that a file tree in a
+// non-git directory (or a git-clean workspace) shows no git status characters
+// at all — only the existing agent-edit '●' and cursor '>' markers.
+func TestFiletreePanel_NoGitMarkers_CleanWorkspace(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "beta.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	m.editDiffSource = func() []message.Message { return nil }
+	_, _ = m.Update(ctrlKey('f'))
+
+	// gitStatus is nil (non-git dir), so no 'M', 'A', 'D', '?' should appear.
+	out := plainText(m.renderMain())
+	for _, marker := range []string{"M", "A", "D", "?"} {
+		for _, name := range []string{"alpha.go", "beta.go"} {
+			require.NotContains(t, out, marker+name,
+				"clean workspace must not show git marker %q before %s", marker, name)
+		}
+	}
 }

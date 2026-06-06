@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -44,6 +45,11 @@ var filetreeIgnored = map[string]struct{}{
 // operate on the narrowed view without special-casing. filter holds the active
 // filter token and filtering reports whether the panel is capturing keystrokes
 // into it, the way a side-panel quick-filter works in Claude Code and opencode.
+//
+// gitStatus maps workspace-relative slash paths to a single git status byte:
+// 'M' modified, 'A' added/staged, 'D' deleted, 'R' renamed, '?' untracked,
+// 'U' merge conflict. It is populated from `git status --porcelain` on each
+// refresh and is nil when the workspace is not a git repository.
 type filetree struct {
 	visible   bool
 	focused   bool
@@ -53,6 +59,7 @@ type filetree struct {
 	cursor    int
 	filter    string
 	filtering bool
+	gitStatus map[string]byte
 }
 
 // toggle flips panel visibility. Showing the panel also focuses it, clears any
@@ -69,11 +76,78 @@ func (f *filetree) toggle(root string) {
 	}
 }
 
-// refresh re-enumerates the workspace file listing from the panel root, then
-// re-applies the active quick-filter so the visible subset stays in sync.
+// refresh re-enumerates the workspace file listing from the panel root, loads
+// the git working-tree status, then re-applies the active quick-filter so the
+// visible subset stays in sync.
 func (f *filetree) refresh() {
 	f.allFiles = listWorkspaceFiles(f.root)
+	f.gitStatus = loadGitStatus(f.root)
 	f.applyFilter()
+}
+
+// gitStatusFor returns the git status byte for rel, or ' ' when the file has
+// no recorded git change or the workspace is not a git repository.
+func (f *filetree) gitStatusFor(rel string) byte {
+	if f.gitStatus == nil {
+		return ' '
+	}
+	if ch, ok := f.gitStatus[rel]; ok {
+		return ch
+	}
+	return ' '
+}
+
+// loadGitStatus runs `git status --porcelain` in root and returns a map from
+// workspace-relative slash paths to a single status byte:
+//
+//	'M'  modified (staged index change or worktree modification)
+//	'A'  added (new file staged)
+//	'D'  deleted
+//	'R'  renamed
+//	'?'  untracked
+//	'U'  merge conflict
+//
+// Returns nil when root is not a git repository, git is not installed, or on
+// any error, so callers treating nil as "no git info" are always safe.
+func loadGitStatus(root string) map[string]byte {
+	if root == "" {
+		return nil
+	}
+	out, err := exec.Command("git", "-C", root, "status", "--porcelain").Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+	status := make(map[string]byte)
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		x, y := line[0], line[1]
+		path := line[3:]
+		// Renames use "old -> new" notation; take the destination path.
+		if arrow := strings.Index(path, " -> "); arrow >= 0 {
+			path = path[arrow+4:]
+		}
+		rel := filepath.ToSlash(path)
+		var ch byte
+		switch {
+		case x == '?' && y == '?':
+			ch = '?'
+		case x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D'):
+			ch = 'U'
+		case x != ' ' && x != '?':
+			ch = x
+		case y == 'M' || y == 'D':
+			ch = y
+		}
+		if ch != 0 {
+			status[rel] = ch
+		}
+	}
+	if len(status) == 0 {
+		return nil
+	}
+	return status
 }
 
 // applyFilter recomputes the visible listing from allFiles through the active
@@ -306,24 +380,30 @@ func (m *model) renderFiletree(width, height int) string {
 			b.WriteString(m.theme.Muted.Render(clampLine(fmt.Sprintf("  ↑ %d more", start), width)))
 			b.WriteByte('\n')
 		}
-		// Flag files with recorded edits so the listing shows which entries were
-		// touched this session without selecting each in turn.
+		// Flag files with recorded edits and collect the git working-tree status so
+		// the listing can show both markers in a two-column gutter without selecting
+		// each file in turn.
 		editedSet := m.filetreeEditedSet()
 		for i := start; i < end; i++ {
 			name := f.files[i]
 			edited := editedSet[name]
-			// An edited file's two-space indent becomes a "● " marker; every gutter
-			// (the cursor row's "> " too) is two columns wide so the names stay
-			// aligned regardless of which marker a row carries.
-			indent := "  "
+			// Gutter column 1: agent-edit marker ('●') or space.
+			editChar := rune(' ')
 			if edited {
-				indent = "● "
+				editChar = '●'
 			}
+			// Gutter column 2: git working-tree status ('M','A','D','?','R','U')
+			// or space when the file is clean or the workspace is not a git repo.
+			gitChar := f.gitStatusFor(name)
+			// plainGutter is the unstyled two-rune gutter used in the narrow-panel
+			// fast path where we operate on raw strings before clamping.
+			plainGutter := string(editChar) + string(rune(gitChar))
+
 			// A panel too narrow for both a two-column gutter and a name falls back
 			// to a plain clamped row so a pathological width never overflows; the
 			// common path elides instead.
 			if width < 3 {
-				clamped := clampLine(indent+name, width)
+				clamped := clampLine(plainGutter+name, width)
 				switch {
 				case i == f.cursor:
 					b.WriteString(m.theme.Accent.Render(clampLine("> "+name, width)))
@@ -346,22 +426,22 @@ func (m *model) renderFiletree(width, height int) string {
 			var row string
 			switch {
 			case i == f.cursor:
-				// The cursor row keeps its "> " indicator in place of the marker;
-				// the selected file's diff renders below, so its edited state is
-				// already evident.
+				// The cursor row keeps its "> " indicator in place of the markers;
+				// the selected file's diff renders below, so its edit state is already
+				// evident there.
 				row = m.theme.Accent.Render(clampLine("> "+shown, width))
 			case f.filter != "":
 				// Emphasize the runes the quick-filter matched, the way the @-file
 				// picker does, so a narrowed listing shows why each entry survived.
-				// The two-column gutter (with any edit marker) is styled and the
-				// elided name is highlighted against the active filter token.
-				row = m.filetreeGutter(indent, edited) + m.highlightMatch(shown, f.filter)
+				// The two-column gutter carries both markers; the elided name is
+				// highlighted against the active filter token.
+				row = m.filetreeGutter(editChar, gitChar) + m.highlightMatch(shown, f.filter)
 			case edited:
 				// Outside a filter, draw the marker and the touched file's name in
 				// the add style so it reads as changed at a glance.
-				row = m.filetreeGutter(indent, edited) + m.theme.DiffAdd.Render(shown)
+				row = m.filetreeGutter(editChar, gitChar) + m.theme.DiffAdd.Render(shown)
 			default:
-				row = indent + shown
+				row = m.filetreeGutter(editChar, gitChar) + shown
 			}
 			b.WriteString(row)
 			b.WriteByte('\n')
@@ -524,20 +604,40 @@ func (m *model) filetreeEditedSet() map[string]bool {
 	return set
 }
 
-// filetreeGutter styles the two-column gutter that precedes a listing entry's
-// name. An edited file's leading "●" marker is drawn in the add style so a
-// touched file stands out, while the trailing pad (and an unedited file's whole
-// gutter) stays muted. The gutter is sliced from the already-clamped row so its
-// width matches the listing exactly.
-func (m *model) filetreeGutter(gutter string, edited bool) string {
-	if !edited {
-		return m.theme.Muted.Render(gutter)
+// filetreeGutter renders the two-column gutter that precedes a listing entry's
+// name. Column 1 is the agent-edit marker (editChar: '●' or ' '), styled in
+// DiffAdd when set. Column 2 is the git working-tree status character (gitChar),
+// styled by semantic meaning:
+//
+//	'M','R' → Warn   (modified / renamed)
+//	'A'     → Success (new file staged)
+//	'D'     → Error   (deleted)
+//	'?'     → Muted   (untracked)
+//	'U'     → Warn    (merge conflict)
+//	' '     → Muted   (clean)
+func (m *model) filetreeGutter(editChar rune, gitChar byte) string {
+	var col1 string
+	if editChar == '●' {
+		col1 = m.theme.DiffAdd.Render("●")
+	} else {
+		col1 = m.theme.Muted.Render(" ")
 	}
-	gr := []rune(gutter)
-	if len(gr) == 0 {
-		return ""
+	var col2 string
+	switch gitChar {
+	case 'M', 'R':
+		col2 = m.theme.Warn.Render(string(rune(gitChar)))
+	case 'A':
+		col2 = m.theme.Success.Render("A")
+	case 'D':
+		col2 = m.theme.Error.Render("D")
+	case '?':
+		col2 = m.theme.Muted.Render("?")
+	case 'U':
+		col2 = m.theme.Warn.Render("U")
+	default:
+		col2 = m.theme.Muted.Render(" ")
 	}
-	return m.theme.DiffAdd.Render(string(gr[:1])) + m.theme.Muted.Render(string(gr[1:]))
+	return col1 + col2
 }
 
 // editDiffMessages returns the messages scanned for edit diffs. When the

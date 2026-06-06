@@ -1553,6 +1553,8 @@ var keybindingGroups = []keyGroup{
 		{"Ctrl+F", "toggle the file-tree panel"},
 		{"/ (in panel)", "filter the file-tree listing"},
 		{"Enter (in panel)", "insert the selected file as an @mention"},
+		{"j/k (in dialog)", "move one line in a dialog or overlay (vim-style)"},
+		{"g/G (in dialog)", "jump to top / bottom of a dialog or overlay"},
 	}},
 	{title: "Search", bindings: []keyBinding{
 		{"Ctrl+/", "jump to the next search match"},

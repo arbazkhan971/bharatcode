@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/message"
 )
 
 func TestIsOpenRouter(t *testing.T) {
@@ -198,4 +199,75 @@ func TestNonOpenRouterStreamOmitsReasoning(t *testing.T) {
 		req.Thinking = &ThinkingConfig{BudgetTokens: 2048}
 	})
 	require.NotContains(t, string(body), `"reasoning"`)
+}
+
+func TestWithOpenRouterAttribution(t *testing.T) {
+	// A non-OpenRouter base URL is returned unchanged (same map, no attribution).
+	user := map[string]string{"X-Proxy": "tok"}
+	got := withOpenRouterAttribution("https://api.openai.com/v1", user)
+	require.Equal(t, user, got)
+	_, hasReferer := got["HTTP-Referer"]
+	require.False(t, hasReferer)
+
+	// An OpenRouter base URL with no user headers gains both attribution headers.
+	got = withOpenRouterAttribution("https://openrouter.ai/api/v1", nil)
+	require.Equal(t, "https://github.com/arbazkhan971/bharatcode", got["HTTP-Referer"])
+	require.Equal(t, "BharatCode", got["X-Title"])
+
+	// User-supplied values win over the defaults, and unrelated user headers are
+	// preserved alongside the remaining default.
+	got = withOpenRouterAttribution("https://OpenRouter.AI/api/v1", map[string]string{
+		"X-Title": "Custom",
+		"X-Proxy": "tok",
+	})
+	require.Equal(t, "Custom", got["X-Title"])
+	require.Equal(t, "tok", got["X-Proxy"])
+	require.Equal(t, "https://github.com/arbazkhan971/bharatcode", got["HTTP-Referer"])
+
+	// The original user map is never mutated.
+	require.NotContains(t, map[string]string{"X-Title": "Custom", "X-Proxy": "tok"}, "HTTP-Referer")
+}
+
+func TestOpenRouterAttributionReachesProvider(t *testing.T) {
+	// End-to-end: a registry-built OpenRouter provider sends the attribution
+	// headers on its outgoing request even when no Headers were configured.
+	var gotReferer, gotTitle string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotReferer = r.Header.Get("HTTP-Referer")
+		gotTitle = r.Header.Get("X-Title")
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: []config.Provider{{
+			Name:    "openrouter",
+			Type:    config.ProviderOpenAICompatible,
+			BaseURL: srv.URL + "/openrouter.ai/api/v1",
+		}},
+		Models: []config.Model{{
+			ID:            "anthropic/claude-sonnet-4-5",
+			Provider:      "openrouter",
+			SupportsTools: true,
+		}},
+	}
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+	p, err := reg.Get("openrouter")
+	require.NoError(t, err)
+
+	ch, err := p.Stream(context.Background(), Request{
+		Model: "anthropic/claude-sonnet-4-5",
+		Messages: []message.Message{{
+			Role:    message.RoleUser,
+			Content: []message.ContentBlock{message.TextBlock{Text: "hi"}},
+		}},
+	})
+	require.NoError(t, err)
+	for range ch {
+	}
+
+	require.Equal(t, "https://github.com/arbazkhan971/bharatcode", gotReferer)
+	require.Equal(t, "BharatCode", gotTitle)
 }

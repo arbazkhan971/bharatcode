@@ -281,6 +281,10 @@ func TestRelativeTime_CoarsensWithGap(t *testing.T) {
 		{"hours ago", now.Add(-3 * time.Hour), "3h ago"},
 		{"days ago", now.Add(-2 * 24 * time.Hour), "2d ago"},
 		{"weeks ago", now.Add(-3 * 7 * 24 * time.Hour), "3w ago"},
+		{"just under a month stays weeks", now.Add(-29 * 24 * time.Hour), "4w ago"},
+		{"months ago", now.Add(-60 * 24 * time.Hour), "2mo ago"},
+		{"just under a year stays months", now.Add(-360 * 24 * time.Hour), "12mo ago"},
+		{"years ago", now.Add(-2 * 365 * 24 * time.Hour), "2y ago"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

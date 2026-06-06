@@ -41,6 +41,7 @@ func TestRegistryListsShellTools(t *testing.T) {
 		"patch",
 		"rename",
 		"symbols",
+		"think",
 		"todo",
 		"view",
 		"web_fetch",

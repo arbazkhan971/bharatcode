@@ -367,3 +367,115 @@ func TestSymbolsMetadataDocumentOutline(t *testing.T) {
 	require.Equal(t, 2, result.Metadata[MetadataSymbolCount])
 	require.Equal(t, 2, result.Metadata[MetadataSymbolTotal])
 }
+
+func TestSymbolsMetadataItemsWorkspaceSearch(t *testing.T) {
+	// A workspace search surfaces a structured items list in metadata, mirroring
+	// MetadataDiagnosticItems in the diagnostics tool.
+	dir := t.TempDir()
+	src := &fakeSymbols{workspace: []lsp.Symbol{
+		{
+			Name:          "Run",
+			Kind:          lsp.Function,
+			Path:          filepath.Join(dir, "a.go"),
+			Range:         lsp.Range{Start: lsp.Position{Line: 9, Character: 0}},
+			ContainerName: "pkg",
+			Detail:        "func() error",
+		},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Run"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	raw, ok := result.Metadata[MetadataSymbolItems]
+	require.True(t, ok, "expected items key in metadata")
+	items, ok := raw.([]symbolItem)
+	require.True(t, ok, "expected []symbolItem")
+	require.Len(t, items, 1)
+	require.Equal(t, "a.go", items[0].Path)
+	require.Equal(t, 10, items[0].Line)
+	require.Equal(t, 1, items[0].Column)
+	require.Equal(t, "function", items[0].Kind)
+	require.Equal(t, "Run", items[0].Name)
+	require.Equal(t, "func() error", items[0].Detail)
+	require.Equal(t, "pkg", items[0].ContainerName)
+}
+
+func TestSymbolsMetadataItemsDocumentOutline(t *testing.T) {
+	// Document outlines also include the items list with workspace-relative paths.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	src := &fakeSymbols{document: []lsp.Symbol{
+		{Name: "Server", Kind: lsp.Struct, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 5}}},
+		{Name: "Run", Kind: lsp.Method, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8}}, ContainerName: "Server", Depth: 1},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	raw, ok := result.Metadata[MetadataSymbolItems]
+	require.True(t, ok)
+	items, ok := raw.([]symbolItem)
+	require.True(t, ok)
+	require.Len(t, items, 2)
+
+	// Paths are workspace-relative and 1-based coordinates.
+	require.Equal(t, "main.go", items[0].Path)
+	require.Equal(t, 3, items[0].Line)
+	require.Equal(t, 6, items[0].Column)
+	require.Equal(t, "struct", items[0].Kind)
+	require.Equal(t, "Server", items[0].Name)
+	require.Equal(t, "", items[0].ContainerName)
+
+	require.Equal(t, "main.go", items[1].Path)
+	require.Equal(t, 9, items[1].Line)
+	require.Equal(t, "method", items[1].Kind)
+	require.Equal(t, "Run", items[1].Name)
+	require.Equal(t, "Server", items[1].ContainerName)
+}
+
+func TestSymbolsMetadataItemsAbsentWhenNoSymbols(t *testing.T) {
+	// When no symbols are found, the items key is absent (not an empty slice).
+	tool := &symbolsTool{source: &fakeSymbols{}, workDir: t.TempDir()}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Nope"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	_, hasItems := result.Metadata[MetadataSymbolItems]
+	require.False(t, hasItems, "items key should be absent when no symbols matched")
+}
+
+func TestSymbolsMetadataItemsCappedAtSymbolMatchCap(t *testing.T) {
+	// When the result exceeds the cap, items holds only the shown symbols —
+	// consistent with the rendered Content (both truncate at the same boundary).
+	dir := t.TempDir()
+	const n = symbolMatchCap + 5
+	syms := make([]lsp.Symbol, 0, n)
+	for i := 0; i < n; i++ {
+		syms = append(syms, lsp.Symbol{
+			Name:  fmt.Sprintf("Sym%04d", i),
+			Kind:  lsp.Function,
+			Path:  filepath.Join(dir, "a.go"),
+			Range: lsp.Range{Start: lsp.Position{Line: i}},
+		})
+	}
+	tool := &symbolsTool{source: &fakeSymbols{workspace: syms}, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Sym"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	require.Equal(t, symbolMatchCap, result.Metadata[MetadataSymbolCount])
+	require.Equal(t, n, result.Metadata[MetadataSymbolTotal])
+
+	raw, ok := result.Metadata[MetadataSymbolItems]
+	require.True(t, ok)
+	items, ok := raw.([]symbolItem)
+	require.True(t, ok)
+	// items is capped to symbolMatchCap, not the full n.
+	require.Len(t, items, symbolMatchCap)
+}

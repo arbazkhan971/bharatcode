@@ -192,6 +192,10 @@ type model struct {
 	// starts and set once the turn finishes, so the bar shows idle-turn stats
 	// rather than stale counts from a previous run.
 	lastTurnTokens string
+	// lastContextPct is the context-window fill percentage (1–100) after the
+	// most recently completed turn. Zero means no data yet; it is cleared when
+	// a new turn starts and set once the turn finishes.
+	lastContextPct int
 	turn           int
 	queueCounter   int
 	eventCh        <-chan agent.Event
@@ -1040,6 +1044,7 @@ func (m *model) renderMain() string {
 	}
 	m.status.Working = runningStatus(m.turnStartedAt, m.now, m.currentActivity)
 	m.status.TurnTokens = m.lastTurnTokens
+	m.status.ContextPct = m.lastContextPct
 	m.status.Search = m.search.statusSegment()
 	// clampChat finalizes m.chatScroll (clamping it to the scrollable range), so
 	// the scroll indicator is computed from it afterwards to reflect the window
@@ -1158,6 +1163,20 @@ func formatTurnCostUSD(usd float64) string {
 	default:
 		return fmt.Sprintf("$%.2f", usd)
 	}
+}
+
+// contextWindowForModel returns the context-window size (in tokens) for the
+// named model from the config model list, or 0 when the model is not found
+// (no context-window data available). The caller uses it to compute the fill
+// percentage shown in the status bar so users can see how full the window is
+// before the agent runs into ErrContextOverflow.
+func contextWindowForModel(models []config.Model, modelID string) int {
+	for _, m := range models {
+		if m.ID == modelID {
+			return m.ContextWindow
+		}
+	}
+	return 0
 }
 
 // turnCostUSD computes the USD cost for one turn using the per-model pricing in

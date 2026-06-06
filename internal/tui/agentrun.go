@@ -85,6 +85,7 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.turnStartedAt = m.now
 	m.currentActivity = ""
 	m.lastTurnTokens = "" // clear previous turn's counts while the new turn runs
+	m.lastContextPct = 0  // clear previous context-window fill while the new turn runs
 	// Inline any @-file references so the model sees their contents, while the
 	// chat bubble above keeps the user's original text. Resolution is scoped to
 	// the workspace root; unresolved mentions are left untouched.
@@ -265,6 +266,15 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 			m.lastTurnTokens = tokens + " · " + formatTurnCostUSD(cost)
 		} else {
 			m.lastTurnTokens = tokens
+		}
+		if window := contextWindowForModel(cfg, m.status.Model); window > 0 {
+			m.lastContextPct = u.InputTokens * 100 / window
+			if m.lastContextPct < 1 {
+				m.lastContextPct = 1 // at least 1% when there is measurable usage
+			}
+			if m.lastContextPct > 100 {
+				m.lastContextPct = 100
+			}
 		}
 	}
 

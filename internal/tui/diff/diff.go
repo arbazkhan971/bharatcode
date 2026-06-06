@@ -45,6 +45,12 @@ func (v *Viewer) RenderUnified(patch string, width int) string {
 // and file-boundary headers get a blank gutter; added lines show only the new
 // number, removed lines only the old number, and context lines show both. The
 // gutter width is reserved from width so the total stays within it.
+//
+// Long runs of unchanged context are collapsed to a "⋯ N unchanged lines" marker
+// (see planFold), keeping foldContext lines next to each change so a small edit
+// inside a large shared region is not buried — the way Claude Code and opencode
+// fold context in a reviewed diff. The line numbers still account for the hidden
+// lines, so the gutter on either side of a fold stays accurate.
 func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 	if width < 1 {
 		width = 1
@@ -65,10 +71,26 @@ func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 	// lines can have just their changed runs emphasized.
 	pairs := pairChanges(lines)
 
+	// Collapse long runs of unchanged context so a small edit buried in a large
+	// shared region does not bury the changed lines under scrollback.
+	hidden, markers := planFold(lines)
+
 	var oldLn, newLn int
 	inHunk := false
-	out := make([]string, len(lines))
+	out := make([]string, 0, len(lines))
 	for i, line := range lines {
+		if n, ok := markers[i]; ok {
+			out = append(out, blankGutter+v.foldMarker(n, contentWidth))
+		}
+		// A folded context line keeps its place in the line numbering — it is
+		// still a real source line — but is not drawn; the marker above stands in
+		// for the whole collapsed run. Context advances both counters.
+		if hidden[i] {
+			oldLn++
+			newLn++
+			continue
+		}
+
 		clamped := clampWidth(expandTabs(line), contentWidth)
 		styled := v.styleLine(clamped)
 		if j := pairs[i]; j >= 0 {
@@ -79,26 +101,121 @@ func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 			oldLn, _ = strconv.Atoi(m[1])
 			newLn, _ = strconv.Atoi(m[2])
 			inHunk = true
-			out[i] = blankGutter + styled
+			out = append(out, blankGutter+styled)
 			continue
 		}
 
 		switch {
 		case isDiffHeader(line) || strings.HasPrefix(line, "@@") || isNoNewlineMarker(line) || !inHunk:
-			out[i] = blankGutter + styled
+			out = append(out, blankGutter+styled)
 		case strings.HasPrefix(line, "+"):
-			out[i] = v.gutter(oldLn, newLn, digits, false, true) + styled
+			out = append(out, v.gutter(oldLn, newLn, digits, false, true)+styled)
 			newLn++
 		case strings.HasPrefix(line, "-"):
-			out[i] = v.gutter(oldLn, newLn, digits, true, false) + styled
+			out = append(out, v.gutter(oldLn, newLn, digits, true, false)+styled)
 			oldLn++
 		default:
-			out[i] = v.gutter(oldLn, newLn, digits, true, true) + styled
+			out = append(out, v.gutter(oldLn, newLn, digits, true, true)+styled)
 			oldLn++
 			newLn++
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// foldContext is how many unchanged lines the numbered diff keeps adjacent to a
+// change when collapsing a longer run of context, so the reviewer still sees the
+// immediate surroundings of each edit. It matches git's default three-line
+// context window.
+const foldContext = 3
+
+// foldMin is the fewest hidden lines worth collapsing. Replacing one unchanged
+// line with a one-line marker saves nothing, so a context run is folded only when
+// at least this many lines would be hidden — keeping the fold a net reduction.
+const foldMin = 2
+
+// planFold scans the numbered diff's lines and decides which interior context
+// lines to collapse, so a small change inside a large unchanged region stays
+// readable. It returns hidden, a per-line flag marking the context lines the
+// renderer should skip (while still advancing the line-number counters, since a
+// hidden context line is still a real source line), and markers, mapping the
+// index where a collapsed run begins to the number of lines it hides so the
+// renderer can draw a "⋯ N unchanged lines" placeholder there.
+//
+// Only maximal runs of genuine in-hunk context lines are considered; headers and
+// changed (+/-) lines break a run and are never hidden. A run keeps foldContext
+// lines next to any change it abuts — context after the change above it and
+// before the change below it — and is folded only when at least foldMin lines
+// remain to hide, mirroring how Claude Code and opencode fold long unchanged
+// stretches in a reviewed diff while leaving each edit's surroundings visible.
+func planFold(lines []string) (hidden []bool, markers map[int]int) {
+	hidden = make([]bool, len(lines))
+	markers = make(map[int]int)
+
+	// Classify each line as unchanged in-hunk context once, so the run scan and
+	// the change-neighbour checks agree on what counts as context.
+	isCtx := make([]bool, len(lines))
+	inHunk := false
+	for i, line := range lines {
+		if hunkHeaderPattern.MatchString(line) {
+			inHunk = true
+			continue
+		}
+		if isDiffHeader(line) || strings.HasPrefix(line, "@@") || isNoNewlineMarker(line) || !inHunk {
+			continue
+		}
+		if !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "-") {
+			isCtx[i] = true
+		}
+	}
+
+	for i := 0; i < len(lines); {
+		if !isCtx[i] {
+			i++
+			continue
+		}
+		start := i
+		for i < len(lines) && isCtx[i] {
+			i++
+		}
+		end := i // exclusive
+
+		keepLeft, keepRight := 0, 0
+		if start > 0 && isChangeLine(lines[start-1]) {
+			keepLeft = foldContext
+		}
+		if end < len(lines) && isChangeLine(lines[end]) {
+			keepRight = foldContext
+		}
+		hideStart, hideEnd := start+keepLeft, end-keepRight
+		if hideEnd-hideStart < foldMin {
+			continue
+		}
+		for k := hideStart; k < hideEnd; k++ {
+			hidden[k] = true
+		}
+		markers[hideStart] = hideEnd - hideStart
+	}
+	return hidden, markers
+}
+
+// isChangeLine reports whether line is added or removed diff content, as opposed
+// to context, a hunk header, or file-boundary metadata. It is used to decide
+// whether a context run abuts a change and so should keep its edge lines visible.
+func isChangeLine(line string) bool {
+	return isAdded(line) || isRemoved(line)
+}
+
+// foldMarker renders the placeholder shown in place of a collapsed run of
+// unchanged context: a muted "⋯ N unchanged line(s)" note telling the reviewer
+// how many lines were hidden, so a fold reads as a deliberate elision rather than
+// missing content. The text is clamped to width so it never widens the diff body.
+func (v *Viewer) foldMarker(n, width int) string {
+	noun := "lines"
+	if n == 1 {
+		noun = "line"
+	}
+	return v.theme.Muted.Render(clampWidth(fmt.Sprintf("⋯ %d unchanged %s", n, noun), width))
 }
 
 // Stat summarizes a unified diff as a one-line "N file(s) changed, +A -R"

@@ -251,6 +251,34 @@ func TestDefinitionReturnsLocations(t *testing.T) {
 	require.NoError(t, manager.Shutdown(ctx))
 }
 
+func TestDeclarationReturnsLocations(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "go.mod"), []byte("module example.test\n"), 0o644))
+	source := filepath.Join(tmp, "main.go")
+	require.NoError(t, os.WriteFile(source, []byte("package main\n"), 0o644))
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmp))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	manager := NewManager(testConfig("go", "fake-lsp"), nil)
+	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	defer done()
+
+	locations, err := manager.Declaration(ctx, source, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, locations, 1)
+	require.Equal(t, source, locations[0].Path)
+	require.Equal(t, Range{
+		Start: Position{Line: 0, Character: 0},
+		End:   Position{Line: 0, Character: 4},
+	}, locations[0].Range)
+
+	require.NoError(t, manager.Shutdown(ctx))
+}
+
 func TestTypeDefinitionReturnsLocations(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PATH", fakeServerPath(t, "pull")+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -863,7 +891,7 @@ func runFakeLSPServer() {
 					"range": fakeRange(),
 				}}),
 			})
-		case "textDocument/typeDefinition", "textDocument/implementation":
+		case "textDocument/typeDefinition", "textDocument/implementation", "textDocument/declaration":
 			var params struct {
 				TextDocument struct {
 					URI string `json:"uri"`

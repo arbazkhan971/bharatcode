@@ -17,6 +17,7 @@ import (
 // *lsp.Manager satisfies it; tests substitute a fake.
 type NavigateSource interface {
 	Definition(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
+	Declaration(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	TypeDefinition(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	Implementation(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	References(ctx context.Context, path string, line, col int, includeDeclaration bool) ([]lsp.Location, error)
@@ -64,8 +65,8 @@ var schemaNavigate = json.RawMessage(`{
     },
     "action": {
       "type": "string",
-      "enum": ["definition", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls", "hover", "signature"],
-      "description": "definition: jump to where the symbol is declared. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. incoming_calls: list the functions that call this one (callers). outgoing_calls: list the functions this one calls (callees). hover: the language server's type/signature/doc for the symbol. signature: the call signature(s) at the position, marking which argument the cursor is on (point at a call's arguments). Defaults to definition."
+      "enum": ["definition", "declaration", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls", "hover", "signature"],
+      "description": "definition: jump to where the symbol is defined (its implementation). declaration: jump to where the symbol is declared, which differs from its definition in languages that separate the two (a C/C++ header vs source file, a TypeScript ambient declaration); falls back to the definition for languages that do not. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. incoming_calls: list the functions that call this one (callers). outgoing_calls: list the functions this one calls (callees). hover: the language server's type/signature/doc for the symbol. signature: the call signature(s) at the position, marking which argument the cursor is on (point at a call's arguments). Defaults to definition."
     },
     "include_declaration": {
       "type": "boolean",
@@ -147,6 +148,12 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 			return Result{}, fmt.Errorf("resolving definition at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
 		return locationsResult(root, locs, "No definition found."), nil
+	case "declaration":
+		locs, err := t.source.Declaration(ctx, path, line0, col0)
+		if err != nil {
+			return Result{}, fmt.Errorf("resolving declaration at %s:%d:%d: %w", args.Path, args.Line, col, err)
+		}
+		return locationsResult(root, locs, "No declaration found."), nil
 	case "type_definition":
 		locs, err := t.source.TypeDefinition(ctx, path, line0, col0)
 		if err != nil {
@@ -197,7 +204,7 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		}
 		return Result{Content: strings.TrimRight(text, "\n")}, nil
 	default:
-		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, type_definition, implementation, references, incoming_calls, outgoing_calls, hover, or signature)", action)), nil
+		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, declaration, type_definition, implementation, references, incoming_calls, outgoing_calls, hover, or signature)", action)), nil
 	}
 }
 

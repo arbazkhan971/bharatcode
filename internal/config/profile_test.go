@@ -96,6 +96,57 @@ func TestLoadWithProfileInvalidJSONErrors(t *testing.T) {
 	require.Contains(t, err.Error(), "parsing profile config file")
 }
 
+func TestLoadFromWithProfileByNameResolvesSibling(t *testing.T) {
+	ctx := context.Background()
+	// Control GlobalPath() by pointing XDG_CONFIG_HOME at a temp dir.
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	// Write a global config under the standard path derived from XDG_CONFIG_HOME.
+	globalDir := filepath.Join(tmpDir, "bharatcode")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	globalFile := filepath.Join(globalDir, "config.json")
+	require.NoError(t, os.WriteFile(globalFile, []byte(`{"ledger": {"currency": "USD"}}`), 0o600))
+
+	// Write a sibling profile file (same dir as config.json).
+	profileFile := filepath.Join(globalDir, "ollama.json")
+	require.NoError(t, os.WriteFile(profileFile, []byte(`{"ledger": {"currency": "INR"}}`), 0o600))
+
+	// LoadFromWithProfile resolves the profile by name relative to GlobalPath().
+	cfg, err := LoadFromWithProfile(ctx, globalFile, "", "ollama")
+	require.NoError(t, err)
+	require.Equal(t, "INR", cfg.Ledger.Currency)
+}
+
+func TestLoadFromWithProfileEmptyNameSkipsOverlay(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	globalFile := filepath.Join(tmpDir, "config.json")
+	require.NoError(t, os.WriteFile(globalFile, []byte(`{"ledger": {"currency": "USD"}}`), 0o600))
+
+	// Empty profile name must reproduce LoadFrom exactly.
+	cfg, err := LoadFromWithProfile(ctx, globalFile, "", "")
+	require.NoError(t, err)
+	require.Equal(t, "USD", cfg.Ledger.Currency)
+}
+
+func TestLoadFromWithProfileMissingFileErrors(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	globalDir := filepath.Join(tmpDir, "bharatcode")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	globalFile := filepath.Join(globalDir, "config.json")
+	require.NoError(t, os.WriteFile(globalFile, []byte(`{}`), 0o600))
+
+	// Profile "noexist" has no sibling file; expect an error.
+	_, err := LoadFromWithProfile(ctx, globalFile, "", "noexist")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reading profile config file")
+}
+
 func TestProfilePathDerivesFromGlobalDir(t *testing.T) {
 	if os.Getenv("APPDATA") == "" {
 		t.Setenv("XDG_CONFIG_HOME", "/custom/xdg")

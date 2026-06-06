@@ -90,6 +90,12 @@ const (
 	// ProviderGemini is for Google's native Generative Language API
 	// (generateContent / streamGenerateContent) used by Gemini models.
 	ProviderGemini ProviderType = "gemini"
+	// ProviderAzure is for Azure OpenAI Service endpoints. It speaks the
+	// OpenAI chat-completions wire format but authenticates with the
+	// "api-key" request header instead of "Authorization: Bearer", and
+	// requires a deployment-scoped base_url of the form
+	// "https://<resource>.openai.azure.com/openai/deployments/<deploy>?api-version=<ver>".
+	ProviderAzure ProviderType = "azure"
 )
 
 // Provider describes one LLM endpoint. APIKeyEnv names an

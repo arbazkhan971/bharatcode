@@ -117,7 +117,12 @@ func TestRunCompactsOnOverflowAndFitsWindow(t *testing.T) {
 		"compacted provider request must fit the usable window")
 
 	// Invariant: the system prompt is carried separately, never inside history.
-	require.Equal(t, "SYSTEM-PROMPT-SENTINEL-b8c9", req.SystemPrompt)
+	// It now leads with the base sentinel and carries the re-injected active-goal
+	// frame (the user's original request) appended after it.
+	require.True(t, strings.HasPrefix(req.SystemPrompt, "SYSTEM-PROMPT-SENTINEL-b8c9"),
+		"system prompt must lead with the base prompt")
+	require.Contains(t, req.SystemPrompt, "Active goal for this session",
+		"system prompt must carry the re-injected goal frame")
 	require.False(t, reqContains(req, "SYSTEM-PROMPT-SENTINEL-b8c9"),
 		"system prompt must not leak into the message history")
 

@@ -402,6 +402,46 @@ func TestRegistryOfflineWithholdsEgressTools(t *testing.T) {
 	}
 }
 
+func TestBashOfflineBlocksEgressCommand(t *testing.T) {
+	deps := shellDeps(t, &config.Config{Permissions: config.PermConfig{AllowAll: true}})
+	deps.Offline = true
+	tool, ok := NewRegistry(deps).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "curl -fsSL https://example.com/exfil",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError, "offline mode must refuse a curl command")
+	require.Contains(t, result.Content, "offline mode blocks the network command")
+	require.Contains(t, result.Content, "curl")
+}
+
+func TestBashOfflineAllowsLocalCommand(t *testing.T) {
+	deps := shellDeps(t, &config.Config{Permissions: config.PermConfig{AllowAll: true}})
+	deps.Offline = true
+	tool, ok := NewRegistry(deps).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), json.RawMessage(`{"command":"echo -n hello"}`))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "offline mode must still run a local command")
+	require.Contains(t, result.Content, "hello")
+}
+
+func TestBashOnlineAllowsEgressCommand(t *testing.T) {
+	// Without offline mode the egress guard is inert: the command runs (and here
+	// fails to connect, which is fine — the point is it was not refused up front).
+	tool, ok := NewRegistry(shellDeps(t, &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+	})).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), json.RawMessage(`{"command":"echo curl ran"}`))
+	require.NoError(t, err)
+	require.NotContains(t, result.Content, "offline mode blocks")
+}
+
 func shellDeps(t *testing.T, cfg *config.Config) Dependencies {
 	t.Helper()
 	if cfg == nil {

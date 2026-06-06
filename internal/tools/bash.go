@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/arbazkhan971/bharatcode/internal/offline"
 	"github.com/arbazkhan971/bharatcode/internal/outputfilter"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/shell"
@@ -28,6 +29,11 @@ type bashTool struct {
 	permission *permission.Checker
 	shell      *shell.Shell
 	workDir    string
+	// offline mirrors Dependencies.Offline. When set, the tool refuses commands
+	// that invoke a known network-egress client (curl, scp, git push, …) so the
+	// bash channel cannot defeat offline mode's "code will not leave this machine"
+	// guarantee the way withholding web_fetch/web_search alone would not.
+	offline bool
 }
 
 type bashArgs struct {
@@ -69,6 +75,7 @@ func newBashTool(deps Dependencies) Tool {
 		permission: deps.Permission,
 		shell:      deps.Shell,
 		workDir:    deps.WorkDir,
+		offline:    deps.Offline,
 	}
 }
 
@@ -94,6 +101,18 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 	}
 	if t.shell == nil {
 		return errorResult("shell is not configured"), nil
+	}
+
+	// In offline mode the bash tool must not become an escape hatch around the
+	// "code will not leave this machine" guarantee: refuse commands that invoke a
+	// known network-egress client before the command can run.
+	if t.offline {
+		if name, blocked := offline.EgressCommand(args.Command); blocked {
+			return errorResult(fmt.Sprintf(
+				"offline mode blocks the network command %q: BharatCode's offline guarantee is that code does not leave this machine. Remove the network call, or run without offline mode (unset %s) if you intend to reach the network.",
+				name, offline.EnvVar,
+			)), nil
+		}
 	}
 
 	if t.permission != nil {

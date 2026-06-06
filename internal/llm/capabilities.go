@@ -357,6 +357,15 @@ var contextWindowRules = []struct {
 	// specific "sonar-pro" marker must precede the bare "sonar".
 	{"sonar-pro", 200_000},
 	{"sonar", 128_000},
+	// DeepSeek-R1-Distill models fine-tune a Qwen or Llama base on R1 reasoning
+	// traces and inherit the base's 131k window (this is how the official repo and
+	// aggregators such as OpenRouter list them). Every distill id carries its base
+	// marker — "deepseek-r1-distill-qwen-32b", "deepseek-r1-distill-llama-70b" —
+	// so without this rule the Qwen variants fall through to the bare "qwen" rule
+	// (32k, a 4x undercount) and the Llama variants to "llama" (128k), resolving
+	// siblings inconsistently. The "deepseek-r1-distill" marker is specific enough
+	// to claim both, so it precedes the llama and qwen family rules below.
+	{"deepseek-r1-distill", 131_072},
 	// Common open-weight families served via openai_compatible/ollama. The
 	// Llama 4 line lifted the window far above the 128k Llama 3.x default —
 	// Scout to 10M and Maverick to 1M — and both ids carry the "llama" marker,

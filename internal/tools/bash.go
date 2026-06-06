@@ -164,15 +164,19 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 		"exit_code": job.ExitCode,
 	}
 	// Structured test-result parsing: when the command is a recognized test
-	// runner that reported failures, surface the failed test names (and their
-	// assertion/panic line) both as Metadata and as a compact summary appended
-	// to the output, so the model homes in on what broke instead of re-scanning
-	// the full log. Parse the raw combined output, not the (possibly truncated)
-	// rendered content, so failures near a length cap are not lost.
-	if failures := parseTestFailures(args.Command, job.Stdout+"\n"+job.Stderr); len(failures) > 0 {
+	// runner, extract structured failure and count information from the raw
+	// combined output (not the truncated rendered content, so data near a length
+	// cap is not lost) and surface it as Metadata. Failures also get a compact
+	// inline summary appended so the model homes in on what broke.
+	combinedOutput := job.Stdout + "\n" + job.Stderr
+	if failures := parseTestFailures(args.Command, combinedOutput); len(failures) > 0 {
 		metadata[MetadataTestFailures] = failures
 		metadata[MetadataTestFailedCount] = len(failures)
 		content += "\n" + summarizeTestFailures(failures)
+	}
+	if counts := parseTestCounts(args.Command, combinedOutput); counts != nil && counts.total > 0 {
+		metadata[MetadataTestPassCount] = counts.passed
+		metadata[MetadataTestTotalCount] = counts.total
 	}
 	return Result{
 		Content:  content,

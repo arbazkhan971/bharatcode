@@ -180,6 +180,14 @@ func TestInferContextWindow(t *testing.T) {
 		{"deepseek-chat", 131_072},
 		{"deepseek-reasoner", 131_072},
 		{"deepseek/deepseek-chat-v3.1", 131_072},
+		// DeepSeek-R1-Distill models inherit their base's 131k window. The Qwen
+		// variants must NOT fall through to the bare "qwen" rule (32k) and the
+		// Llama variants must resolve to the same 131k as their Qwen siblings
+		// rather than the "llama" family's 128k — the dedicated distill rule
+		// claims both ahead of the family rules.
+		{"deepseek-r1-distill-qwen-32b", 131_072},
+		{"deepseek-r1-distill-qwen-1.5b", 131_072},
+		{"deepseek/deepseek-r1-distill-llama-70b", 131_072},
 		// MiniMax-01 and MiniMax-M1 ship a 1M native window; their ids carry no
 		// broader family marker, so each resolves via the dedicated rule rather
 		// than falling through to "unknown" (0).

@@ -99,6 +99,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseRobotFailures(output)
 	case runnerCucumber:
 		return parseCucumberFailures(output)
+	case runnerKarma:
+		return parseKarmaFailures(output)
 	default:
 		return nil
 	}
@@ -140,6 +142,7 @@ const (
 	runnerGTest
 	runnerRobot
 	runnerCucumber
+	runnerKarma
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -288,6 +291,15 @@ var (
 	// at no trailing word boundary — from matching. A Cucumber invocation carries
 	// none of the other runners' substrings.
 	cucumberRe = regexp.MustCompile(`\bcucumber\b`)
+	// `karma start`/`npx karma`/`ng test` drive Karma (the dominant Angular test
+	// runner), whose progress/dots reporter prints each failing spec as
+	// "<browser> <suite> <test> FAILED" with the assertion on the tab-indented
+	// line(s) beneath. \bkarma\b admits "karma start karma.conf.js" and the bare
+	// wrapper; \bng test\b admits Angular's "ng test"/"ng test --watch=false" (its
+	// default builder runs Karma) while keeping prose like "running test data" —
+	// where "ng" sits mid-word — from matching. A Karma invocation carries none of
+	// the other JS runners' substrings, so it is classified before them.
+	karmaRe = regexp.MustCompile(`\bkarma\b|\bng test\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -520,6 +532,15 @@ func classifyTestRunner(command string) testRunner {
 		// the jest runners since a "cucumber" invocation carries none of their
 		// substrings, but kept explicit to guard against future overlap.
 		return runnerCucumber
+	case karmaRe.MatchString(c):
+		// `karma`/`ng test` drive Karma, whose progress reporter marks each failing
+		// spec with a "<browser> <suite> <test> FAILED" line and prints the assertion
+		// on the tab-indented line(s) beneath. Checked before the jest runners since a
+		// Karma invocation carries none of their substrings, but kept explicit to
+		// guard against future overlap. (Karma usually drives Jasmine specs, but its
+		// reporter output differs from the standalone jasmine CLI's "Failures:" block,
+		// so it needs its own parser.)
+		return runnerKarma
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1204,6 +1225,59 @@ func parseCucumberFailures(output string) []testFailure {
 		}
 		seen[name] = true
 		failures = append(failures, testFailure{Name: name, Detail: detail})
+	}
+	return failures
+}
+
+// "HeadlessChrome 120.0.0 (Linux x86_64) AppComponent should create FAILED" —
+// a Karma spec-failure line. Group 1 is the browser ("<name> <version>
+// (<platform>)"), captured non-greedily up to the first parenthesized platform
+// group so it is stripped from the test id; group 2 is the "<suite> <test>"
+// description Karma joins with spaces. The literal trailing " FAILED" anchors the
+// line, keeping Karma's "Executed N of M (X FAILED)" run-summary line — whose
+// "FAILED" sits inside parentheses, not at the end — from matching.
+var karmaFailRe = regexp.MustCompile(`^(.+? \([^)]*\)) (.+) FAILED$`)
+
+// parseKarmaFailures extracts failing specs from Karma's progress/dots reporter
+// output (`karma start`, `ng test`). Each failure is a "<browser> <suite> <test>
+// FAILED" line; Name is the "<suite> <test>" description with the browser prefix
+// stripped, and Detail is the first tab/space-indented non-empty line beneath it
+// (the assertion message, e.g. "Expected true to be false."), located before the
+// next failure line so stack frames and the next entry are skipped. Specs are
+// deduplicated by name, since a run across multiple browsers — or a reporter that
+// repeats failures in its end-of-run summary — emits the same spec more than once.
+func parseKarmaFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := karmaFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[2])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if karmaFailRe.MatchString(lines[j]) {
+				break
+			}
+			t := strings.TrimSpace(lines[j])
+			if t == "" {
+				continue
+			}
+			// The assertion message is indented (tab or spaces) beneath the header;
+			// an unindented non-blank line ends the block before any message.
+			if lines[j][0] != ' ' && lines[j][0] != '\t' {
+				break
+			}
+			f.Detail = t
+			break
+		}
+		failures = append(failures, f)
 	}
 	return failures
 }

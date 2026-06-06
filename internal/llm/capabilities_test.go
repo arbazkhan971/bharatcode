@@ -37,6 +37,13 @@ func TestInferContextWindow(t *testing.T) {
 		// The chat-tuned gpt-5-chat-latest ships only a 128k window; its id carries
 		// the "gpt-5" marker, so the specific rule must win over the 400k family rule.
 		{"gpt-5-chat-latest", 128_000},
+		// Versioned chat variants (gpt-5.1-chat-latest) never contain the literal
+		// "gpt-5-chat", so the gpt-5 chat pre-scan — not a substring rule — must keep
+		// them at 128k instead of letting the family rule resolve them to 400k.
+		{"gpt-5.1-chat-latest", 128_000},
+		{"gpt-5.1-chat", 128_000},
+		// The vendor-namespaced form an aggregator serves must classify the same.
+		{"openai/gpt-5.1-chat-latest", 128_000},
 		// o1-preview and o1-mini shipped a 128k window; the released o1 and the
 		// o3/o4-mini line are 200k. The specific preview/mini rules must win over
 		// the broader "o1" family rule.

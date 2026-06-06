@@ -135,7 +135,7 @@ func (t *webFetchTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 
 	contentType := resp.Header.Get("Content-Type")
 	text := string(body)
-	if strings.Contains(strings.ToLower(contentType), "html") || strings.Contains(text, "<") {
+	if shouldRenderHTML(contentType, text) {
 		text = htmlToMarkdown(text)
 	}
 	if args.Prompt != "" {
@@ -145,6 +145,58 @@ func (t *webFetchTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		text += "\n\n[truncated response body]"
 	}
 	return Result{Content: strings.TrimSpace(text)}, nil
+}
+
+// shouldRenderHTML decides whether a fetched body should be reduced from HTML to
+// markdown. It trusts an explicit Content-Type first: an HTML type always
+// converts, and any other recognized textual or structured type (JSON, source
+// code, CSS, XML, …) is returned verbatim so a stray '<' — a Rust Vec<T>, a Go
+// chan<-, a shell redirect, or a '<' inside a JSON string — is never mistaken
+// for a tag and eaten by the tag stripper. Only when the type is absent or
+// uninformative (text/plain, octet-stream, or missing) does it sniff the body
+// for genuine HTML structure rather than for any '<'.
+func shouldRenderHTML(contentType, body string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	// Drop any parameters (charset, boundary, …) so "text/html; charset=utf-8"
+	// compares as "text/html".
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	switch ct {
+	case "text/html", "application/xhtml+xml":
+		return true
+	case "", "text/plain", "application/octet-stream":
+		// Ambiguous or unlabeled: fall through to sniffing the body.
+	default:
+		// A recognized, non-HTML type (application/json, text/javascript,
+		// text/css, application/xml, text/markdown, …): trust the label and
+		// return the body untouched.
+		return false
+	}
+	return looksLikeHTML(body)
+}
+
+// htmlSniffMarkers are lowercased substrings that reliably indicate an actual
+// HTML document or fragment, as opposed to any text that merely contains '<'.
+// Matching these instead of a bare '<' keeps JSON, source code, diffs, and YAML
+// out of the HTML-to-markdown path even when the server omits a Content-Type.
+var htmlSniffMarkers = []string{
+	"<!doctype html", "<html", "<head", "<body", "<title", "<meta",
+	"<div", "<span", "<p>", "<p ", "<a ", "<table", "<ul", "<ol",
+	"<li", "<h1", "<h2", "<h3", "<br", "<script", "<style", "<img",
+}
+
+// looksLikeHTML reports whether body contains a recognizable HTML structural
+// marker. It is the sniffing fallback used only when the Content-Type cannot
+// settle the question.
+func looksLikeHTML(body string) bool {
+	lower := strings.ToLower(body)
+	for _, m := range htmlSniffMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
 }
 
 var (

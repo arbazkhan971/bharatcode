@@ -94,6 +94,100 @@ func TestWebFetchRunReturnsCodeBlock(t *testing.T) {
 	}
 }
 
+func TestWebFetchJSONNotMangledByMarkdown(t *testing.T) {
+	// A JSON body whose string values contain '<' must be returned verbatim,
+	// not run through the HTML-to-markdown tag stripper, which would delete the
+	// "<3" and "a < b" fragments.
+	const payload = `{"emoji":"<3","note":"a < b && c > d","tag":"<span>"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	tool := newWebFetchTool(Dependencies{})
+	args, _ := json.Marshal(map[string]string{"url": srv.URL})
+	res, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error result: %s", res.Content)
+	}
+	if res.Content != payload {
+		t.Fatalf("JSON body was altered.\nwant: %s\ngot:  %s", payload, res.Content)
+	}
+}
+
+func TestWebFetchSourceCodeNotMangled(t *testing.T) {
+	// Raw source served as text/plain with angle brackets (generics, channel
+	// directions, redirects) must survive untouched.
+	const src = "func f[T any](ch chan<- T, xs []T) { if len(xs) < 1 { return } }"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(src))
+	}))
+	defer srv.Close()
+
+	tool := newWebFetchTool(Dependencies{})
+	args, _ := json.Marshal(map[string]string{"url": srv.URL})
+	res, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if res.Content != src {
+		t.Fatalf("source was altered.\nwant: %s\ngot:  %s", src, res.Content)
+	}
+}
+
+func TestWebFetchUnlabeledHTMLStillRendered(t *testing.T) {
+	// When the server omits a Content-Type, a body with real HTML structure is
+	// still sniffed and reduced to markdown.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header()["Content-Type"] = nil
+		_, _ = w.Write([]byte("<html><body><h1>Title</h1><pre>code here</pre></body></html>"))
+	}))
+	defer srv.Close()
+
+	tool := newWebFetchTool(Dependencies{})
+	args, _ := json.Marshal(map[string]string{"url": srv.URL})
+	res, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if strings.Contains(res.Content, "<h1>") || !strings.Contains(res.Content, "code here") {
+		t.Fatalf("unlabeled HTML was not rendered to markdown.\ngot:\n%s", res.Content)
+	}
+}
+
+func TestShouldRenderHTML(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		body        string
+		want        bool
+	}{
+		{"explicit html", "text/html; charset=utf-8", "<html><body>x</body></html>", true},
+		{"xhtml", "application/xhtml+xml", "<html/>", true},
+		{"json with angle bracket", "application/json", `{"x":"a < b"}`, false},
+		{"javascript with comparison", "text/javascript", "if (a<b) {}", false},
+		{"css", "text/css", "a{}", false},
+		{"xml is not html", "application/xml", "<note>hi</note>", false},
+		{"plain text sniffs html structure", "text/plain", "<div>real page</div>", true},
+		{"plain text without html markers", "text/plain", "a < b and c > d", false},
+		{"missing type sniffs html", "", "<!DOCTYPE html><html></html>", true},
+		{"missing type non-html", "", `{"k":"<v>"}`, false},
+		{"octet-stream sniffs html", "application/octet-stream", "<body><p>p</p></body>", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRenderHTML(tc.contentType, tc.body); got != tc.want {
+				t.Fatalf("shouldRenderHTML(%q, %q) = %v, want %v", tc.contentType, tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsBlockedFetchIP(t *testing.T) {
 	cases := []struct {
 		ip      string

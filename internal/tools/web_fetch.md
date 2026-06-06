@@ -4,6 +4,14 @@ Use `web_fetch` when BharatCode needs the contents of a specific HTTP or HTTPS
 page that the user has asked about or supplied as a source. It fetches the URL
 and converts simple HTML into model-readable markdown-like text.
 
+Only HTML responses are reduced to markdown. A response the server labels as
+JSON, JavaScript, CSS, XML, or another non-HTML type is returned verbatim, so
+raw source, config files, and API payloads keep their angle brackets (generics
+like `Vec<T>`, a `chan<-`, a shell redirect, or a `<` inside a JSON string)
+instead of having them stripped as if they were tags. When the server omits the
+content type, the body is rendered as markdown only if it actually looks like
+HTML.
+
 Arguments:
 
 - `url` string, required: absolute URL beginning with `http://` or `https://`.

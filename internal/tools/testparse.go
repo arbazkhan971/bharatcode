@@ -831,7 +831,10 @@ func parseGoTestFailures(output string) []testFailure {
 	// the goroutine dump; the "running tests:" block printed before the dump names
 	// them directly. Supply any names not already attributed by parseGoTestPanics.
 	failures = append(failures, parseGoTestTimeoutRunning(lines, failures)...)
-	return failures
+	// Strip parent subtest entries whose only failure reason is that a child
+	// subtest failed — go test reports both "TestFoo" and "TestFoo/SubTest" as
+	// failing, but the parent has no assertion of its own in that case.
+	return filterSubtestParents(failures)
 }
 
 // parseGoTestPanics recovers tests that aborted the binary with an unrecovered
@@ -1053,7 +1056,10 @@ func parseGoTestJSONFailures(output string) []testFailure {
 			failures = append(failures, hung...)
 		}
 	}
-	return failures
+	// Strip parent subtest entries whose only failure reason is that a child
+	// subtest failed — the JSON event stream reports both "TestFoo" and
+	// "TestFoo/SubTest" as failing, but the parent adds no new information.
+	return filterSubtestParents(failures)
 }
 
 // goDetailFromOutput pulls an assertion or panic message out of a single
@@ -3322,6 +3328,47 @@ func parseZigTestFailures(output string) []testFailure {
 		failures = append(failures, testFailure{Name: name, Detail: strings.TrimSpace(m[2])})
 	}
 	return failures
+}
+
+// filterSubtestParents removes parent test entries that have no detail of their
+// own and whose only failure reason is that a child subtest failed. go test
+// (and go test -json) report both the parent and each failing subtest as
+// failures: "TestFoo" appears alongside "TestFoo/SubTest1" and
+// "TestFoo/SubTest2". When the parent carries no detail line it has no
+// assertion of its own — it fails solely because a child failed — so including
+// it in the summary is redundant and makes the failure list harder to scan.
+//
+// A failure F is filtered when it has no Detail AND at least one other failure
+// in the list has a name that starts with F.Name+"/". Failures that carry a
+// detail (an assertion location or panic message) are always kept, even if they
+// are also a parent of another failing subtest.
+func filterSubtestParents(failures []testFailure) []testFailure {
+	if len(failures) <= 1 {
+		return failures
+	}
+	names := make(map[string]bool, len(failures))
+	for _, f := range failures {
+		names[f.Name] = true
+	}
+	out := failures[:0:0]
+	for _, f := range failures {
+		if f.Detail != "" {
+			out = append(out, f)
+			continue
+		}
+		prefix := f.Name + "/"
+		isParent := false
+		for other := range names {
+			if strings.HasPrefix(other, prefix) {
+				isParent = true
+				break
+			}
+		}
+		if !isParent {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // maxSummarizedFailures bounds how many failed tests the appended summary block

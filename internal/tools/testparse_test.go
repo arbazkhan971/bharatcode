@@ -576,6 +576,129 @@ FAIL	github.com/x/y	0.050s`
 	assertFailures(t, got, want)
 }
 
+func TestFilterSubtestParents_RemovesParentWithNoDetail(t *testing.T) {
+	// When a subtest fails, go test prints both the parent test and the subtest as
+	// failing. The parent has no detail line because it fails only because its
+	// subtest failed. filterSubtestParents should drop the parent and keep the leaf.
+	out := `=== RUN   TestFoo
+=== RUN   TestFoo/SubTest1
+--- FAIL: TestFoo/SubTest1 (0.00s)
+    foo_test.go:42: subtestError
+--- FAIL: TestFoo (0.00s)
+FAIL
+FAIL	github.com/x/y	0.123s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo/SubTest1", Detail: "foo_test.go:42: subtestError"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestFilterSubtestParents_KeepsParentWithOwnDetail(t *testing.T) {
+	// When the parent test also has its own assertion failure (detail line), it must
+	// be kept alongside the failing subtest — it is not a pure subtest parent.
+	// go test prints "--- FAIL: TestFoo/SubTest1" before "--- FAIL: TestFoo", so
+	// the subtest appears first in the parsed order.
+	out := `=== RUN   TestFoo
+=== RUN   TestFoo/SubTest1
+--- FAIL: TestFoo/SubTest1 (0.00s)
+    foo_test.go:55: subtestError
+--- FAIL: TestFoo (0.01s)
+    foo_test.go:10: parentError
+FAIL
+FAIL	github.com/x/y	0.123s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo/SubTest1", Detail: "foo_test.go:55: subtestError"},
+		{Name: "TestFoo", Detail: "foo_test.go:10: parentError"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestFilterSubtestParents_MultipleSubtests(t *testing.T) {
+	// Multiple failing subtests under one parent: only the leaf subtests survive.
+	out := `=== RUN   TestFoo
+=== RUN   TestFoo/A
+--- FAIL: TestFoo/A (0.00s)
+    foo_test.go:10: a failed
+=== RUN   TestFoo/B
+--- FAIL: TestFoo/B (0.00s)
+    foo_test.go:20: b failed
+--- FAIL: TestFoo (0.00s)
+FAIL
+FAIL	github.com/x/y	0.123s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo/A", Detail: "foo_test.go:10: a failed"},
+		{Name: "TestFoo/B", Detail: "foo_test.go:20: b failed"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestFilterSubtestParents_NestedSubtests(t *testing.T) {
+	// Deeply nested subtests: only the innermost leaf survives.
+	out := `=== RUN   TestFoo
+=== RUN   TestFoo/A
+=== RUN   TestFoo/A/Deep
+--- FAIL: TestFoo/A/Deep (0.00s)
+    foo_test.go:30: deep error
+--- FAIL: TestFoo/A (0.00s)
+--- FAIL: TestFoo (0.00s)
+FAIL
+FAIL	github.com/x/y	0.123s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo/A/Deep", Detail: "foo_test.go:30: deep error"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestFilterSubtestParents_JSON_RemovesParentWithNoDetail(t *testing.T) {
+	// Same subtest-parent filtering applies to go test -json output.
+	out := `{"Action":"run","Test":"TestFoo","Package":"x"}
+{"Action":"run","Test":"TestFoo/SubTest1","Package":"x"}
+{"Action":"output","Test":"TestFoo/SubTest1","Package":"x","Output":"    foo_test.go:42: subtestError\n"}
+{"Action":"fail","Test":"TestFoo/SubTest1","Package":"x"}
+{"Action":"fail","Test":"TestFoo","Package":"x"}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo/SubTest1", Detail: "foo_test.go:42: subtestError"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestFilterSubtestParents_JSON_KeepsParentWithOwnDetail(t *testing.T) {
+	// go test -json: parent with its own assertion must survive alongside child.
+	// The JSON event stream emits "fail" for the subtest before the parent, so the
+	// subtest appears first in the parsed order.
+	out := `{"Action":"run","Test":"TestFoo","Package":"x"}
+{"Action":"run","Test":"TestFoo/Sub","Package":"x"}
+{"Action":"output","Test":"TestFoo","Package":"x","Output":"    foo_test.go:10: parentError\n"}
+{"Action":"output","Test":"TestFoo/Sub","Package":"x","Output":"    foo_test.go:50: subError\n"}
+{"Action":"fail","Test":"TestFoo/Sub","Package":"x"}
+{"Action":"fail","Test":"TestFoo","Package":"x"}`
+	got := parseTestFailures("go test -json ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo/Sub", Detail: "foo_test.go:50: subError"},
+		{Name: "TestFoo", Detail: "foo_test.go:10: parentError"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestFilterSubtestParents_StandaloneTestUnchanged(t *testing.T) {
+	// A test with no subtests must not be filtered, even if it has no detail.
+	// (No detail here to test the "has child?" path correctly.)
+	out := `=== RUN   TestBar
+--- FAIL: TestBar (0.00s)
+FAIL
+FAIL	github.com/x/y	0.123s`
+	got := parseTestFailures("go test ./...", out)
+	// TestBar has no detail and no children: must survive.
+	if len(got) != 1 || got[0].Name != "TestBar" {
+		t.Errorf("expected [TestBar], got %v", got)
+	}
+}
+
 func TestParseGotestsumFailures(t *testing.T) {
 	// gotestsum's default pkgname reporter prints per-package status lines and
 	// closes with a "=== Failed" summary block; the "--- FAIL:" framing lines are

@@ -439,6 +439,27 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.focus = focusInput
 		}
 		return m, nil
+	case "shift+tab":
+		// Shift+Tab steps a slash-command or @-file completion cycle backward,
+		// the reverse of Tab, so a user who overshoots the match they wanted can
+		// step back instead of cycling the whole list around. Outside a completion
+		// context it does nothing — Tab already toggles focus, and with only two
+		// focuses a reverse toggle would be identical — so the key is reserved for
+		// the one place a direction matters.
+		if m.focus == focusInput && strings.HasPrefix(m.input.String(), "/") {
+			if completed, ok := m.inputHistory.completeSlashPrev(m.input.String()); ok {
+				m.setInput(completed)
+			}
+			return m, nil
+		}
+		if m.focus == focusInput {
+			if _, ok := activeMention(m.input.String()); ok {
+				if completed, ok := m.inputHistory.completeMentionPrev(m.input.String(), m.workspaceRoot); ok {
+					m.setInput(completed)
+				}
+			}
+		}
+		return m, nil
 	case "up":
 		if m.focus == focusInput {
 			if recalled, ok := m.inputHistory.recallPrev(m.input.String()); ok {
@@ -1295,6 +1316,7 @@ type keyGroup struct {
 var keybindingGroups = []keyGroup{
 	{title: "Navigation", bindings: []keyBinding{
 		{"Tab", "switch focus, or complete a /command or @file"},
+		{"Shift+Tab", "cycle the /command or @file menu backward"},
 		{"Up/Down", "recall previous prompts"},
 		{"Shift+Up/Down", "scroll the chat one line at a time"},
 		{"PgUp/PgDn", "scroll the chat a page at a time"},

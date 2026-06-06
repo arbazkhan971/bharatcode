@@ -23,6 +23,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tools"
+	"github.com/arbazkhan971/bharatcode/internal/tui/notification"
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -555,4 +556,97 @@ func (e *echoTool) Description() string     { return "Echo the provided text." }
 func (e *echoTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (e *echoTool) Run(_ context.Context, args json.RawMessage) (tools.Result, error) {
 	return tools.Result{Content: string(args)}, nil
+}
+
+// --- notification tests --------------------------------------------------
+
+// countingNotifier records how many notifications were dispatched.
+type countingNotifier struct {
+	mu    sync.Mutex
+	calls []struct{ title, body string }
+}
+
+func (c *countingNotifier) Notify(title, body string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, struct{ title, body string }{title, body})
+	return nil
+}
+
+func (c *countingNotifier) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.calls)
+}
+
+// TestRunDone_NotifiesWhenUnfocused verifies that completing a turn while the
+// terminal is out of focus dispatches a desktop notification — matching the
+// Claude Code / opencode parity behaviour.
+func TestRunDone_NotifiesWhenUnfocused(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "Here is your answer."},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+
+	// Swap in a counting notifier and simulate the terminal losing focus.
+	rec := &countingNotifier{}
+	notif := notification.NewFocusAware(rec)
+	notif.SetFocused(false)
+	h.model.notifications = notif
+
+	h.submit(t, "give me an answer")
+	h.drain(t, func() bool { return !h.model.running })
+
+	require.Equal(t, 1, rec.count(), "expected one notification after the turn completed")
+}
+
+// TestRunDone_NoNotifyWhenFocused verifies that when the terminal still has focus
+// no notification is dispatched — the FocusAware wrapper must suppress it.
+func TestRunDone_NoNotifyWhenFocused(t *testing.T) {
+	t.Parallel()
+
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "Here is your answer."},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+
+	rec := &countingNotifier{}
+	// focused is true by default in NewFocusAware — no SetFocused(false) call.
+	h.model.notifications = notification.NewFocusAware(rec)
+
+	h.submit(t, "give me an answer")
+	h.drain(t, func() bool { return !h.model.running })
+
+	require.Equal(t, 0, rec.count(), "expected no notification when terminal is focused")
+}
+
+// TestTurnNotifyBody covers the body-extraction helper across edge cases.
+func TestTurnNotifyBody(t *testing.T) {
+	t.Parallel()
+
+	msg := func(text string) *message.Message {
+		return &message.Message{
+			Role:    message.RoleAssistant,
+			Content: []message.ContentBlock{message.TextBlock{Text: text}},
+		}
+	}
+
+	require.Equal(t, "Turn complete", turnNotifyBody(nil))
+	require.Equal(t, "Turn complete", turnNotifyBody(msg("")))
+	require.Equal(t, "Turn complete", turnNotifyBody(msg("   ")))
+	require.Equal(t, "First line only", turnNotifyBody(msg("First line only\nmore here")))
+	require.Equal(t, "single line", turnNotifyBody(msg("single line")))
+
+	longLine := strings.Repeat("x", 120)
+	got := turnNotifyBody(msg(longLine))
+	require.LessOrEqual(t, len(got), 100)
+	require.True(t, strings.HasSuffix(got, "..."))
 }

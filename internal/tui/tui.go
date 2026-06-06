@@ -287,7 +287,7 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 		chat:            chatList,
 		footer:          footer,
 		status:          statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
-		notifications:   notification.NewFocusAware(notification.Noop{}),
+		notifications:   notification.NewFocusAware(notification.SystemNotifier{}),
 		focus:           focusInput,
 		width:           minWidth,
 		height:          minHeight,

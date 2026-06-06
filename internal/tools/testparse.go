@@ -95,6 +95,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parsePesterFailures(output)
 	case runnerGTest:
 		return parseGTestFailures(output)
+	case runnerRobot:
+		return parseRobotFailures(output)
 	default:
 		return nil
 	}
@@ -134,6 +136,7 @@ const (
 	runnerJasmine
 	runnerPester
 	runnerGTest
+	runnerRobot
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -259,6 +262,13 @@ var (
 	// "trumpeters tune up" — which contains no "pester" at a word boundary — from
 	// matching. A Pester invocation carries none of the other runners' substrings.
 	pesterRe = regexp.MustCompile(`\bpester\b`)
+	// `robot tests/`, `python -m robot`, and the parallel-runner `pabot` drive
+	// Robot Framework, whose console reporter renders each test as a "<name> ...
+	// | FAIL |" row and prints the failure message on the line beneath. \b admits
+	// "robot tests", "python -m robot suite.robot", and "pabot --processes 4"
+	// while keeping prose like "the robotics demo" — and the unrelated runners,
+	// which never contain "robot"/"pabot" at a word boundary — from matching.
+	robotRe = regexp.MustCompile(`\b(?:robot|pabot)\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -461,6 +471,15 @@ func classifyTestRunner(command string) testRunner {
 		// invocation carries none of their substrings, but kept explicit to guard
 		// against future overlap.
 		return runnerPester
+	case robotRe.MatchString(c):
+		// `robot`/`pabot`/`python -m robot` drive Robot Framework, whose console
+		// reporter renders each test as a "<name> ... | FAIL |" row and prints the
+		// failure message on the line beneath; each suite closes with a row of the
+		// same shape followed by a "N tests, M passed, K failed" statistics line,
+		// which the parser uses to tell suites from tests. Checked before the JS
+		// runners since a Robot invocation carries none of their substrings, but
+		// kept explicit to guard against future overlap.
+		return runnerRobot
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -2375,6 +2394,67 @@ func parsePesterFailures(output string) []testFailure {
 			}
 		}
 		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "Addition Works                              | FAIL |" — Robot Framework's
+	// per-test result row: the test name, left-justified and padded, ahead of the
+	// "| FAIL |" status. Each suite closes with a row of the same shape, told
+	// apart by robotStatsRe (see parseRobotFailures).
+	robotFailRowRe = regexp.MustCompile(`^(\S.*?)\s+\| FAIL \|\s*$`)
+	// "2 tests, 1 passed, 1 failed" — the statistics line Robot prints beneath a
+	// suite's "| FAIL |" row, never beneath a test's. It marks the row above as a
+	// suite summary rather than a failing test. A leading "N critical tests, ..."
+	// variant (older Robot versions) is matched too.
+	robotStatsRe = regexp.MustCompile(`^\d+ (?:critical )?tests?, \d+ passed`)
+	// A Robot section separator ("===" between suites, "---" between tests), which
+	// follows a failing test that carried no message so it is not taken as detail.
+	robotSepRe = regexp.MustCompile(`^[=-]{10,}$`)
+)
+
+// parseRobotFailures extracts failing tests from Robot Framework console output.
+// Each test renders as a "<name> ... | FAIL |" row and the line beneath carries
+// the failure message, which becomes the detail. Robot closes every suite with a
+// row of the same shape, but a suite row is followed by a "N tests, M passed, K
+// failed" statistics line — detected and skipped — so only genuine tests are
+// reported. Names are deduplicated.
+func parseRobotFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := robotFailRowRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		// The first non-empty line beneath the row decides what it is: a statistics
+		// line marks a suite summary (skip it); a separator marks a message-less
+		// failure; anything else is the failing test's message.
+		detail, isSuite := "", false
+		for j := i + 1; j < len(lines); j++ {
+			t := strings.TrimSpace(lines[j])
+			if t == "" {
+				continue
+			}
+			switch {
+			case robotStatsRe.MatchString(t):
+				isSuite = true
+			case !robotSepRe.MatchString(t):
+				detail = t
+			}
+			break
+		}
+		if isSuite {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: detail})
 	}
 	return failures
 }

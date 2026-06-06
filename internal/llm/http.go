@@ -186,27 +186,35 @@ func classifyHTTPError(resp *http.Response) error {
 func parseProviderError(body []byte) error {
 	var envelope struct {
 		Error struct {
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-			Message string `json:"message"`
+			Type string `json:"type"`
+			// Code is captured raw because providers disagree on its JSON type:
+			// OpenAI/Anthropic send a string code ("context_length_exceeded"),
+			// while Gemini sends a numeric HTTP status ("code": 400). Decoding into
+			// a string field would fail the whole unmarshal on Gemini's numeric
+			// form, dropping every Gemini error to the status-code fallback; a raw
+			// message accepts either and errorCodeString normalizes it.
+			Code    json.RawMessage `json:"code"`
+			Message string          `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil
 	}
 
-	code := strings.ToLower(envelope.Error.Code)
+	code := strings.ToLower(errorCodeString(envelope.Error.Code))
 	typ := strings.ToLower(envelope.Error.Type)
 	msg := strings.ToLower(envelope.Error.Message)
 	switch {
 	case code == "rate_limit_exceeded" || typ == "rate_limit_error":
 		return fmt.Errorf("provider rate limited request: %w", ErrRateLimit)
-	case code == "context_length_exceeded" || strings.Contains(msg, "context length") || strings.Contains(msg, "maximum context") || strings.Contains(msg, "prompt is too long"):
-		// Anthropic rejects an over-budget prompt with an invalid_request_error
-		// whose message reads "prompt is too long: N tokens > M maximum" rather
-		// than the OpenAI "context length" wording, so match its marker too;
-		// otherwise the request falls through to a generic 400 and the agent's
-		// compaction path never triggers.
+	case code == "context_length_exceeded" || mentionsContextLimit(msg):
+		// Match the over-budget wording every provider uses through the shared
+		// mentionsContextLimit scan rather than re-listing markers here: OpenAI's
+		// "context length", Anthropic's "prompt is too long: N tokens > M maximum",
+		// and Gemini's "input token count (X) exceeds the maximum number of tokens"
+		// all classify as ErrContextLimit so the agent's compaction path can recover
+		// the turn instead of failing it as a generic 400 — regardless of the HTTP
+		// status the envelope arrives on.
 		return fmt.Errorf("provider context limit: %w", ErrContextLimit)
 	case code == "model_not_found" || typ == "not_found_error":
 		return fmt.Errorf("provider model lookup: %w", ErrModelNotFound)
@@ -215,6 +223,23 @@ func parseProviderError(body []byte) error {
 	default:
 		return nil
 	}
+}
+
+// errorCodeString renders an error envelope's "code" field as a string,
+// accepting either the quoted string OpenAI/Anthropic send or the bare JSON
+// number Gemini sends. A quoted string is unquoted to its value; anything else
+// (a number, null, or absent field) is returned as its raw text, so a numeric
+// Gemini code becomes "400" rather than breaking the comparison. An empty raw
+// message yields "".
+func errorCodeString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
 }
 
 func mentionsContextLimit(s string) bool {

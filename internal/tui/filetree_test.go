@@ -106,6 +106,9 @@ func TestFiletreePanel_SelectingEditedFile_RendersDiff(t *testing.T) {
 	require.Contains(t, out, "Diff: beta.go")
 	require.Contains(t, out, "old line")
 	require.Contains(t, out, "new line")
+	// The diff header leads with the file's "+A -B" change counts, the way /diff
+	// leads with a diffstat, so the magnitude is visible without reading the body.
+	require.Contains(t, out, "Diff: beta.go +1 -1")
 }
 
 func TestFiletreePanel_MarksEditedFiles(t *testing.T) {

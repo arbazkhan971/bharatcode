@@ -243,6 +243,22 @@ func (v *Viewer) Stat(patch string) string {
 	return out
 }
 
+// CountSummary returns just the colored "+A -B" change counts for a patch,
+// without the "N files changed" preamble Stat prepends. It suits a caller that
+// already names the file it is summarizing — the file-tree panel's per-file diff
+// header — where Stat's "1 file changed" count would only restate what the
+// surrounding label already says. The "+A" segment uses the add style and "-B"
+// the remove style, matching Stat; an empty or content-free patch returns "".
+func (v *Viewer) CountSummary(patch string) string {
+	files, added, removed := diffStat(patch)
+	if files == 0 {
+		return ""
+	}
+	return v.theme.DiffAdd.Render(fmt.Sprintf("+%d", added)) +
+		v.theme.Muted.Render(" ") +
+		v.theme.DiffRemove.Render(fmt.Sprintf("-%d", removed))
+}
+
 // statBarWidth caps the number of "+"/"-" cells in a per-file histogram bar.
 // Files whose total change count fits within it get one cell per changed line
 // (so a small review shows its exact shape); larger files are scaled down to

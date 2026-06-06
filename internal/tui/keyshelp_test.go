@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -169,20 +170,22 @@ func TestKeybindingHelp_FilterAllTermsMustMatch(t *testing.T) {
 
 // TestKeybindingHelp_FilterTermOrderIndependent proves the term split is
 // order-independent: the same binding surfaces however its words are arranged.
+// The overlay's count header echoes the query verbatim (so it differs by
+// arrangement), so the order-independence is asserted on the filtering itself.
 func TestKeybindingHelp_FilterTermOrderIndependent(t *testing.T) {
-	require.Equal(t, keybindingHelpBodyFiltered("tab switch"), keybindingHelpBodyFiltered("switch tab"))
+	require.Equal(t, filterKeybindingGroups("tab switch"), filterKeybindingGroups("switch tab"))
 }
 
 // TestKeybindingHelp_FilterCollapsesInnerWhitespace proves extra spaces between
-// terms are ignored, so a stray double space does not change the result.
+// terms are ignored, so a stray double space does not change the matched rows.
 func TestKeybindingHelp_FilterCollapsesInnerWhitespace(t *testing.T) {
-	require.Equal(t, keybindingHelpBodyFiltered("tab switch"), keybindingHelpBodyFiltered("tab   switch"))
+	require.Equal(t, filterKeybindingGroups("tab switch"), filterKeybindingGroups("tab   switch"))
 }
 
 // TestKeybindingHelp_FilterCaseInsensitive proves the filter folds case, so a
 // shouted filter still matches a lower-case description.
 func TestKeybindingHelp_FilterCaseInsensitive(t *testing.T) {
-	require.Equal(t, keybindingHelpBodyFiltered("scroll"), keybindingHelpBodyFiltered("SCROLL"))
+	require.Equal(t, filterKeybindingGroups("scroll"), filterKeybindingGroups("SCROLL"))
 }
 
 // TestKeybindingHelp_EmptyFilterIsFullOverlay proves a blank or whitespace-only
@@ -233,4 +236,48 @@ func TestKeybindingHelp_NoTrailingBlankLine(t *testing.T) {
 	body := keybindingHelpBody()
 	require.NotEmpty(t, body)
 	require.False(t, strings.HasSuffix(body, "\n"), "overlay must not end with a blank line")
+}
+
+// TestKeybindingHelp_FilterShowsMatchCount proves a successful filter leads with
+// an "M of N shortcuts match …" count header, reporting how many bindings
+// survived against the full keymap so a narrowing reads as a measured search
+// result rather than a silent list.
+func TestKeybindingHelp_FilterShowsMatchCount(t *testing.T) {
+	body := keybindingHelpBodyFiltered("scroll")
+
+	total := countBindings(keybindingGroups)
+	matched := countBindings(filterKeybindingGroups("scroll"))
+	require.Equal(t, 2, matched, "the two scroll bindings should match")
+
+	header := body[:strings.Index(body, "\n")]
+	require.Equal(t,
+		fmt.Sprintf("%d of %d shortcuts match %q", matched, total, "scroll"),
+		header,
+		"the count header should lead the filtered overlay")
+
+	// The count sits on its own line above a blank separator so it reads as a
+	// header rather than a binding row, and the bindings still follow.
+	require.True(t, strings.HasPrefix(body, header+"\n\n"), "a blank line should separate the count from the bindings")
+	require.Contains(t, body, "scroll the chat one line at a time")
+}
+
+// TestKeybindingHelp_FilterCountIsSingularForOneMatch proves the count noun
+// agrees in number, so a filter that keeps a single binding reads "1 … shortcut
+// match" rather than the plural.
+func TestKeybindingHelp_FilterCountIsSingularForOneMatch(t *testing.T) {
+	// "model picker" lands on exactly the Ctrl+P binding.
+	groups := filterKeybindingGroups("model picker")
+	require.Equal(t, 1, countBindings(groups), "only the model-picker binding should match")
+
+	body := keybindingHelpBodyFiltered("model picker")
+	require.Contains(t, body, "shortcut match", "a single match uses the singular noun")
+	require.NotContains(t, body, "shortcuts match", "a single match must not use the plural noun")
+}
+
+// TestKeybindingHelp_NoCountHeaderWhenUnfiltered proves the count header is a
+// filtered-overlay affordance only: a bare "/keys" renders the full keymap with
+// no count line prepended.
+func TestKeybindingHelp_NoCountHeaderWhenUnfiltered(t *testing.T) {
+	require.NotContains(t, keybindingHelpBody(), "shortcuts match")
+	require.NotContains(t, keybindingHelpBodyFiltered("   "), "shortcuts match")
 }

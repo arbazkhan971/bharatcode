@@ -1404,6 +1404,13 @@ func renderKeyGroups(groups []keyGroup) string {
 // filter renders the full overlay unchanged. When the filter matches nothing it
 // returns a quiet "no shortcuts match" note rather than an empty body, so the
 // overlay always explains itself.
+//
+// A successful filter leads with a one-line "M of N shortcuts match …" count so
+// the user can see how much of the keymap the filter kept — the search-result
+// count Claude Code and opencode show above a narrowed list — turning an
+// otherwise-silent narrowing into a measured one. The count sits on its own line
+// above a blank separator, so it reads as a header rather than a binding row and
+// the groups below stay aligned.
 func keybindingHelpBodyFiltered(filter string) string {
 	if strings.TrimSpace(filter) == "" {
 		return keybindingHelpBody()
@@ -1412,7 +1419,25 @@ func keybindingHelpBodyFiltered(filter string) string {
 	if len(groups) == 0 {
 		return fmt.Sprintf("No shortcuts match %q.", strings.TrimSpace(filter))
 	}
-	return renderKeyGroups(groups)
+	matched, total := countBindings(groups), countBindings(keybindingGroups)
+	noun := "shortcuts"
+	if matched == 1 {
+		noun = "shortcut"
+	}
+	header := fmt.Sprintf("%d of %d %s match %q", matched, total, noun, strings.TrimSpace(filter))
+	return header + "\n\n" + renderKeyGroups(groups)
+}
+
+// countBindings totals the number of binding rows across the given shortcut
+// groups, so the filtered overlay can report how many shortcuts survived a
+// filter against the full keymap. It counts rows, not groups, since a group is a
+// heading rather than a shortcut the user can press.
+func countBindings(groups []keyGroup) int {
+	n := 0
+	for _, g := range groups {
+		n += len(g.bindings)
+	}
+	return n
 }
 
 // filterKeybindingGroups returns the keyGroups whose bindings match filter, a

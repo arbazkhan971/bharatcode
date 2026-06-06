@@ -623,6 +623,12 @@ var (
 	// assertion details are matched by goDetailRe instead, so the two do not
 	// collide.
 	goCompileErrRe = regexp.MustCompile(`^\S*\.go:\d+:\d+: .+`)
+	// A goroutine-stack frame naming a test function, e.g.
+	// "github.com/x/y.TestFoo(0xc000102000)" (or "...TestFoo.func1(...)" for a
+	// closure within it). The captured group is the test name. Used to attribute a
+	// binary-aborting panic — which prints no "--- FAIL:" line — to the test whose
+	// frame appears in the panic's stack trace.
+	goPanicStackTestRe = regexp.MustCompile(`\.(Test[^.\s(]*)(?:\.func\d+)?\(`)
 )
 
 // parseGoTestFailures handles `go test` verbose/non-verbose output. Each
@@ -686,7 +692,52 @@ func parseGoTestFailures(output string) []testFailure {
 		}
 		failures = append(failures, f)
 	}
+	// A test that panics without recovering crashes the whole test binary before
+	// Go can print a "--- FAIL:" line for it, so the loop above never captures it
+	// — Go emits a bare column-0 "panic: <msg>" followed by the goroutine stack.
+	// Recover the panicking test from that stack so it still surfaces.
+	failures = append(failures, parseGoTestPanics(lines, failures)...)
 	return failures
+}
+
+// parseGoTestPanics recovers tests that aborted the binary with an unrecovered
+// panic. Such a panic prints a column-0 "panic: <msg>" line with no preceding
+// "--- FAIL:" marker, so parseGoTestFailures' main loop misses it. For each such
+// panic this scans the goroutine stack that follows for the first frame naming a
+// Test function and attributes the panic to it, using "panic: <msg>" as the
+// detail. Tests already recorded by the caller (a "--- FAIL:" that also printed a
+// panic) are skipped so they are not double-counted, as are panics whose stack
+// names no test (e.g. one raised in an unrelated background goroutine).
+func parseGoTestPanics(lines []string, existing []testFailure) []testFailure {
+	seen := make(map[string]bool, len(existing))
+	for _, f := range existing {
+		seen[f.Name] = true
+	}
+	var out []testFailure
+	for i := 0; i < len(lines); i++ {
+		p := goPanicRe.FindStringSubmatch(lines[i])
+		if p == nil {
+			continue
+		}
+		// Find the panicking test in the stack frames that follow, stopping at the
+		// next top-level panic so a recovered re-panic's stack is not rescanned.
+		name := ""
+		for j := i + 1; j < len(lines); j++ {
+			if goPanicRe.MatchString(lines[j]) {
+				break
+			}
+			if m := goPanicStackTestRe.FindStringSubmatch(lines[j]); m != nil {
+				name = m[1]
+				break
+			}
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, testFailure{Name: name, Detail: "panic: " + strings.TrimSpace(p[1])})
+	}
+	return out
 }
 
 // goJSONEvent is one event from the `go test -json` stream (the shape produced

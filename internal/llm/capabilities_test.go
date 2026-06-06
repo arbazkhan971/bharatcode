@@ -123,6 +123,10 @@ func TestInferContextWindow(t *testing.T) {
 		// Databricks DBRX (32k) and IBM Granite 3.x (128k).
 		{"dbrx-instruct", 32_768},
 		{"granite-3.3-8b-instruct", 128_000},
+		// LG EXAONE 4.0/3.5 hosted flagship (32B) exposes a 128k window; the
+		// "exaone" marker keeps it off the "unknown" (0) fallback.
+		{"LGAI-EXAONE/EXAONE-4.0-32B", 128_000},
+		{"exaone-3.5-32b-instruct", 128_000},
 		// deepseek-chat (V3 non-thinking) and deepseek-reasoner (thinking) both
 		// expose a 128k window on the official API.
 		{"deepseek-chat", 131_072},

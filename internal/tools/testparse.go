@@ -175,6 +175,13 @@ var (
 	// the TAP parser. \bbats\b admits "bats", "bats test.bats", and "npx bats"
 	// while keeping prose like "acrobats perform" from matching.
 	batsRe = regexp.MustCompile(`\bbats\b`)
+	// "prove" is Perl's standard Test::Harness driver; run verbose ("prove -v")
+	// it streams each test file's raw TAP, including the "not ok N - <desc>"
+	// failure lines and "#"-comment diagnostics the TAP parser keys on, so it
+	// shares that parser. \bprove\b admits "prove", "prove -lv t/", and
+	// "perl Build.PL && prove" while keeping prose like "approved" / "improved"
+	// — where "prove" is not at a word boundary — from matching.
+	proveRe = regexp.MustCompile(`\bprove\b`)
 	// "swift test" drives SwiftPM's XCTest runner; \b after "test" keeps prose
 	// like "swift testing guide" from matching while admitting flags and paths
 	// ("swift test --filter FooTests").
@@ -349,7 +356,10 @@ func classifyTestRunner(command string) testRunner {
 		// unittest cases so a "tox -e py -- pytest ..." command — which carries the
 		// "pytest" substring — is claimed by the more specific pytest case first.
 		return runnerTox
-	case tapRe.MatchString(c), batsRe.MatchString(c):
+	case tapRe.MatchString(c), batsRe.MatchString(c), proveRe.MatchString(c):
+		// `prove -v` drives Perl's Test::Harness, relaying each test file's raw TAP
+		// ("not ok N - <desc>" lines with "#"-comment diagnostics), so it routes to
+		// the shared TAP parser alongside node:test/tape/bats.
 		return runnerTAP
 	case strings.Contains(c, "deno test"):
 		// `deno test` runs Deno's built-in test runner, whose console output marks

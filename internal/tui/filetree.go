@@ -289,26 +289,47 @@ func (m *model) renderFiletree(width, height int) string {
 			b.WriteString(m.theme.Muted.Render(clampLine(fmt.Sprintf("  ↑ %d more", start), width)))
 			b.WriteByte('\n')
 		}
+		// Flag files with recorded edits so the listing shows which entries were
+		// touched this session without selecting each in turn.
+		editedSet := m.filetreeEditedSet()
 		for i := start; i < end; i++ {
 			name := f.files[i]
+			edited := editedSet[name]
+			// An edited file's two-space indent becomes a "● " marker; the gutter
+			// width is unchanged so the names stay aligned.
+			indent := "  "
+			if edited {
+				indent = "● "
+			}
 			// Clamp the raw text before styling so ANSI codes are not counted or
 			// sliced through.
-			clamped := clampLine("  "+name, width)
+			clamped := clampLine(indent+name, width)
+			runes := []rune(clamped)
 			row := clamped
 			switch {
 			case i == f.cursor:
+				// The cursor row keeps its "> " indicator in place of the marker;
+				// the selected file's diff renders below, so its edited state is
+				// already evident.
 				row = m.theme.Accent.Render(clampLine("> "+name, width))
 			case f.filter != "":
 				// Emphasize the runes the quick-filter matched, the way the @-file
 				// picker does, so a narrowed listing shows why each entry survived.
-				// The two-column indent is kept muted and the name is highlighted
-				// against the active filter token; a too-narrow clamp that loses the
-				// indent falls back to a plain muted row.
-				runes := []rune(clamped)
+				// The two-column gutter (with any edit marker) is styled and the name
+				// is highlighted against the active filter token; a too-narrow clamp
+				// that loses the gutter falls back to a plain muted row.
 				if len(runes) > 2 {
-					row = m.theme.Muted.Render(string(runes[:2])) + m.highlightMatch(string(runes[2:]), f.filter)
+					row = m.filetreeGutter(string(runes[:2]), edited) + m.highlightMatch(string(runes[2:]), f.filter)
 				} else {
 					row = m.theme.Muted.Render(clamped)
+				}
+			case edited:
+				// Outside a filter, draw the marker and the touched file's name in
+				// the add style so it reads as changed at a glance.
+				if len(runes) > 2 {
+					row = m.filetreeGutter(string(runes[:2]), edited) + m.theme.DiffAdd.Render(string(runes[2:]))
+				} else {
+					row = m.theme.DiffAdd.Render(clamped)
 				}
 			}
 			b.WriteString(row)
@@ -405,6 +426,57 @@ func (m *model) filetreeDiffs(rel string) []editDiff {
 		return nil
 	}
 	return diffsForPath(msgs, m.filetree.root, rel)
+}
+
+// filetreeEditedSet returns the set of workspace-relative paths that have a
+// recorded edit, multiedit, or write in the session, so the listing can flag
+// touched files at a glance the way Claude Code and opencode mark changed
+// entries in their file panels. Paths are normalized the same way diffsForPath
+// matches them, so a marker lands on exactly the listing rows whose selection
+// would render a diff. It returns nil when nothing has been edited, leaving the
+// listing unmarked.
+func (m *model) filetreeEditedSet() map[string]bool {
+	msgs := m.editDiffMessages()
+	if len(msgs) == 0 {
+		return nil
+	}
+	set := make(map[string]bool)
+	for _, msg := range msgs {
+		if msg.Role != message.RoleAssistant {
+			continue
+		}
+		for _, block := range msg.Content {
+			use, ok := block.(message.ToolUseBlock)
+			if !ok {
+				continue
+			}
+			for _, d := range editDiffsFromToolUse(use) {
+				if rel := normalizeToolPath(m.filetree.root, d.Path); rel != "" {
+					set[rel] = true
+				}
+			}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// filetreeGutter styles the two-column gutter that precedes a listing entry's
+// name. An edited file's leading "●" marker is drawn in the add style so a
+// touched file stands out, while the trailing pad (and an unedited file's whole
+// gutter) stays muted. The gutter is sliced from the already-clamped row so its
+// width matches the listing exactly.
+func (m *model) filetreeGutter(gutter string, edited bool) string {
+	if !edited {
+		return m.theme.Muted.Render(gutter)
+	}
+	gr := []rune(gutter)
+	if len(gr) == 0 {
+		return ""
+	}
+	return m.theme.DiffAdd.Render(string(gr[:1])) + m.theme.Muted.Render(string(gr[1:]))
 }
 
 // editDiffMessages returns the messages scanned for edit diffs. When the

@@ -58,6 +58,10 @@ type Options struct {
 	// BHARATCODE_OFFLINE environment variable: non-localhost providers are
 	// rejected and the web_fetch/web_search tools are withheld.
 	Offline bool
+	// Profile names a config overlay file (<name>.json alongside the global
+	// config.json) whose settings win over the merged global+project config.
+	// Empty disables the profile layer.
+	Profile string
 }
 
 // App is the assembled BharatCode service graph.
@@ -170,7 +174,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		return nil
 	}})
 
-	app.Cfg, err = config.LoadFrom(rootCtx, globalConfigPath, projectConfigPath)
+	app.Cfg, err = config.LoadFromWithProfile(rootCtx, globalConfigPath, projectConfigPath, opts.Profile)
 	if err != nil {
 		return rollback(fmt.Errorf("constructing config: %w", err))
 	}

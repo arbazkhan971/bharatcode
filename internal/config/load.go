@@ -118,6 +118,18 @@ func LoadWithProfile(ctx context.Context, profileName string) (*Config, error) {
 	return loadFromWithProfile(ctx, GlobalPath(), projPath, profilePath)
 }
 
+// LoadFromWithProfile is like LoadFrom but additionally overlays the named
+// profile file on top of the merged global and project configuration. An
+// empty profileName skips the profile layer, reproducing LoadFrom exactly.
+// A non-empty profileName whose file is absent returns an error.
+func LoadFromWithProfile(ctx context.Context, globalPath, projectPath, profileName string) (*Config, error) {
+	var profilePath string
+	if profileName != "" {
+		profilePath = ProfilePath(profileName)
+	}
+	return loadFromWithProfile(ctx, globalPath, projectPath, profilePath)
+}
+
 // loadFromWithProfile is the shared core of LoadFrom and
 // LoadWithProfile. profilePath may be empty to skip the profile
 // overlay; when non-empty the file must exist.

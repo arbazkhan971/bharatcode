@@ -100,6 +100,50 @@ func TestBudgetSetPersists(t *testing.T) {
 	require.Equal(t, float64(500), ledger["max_inr_per_month"])
 }
 
+func TestProfileFlagForwardedToApp(t *testing.T) {
+	oldNewApp := newApp
+	oldRunTUI := runTUI
+	defer func() {
+		newApp = oldNewApp
+		runTUI = oldRunTUI
+	}()
+
+	var gotProfile string
+	newApp = func(ctx context.Context, opts app.Options) (*app.App, error) {
+		gotProfile = opts.Profile
+		return nil, nil
+	}
+	runTUI = func(ctx context.Context, application *app.App, initialSessionID string) error {
+		return nil
+	}
+
+	_, _, err := executeRoot(t, "--profile", "ollama")
+	require.NoError(t, err)
+	require.Equal(t, "ollama", gotProfile)
+}
+
+func TestProfileFlagAbsentDefaultsToEmpty(t *testing.T) {
+	oldNewApp := newApp
+	oldRunTUI := runTUI
+	defer func() {
+		newApp = oldNewApp
+		runTUI = oldRunTUI
+	}()
+
+	var gotProfile string
+	newApp = func(ctx context.Context, opts app.Options) (*app.App, error) {
+		gotProfile = opts.Profile
+		return nil, nil
+	}
+	runTUI = func(ctx context.Context, application *app.App, initialSessionID string) error {
+		return nil
+	}
+
+	_, _, err := executeRoot(t)
+	require.NoError(t, err)
+	require.Empty(t, gotProfile)
+}
+
 func TestLoginLogoutFakeKeyring(t *testing.T) {
 	oldKeyring := keyring
 	fake := newFakeKeyring()

@@ -361,6 +361,76 @@ func TestPaletteBody_NoSpuriousShortcut(t *testing.T) {
 	}
 }
 
+// TestPaletteBody_FilterHighlightPreservesNames asserts that per-rune match
+// highlighting does not drop or duplicate any character in a non-selected
+// palette row — the plain text must still contain every command name that
+// matched the filter, even though each name is now rendered as multiple styled
+// spans rather than one muted run.
+func TestPaletteBody_FilterHighlightPreservesNames(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+
+	// "s" matches /sessions, /search, /save, /status, /settings and more, so
+	// the first entry is selected and the rest exercise the highlight branch.
+	m.paletteFilter = "s"
+	m.paletteCursor = 0
+
+	body := plainText(m.paletteBody())
+	// Commands past the selected cursor must still appear intact.
+	require.Contains(t, body, "sessions", "non-selected highlighted name must be character-complete")
+	require.Contains(t, body, "search", "non-selected highlighted name must be character-complete")
+}
+
+// TestPaletteBody_FilterHighlightNoFilterMutedOnly asserts that when no filter
+// is active the rendering falls through to the original muted-whole-row path,
+// keeping the body unchanged relative to the pre-highlight behaviour.
+func TestPaletteBody_FilterHighlightNoFilterMutedOnly(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	m.paletteFilter = ""
+
+	body := plainText(m.paletteBody())
+	// The palette windows to paletteWindow rows; check entries visible in the
+	// initial window (cursor=0) rather than the full list.
+	start, end := paletteWindowBounds(0, len(paletteBuiltinOrder))
+	for _, name := range paletteBuiltinOrder[start:end] {
+		require.Contains(t, body, name, "unfiltered palette must list visible command %s", name)
+	}
+}
+
+// TestPaletteBody_FilterHighlightShortcutSurvives asserts that the keyboard
+// shortcut hint on a non-selected row is preserved after the highlight refactor
+// so a user scanning the filtered list can still discover Ctrl+P, Ctrl+A, etc.
+func TestPaletteBody_FilterHighlightShortcutSurvives(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+
+	// Filter to "model" so /model (Ctrl+P) is visible; place the cursor on a
+	// different row so /model exercises the non-selected highlight branch.
+	m.paletteFilter = "model"
+	entries := m.visiblePaletteEntries()
+	modelIdx := -1
+	for i, e := range entries {
+		if e.name == "/model" {
+			modelIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, modelIdx, 0, "/model must be in the filtered list")
+	// Move cursor away from /model if it would otherwise land there.
+	if modelIdx == 0 && len(entries) > 1 {
+		m.paletteCursor = 1
+	} else {
+		m.paletteCursor = 0
+	}
+
+	body := plainText(m.paletteBody())
+	if m.paletteCursor != modelIdx {
+		require.Contains(t, body, "Ctrl+P",
+			"shortcut hint must survive in a non-selected highlighted row")
+	}
+}
+
 // TestKeybindingGroups_IncludesPalette asserts the /keys overlay lists the
 // Ctrl+K command-palette binding so users can discover it from the help text.
 func TestKeybindingGroups_IncludesPalette(t *testing.T) {

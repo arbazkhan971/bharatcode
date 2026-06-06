@@ -87,6 +87,7 @@ func newRootCmd() *cobra.Command {
 		newLogoutCmd(),
 		newModelsCmd(),
 		newSessionsCmd(),
+		newRevertCmd(),
 		newShareCmd(),
 		newImportHistoryCmd(),
 		newStatsCmd(),

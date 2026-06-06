@@ -118,6 +118,7 @@ func NewRegistry(deps Dependencies) *Registry {
 		r.Register(newWebSearchTool(deps))
 	}
 	r.Register(newJobOutputTool(deps))
+	r.Register(newJobListTool(deps))
 	r.Register(newJobKillTool(deps))
 	return r
 }

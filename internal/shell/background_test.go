@@ -126,3 +126,47 @@ func TestEviction_RunningJobNeverEvicted(t *testing.T) {
 	_, ok := s.jobs.Load(st.id)
 	require.True(t, ok, "a running job must never be evicted")
 }
+
+// TestList_EmptyWhenNoJobs asserts List returns an empty slice on a fresh shell.
+func TestList_EmptyWhenNoJobs(t *testing.T) {
+	s := newTestShell(t, time.Now)
+	require.Empty(t, s.List())
+}
+
+// TestList_ReportsJobsNewestFirst asserts List enumerates tracked jobs ordered
+// newest-started first, carrying status metadata without output text.
+func TestList_ReportsJobsNewestFirst(t *testing.T) {
+	s := newTestShell(t, time.Now)
+
+	older, err := s.Start(context.Background(), "sleep 30", RunOpts{})
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+	newer, err := s.Start(context.Background(), "sleep 31", RunOpts{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Kill(older); _ = s.Kill(newer) })
+
+	jobs := s.List()
+	require.Len(t, jobs, 2)
+	// Newest-started first.
+	require.Equal(t, newer, jobs[0].ID)
+	require.Equal(t, older, jobs[1].ID)
+	// Running jobs report their command and status; output is omitted.
+	require.Equal(t, StatusRunning, jobs[0].Status)
+	require.Equal(t, "sleep 31", jobs[0].Command)
+	require.Empty(t, jobs[0].Stdout)
+	require.Empty(t, jobs[0].Stderr)
+}
+
+// TestList_ReflectsTerminalStatus asserts a finished job appears with its
+// terminal status and exit code.
+func TestList_ReflectsTerminalStatus(t *testing.T) {
+	s := newTestShell(t, time.Now)
+
+	_, err := s.Run(context.Background(), "exit 3", RunOpts{})
+	require.NoError(t, err)
+
+	jobs := s.List()
+	require.Len(t, jobs, 1)
+	require.Equal(t, StatusFailed, jobs[0].Status)
+	require.Equal(t, 3, jobs[0].ExitCode)
+}

@@ -225,6 +225,14 @@ type model struct {
 	sessionCursor     int
 	sessionFilter     string
 
+	// Model picker state. modelCandidates holds the configured models while the
+	// /model picker is open; modelCursor is the highlighted row within the
+	// visible (filtered) rows; modelFilter is the live type-to-filter query
+	// narrowing the list by model ID or provider name.
+	modelCandidates []config.Model
+	modelCursor     int
+	modelFilter     string
+
 	// exportDir is the directory /export writes transcript files into. It is
 	// empty by default, in which case exports land in the current working
 	// directory (the workspace). Tests set it to a temp directory.
@@ -443,6 +451,14 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// handler (which only dismisses on enter/esc).
 		if top.ID() == "sessions" && len(m.sessionCandidates) > 0 {
 			if consumed, cmd := m.handleSessionPickerKey(msg); consumed {
+				return m, cmd
+			}
+		}
+		// The model picker carries selection state in the model (modelCandidates,
+		// modelCursor, modelFilter) and must intercept navigation and selection
+		// keys before the generic dialog handler, mirroring the session picker.
+		if top.ID() == "model_picker" && len(m.modelCandidates) > 0 {
+			if consumed, cmd := m.handleModelPickerKey(msg); consumed {
 				return m, cmd
 			}
 		}
@@ -1298,19 +1314,29 @@ func runningStatus(started, now time.Time, activity string, toolCount int) strin
 }
 
 func (m *model) pushModelPicker() {
-	var lines []string
-	for _, model := range m.deps.Cfg.Models {
-		label := model.Provider + "/" + model.ID
-		// The status bar tracks the active model by its bare ID; accept the
-		// "provider/id" label too so a config that records the full name still
-		// marks the right row.
-		active := m.status.Model == model.ID || m.status.Model == label
-		lines = append(lines, activeMarker(active)+label)
+	if len(m.deps.Cfg.Models) == 0 {
+		m.dialogs.Push(&dialog.Text{DialogID: "model_picker", Title: "Models", Body: "No configured models.", Theme: m.theme})
+		return
 	}
-	if len(lines) == 0 {
-		lines = append(lines, "No configured models")
+	m.modelCandidates = m.deps.Cfg.Models
+	m.modelCursor = 0
+	m.modelFilter = ""
+	// Seed the cursor at the currently active model so the picker opens with
+	// the selection already on the row the user is using, mirroring the session
+	// picker which starts at the top but marks the current session.
+	for i, mod := range m.modelCandidates {
+		label := mod.Provider + "/" + mod.ID
+		if m.status.Model == mod.ID || m.status.Model == label {
+			m.modelCursor = i
+			break
+		}
 	}
-	m.dialogs.Push(&dialog.Text{DialogID: "model_picker", Title: "Models", Body: strings.Join(lines, "\n"), Theme: m.theme})
+	m.dialogs.Push(&dialog.Text{
+		DialogID: "model_picker",
+		Title:    "Models",
+		Body:     m.modelPickerBody(),
+		Theme:    m.theme,
+	})
 }
 
 func (m *model) agentList() string {

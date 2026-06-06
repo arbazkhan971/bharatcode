@@ -151,6 +151,12 @@ func TestClassifyTestRunner(t *testing.T) {
 		"crystal spec spec/calc_spec.cr":             runnerCrystal,
 		"crystal spec --verbose spec/":               runnerCrystal,
 		"echo crystal build only":                    runnerNone,
+		"zig test src/main.zig":                      runnerZig,
+		"zig test --summary failures src/":           runnerZig,
+		"zig build test":                             runnerZig,
+		"zig build test --summary failures":          runnerZig,
+		"echo zigzag tested":                         runnerNone,
+		"zig build run":                              runnerNone,
 		"echo the adjusted plan":                     runnerNone,
 		"echo running test data":                     runnerNone,
 		"echo about cucumbers":                       runnerNone,
@@ -2649,6 +2655,52 @@ func TestParsePesterFailures_NoFailures(t *testing.T) {
   [!] Pending case 0ms
 Tests Passed: 1, Failed: 0, Skipped: 1`
 	if got := parseTestFailures("Invoke-Pester", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseZigTestFailures(t *testing.T) {
+	out := `Test [1/3] test "addition works"... OK
+Test [2/3] test "subtraction fails"... FAIL (AssertionError at src/math.zig:5:5)
+Test [3/3] test "division"... OK
+2 passed; 1 failed.`
+	got := parseTestFailures("zig test src/math.zig", out)
+	want := []testFailure{
+		{Name: "subtraction fails", Detail: "AssertionError at src/math.zig:5:5"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseZigTestFailures_MultipleAndNoReason(t *testing.T) {
+	// A second failing test without a reason in parens is still captured.
+	out := `Test [1/3] test "a"... FAIL (AssertionError at lib.zig:3:4)
+Test [2/3] test "b"... FAIL
+Test [3/3] test "c"... OK
+1 passed; 2 failed.`
+	got := parseZigTestFailures(out)
+	want := []testFailure{
+		{Name: "a", Detail: "AssertionError at lib.zig:3:4"},
+		{Name: "b"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseZigTestFailures_BuildTest(t *testing.T) {
+	// "zig build test" routes to the same parser.
+	out := `Test [1/1] test "works"... FAIL (AssertionError at main.zig:8:5)
+0 passed; 1 failed.`
+	got := parseTestFailures("zig build test", out)
+	want := []testFailure{
+		{Name: "works", Detail: "AssertionError at main.zig:8:5"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseZigTestFailures_NoFailures(t *testing.T) {
+	out := `Test [1/2] test "add"... OK
+Test [2/2] test "sub"... OK
+2 passed; 0 failed.`
+	if got := parseTestFailures("zig test src/main.zig", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

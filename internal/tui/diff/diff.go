@@ -1024,15 +1024,45 @@ func expandTabs(line string) string {
 	return b.String()
 }
 
+// extendedHeaderPrefixes are the git "extended header" lines that sit between
+// the "diff --git" banner and the first hunk, describing how a file changed
+// (created, deleted, renamed, copied, or had its mode altered) without carrying
+// any +/- content. Git, delta, and opencode style these as part of the file
+// header rather than leaving them as plain text; matching them here lets the
+// renderers do the same. Each lacks a +/-/space marker, so it can never be
+// confused with hunk content.
+var extendedHeaderPrefixes = []string{
+	"new file mode ",
+	"deleted file mode ",
+	"old mode ",
+	"new mode ",
+	"similarity index ",
+	"dissimilarity index ",
+	"rename from ",
+	"rename to ",
+	"copy from ",
+	"copy to ",
+}
+
 // isDiffHeader reports whether line is unified-diff file-boundary metadata
 // rather than content: the old/new path lines (---/+++), the git "diff --git"
-// banner, or the "index" blob line. These delimit one file from the next in a
-// multi-file patch and are styled distinctly from added/removed content.
+// banner, the "index" blob line, or one of git's extended header lines (mode
+// changes, rename/copy metadata, similarity index). These delimit one file from
+// the next in a multi-file patch and are styled distinctly from added/removed
+// content.
 func isDiffHeader(line string) bool {
-	return strings.HasPrefix(line, "+++") ||
+	if strings.HasPrefix(line, "+++") ||
 		strings.HasPrefix(line, "---") ||
 		strings.HasPrefix(line, "diff --git") ||
-		strings.HasPrefix(line, "index ")
+		strings.HasPrefix(line, "index ") {
+		return true
+	}
+	for _, p := range extendedHeaderPrefixes {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // isNoNewlineMarker reports whether line is git's "\ No newline at end of file"

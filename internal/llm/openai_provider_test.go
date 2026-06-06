@@ -441,6 +441,10 @@ func TestIsReasoningModel(t *testing.T) {
 		{"o1-mini", true},
 		{"o3", true},
 		{"o3-mini", true},
+		// o3-pro is the high-compute variant of o3; its id carries the "o3-" prefix
+		// so the reasoningModelPrefixes loop classifies it as a reasoning model and
+		// the request builder correctly omits temperature/max_tokens.
+		{"o3-pro", true},
 		{"o4-mini", true},
 		{"O3-MINI", true},
 		// The gpt-5 family runs a hidden reasoning pass and rejects temperature,

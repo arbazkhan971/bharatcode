@@ -785,3 +785,132 @@ func TestSplitTrailingWhitespace(t *testing.T) {
 		require.Equal(t, c.trail, trail, "trail for %q", c.in)
 	}
 }
+
+// gutterNumberedLine finds the rendered line whose content ends with want and
+// returns it, so a test can assert the line-number gutter a folded diff drew
+// next to a specific kept context line. It fails the test when no line matches.
+func gutterNumberedLine(t *testing.T, rendered, want string) string {
+	t.Helper()
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.HasSuffix(line, want) {
+			return line
+		}
+	}
+	t.Fatalf("no rendered line ends with %q in:\n%s", want, rendered)
+	return ""
+}
+
+// foldedPatch builds a single-hunk patch with a change, count lines of context,
+// then another change, so a test can exercise collapsing a long interior context
+// run. The hunk header is sized to match the body so the line numbers are sane.
+func foldedPatch(count int) string {
+	var b strings.Builder
+	total := count + 2 // the two changed lines plus the context between them
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n-old1\n+new1\n", total, total)
+	for i := 1; i <= count; i++ {
+		fmt.Fprintf(&b, " c%d\n", i)
+	}
+	b.WriteString("-old2\n+new2\n")
+	return b.String()
+}
+
+// TestUnifiedNumbered_FoldsLongContext checks that a long run of unchanged
+// context between two changes is collapsed to a single "⋯ N unchanged lines"
+// marker, hiding the interior while keeping foldContext lines next to each
+// change so the edits' surroundings stay visible.
+func TestUnifiedNumbered_FoldsLongContext(t *testing.T) {
+	t.Parallel()
+
+	// 10 context lines, keeping 3 on each side, hides the middle 4.
+	got := New(styles.Theme{}).RenderUnifiedNumbered(foldedPatch(10), 120)
+
+	require.Contains(t, got, "⋯ 4 unchanged lines", "the fold marker reports the hidden count")
+	// The three context lines next to each change survive.
+	for _, kept := range []string{"c1", "c2", "c3", "c8", "c9", "c10"} {
+		require.Contains(t, got, " "+kept, "context line %s adjacent to a change is kept", kept)
+	}
+	// The interior lines are hidden behind the marker.
+	for _, hidden := range []string{"c4", "c5", "c6", "c7"} {
+		require.NotContains(t, got, " "+hidden, "interior context line %s is folded away", hidden)
+	}
+}
+
+// TestUnifiedNumbered_FoldKeepsNumbering checks that the line numbers on the far
+// side of a fold still account for the hidden lines, so the gutter stays accurate
+// rather than resuming as if the folded lines never existed.
+func TestUnifiedNumbered_FoldKeepsNumbering(t *testing.T) {
+	t.Parallel()
+
+	got := New(styles.Theme{}).RenderUnifiedNumbered(foldedPatch(10), 120)
+
+	// The hunk spans to line 12, so the gutter is two digits wide. c3 is the last
+	// kept line before the fold at line 4; after hiding c4..c7 the next kept line
+	// c8 must resume at 9, not 5 — proving the counters advanced through the
+	// hidden run rather than resuming as if it never existed.
+	require.Equal(t, " 4  4  c3", gutterNumberedLine(t, got, " c3"))
+	require.Equal(t, " 9  9  c8", gutterNumberedLine(t, got, " c8"))
+}
+
+// TestUnifiedNumbered_ShortContextNotFolded checks that a context run too short
+// to save space (it would hide fewer than foldMin lines) is left intact, so a
+// small diff renders exactly as before with no marker.
+func TestUnifiedNumbered_ShortContextNotFolded(t *testing.T) {
+	t.Parallel()
+
+	// 7 context lines: keeping 3 on each side leaves only 1 to hide (< foldMin),
+	// so nothing is folded.
+	got := New(styles.Theme{}).RenderUnifiedNumbered(foldedPatch(7), 120)
+
+	require.NotContains(t, got, "unchanged", "a short context run is not folded")
+	for i := 1; i <= 7; i++ {
+		require.Contains(t, got, fmt.Sprintf(" c%d", i), "context line c%d is kept", i)
+	}
+}
+
+// TestUnifiedNumbered_FoldsLeadingContext checks that a long run of context at
+// the start of a hunk — with a change below it but none above — keeps only the
+// foldContext lines nearest the change, folding the leading remainder.
+func TestUnifiedNumbered_FoldsLeadingContext(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	b.WriteString("@@ -1,8 +1,8 @@\n")
+	for i := 1; i <= 7; i++ {
+		fmt.Fprintf(&b, " c%d\n", i)
+	}
+	b.WriteString("-old\n+new\n")
+	got := New(styles.Theme{}).RenderUnifiedNumbered(b.String(), 120)
+
+	// 7 leading context lines, no change above: keep the last 3 (c5,c6,c7), hide
+	// the first 4 (c1..c4).
+	require.Contains(t, got, "⋯ 4 unchanged lines")
+	for _, hidden := range []string{"c1", "c2", "c3", "c4"} {
+		require.NotContains(t, got, " "+hidden)
+	}
+	for _, kept := range []string{"c5", "c6", "c7"} {
+		require.Contains(t, got, " "+kept)
+	}
+}
+
+// TestPlanFold_NoChangeStillNumbered guards the planFold helper directly: a run
+// it folds reports the hidden lines through markers, and every hidden index is
+// flagged so the renderer advances its counters past them.
+func TestPlanFold_NoChangeStillNumbered(t *testing.T) {
+	t.Parallel()
+
+	lines := strings.Split(foldedPatch(10), "\n")
+	hidden, markers := planFold(lines)
+
+	total := 0
+	for _, n := range markers {
+		total += n
+	}
+	count := 0
+	for _, h := range hidden {
+		if h {
+			count++
+		}
+	}
+	require.Equal(t, 4, total, "the markers account for every hidden line")
+	require.Equal(t, total, count, "every hidden line is flagged for the renderer")
+}

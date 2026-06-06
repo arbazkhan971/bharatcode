@@ -864,11 +864,12 @@ func (m *model) handleKeys(text string) tea.Model {
 	if filter != "" {
 		title += " · " + filter
 	}
-	m.dialogs.Push(&dialog.Text{
+	m.dialogs.Push(&dialog.ScrollableText{
 		DialogID: "keybindings",
 		Title:    title,
 		Body:     keybindingHelpBodyFiltered(filter),
 		Theme:    m.theme,
+		Height:   m.height,
 	})
 	return m
 }

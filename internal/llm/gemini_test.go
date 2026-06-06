@@ -1070,6 +1070,69 @@ func TestGeminiKeepsMaxOutputTokensAboveThinkingBudget(t *testing.T) {
 		"an explicit cap above the budget must be preserved")
 }
 
+// TestGeminiDefaultMaxOutputTokensIsModelAware verifies that a request leaving
+// MaxTokens unset receives a model-aware maxOutputTokens default rather than
+// relying on the Gemini API's conservative 8192-token fallback. Long responses
+// from the Gemini 2.5 family (which supports 65536 output tokens) would
+// otherwise be silently truncated.
+func TestGeminiDefaultMaxOutputTokensIsModelAware(t *testing.T) {
+	cases := []struct {
+		name          string
+		modelID       string
+		reqMaxTokens  int
+		wantMaxOutput int
+	}{
+		{
+			name:          "gemini-2.5-flash defaults to 65536",
+			modelID:       "gemini-2.5-flash",
+			reqMaxTokens:  0,
+			wantMaxOutput: 65_536,
+		},
+		{
+			name:          "gemini-2.5-flash-lite defaults to 32768",
+			modelID:       "gemini-2.5-flash-lite",
+			reqMaxTokens:  0,
+			wantMaxOutput: 32_768,
+		},
+		{
+			name:          "explicit MaxTokens always wins",
+			modelID:       "gemini-2.5-flash",
+			reqMaxTokens:  1000,
+			wantMaxOutput: 1000,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rawBody []byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rawBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+			}))
+			defer server.Close()
+
+			cfg := geminiThinkingConfigFor(t, tc.modelID, server.URL)
+			provider := geminiProviderFor(t, cfg)
+
+			events, err := provider.Stream(context.Background(), Request{
+				Model:     tc.modelID,
+				Messages:  []message.Message{textMsg("hello")},
+				MaxTokens: tc.reqMaxTokens,
+			})
+			require.NoError(t, err)
+			_ = collectEvents(events)
+
+			var captured geminiRequest
+			require.NoError(t, json.Unmarshal(rawBody, &captured))
+			require.NotNil(t, captured.GenerationConfig,
+				"GenerationConfig must always be set for maxOutputTokens")
+			require.Equal(t, tc.wantMaxOutput, captured.GenerationConfig.MaxOutputTokens,
+				"maxOutputTokens mismatch for model %q", tc.modelID)
+		})
+	}
+}
+
 func TestGeminiOmitsThinkingConfigForUnsupportedModel(t *testing.T) {
 	var rawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

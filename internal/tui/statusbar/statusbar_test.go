@@ -156,3 +156,52 @@ func TestRenderClipsWideBar(t *testing.T) {
 	require.Contains(t, bar.Render(20), "…", "a bar wider than the window is marked as clipped")
 	require.NotContains(t, bar.Render(0), "…", "an unbounded render adds no marker")
 }
+
+// TestTurnTokensSegment asserts the turn-token segment appears only when set,
+// so the bar is unchanged until a completed turn provides usage data — and
+// disappears cleanly once cleared (e.g. when a new turn starts).
+func TestTurnTokensSegment(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+	require.NotContains(t, bar.Render(160), " in · ", "an empty TurnTokens must add no segment")
+
+	bar.TurnTokens = "1.2k in · 234 out"
+	require.Contains(t, bar.Render(160), "1.2k in · 234 out",
+		"a set TurnTokens must surface its segment")
+
+	bar.TurnTokens = ""
+	require.NotContains(t, bar.Render(160), " in · ",
+		"clearing TurnTokens must remove the segment")
+}
+
+// TestTurnTokensSegment_Priority asserts the turn-token segment is shed before
+// the model anchor but after the working indicator, so a narrow window keeps
+// the live spinner and drops the idle-turn token counts first.
+func TestTurnTokensSegment_Priority(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{
+		Theme:      styles.Default(),
+		Model:      "m",
+		Agent:      "a",
+		SessionID:  "id",
+		StartedAt:  start,
+		Now:        start,
+		Working:    "⠙ working 3s",
+		TurnTokens: "1.2k in · 234 out",
+	}
+
+	// Wide enough for both: both must appear.
+	full := bar.Render(160)
+	require.Contains(t, full, "⠙ working 3s", "working must appear when bar is wide")
+	require.Contains(t, full, "1.2k in · 234 out", "turn tokens must appear when bar is wide")
+
+	// Narrow enough that only the anchor plus working fits: working must survive
+	// and the lower-priority token segment must be shed.
+	narrow := bar.Render(len([]rune("m · ⠙ working 3s")))
+	require.Contains(t, narrow, "⠙ working 3s", "the working segment must outlast the token counts")
+	require.NotContains(t, narrow, " in · ", "the token segment must be shed before the working indicator")
+}

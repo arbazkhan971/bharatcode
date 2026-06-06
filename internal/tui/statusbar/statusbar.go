@@ -35,6 +35,10 @@ type Bar struct {
 	// the newest output (e.g. "↓ 12 below"). Empty hides the segment, so the
 	// bar is unchanged while the view is anchored to the bottom.
 	Scroll string
+	// TurnTokens shows the token counts from the last completed turn (e.g.
+	// "1.2k in · 234 out"). Empty hides the segment; it is cleared when a new
+	// turn starts and set once the turn finishes.
+	TurnTokens string
 }
 
 // segment is one " · "-joined field of the status line paired with the priority
@@ -53,16 +57,17 @@ type segment struct {
 // the tail of the line. The model is the anchor: it is never dropped, only
 // ellipsis-clipped as a last resort.
 const (
-	prioModel   = 1000 // anchor: never dropped
-	prioWorking = 100
-	prioSearch  = 90
-	prioScroll  = 80
-	prioGoal    = 70
-	prioMode    = 60
-	prioYolo    = 50
-	prioAgent   = 30
-	prioSession = 25
-	prioUptime  = 20
+	prioModel      = 1000 // anchor: never dropped
+	prioWorking    = 100
+	prioSearch     = 90
+	prioScroll     = 80
+	prioGoal       = 70
+	prioMode       = 60
+	prioYolo       = 50
+	prioTurnTokens = 35
+	prioAgent      = 30
+	prioSession    = 25
+	prioUptime     = 20
 )
 
 // Render returns one status line.
@@ -102,6 +107,9 @@ func (b Bar) Render(width int) string {
 	}
 	if b.Scroll != "" {
 		segs = append(segs, segment{b.Scroll, prioScroll})
+	}
+	if b.TurnTokens != "" {
+		segs = append(segs, segment{b.TurnTokens, prioTurnTokens})
 	}
 
 	line := fitSegments(segs, width)

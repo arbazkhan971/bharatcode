@@ -477,6 +477,50 @@ func TestParseGoTestNoFailures(t *testing.T) {
 	}
 }
 
+func TestParseGoTestFailures_CountN(t *testing.T) {
+	// `go test -count=2 ./...` reruns each test twice; a failing test produces
+	// two identical "--- FAIL:" blocks. The text parser must deduplicate them so
+	// the model sees each failure once, matching the JSON parser's behaviour.
+	out := `=== RUN   TestFoo
+--- FAIL: TestFoo (0.01s)
+    foo_test.go:42: expected 1, got 2
+=== RUN   TestBar
+--- FAIL: TestBar (0.00s)
+    bar_test.go:10: boom
+=== RUN   TestFoo
+--- FAIL: TestFoo (0.01s)
+    foo_test.go:42: expected 1, got 2
+=== RUN   TestBar
+--- FAIL: TestBar (0.00s)
+    bar_test.go:10: boom
+FAIL
+FAIL	github.com/x/y	0.123s`
+	got := parseTestFailures("go test -count=2 ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo", Detail: "foo_test.go:42: expected 1, got 2"},
+		{Name: "TestBar", Detail: "bar_test.go:10: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_CountNFlaky(t *testing.T) {
+	// A flaky test that fails in run 1 but passes in run 2 under -count=2 still
+	// surfaces as a single failure entry: only FAIL lines are matched, and there
+	// is no PASS-line to un-record it.
+	out := `=== RUN   TestFlaky
+--- FAIL: TestFlaky (0.00s)
+    flaky_test.go:5: intermittent
+=== RUN   TestFlaky
+--- PASS: TestFlaky (0.00s)
+FAIL
+FAIL	github.com/x/y	0.050s`
+	got := parseTestFailures("go test -count=2 ./...", out)
+	want := []testFailure{
+		{Name: "TestFlaky", Detail: "flaky_test.go:5: intermittent"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseGotestsumFailures(t *testing.T) {
 	// gotestsum's default pkgname reporter prints per-package status lines and
 	// closes with a "=== Failed" summary block; the "--- FAIL:" framing lines are

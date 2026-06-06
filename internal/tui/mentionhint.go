@@ -94,7 +94,24 @@ func rankedMentions(token, root string) []string {
 		return files
 	}
 
-	lower := strings.ToLower(token)
+	return rankFilesByToken(strings.ToLower(token), files)
+}
+
+// rankFilesByToken ranks files against an already-lower-cased token using
+// mentionScore, best-first, and returns only the matches. It is the single
+// ordering shared by the @-file picker (rankedMentions) and the file-tree
+// quick-filter (filterFiles) so a query ranks identically wherever it is typed.
+// Files keep their original case; token must be pre-lowered by the caller.
+//
+// The sort is the picker's full ranking: by score band first; then, within a
+// band, by the tightness of the matched span — a candidate whose matched runes
+// sit closer together reads as a more deliberate match, the way fzf and opencode
+// reward contiguity over a token threaded across a long name (contiguous bands
+// report an equal span, so this only reorders the looser acronym and subsequence
+// bands); then by shape, preferring shallower then shorter paths so a top-level
+// file outranks a deeply-nested namesake. The stable sort leaves the input
+// (lexical) order for any remaining ties.
+func rankFilesByToken(lower string, files []string) []string {
 	type scored struct {
 		path  string
 		score int
@@ -109,17 +126,9 @@ func rankedMentions(token, root string) []string {
 		if matched[i].score != matched[j].score {
 			return matched[i].score < matched[j].score
 		}
-		// Within a score band, prefer the candidate whose matched runes sit closer
-		// together: a tighter span reads as a more deliberate match, the way fzf and
-		// opencode reward contiguity over a token threaded across a long name. Bands
-		// that already match contiguously (prefix/substring) report an equal span,
-		// so this only reorders the looser acronym and subsequence bands.
 		if si, sj := matchSpan(lower, matched[i].path), matchSpan(lower, matched[j].path); si != sj {
 			return si < sj
 		}
-		// Then prefer shallower paths, then shorter ones, so a top-level file
-		// outranks a deeply-nested namesake. The stable sort then leaves the
-		// original lexical order for remaining ties.
 		return shallowerFirst(matched[i].path, matched[j].path)
 	})
 	out := make([]string, 0, len(matched))

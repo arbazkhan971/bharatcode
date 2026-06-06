@@ -592,6 +592,59 @@ func TestDefaultConfigCoherePreset(t *testing.T) {
 	require.False(t, model.SupportsImages, "Command A is text-only")
 }
 
+// TestDefaultConfigMoonshotPreset asserts the embedded default config ships a
+// Moonshot provider wired to Moonshot's OpenAI-compatibility endpoint, and that
+// its Kimi K2 model surfaces in the registry catalog with the right window and
+// capabilities. The K2-Instruct "0905" refresh doubled the original K2's 128k
+// window to 256k (262,144 tokens), and the catalog must reflect that so the
+// agent's compaction/overflow budgets match what the model actually serves
+// rather than undercounting it. This guards the catalog entry against silently
+// regressing to a smaller window. Fully offline: Default() unmarshals embedded
+// bytes and NewRegistry only constructs structs.
+func TestDefaultConfigMoonshotPreset(t *testing.T) {
+	cfg := config.Default()
+
+	var prov *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "moonshot" {
+			prov = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, prov, "default config should define a moonshot provider")
+	require.Equal(t, config.ProviderOpenAICompatible, prov.Type)
+	require.Equal(t, "https://api.moonshot.cn/v1", prov.BaseURL,
+		"moonshot preset should target Moonshot's OpenAI-compatibility endpoint")
+	require.Equal(t, "MOONSHOT_API_KEY", prov.APIKeyEnv)
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	provider, err := reg.Get("moonshot")
+	require.NoError(t, err)
+	_, ok := provider.(*openAICompatibleProvider)
+	require.True(t, ok, "moonshot should resolve to the openai_compatible client")
+
+	var model Model
+	for _, m := range reg.ListModels() {
+		if m.ID == "kimi-k2-0905-preview" {
+			model = m
+			break
+		}
+	}
+	require.Equal(t, "kimi-k2-0905-preview", model.ID, "Kimi K2 0905 should appear in the catalog")
+	require.Equal(t, "moonshot", model.Provider)
+	require.Equal(t, 262_144, model.ContextWindow,
+		"Kimi K2 0905 serves a 256k (262,144-token) context window")
+	require.True(t, model.SupportsTools, "Kimi K2 supports tool calling")
+	require.False(t, model.SupportsImages, "Kimi K2 0905 is text-only")
+
+	// The catalog's explicit window must not undercut what the family heuristic
+	// would infer for the same id — a mismatch is the signature of a stale value.
+	require.GreaterOrEqual(t, model.ContextWindow, inferContextWindow(model.ID),
+		"catalog window for Kimi K2 0905 should not undercount the inferred family window")
+}
+
 func collectEvents(events <-chan Event) []Event {
 	var out []Event
 	for event := range events {

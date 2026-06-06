@@ -264,6 +264,10 @@ func TestInferContextWindow(t *testing.T) {
 		// Pixtral, Gemma, Cohere Command, GLM and Nemotron open-weight families.
 		{"pixtral-large-latest", 128_000},
 		{"gemma-3-27b-it", 128_000},
+		// Gemma 3n (on-device variant) ships a 32k window despite carrying the
+		// "gemma-3" marker, so its specific rule must win over the 128k family rule.
+		{"gemma-3n-e4b-it", 32_768},
+		{"gemma-3n-e2b", 32_768},
 		{"gemma-2-9b-it", 8_192},
 		{"command-a-03-2025", 256_000},
 		{"command-r-plus", 128_000},

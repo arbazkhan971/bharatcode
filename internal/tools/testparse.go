@@ -295,6 +295,16 @@ func classifyTestRunner(command string) testRunner {
 		// carries none of their substrings, but kept explicit to guard against
 		// future overlap.
 		return runnerMocha
+	case strings.Contains(c, "cypress run"):
+		// `cypress run`/`npx cypress run` executes Cypress headlessly with Mocha's
+		// spec reporter underneath, so its failures close with the same "N failing"
+		// block of numbered "  N) <title>" entries — ending in a colon — that the
+		// Mocha parser handles, followed by the assertion message. Routed to that
+		// parser rather than duplicating it. Checked before the jest runners since a
+		// cypress invocation carries none of their substrings. Only "cypress run"
+		// (the headless command that emits this report) matches; "cypress open"
+		// launches the interactive GUI and prints no such summary.
+		return runnerMocha
 	case ctestRe.MatchString(c):
 		// `ctest` drives CMake's test runner, whose run summary closes with a
 		// "The following tests FAILED:" block listing each failure as

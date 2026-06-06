@@ -425,6 +425,67 @@ func TestResponsesProviderEmitsToolCall(t *testing.T) {
 	require.True(t, hasEnd)
 }
 
+// TestResponsesProviderEmitsBufferedReasoning asserts the buffered (non-streaming)
+// path surfaces a reasoning output item's summary_text parts as ThinkingEvents,
+// ahead of the assistant text, mirroring the streaming path's handling of
+// response.reasoning_summary_text.delta. A server that ignores stream=true and
+// replies with a single JSON body must not silently drop the reasoning.
+func TestResponsesProviderEmitsBufferedReasoning(t *testing.T) {
+	reply := `{
+	  "id": "resp_reason",
+	  "object": "response",
+	  "status": "completed",
+	  "model": "o4-mini",
+	  "output": [
+	    {"type": "reasoning", "id": "rs_1", "summary": [
+	      {"type": "summary_text", "text": "Weighing the "},
+	      {"type": "summary_text", "text": "options."}
+	    ]},
+	    {"type": "message", "id": "msg_1", "role": "assistant", "content": [{"type": "output_text", "text": "Answer."}]}
+	  ],
+	  "usage": {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13}
+	}`
+	provider, _, _ := responsesProvider(t, "o4-mini", reply)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "o4-mini",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	// Each summary_text part becomes a ThinkingEvent; concatenation is the full
+	// reasoning summary.
+	var thinking string
+	thinks := 0
+	for _, ev := range got {
+		if th, ok := ev.(ThinkingEvent); ok {
+			thinking += th.Text
+			thinks++
+		}
+	}
+	require.Equal(t, 2, thinks, "expected one ThinkingEvent per summary_text part")
+	require.Equal(t, "Weighing the options.", thinking)
+
+	// The reasoning summary precedes the assistant text in emission order.
+	var thinkIdx, textIdx = -1, -1
+	for i, ev := range got {
+		switch e := ev.(type) {
+		case ThinkingEvent:
+			if thinkIdx == -1 {
+				thinkIdx = i
+			}
+		case DeltaTextEvent:
+			if e.Text == "Answer." && textIdx == -1 {
+				textIdx = i
+			}
+		}
+	}
+	require.NotEqual(t, -1, thinkIdx, "expected a ThinkingEvent")
+	require.NotEqual(t, -1, textIdx, "expected the assistant DeltaTextEvent")
+	require.Less(t, thinkIdx, textIdx, "reasoning must be emitted before the answer text")
+}
+
 // TestResponsesRequestEncodesToolCallRoundTrip asserts a multi-turn transcript
 // (assistant tool call followed by a tool result) serializes to the Responses
 // function_call / function_call_output input items, so the model sees its own

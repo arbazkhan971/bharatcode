@@ -59,6 +59,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"bats test/":                                 runnerTAP,
 		"bats test.bats":                             runnerTAP,
 		"npx bats tests/":                            runnerTAP,
+		"prove -lv t/":                               runnerTAP,
+		"perl Build.PL && prove":                     runnerTAP,
+		"echo the change was approved":               runnerNone,
 		"echo acrobats perform":                      runnerNone,
 		"deno test":                                  runnerDeno,
 		"deno test --allow-read mod_test.ts":         runnerDeno,
@@ -940,6 +943,28 @@ not ok 2 addition using dc
 	}
 	if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
 		t.Errorf("parseBatsFailures mismatch:\n got %v\nwant %v", got, want)
+	}
+}
+
+func TestParseProveFailures(t *testing.T) {
+	// `prove -v` streams each Perl test file's raw TAP, including the "not ok"
+	// lines and the "# Failed test ..." diagnostic comments Test::More prints
+	// beneath a failure. The first "#" comment is the detail, as for bats.
+	out := `t/calc.t ..
+1..2
+ok 1 - adds numbers
+not ok 2 - subtracts numbers
+#   Failed test 'subtracts numbers'
+#   at t/calc.t line 12.
+#          got: '1'
+#     expected: '2'
+t/calc.t .. Failed 1/2 subtests `
+	got := parseTestFailures("prove -lv t/", out)
+	want := []testFailure{
+		{Name: "subtracts numbers", Detail: "Failed test 'subtracts numbers'"},
+	}
+	if fmt.Sprintf("%v", got) != fmt.Sprintf("%v", want) {
+		t.Errorf("parseProveFailures mismatch:\n got %v\nwant %v", got, want)
 	}
 }
 

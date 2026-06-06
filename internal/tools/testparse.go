@@ -965,8 +965,13 @@ func jestFailureDetails(lines []string) map[string]string {
 }
 
 var (
-	// "test tests::it_works ... FAILED" (cargo libtest).
-	cargoFailRe = regexp.MustCompile(`^test (\S+) \.\.\. FAILED$`)
+	// "test tests::it_works ... FAILED" (cargo libtest), and the doctest variant
+	// "test src/lib.rs - add (line 5) ... FAILED", whose name carries spaces. The
+	// name is captured non-greedily up to the terminal " ... FAILED" so both the
+	// space-free unit-test path and the spaced doctest path are recognized; the
+	// "$" anchor and the literal " ... FAILED" suffix keep the libtest run-summary
+	// ("test result: FAILED. ...", which has no " ... ") from matching.
+	cargoFailRe = regexp.MustCompile(`^test (.+?) \.\.\. FAILED$`)
 	// "thread 'tests::it_works' panicked at ..." carries the test name.
 	cargoPanicRe = regexp.MustCompile(`^thread '([^']+)' panicked at (.*)$`)
 	// "error: could not compile `crate` (lib test) due to N previous errors" —
@@ -981,10 +986,13 @@ var (
 )
 
 // parseCargoTestFailures collects "test <name> ... FAILED" lines and attaches
-// the matching "thread '<name>' panicked at ..." detail when present. When the
-// crate fails to compile, cargo emits no "... FAILED" lines, so a
-// "could not compile `crate` ..." marker is surfaced as a "[build failed]"
-// entry instead, with the first rustc diagnostic as its detail.
+// the matching "thread '<name>' panicked at ..." detail when present. Doctest
+// failures ("test src/lib.rs - add (line 5) ... FAILED") are captured too; their
+// panic is reported under thread 'main' rather than the test name, so they
+// surface with the name but no paired detail. When the crate fails to compile,
+// cargo emits no "... FAILED" lines, so a "could not compile `crate` ..." marker
+// is surfaced as a "[build failed]" entry instead, with the first rustc
+// diagnostic as its detail.
 func parseCargoTestFailures(output string) []testFailure {
 	lines := splitLines(output)
 	panics := map[string]string{}

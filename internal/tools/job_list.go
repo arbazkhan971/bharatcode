@@ -37,6 +37,8 @@ func (t *jobListTool) Name() string {
 	return "job_list"
 }
 
+func (t *jobListTool) IsReadOnly() bool { return true }
+
 func (t *jobListTool) Description() string {
 	return jobListDescription
 }

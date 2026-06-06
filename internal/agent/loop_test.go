@@ -1138,3 +1138,151 @@ func TestAbortedBatchLeavesNoOrphanedToolUse(t *testing.T) {
 	require.Equal(t, len(toolUseIDs), len(toolResultIDs),
 		"tool_use count must equal tool_result count: no unmatched results either")
 }
+
+// barrierTool blocks inside Run until all N instances in the batch have
+// started, then unblocks all of them simultaneously. It implements
+// ReadOnlyTool so the loop's parallel fan-out path is used for all-read-only
+// batches. If the loop ran tools sequentially, the first tool would block
+// forever waiting for the second to arrive at the barrier, causing a timeout.
+type barrierTool struct {
+	name string
+	wg   *sync.WaitGroup // counts down; reaches 0 when all goroutines have started
+	gate chan struct{}   // closed when wg reaches 0 — signals all to proceed
+}
+
+func (b *barrierTool) Name() string            { return b.name }
+func (b *barrierTool) Description() string     { return "barrier tool for concurrency test" }
+func (b *barrierTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (b *barrierTool) IsReadOnly() bool        { return true }
+func (b *barrierTool) Run(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
+	b.wg.Done() // signal this goroutine has arrived
+	select {
+	case <-b.gate: // wait until all goroutines have arrived
+	case <-ctx.Done():
+		return tools.Result{Content: "ctx cancelled", IsError: true}, nil
+	}
+	return tools.Result{Content: b.name + " done"}, nil
+}
+
+// makeBarrierTools creates N barrierTools sharing a common gate. The caller
+// must register them under distinct names matching the tool calls in the batch.
+func makeBarrierTools(names ...string) []*barrierTool {
+	var wg sync.WaitGroup
+	wg.Add(len(names))
+	gate := make(chan struct{})
+	go func() { wg.Wait(); close(gate) }()
+	out := make([]*barrierTool, len(names))
+	for i, name := range names {
+		out[i] = &barrierTool{name: name, wg: &wg, gate: gate}
+	}
+	return out
+}
+
+// TestParallelFanOutRunsReadOnlyBatchConcurrently proves that a batch where
+// all calls are read-only tools executes them concurrently. The barrierTool
+// blocks until both goroutines have started; if the loop were sequential the
+// first tool would deadlock waiting for the second to start.
+func TestParallelFanOutRunsReadOnlyBatchConcurrently(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+
+	// Two barrier tools that each block until both are active before returning.
+	barriers := makeBarrierTools("view", "grep")
+	for _, bt := range barriers {
+		registry.Register(bt)
+	}
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{
+			// Batch: two read-only calls issued in the same turn.
+			toolCall("c1", "view", `{}`),
+			toolCall("c2", "grep", `{}`),
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 4, OutputTokens: 2}},
+		},
+	}}
+
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		Bus:          pubsub.NewTopic[Event]("agent-parallel-test", 16),
+		SystemPrompt: "test",
+	})
+	err := loop.Run(ctx, sessionID, userMessage("run parallel tools"))
+	require.NoError(t, err, "parallel fan-out must complete without error or deadlock")
+
+	// Verify both tool results are in the session history.
+	messages, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+	results := 0
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if _, ok := block.(message.ToolResultBlock); ok {
+				results++
+			}
+		}
+	}
+	require.Equal(t, 2, results, "both tool results must appear in history")
+}
+
+// TestParallelFanOutSkippedForMixedBatch verifies that a batch containing one
+// read-only and one write-class tool falls through to the sequential path
+// (no panic, correct results, history well-formed).
+func TestParallelFanOutSkippedForMixedBatch(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+
+	readTool := &readOnlyRecordingTool{recordingTool: recordingTool{name: "view", result: "file content"}}
+	writeTool := &recordingTool{name: "edit", result: "edited"}
+	registry.Register(readTool)
+	registry.Register(writeTool)
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{
+			toolCall("c1", "view", `{}`),
+			toolCall("c2", "edit", `{}`),
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 4, OutputTokens: 2}},
+		},
+	}}
+
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		Bus:          pubsub.NewTopic[Event]("agent-mixed-test", 16),
+		SystemPrompt: "test",
+	})
+	err := loop.Run(ctx, sessionID, userMessage("mixed batch"))
+	require.NoError(t, err)
+
+	// Both tools must have been called.
+	require.Equal(t, 1, len(readTool.calls), "view must be called once")
+	require.Equal(t, 1, len(writeTool.calls), "edit must be called once")
+}
+
+// readOnlyRecordingTool wraps recordingTool and implements ReadOnlyTool so
+// it participates in the parallel fan-out when paired with other read-only tools,
+// but a mixed batch (with a non-read-only tool) reverts to sequential.
+type readOnlyRecordingTool struct {
+	recordingTool
+}
+
+func (r *readOnlyRecordingTool) IsReadOnly() bool { return true }

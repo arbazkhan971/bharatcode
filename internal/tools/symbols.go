@@ -78,6 +78,7 @@ func (t *symbolsTool) Name() string {
 	return "symbols"
 }
 
+func (t *symbolsTool) IsReadOnly() bool { return true }
 func (t *symbolsTool) Description() string {
 	return symbolsDescription
 }

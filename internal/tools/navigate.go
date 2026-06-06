@@ -148,25 +148,25 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if err != nil {
 			return Result{}, fmt.Errorf("resolving definition at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No definition found."), nil
+		return locationsResult(root, locs, "No definition found.", "definition"), nil
 	case "declaration":
 		locs, err := t.source.Declaration(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("resolving declaration at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No declaration found."), nil
+		return locationsResult(root, locs, "No declaration found.", "declaration"), nil
 	case "type_definition":
 		locs, err := t.source.TypeDefinition(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("resolving type definition at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No type definition found."), nil
+		return locationsResult(root, locs, "No type definition found.", "type definition"), nil
 	case "implementation":
 		locs, err := t.source.Implementation(ctx, path, line0, col0)
 		if err != nil {
 			return Result{}, fmt.Errorf("finding implementations at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}
-		return locationsResult(root, locs, "No implementations found."), nil
+		return locationsResult(root, locs, "No implementations found.", "implementation"), nil
 	case "references":
 		includeDecl := args.IncludeDeclaration == nil || *args.IncludeDeclaration
 		locs, err := t.source.References(ctx, path, line0, col0, includeDecl)
@@ -269,13 +269,23 @@ func boundHoverText(text string) string {
 // where possible. The trailing source line is the trimmed text at the location
 // so the model sees the code at each site, not just coordinates (matching how
 // goose/opencode surface navigation results); it is omitted when the file or
-// line cannot be read. An empty input returns the supplied empty message.
-func locationsResult(root string, locs []lsp.Location, emptyMsg string) Result {
+// line cannot be read. When more than one location is found a summary header
+// "N <noun>s across M file(s):" is prepended so the model sees the scope
+// before scanning the list, matching how referencesResult and callsResult
+// shape their output. Single and empty results are unaffected. An empty input
+// returns the supplied empty message.
+func locationsResult(root string, locs []lsp.Location, emptyMsg, noun string) Result {
 	if len(locs) == 0 {
 		return Result{Content: emptyMsg}
 	}
-	body, _, _ := renderLocations(root, locs)
-	return Result{Content: body}
+	body, total, files := renderLocations(root, locs)
+	if total <= 1 {
+		return Result{Content: body}
+	}
+	header := fmt.Sprintf("%d %s across %d %s:",
+		total, pluralize(noun, total),
+		files, pluralize("file", files))
+	return Result{Content: header + "\n" + body}
 }
 
 // referencesResult renders reference locations like locationsResult but prefixes

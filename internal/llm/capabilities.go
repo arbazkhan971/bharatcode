@@ -596,6 +596,22 @@ var contextWindowRules = []struct {
 	// adds it (commonly via OpenRouter or the Tencent API) without an explicit
 	// context_window.
 	{"hunyuan", 262_144},
+	// ByteDance Doubao (served via the Volcengine Ark API). The classic Doubao-pro
+	// and Doubao-lite endpoints — and the Doubao-1.5 generation — encode the window
+	// directly in the id as a trailing "-<n>k" token (doubao-pro-256k,
+	// doubao-1.5-pro-32k, doubao-1-5-lite-4k, ...). That explicit size is extracted
+	// by the inferDoubaoContextWindow pre-scan in inferContextWindow before this
+	// table is consulted, so it covers every pro/lite tier and both the dot and dash
+	// 1.5 spellings without a per-variant rule. The rules here cover the
+	// suffix-less ids the pre-scan leaves: the Doubao-Seed line (doubao-seed-1.6,
+	// doubao-seed-1-6-flash) ships a 256k window, so its marker precedes the family
+	// rule. Every Doubao id carries no broader family marker above, so without these
+	// it falls through to "unknown" (0). The bare "doubao" family default is the
+	// conservative 128k tier: an undercount only compacts a touch early, whereas an
+	// overcount would let the agent grow context past the model's real limit before
+	// the API rejects it.
+	{"doubao-seed", 262_144},
+	{"doubao", 131_072},
 	// Amazon Nova (commonly served via Bedrock) — Nova Pro and Nova Lite both
 	// expose a 300k window while Nova Micro is 128k, and Nova Premier lifted the
 	// window to 1M. The "nova-premier" and "nova-micro" ids both carry the "nova"
@@ -636,12 +652,54 @@ func inferContextWindow(id string) int {
 	if strings.HasPrefix(lid, "gpt-5") && strings.Contains(lid, gpt5ChatMarker) {
 		return 128_000
 	}
+	// ByteDance Doubao endpoints encode the window in a trailing "-<n>k" size token
+	// (doubao-pro-256k, doubao-1.5-pro-32k, ...) that no fixed substring rule can
+	// cover across every pro/lite tier and 1.5 spelling, so parse it directly before
+	// the table scan. A Doubao id without a size token (the Doubao-Seed line) falls
+	// through to the "doubao-seed"/"doubao" rules in the table.
+	if window, ok := inferDoubaoContextWindow(lid); ok {
+		return window
+	}
 	for _, rule := range contextWindowRules {
 		if strings.Contains(lid, rule.substring) {
 			return rule.window
 		}
 	}
 	return 0
+}
+
+// inferDoubaoContextWindow extracts the context window from a ByteDance Doubao
+// model id that encodes its size as a trailing "-<n>k" token, returning the
+// window in tokens (n * 1024, matching how Volcengine documents the sizes, e.g.
+// 256k == 256*1024) and true. It only fires for Doubao ids — the "-<n>k" suffix
+// convention is theirs, and gating on the "doubao" marker keeps the parse from
+// claiming an unrelated id that happens to end in a "k" size token. A Doubao id
+// with no such suffix (the Doubao-Seed line) returns false so the caller falls
+// back to the substring table. lid is assumed already lowercased and trimmed.
+func inferDoubaoContextWindow(lid string) (int, bool) {
+	if !strings.Contains(lid, "doubao") {
+		return 0, false
+	}
+	// Walk back over a trailing "k" and the run of digits before it, then require
+	// the size token to be hyphen-delimited (…-32k) so a digit run that is part of
+	// a longer word is not misread as a size.
+	if !strings.HasSuffix(lid, "k") {
+		return 0, false
+	}
+	rest := lid[:len(lid)-1]
+	end := len(rest)
+	start := end
+	for start > 0 && rest[start-1] >= '0' && rest[start-1] <= '9' {
+		start--
+	}
+	if start == end || start == 0 || rest[start-1] != '-' {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest[start:end])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n * 1024, true
 }
 
 func modelSupportsTools(models []Model, id string) bool {

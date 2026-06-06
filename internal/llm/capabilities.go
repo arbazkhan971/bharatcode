@@ -378,6 +378,12 @@ var contextWindowRules = []struct {
 	{"dbrx", 32_768},
 	// IBM Granite — the shipping Granite 3.x instruct line exposes a 128k window.
 	{"granite", 128_000},
+	// LG EXAONE — the hosted EXAONE 4.0 flagship (the 32B model served via
+	// OpenRouter/Together/Fireworks) exposes a 128k window, as does the EXAONE
+	// 3.5 32B. The "exaone" marker carries no broader family marker above, so
+	// without this rule the id falls through to "unknown" (0) when a user adds
+	// it without an explicit context_window.
+	{"exaone", 128_000},
 	// Google Gemma open-weight line — Gemma 3 lifted the window to 128k while
 	// Gemma 1/2 shipped 8k, so the specific "gemma-3" marker precedes the family.
 	{"gemma-3", 128_000},

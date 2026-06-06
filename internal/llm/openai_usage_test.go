@@ -147,3 +147,58 @@ func TestOpenAIUsageNoCacheDetails(t *testing.T) {
 	require.Equal(t, 0, got.CacheReadTokens)
 	require.Equal(t, 0, got.CacheWriteTokens)
 }
+
+// TestOpenAIUsageReasoningTokensSurfaced asserts that reasoning tokens from an
+// OpenAI o-series (or gpt-5) response are mapped into ReasoningTokens without
+// double-counting: they are already included in CompletionTokens (OutputTokens),
+// so the total billing is unchanged and ReasoningTokens is just a breakdown.
+func TestOpenAIUsageReasoningTokensSurfaced(t *testing.T) {
+	raw := `{
+		"prompt_tokens": 50,
+		"completion_tokens": 200,
+		"completion_tokens_details": {"reasoning_tokens": 150}
+	}`
+
+	var u openAIUsage
+	require.NoError(t, json.Unmarshal([]byte(raw), &u))
+
+	got := u.toUsage()
+	require.Equal(t, 50, got.InputTokens)
+	// OutputTokens must equal CompletionTokens (reasoning tokens are a subset).
+	require.Equal(t, 200, got.OutputTokens)
+	require.Equal(t, 150, got.ReasoningTokens, "reasoning tokens must be surfaced as a breakdown")
+}
+
+// TestOpenAIUsageReasoningTokensAbsentOnChatModel asserts that a chat-model
+// response (no completion_tokens_details) leaves ReasoningTokens at zero, not
+// a spurious non-zero from a previous test or uninitialized value.
+func TestOpenAIUsageReasoningTokensAbsentOnChatModel(t *testing.T) {
+	raw := `{"prompt_tokens": 10, "completion_tokens": 5}`
+
+	var u openAIUsage
+	require.NoError(t, json.Unmarshal([]byte(raw), &u))
+
+	got := u.toUsage()
+	require.Equal(t, 0, got.ReasoningTokens, "no completion_tokens_details means zero reasoning tokens")
+}
+
+// TestOpenAIUsageReasoningTokensWithCacheAndReasoning asserts reasoning and
+// cache fields are resolved independently: a response with both cache hits and
+// reasoning tokens surfaces all four token buckets correctly.
+func TestOpenAIUsageReasoningTokensWithCacheAndReasoning(t *testing.T) {
+	raw := `{
+		"prompt_tokens": 1000,
+		"completion_tokens": 300,
+		"prompt_tokens_details": {"cached_tokens": 400},
+		"completion_tokens_details": {"reasoning_tokens": 200}
+	}`
+
+	var u openAIUsage
+	require.NoError(t, json.Unmarshal([]byte(raw), &u))
+
+	got := u.toUsage()
+	require.Equal(t, 600, got.InputTokens, "prompt minus cached")
+	require.Equal(t, 300, got.OutputTokens, "completion unchanged")
+	require.Equal(t, 400, got.CacheReadTokens)
+	require.Equal(t, 200, got.ReasoningTokens)
+}

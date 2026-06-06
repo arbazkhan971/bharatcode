@@ -186,6 +186,10 @@ type openAIUsage struct {
 	// under prompt_tokens_details.cached_tokens, which is a subset already
 	// counted in PromptTokens.
 	PromptTokensDetails *openAIPromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	// CompletionTokensDetails carries the output breakdown for OpenAI reasoning
+	// models. ReasoningTokens is a subset of CompletionTokens — it is already
+	// counted in the billing total and is surfaced here for observability only.
+	CompletionTokensDetails *openAICompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
 // openAIPromptTokensDetails is the nested cache breakdown of the OpenAI Chat
@@ -193,6 +197,14 @@ type openAIUsage struct {
 // other modality fields are ignored.
 type openAIPromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+// openAICompletionTokensDetails carries the output breakdown for OpenAI
+// reasoning models (o-series, gpt-5). ReasoningTokens is the hidden reasoning
+// pass spend, a subset already counted in CompletionTokens; audio and other
+// modality fields are ignored.
+type openAICompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 func (u openAIUsage) toUsage() Usage {
@@ -227,10 +239,19 @@ func (u openAIUsage) toUsage() Usage {
 	if input < 0 {
 		input = 0
 	}
+	// ReasoningTokens is a subset of CompletionTokens (it is already counted in
+	// OutputTokens for billing) and is surfaced here only as an informational
+	// breakdown. Absent on non-reasoning models / older providers that do not emit
+	// completion_tokens_details.
+	var reasoningTokens int
+	if u.CompletionTokensDetails != nil {
+		reasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
 	return Usage{
 		InputTokens:      input,
 		OutputTokens:     u.CompletionTokens,
 		CacheReadTokens:  cacheRead,
 		CacheWriteTokens: cacheWrite,
+		ReasoningTokens:  reasoningTokens,
 	}
 }

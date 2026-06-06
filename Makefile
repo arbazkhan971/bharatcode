@@ -13,6 +13,21 @@ BINARY := bharatcode
 BIN_DIR := bin
 MAIN := .
 
+# Version stamping. COMMIT is the short git SHA the binary is built from; it is
+# read by `bharatcode update` to detect when a newer build is available. Both
+# fall back gracefully when git is unavailable (e.g. a source tarball), in which
+# case the update check treats the commit as unknown and stays silent.
+PKG := github.com/arbazkhan971/bharatcode/internal/cmd
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null)
+VERSION ?= $(shell git describe --tags --always 2>/dev/null)
+LDFLAGS := -s -w
+ifneq ($(COMMIT),)
+LDFLAGS += -X $(PKG).commit=$(COMMIT)
+endif
+ifneq ($(VERSION),)
+LDFLAGS += -X $(PKG).version=$(VERSION)
+endif
+
 # Tools.
 GO ?= go
 GOFUMPT ?= gofumpt
@@ -24,9 +39,9 @@ GOFUMPT ?= gofumpt
 # all runs the default developer loop: format check, vet, build, and test.
 all: lint build test
 
-# build compiles a static binary into bin/.
+# build compiles a static binary into bin/, stamping version metadata.
 build:
-	$(GO) build -o $(BIN_DIR)/$(BINARY) $(MAIN)
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(MAIN)
 
 # test runs the full test suite.
 test:
@@ -55,7 +70,7 @@ fmt:
 
 # install installs the binary into the Go bin directory.
 install:
-	$(GO) install $(MAIN)
+	$(GO) install -ldflags "$(LDFLAGS)" $(MAIN)
 
 # validate-config verifies the embedded default config is valid.
 validate-config:

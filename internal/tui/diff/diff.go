@@ -1101,15 +1101,21 @@ var extendedHeaderPrefixes = []string{
 
 // isDiffHeader reports whether line is unified-diff file-boundary metadata
 // rather than content: the old/new path lines (---/+++), the git "diff --git"
-// banner, the "index" blob line, or one of git's extended header lines (mode
-// changes, rename/copy metadata, similarity index). These delimit one file from
-// the next in a multi-file patch and are styled distinctly from added/removed
-// content.
+// banner, the "index" blob line, the binary-change markers ("Binary files …
+// differ" and the "GIT binary patch" header), or one of git's extended header
+// lines (mode changes, rename/copy metadata, similarity index). These delimit
+// one file from the next in a multi-file patch and are styled distinctly from
+// added/removed content. Recognizing the binary markers here keeps a binary
+// change — which carries no +/- hunk content — styled as the file metadata it
+// is rather than rendering as a plain, uncolored line the gutter would also
+// mis-number, matching how git, delta, and opencode present a binary diff.
 func isDiffHeader(line string) bool {
 	if strings.HasPrefix(line, "+++") ||
 		strings.HasPrefix(line, "---") ||
 		strings.HasPrefix(line, "diff --git") ||
-		strings.HasPrefix(line, "index ") {
+		strings.HasPrefix(line, "index ") ||
+		strings.HasPrefix(line, "GIT binary patch") ||
+		(strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, " differ")) {
 		return true
 	}
 	for _, p := range extendedHeaderPrefixes {

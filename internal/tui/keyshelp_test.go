@@ -109,6 +109,51 @@ func TestKeybindingHelp_FilterMatchesGroupTitle(t *testing.T) {
 	require.Equal(t, src.bindings, groups[0].bindings, "a title match keeps all of the group's bindings")
 }
 
+// TestKeybindingHelp_FilterAllTermsMustMatch proves a multi-word filter is split
+// into terms that must all match a binding, so a query naming a shortcut from two
+// angles ("tab switch") finds it even though no single run of its text contains
+// both words — and a binding missing any one term is dropped.
+func TestKeybindingHelp_FilterAllTermsMustMatch(t *testing.T) {
+	groups := filterKeybindingGroups("tab switch")
+
+	require.NotEmpty(t, groups, "bindings covering both terms should survive a two-term filter")
+
+	// Only bindings where both terms land somewhere (title, key, or description)
+	// are kept. The Ctrl+←/→ tab-switcher's description carries both "tab" and
+	// "switch", so it survives even though no single word does.
+	var got []keyBinding
+	for _, g := range groups {
+		got = append(got, g.bindings...)
+	}
+	var foundSwitcher bool
+	for _, b := range got {
+		require.Contains(t, strings.ToLower(b.key+" "+b.desc), "tab", "every survivor matches 'tab'")
+		require.Contains(t, strings.ToLower(b.key+" "+b.desc), "switch", "every survivor matches 'switch'")
+		if strings.Contains(b.desc, "switch to the previous/next tab") {
+			foundSwitcher = true
+		}
+	}
+	require.True(t, foundSwitcher, "the Ctrl+←/→ tab switcher should survive")
+
+	// Rows matching only one term — "new tab" and "close tab" never mention
+	// "switch" — are dropped.
+	body := keybindingHelpBodyFiltered("tab switch")
+	require.NotContains(t, body, "new tab")
+	require.NotContains(t, body, "close tab")
+}
+
+// TestKeybindingHelp_FilterTermOrderIndependent proves the term split is
+// order-independent: the same binding surfaces however its words are arranged.
+func TestKeybindingHelp_FilterTermOrderIndependent(t *testing.T) {
+	require.Equal(t, keybindingHelpBodyFiltered("tab switch"), keybindingHelpBodyFiltered("switch tab"))
+}
+
+// TestKeybindingHelp_FilterCollapsesInnerWhitespace proves extra spaces between
+// terms are ignored, so a stray double space does not change the result.
+func TestKeybindingHelp_FilterCollapsesInnerWhitespace(t *testing.T) {
+	require.Equal(t, keybindingHelpBodyFiltered("tab switch"), keybindingHelpBodyFiltered("tab   switch"))
+}
+
 // TestKeybindingHelp_FilterCaseInsensitive proves the filter folds case, so a
 // shouted filter still matches a lower-case description.
 func TestKeybindingHelp_FilterCaseInsensitive(t *testing.T) {

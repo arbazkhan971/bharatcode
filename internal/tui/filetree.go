@@ -107,31 +107,16 @@ func (f *filetree) clearFilter() {
 	f.applyFilter()
 }
 
-// filterFiles ranks files against a quick-filter token, best-first, reusing the
-// same scoring the @-file picker uses so the panel and the picker rank a query
-// the same way. An empty token returns the listing unchanged; the input order
-// (lexical) breaks ties through the stable sort.
+// filterFiles ranks files against a quick-filter token, best-first, through the
+// shared rankFilesByToken ordering so the panel and the @-file picker rank a
+// query identically — including the picker's span-tightness and shallower-path
+// tie-breaks, not just the coarse score band. An empty token returns the listing
+// unchanged.
 func filterFiles(filter string, files []string) []string {
 	if filter == "" {
 		return files
 	}
-	lower := strings.ToLower(filter)
-	type scored struct {
-		path  string
-		score int
-	}
-	var matched []scored
-	for _, f := range files {
-		if s, ok := mentionScore(lower, strings.ToLower(f)); ok {
-			matched = append(matched, scored{f, s})
-		}
-	}
-	sort.SliceStable(matched, func(i, j int) bool { return matched[i].score < matched[j].score })
-	out := make([]string, 0, len(matched))
-	for _, m := range matched {
-		out = append(out, m.path)
-	}
-	return out
+	return rankFilesByToken(strings.ToLower(filter), files)
 }
 
 // moveCursor advances the selection by delta, clamped to the listing bounds.

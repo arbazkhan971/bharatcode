@@ -1351,6 +1351,66 @@ func TestSanitizeGeminiSchemaCollapsesRecursiveRef(t *testing.T) {
 	require.NotContains(t, child, "properties")
 }
 
+func TestSanitizeGeminiSchemaCollapsesRecursiveRefIsOrderStable(t *testing.T) {
+	// Regression: inlining once recursed into the live "$defs" container, mutating
+	// the shared definition object in place. Because Go randomizes map iteration
+	// order, a $ref consumer reached after the container would deep-copy an
+	// already-expanded definition and the recursive child would keep a "properties"
+	// level instead of collapsing. Sanitizing the same schema many times exercises
+	// many iteration orders; every result must be identical and fully collapsed.
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {"node": {"$ref": "#/$defs/Node"}},
+		"$defs": {
+			"Node": {
+				"type": "object",
+				"properties": {"child": {"$ref": "#/$defs/Node"}}
+			}
+		}
+	}`)
+
+	for i := 0; i < 200; i++ {
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(sanitizeGeminiSchema(raw), &decoded))
+		node := decoded["properties"].(map[string]any)["node"].(map[string]any)
+		child := node["properties"].(map[string]any)["child"].(map[string]any)
+		require.Equalf(t, "object", child["type"], "iteration %d", i)
+		require.NotContainsf(t, child, "properties", "iteration %d", i)
+	}
+}
+
+func TestSanitizeGeminiSchemaSharedDefInlinesIndependently(t *testing.T) {
+	// A single definition referenced from two sibling sites must inline a fresh
+	// copy at each; the earlier aliasing bug let the first inline mutate the shared
+	// definition so the second site (visited in a different map order) saw an
+	// already-expanded copy. Both recursive children must collapse identically.
+	raw := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"a": {"$ref": "#/$defs/Node"},
+			"b": {"$ref": "#/$defs/Node"}
+		},
+		"$defs": {
+			"Node": {
+				"type": "object",
+				"properties": {"child": {"$ref": "#/$defs/Node"}}
+			}
+		}
+	}`)
+
+	for i := 0; i < 200; i++ {
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(sanitizeGeminiSchema(raw), &decoded))
+		props := decoded["properties"].(map[string]any)
+		for _, site := range []string{"a", "b"} {
+			node := props[site].(map[string]any)
+			child := node["properties"].(map[string]any)["child"].(map[string]any)
+			require.Equalf(t, "object", child["type"], "site %q iteration %d", site, i)
+			require.NotContainsf(t, child, "properties", "site %q iteration %d", site, i)
+		}
+	}
+}
+
 func TestSanitizeGeminiSchemaLeavesUnresolvableRef(t *testing.T) {
 	// A reference with no matching definition is left untouched rather than
 	// guessed at, so the sanitizer never makes a request worse than the input.

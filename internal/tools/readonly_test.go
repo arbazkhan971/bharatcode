@@ -22,6 +22,7 @@ func TestIsReadOnlyReadOnlyToolsReturnTrue(t *testing.T) {
 		newNavigateTool(deps),
 		newJobListTool(deps),
 		newJobOutputTool(deps),
+		newThinkTool(deps),
 	}
 	for _, tool := range readOnlyTools {
 		t.Run(tool.Name(), func(t *testing.T) {

@@ -154,11 +154,19 @@ func isASCIIAlnum(r rune) bool {
 }
 
 // isCJK reports whether r belongs to a wide East Asian script whose characters
-// each cost roughly a whole token. It covers the common CJK, Japanese kana, and
-// Korean Hangul ranges; it is intentionally a coarse classifier rather than an
-// exhaustive Unicode block table.
+// each cost roughly a whole token. It covers the common CJK ideographs (BMP and
+// the supplementary-plane Extension B–F blocks), CJK symbols and punctuation,
+// Japanese kana, and Korean Hangul ranges; it is intentionally a coarse
+// classifier rather than an exhaustive Unicode block table.
 func isCJK(r rune) bool {
 	switch {
+	case r >= 0x3000 && r <= 0x303F: // CJK Symbols and Punctuation.
+		// The ideographic space and full-width punctuation (、。「」…) that
+		// pervade Chinese and Japanese text. Real BPE vocabularies spend a whole
+		// token on each rather than folding them into a neighboring word the way
+		// ASCII punctuation often is, so they belong with the full-token CJK
+		// class, not the 0.5-weight "other" bucket they would otherwise land in.
+		return true
 	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified Ideographs.
 		return true
 	case r >= 0x3400 && r <= 0x4DBF: // CJK Extension A.
@@ -168,6 +176,12 @@ func isCJK(r rune) bool {
 	case r >= 0xAC00 && r <= 0xD7A3: // Hangul syllables.
 		return true
 	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility Ideographs.
+		return true
+	case r >= 0x20000 && r <= 0x2FA1F: // CJK Extensions B–F + Compatibility Supplement.
+		// Supplementary-plane Han ideographs (rarer characters, classical and
+		// proper-noun glyphs). Each is its own token like the BMP ideographs
+		// above; without this range they fall to the multi-byte "other" weight
+		// and undercount, the same structural error this classifier exists to fix.
 		return true
 	default:
 		return false

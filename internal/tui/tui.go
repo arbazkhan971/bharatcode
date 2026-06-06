@@ -208,8 +208,12 @@ type model struct {
 	// Command palette state. paletteCursor is the highlighted row index within
 	// the visible (filtered) command list; paletteFilter is the live
 	// type-to-filter query narrowing the palette by command name or description.
+	// paletteRecent holds the names of recently-executed palette commands,
+	// most-recent first, capped at paletteMaxRecent; they bubble to the top of
+	// the palette when no filter is active.
 	paletteCursor int
 	paletteFilter string
+	paletteRecent []string
 
 	// Session picker state. sessionCandidates holds the listed sessions while
 	// the /sessions picker is open; sessionCursor is the highlighted row within

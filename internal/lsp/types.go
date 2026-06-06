@@ -296,6 +296,57 @@ var defaultLanguageSpecs = []languageSpec{
 		rootFiles:  []string{"compile_commands.json", "compile_flags.txt", ".git"},
 		languageID: "c",
 	},
+	{
+		// ruby-lsp (gem: ruby-lsp) is Shopify's actively-maintained Ruby server and
+		// speaks LSP over stdio with no extra flags. The older solargraph remains a
+		// valid alternative a user can point at via config.
+		name:       "ruby",
+		extension:  extSet(".rb", ".rake"),
+		command:    "ruby-lsp",
+		rootFiles:  []string{"Gemfile", ".ruby-version", ".git"},
+		languageID: "ruby",
+	},
+	{
+		// bash-language-server (npm: bash-language-server) wraps shellcheck and
+		// explainshell behind LSP; it is launched with the "start" subcommand and
+		// speaks LSP over stdio. The LSP languageID for shell scripts is
+		// "shellscript".
+		name:       "bash",
+		extension:  extSet(".sh", ".bash"),
+		command:    "bash-language-server",
+		args:       []string{"start"},
+		rootFiles:  []string{".git"},
+		languageID: "shellscript",
+	},
+	{
+		// lua-language-server (the LuaLS project) speaks LSP over stdio by default.
+		// .luarc.json marks a configured Lua workspace root.
+		name:       "lua",
+		extension:  extSet(".lua"),
+		command:    "lua-language-server",
+		rootFiles:  []string{".luarc.json", ".luarc.jsonc", ".git"},
+		languageID: "lua",
+	},
+	{
+		// zls (the Zig Language Server) speaks LSP over stdio. build.zig marks a Zig
+		// project root.
+		name:       "zig",
+		extension:  extSet(".zig"),
+		command:    "zls",
+		rootFiles:  []string{"build.zig", "build.zig.zon", ".git"},
+		languageID: "zig",
+	},
+	{
+		// intelephense (npm: intelephense) is the de-facto PHP language server and
+		// is launched in stdio mode with --stdio. composer.json marks a PHP project
+		// root.
+		name:       "php",
+		extension:  extSet(".php"),
+		command:    "intelephense",
+		args:       []string{"--stdio"},
+		rootFiles:  []string{"composer.json", ".git"},
+		languageID: "php",
+	},
 }
 
 // DefaultExtensions returns the file extensions (lowercased, leading dot,

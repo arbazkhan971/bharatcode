@@ -228,9 +228,17 @@ func TestInferContextWindow(t *testing.T) {
 		// through to grok-4's 256k.
 		{"grok-4.1-fast", 2_000_000},
 		{"grok-4.1-fast-non-reasoning", 2_000_000},
+		// xAI's own API serves the 4.1-fast line with a dashed id ("grok-4-1-fast-...")
+		// rather than the dotted OpenRouter slug, and the dashed form matches neither
+		// "grok-4-fast" nor "grok-4.1-fast"; without its own rule it falls through to
+		// grok-4's 256k — an ~8x undercount of the real 2M window.
+		{"grok-4-1-fast-reasoning", 2_000_000},
+		{"grok-4-1-fast-non-reasoning", 2_000_000},
 		// Plain grok-4.1 (non-fast) carries only the bare "grok-4" marker and keeps
 		// the 256k window, so it must resolve via the grok-4 rule, not grok-4.1-fast's.
+		// Its dashed equivalent ("grok-4-1") likewise resolves via grok-4.
 		{"grok-4.1", 256_000},
+		{"grok-4-1", 256_000},
 		{"sonar", 128_000},
 		{"sonar-pro", 200_000},
 		{"codestral-latest", 256_000},

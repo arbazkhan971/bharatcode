@@ -347,9 +347,14 @@ var contextWindowRules = []struct {
 	// contains neither the literal "grok-4-fast" substring (the dotted version digit
 	// breaks it) nor anything but the bare "grok-4" marker, so without its own rule
 	// it would fall through to grok-4's 256k — an ~8x undercount. It must precede
-	// grok-4 for the same reason grok-4-fast does.
+	// grok-4 for the same reason grok-4-fast does. The id is spelled two ways across
+	// providers: the dotted "grok-4.1-fast" (OpenRouter's "x-ai/grok-4.1-fast" slug)
+	// and the dashed "grok-4-1-fast" (the form xAI's own API serves, e.g.
+	// "grok-4-1-fast-reasoning"); neither substring contains the other, so both get a
+	// rule — without the dashed one the native xAI ids undercount to grok-4's 256k.
 	{"grok-4-fast", 2_000_000},
 	{"grok-4.1-fast", 2_000_000},
+	{"grok-4-1-fast", 2_000_000},
 	{"grok-4", 256_000},
 	{"grok-code", 256_000},
 	{"grok", 131_072},

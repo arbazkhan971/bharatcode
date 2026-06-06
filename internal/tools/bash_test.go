@@ -36,6 +36,7 @@ func TestRegistryListsShellTools(t *testing.T) {
 		"multiedit",
 		"navigate",
 		"notebook_edit",
+		"patch",
 		"rename",
 		"symbols",
 		"todo",

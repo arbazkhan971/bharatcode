@@ -2,7 +2,7 @@
 package statusbar
 
 import (
-	"fmt"
+	"strings"
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
@@ -37,6 +37,34 @@ type Bar struct {
 	Scroll string
 }
 
+// segment is one " · "-joined field of the status line paired with the priority
+// that decides which fields survive when the bar is too wide for the window. A
+// higher prio is kept longer; the lowest-prio present segment is dropped first.
+type segment struct {
+	text string
+	prio int
+}
+
+// Segment priorities. Higher survives a narrow window longer. The live,
+// turn-scoped fields (the working spinner, search/scroll position) outrank the
+// static identity fields (agent, session id, uptime) so a user watching a
+// running turn keeps the progress readout even when the terminal is too narrow
+// to show everything — rather than losing the spinner first because it sits at
+// the tail of the line. The model is the anchor: it is never dropped, only
+// ellipsis-clipped as a last resort.
+const (
+	prioModel   = 1000 // anchor: never dropped
+	prioWorking = 100
+	prioSearch  = 90
+	prioScroll  = 80
+	prioGoal    = 70
+	prioMode    = 60
+	prioYolo    = 50
+	prioAgent   = 30
+	prioSession = 25
+	prioUptime  = 20
+)
+
 // Render returns one status line.
 func (b Bar) Render(width int) string {
 	now := b.Now
@@ -47,32 +75,78 @@ func (b Bar) Render(width int) string {
 	if started.IsZero() {
 		started = now
 	}
-	yolo := ""
-	if b.Yolo {
-		yolo = " · yolo"
+
+	// Build the segments in display order. The first four are always present so
+	// a bar that fits is byte-identical to the plain " · "-joined form; the rest
+	// appear only when their field is set.
+	segs := []segment{
+		{b.Model, prioModel},
+		{b.Agent, prioAgent},
+		{"session " + shortID(b.SessionID), prioSession},
+		{"up " + util.HumanDuration(now.Sub(started)), prioUptime},
 	}
-	working := ""
 	if b.Working != "" {
-		working = " · " + b.Working
+		segs = append(segs, segment{b.Working, prioWorking})
 	}
-	mode := ""
 	if b.Mode != "" {
-		mode = " · " + b.Mode
+		segs = append(segs, segment{b.Mode, prioMode})
 	}
-	goal := ""
+	if b.Yolo {
+		segs = append(segs, segment{"yolo", prioYolo})
+	}
 	if b.Goal != "" {
-		goal = " · " + b.Goal
+		segs = append(segs, segment{b.Goal, prioGoal})
 	}
-	search := ""
 	if b.Search != "" {
-		search = " · " + b.Search
+		segs = append(segs, segment{b.Search, prioSearch})
 	}
-	scroll := ""
 	if b.Scroll != "" {
-		scroll = " · " + b.Scroll
+		segs = append(segs, segment{b.Scroll, prioScroll})
 	}
-	line := fmt.Sprintf("%s · %s · session %s · up %s%s%s%s%s%s%s", b.Model, b.Agent, shortID(b.SessionID), util.HumanDuration(now.Sub(started)), working, mode, yolo, goal, search, scroll)
+
+	line := fitSegments(segs, width)
 	return b.Theme.Status.Render(truncateLine(line, width))
+}
+
+// fitSegments joins segs with " · " in their given (display) order, dropping the
+// lowest-priority segment whenever the joined line is wider than width — so a
+// narrow window sheds the least-important fields rather than blindly clipping the
+// tail, which would always hide the live progress segments that sit at the end.
+// A non-positive width is unbounded, so every segment is kept. The result may
+// still exceed width when even the highest-priority survivor alone does not fit;
+// the caller's ellipsis truncation handles that final case.
+func fitSegments(segs []segment, width int) string {
+	join := func(s []segment) string {
+		parts := make([]string, len(s))
+		for i, seg := range s {
+			parts[i] = seg.text
+		}
+		return strings.Join(parts, " · ")
+	}
+
+	if width <= 0 {
+		return join(segs)
+	}
+
+	// Drop on a copy so the caller's slice (and its backing array) is untouched —
+	// the shrink uses append-shift, which would otherwise corrupt a reused input.
+	segs = append([]segment(nil), segs...)
+	for len([]rune(join(segs))) > width {
+		// Find the lowest-priority segment to drop. Ties drop the later (more
+		// rightward) segment so earlier identity fields outlive a duplicate-prio
+		// trailing one, keeping the line's left edge stable as it shrinks.
+		drop := -1
+		for i, seg := range segs {
+			if drop < 0 || seg.prio <= segs[drop].prio {
+				drop = i
+			}
+		}
+		if drop < 0 || segs[drop].prio == prioModel {
+			break // only the anchor remains; let truncateLine clip it
+		}
+		segs = append(segs[:drop], segs[drop+1:]...)
+	}
+	return join(segs)
 }
 
 // truncateLine clamps line to at most width runes. When a line is cut short an

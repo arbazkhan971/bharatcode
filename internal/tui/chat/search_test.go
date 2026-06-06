@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -68,4 +69,48 @@ func TestSearchLines_AgainstTranscriptText(t *testing.T) {
 
 	matches := SearchLines(list.TranscriptText(), "parser")
 	require.Len(t, matches, 2, "both turns mention the parser, so both lines match")
+}
+
+// TestSearchLinesRe_FindsPatternMatches asserts SearchLinesRe returns the
+// indices of lines whose content the compiled regexp matches, following the
+// same "\n"-split line space as SearchLines.
+func TestSearchLinesRe_FindsPatternMatches(t *testing.T) {
+	t.Parallel()
+
+	text := "error: disk full\nwarn: low memory\nerror: timeout\ninfo: done"
+	re := regexp.MustCompile(`^error:`)
+	got := SearchLinesRe(text, re)
+	require.Equal(t, []int{0, 2}, got,
+		"only lines whose start matches the pattern must be reported")
+}
+
+// TestSearchLinesRe_CaseInsensitive asserts that a pattern compiled with the
+// (?i) flag matches regardless of case, equivalent to the /pattern/i user
+// syntax.
+func TestSearchLinesRe_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	text := "Alpha\nbeta\nALPHA again\nalpha lower"
+	re := regexp.MustCompile(`(?i)alpha`)
+	got := SearchLinesRe(text, re)
+	require.Equal(t, []int{0, 2, 3}, got,
+		"case-insensitive pattern must match every casing of the word")
+}
+
+// TestSearchLinesRe_NilReturnsNil asserts a nil regexp returns nil without
+// panicking, matching the empty-term contract of SearchLines.
+func TestSearchLinesRe_NilReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	require.Nil(t, SearchLinesRe("any text", nil),
+		"a nil regexp must return nil, not panic")
+}
+
+// TestSearchLinesRe_NoMatch asserts a pattern that matches nothing returns nil.
+func TestSearchLinesRe_NoMatch(t *testing.T) {
+	t.Parallel()
+
+	re := regexp.MustCompile(`zzz_absent`)
+	require.Nil(t, SearchLinesRe("alpha\nbeta\ngamma", re),
+		"a pattern with no match must return nil")
 }

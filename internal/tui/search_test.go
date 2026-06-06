@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -483,4 +484,144 @@ func TestSearchHighlightsVisibleMatch(t *testing.T) {
 
 	require.Contains(t, m.renderMain(), highlighted,
 		"the centered match line must carry the search-match style")
+}
+
+// TestParseRegexTerm asserts the /pattern/ parser returns a compiled regexp for
+// valid envelopes and nil for terms that are not /…/-wrapped.
+func TestParseRegexTerm(t *testing.T) {
+	t.Parallel()
+
+	// A term without a leading slash is treated as a literal — no regexp.
+	re, err := parseRegexTerm("plain")
+	require.NoError(t, err)
+	require.Nil(t, re, "a plain term must not be treated as a regex")
+
+	// A term with a leading slash but no closing slash is also literal.
+	re, err = parseRegexTerm("/unclosed")
+	require.NoError(t, err)
+	require.Nil(t, re, "a term with no closing slash must not be treated as a regex")
+
+	// /pattern/ produces a case-sensitive regexp.
+	re, err = parseRegexTerm("/foo.*/")
+	require.NoError(t, err)
+	require.NotNil(t, re, "/pattern/ must produce a compiled regexp")
+	require.True(t, re.MatchString("foobar"), "the compiled pattern must match its target")
+	require.False(t, re.MatchString("FOO"), "a case-sensitive pattern must not match wrong case")
+
+	// /pattern/i produces a case-insensitive regexp.
+	re, err = parseRegexTerm("/foo.*/i")
+	require.NoError(t, err)
+	require.NotNil(t, re, "/pattern/i must produce a compiled regexp")
+	require.True(t, re.MatchString("FOOBAR"), "/i pattern must match regardless of case")
+
+	// An invalid pattern returns an error.
+	re, err = parseRegexTerm("/[invalid/")
+	require.Error(t, err, "an invalid regex must return a compile error")
+	require.Nil(t, re)
+}
+
+// TestSlashSearch_RegexSyntax_FindsMatches asserts that a /pattern/ term
+// searches the transcript as a regex and finds lines whose content matches the
+// pattern — including alternation patterns that literal search cannot express.
+func TestSlashSearch_RegexSyntax_FindsMatches(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+
+	// Use lines where only a regex with alternation can select exactly two of them.
+	m.chat.Append(message.Message{
+		ID:   "u1",
+		Role: message.RoleUser,
+		Content: []message.ContentBlock{message.TextBlock{
+			Text: strings.Join([]string{
+				"error: disk full",
+				"warn: low memory",
+				"error: timeout",
+				"info: ok",
+			}, "\n"),
+		}},
+	})
+
+	// /disk|timeout/ matches only the two error lines and not the warn/info lines.
+	m.input.WriteString("/search /disk|timeout/")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	require.True(t, m.search.active(), "a valid regex must activate the search")
+	require.NotNil(t, m.search.re, "regex search must store the compiled regexp")
+	require.Len(t, m.search.matches, 2,
+		"/disk|timeout/ must match exactly the two lines containing those words")
+}
+
+// TestSlashSearch_RegexSyntax_CaseInsensitive asserts that /pattern/i matches
+// regardless of the case of the content in the transcript.
+func TestSlashSearch_RegexSyntax_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+
+	m.chat.Append(message.Message{
+		ID:   "u1",
+		Role: message.RoleUser,
+		Content: []message.ContentBlock{message.TextBlock{
+			Text: "ZZMIXED line\nzzother line\nZZMIXED again\nZZMIXED lower",
+		}},
+	})
+
+	// Smart-case literal search for an all-upper term would be case-sensitive,
+	// but /ZZMIXED/i must match every casing.
+	m.input.WriteString("/search /ZZMIXED/i")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	require.True(t, m.search.active())
+	require.Len(t, m.search.matches, 3,
+		"/ZZMIXED/i must match all three ZZMIXED lines regardless of case")
+}
+
+// TestSlashSearch_InvalidRegex_ShowsDialog asserts that an invalid /pattern/
+// surfaces an error dialog rather than silently matching nothing.
+func TestSlashSearch_InvalidRegex_ShowsDialog(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.chat.Append(message.Message{
+		ID:      "u1",
+		Role:    message.RoleUser,
+		Content: []message.ContentBlock{message.TextBlock{Text: "some content"}},
+	})
+
+	m.input.WriteString("/search /[invalid/")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+
+	require.False(t, m.search.active(),
+		"an invalid regex must not activate a search")
+	require.True(t, m.dialogs.Contains("search"),
+		"an invalid regex must open an error dialog")
+	require.Contains(t, plainText(m.dialogs.Render(200)), "Invalid",
+		"the error dialog must report that the pattern is invalid")
+}
+
+// TestHighlightTermRe asserts the regex highlighter wraps every match in the
+// style and leaves non-matching text unchanged.
+func TestHighlightTermRe(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	style := theme.Match
+
+	// A pattern that matches two distinct substrings.
+	re := regexp.MustCompile(`\d+`)
+	got := highlightTermRe("foo 42 bar 7 baz", re, style)
+	require.Equal(t,
+		"foo "+style.Render("42")+" bar "+style.Render("7")+" baz", got,
+		"every match must be wrapped in the style")
+
+	// A line with no match is returned unchanged.
+	require.Equal(t, "no digits here", highlightTermRe("no digits here", re, style),
+		"a line with no match must be returned unchanged")
+
+	// A case-insensitive pattern wraps both casings.
+	rei := regexp.MustCompile(`(?i)go`)
+	got = highlightTermRe("Go and go", rei, style)
+	require.Equal(t, style.Render("Go")+" and "+style.Render("go"), got,
+		"a case-insensitive pattern must wrap every casing")
 }

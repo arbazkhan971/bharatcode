@@ -32,7 +32,10 @@ supplies one (e.g. `function Add func(a int, b int) int`). A full file outline i
 rendered as an indented tree: nested symbols (a struct's fields, a class's
 methods) are indented two spaces per level beneath their container. A workspace
 search or a filtered outline stays flat and appends the enclosing container as
-`(in container)` when present.
+`(in container)` when present. A very broad query can match more symbols than fit
+usefully in one result; the list is capped and a trailing `... and N more (M
+total) not shown` line reports what was elided, so narrow the `query` (or add a
+`kind` filter) to see the rest.
 
 Failure cases:
 

@@ -20,9 +20,9 @@ brew upgrade bharatcode
 ## npm / npx
 
 ```sh
-npm install -g bharatcode      # global install
+npm install -g @arbazkhan971/bharatcode      # global install
 # or run without installing:
-npx bharatcode
+npx @arbazkhan971/bharatcode
 ```
 
 The npm package downloads the prebuilt binary for your platform on install.
@@ -77,7 +77,7 @@ make build        # stamps version + commit into the binary
 ## Upgrading
 
 If you installed with a package manager, prefer its own upgrade path
-(`brew upgrade bharatcode`, `npm install -g bharatcode`, re-running the install
+(`brew upgrade bharatcode`, `npm install -g @arbazkhan971/bharatcode`, re-running the install
 script, etc.). Otherwise BharatCode can update itself in place:
 
 ```sh

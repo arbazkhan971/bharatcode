@@ -1,5 +1,5 @@
 {
-  "name": "bharatcode",
+  "name": "@arbazkhan971/bharatcode",
   "version": "0.2.0",
   "description": "BharatCode — an open, sovereign terminal coding agent. OpenCode for India. This npm package downloads the correct prebuilt binary for your platform from GitHub Releases.",
   "keywords": [
@@ -24,6 +24,9 @@
   },
   "bin": {
     "bharatcode": "bin/bharatcode.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "postinstall": "node install.js"

@@ -3074,3 +3074,166 @@ func assertFailures(t *testing.T, got, want []testFailure) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// parseTestCounts tests
+// ---------------------------------------------------------------------------
+
+func assertCounts(t *testing.T, cmd, output string, wantPassed, wantTotal int) {
+	t.Helper()
+	got := parseTestCounts(cmd, output)
+	if wantTotal == 0 {
+		if got != nil {
+			t.Errorf("parseTestCounts(%q) = %+v, want nil", cmd, got)
+		}
+		return
+	}
+	if got == nil {
+		t.Fatalf("parseTestCounts(%q) = nil, want {passed:%d total:%d}", cmd, wantPassed, wantTotal)
+	}
+	if got.passed != wantPassed || got.total != wantTotal {
+		t.Errorf("parseTestCounts(%q) = {passed:%d total:%d}, want {passed:%d total:%d}",
+			cmd, got.passed, got.total, wantPassed, wantTotal)
+	}
+}
+
+func TestParseTestCounts_Go(t *testing.T) {
+	out := `=== RUN   TestOK
+--- PASS: TestOK (0.00s)
+=== RUN   TestFoo
+--- FAIL: TestFoo (0.01s)
+    foo_test.go:42: expected 1, got 2
+--- PASS: TestBar (0.00s)
+FAIL
+FAIL	github.com/x/y	0.123s`
+	assertCounts(t, "go test ./...", out, 2, 3)
+}
+
+func TestParseTestCounts_GoAllPass(t *testing.T) {
+	out := `--- PASS: TestA (0.00s)
+--- PASS: TestB (0.00s)
+--- PASS: TestC (0.00s)
+ok  	github.com/x/y	0.003s`
+	assertCounts(t, "go test ./...", out, 3, 3)
+}
+
+func TestParseTestCounts_GoJSON(t *testing.T) {
+	out := `{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"p","Test":"TestA"}
+{"Time":"2024-01-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestA","Elapsed":0.001}
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"p","Test":"TestB"}
+{"Time":"2024-01-01T00:00:00Z","Action":"fail","Package":"p","Test":"TestB","Elapsed":0.002}
+{"Time":"2024-01-01T00:00:00Z","Action":"run","Package":"p","Test":"TestC"}
+{"Time":"2024-01-01T00:00:00Z","Action":"pass","Package":"p","Test":"TestC","Elapsed":0.001}`
+	assertCounts(t, "go test ./...", out, 2, 3)
+}
+
+func TestParseTestCounts_GoNoTests(t *testing.T) {
+	// No PASS/FAIL lines — don't return zero-total counts.
+	assertCounts(t, "go test ./...", "ok  github.com/x/y  [no test files]", 0, 0)
+}
+
+func TestParseTestCounts_Pytest(t *testing.T) {
+	out := `test session starts
+collected 5 items
+
+tests/test_a.py . PASSED
+tests/test_b.py F FAILED
+
+=========================== short test summary info ============================
+FAILED tests/test_b.py::test_x - AssertionError
+========================= 4 passed, 1 failed in 0.12s =========================`
+	assertCounts(t, "pytest tests/", out, 4, 5)
+}
+
+func TestParseTestCounts_PytestAllPass(t *testing.T) {
+	out := `========================= 3 passed in 0.05s =========================`
+	assertCounts(t, "pytest -q", out, 3, 3)
+}
+
+func TestParseTestCounts_PytestError(t *testing.T) {
+	// "error" also contributes to the failed count.
+	out := `========================= 2 passed, 1 error in 0.08s =========================`
+	assertCounts(t, "pytest tests/", out, 2, 3)
+}
+
+func TestParseTestCounts_Jest(t *testing.T) {
+	out := `FAIL src/calc.test.ts
+  ✕ adds correctly (3ms)
+
+Test Suites: 1 failed, 2 passed, 3 total
+Tests:       1 failed, 9 passed, 10 total
+Snapshots:   0 total
+Time:        0.5s`
+	assertCounts(t, "npx jest src/", out, 9, 10)
+}
+
+func TestParseTestCounts_JestAllPass(t *testing.T) {
+	out := `Test Suites: 2 passed, 2 total
+Tests:       12 passed, 12 total
+Time:        0.3s`
+	assertCounts(t, "npm test", out, 12, 12)
+}
+
+func TestParseTestCounts_Cargo(t *testing.T) {
+	out := `running 5 tests
+test a ... ok
+test b ... FAILED
+test c ... ok
+
+failures:
+    b
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`
+	assertCounts(t, "cargo test", out, 4, 5)
+}
+
+func TestParseTestCounts_CargoAllPass(t *testing.T) {
+	out := `running 3 tests
+test a ... ok
+test b ... ok
+test c ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+	assertCounts(t, "cargo test", out, 3, 3)
+}
+
+func TestParseTestCounts_Nextest(t *testing.T) {
+	out := `   Compiling foo v0.1.0
+    Running 12 tests
+        FAIL [   0.005s] foo tests::bad
+    Summary [   1.234s] 12 tests run: 10 passed (0 leaky), 2 failed, 1 skipped`
+	assertCounts(t, "cargo nextest run", out, 10, 12)
+}
+
+func TestParseTestCounts_RSpec(t *testing.T) {
+	out := `Finished in 0.12s (files took 0.34s to load)
+5 examples, 2 failures
+
+Failed examples:
+  rspec ./spec/foo_spec.rb:10 # Foo#bar does something`
+	assertCounts(t, "bundle exec rspec spec/", out, 3, 5)
+}
+
+func TestParseTestCounts_RSpecAllPass(t *testing.T) {
+	out := `Finished in 0.02s
+4 examples, 0 failures`
+	assertCounts(t, "rspec", out, 4, 4)
+}
+
+func TestParseTestCounts_Dotnet(t *testing.T) {
+	out := `Test run for MyApp.Tests.dll (.NETCoreApp,Version=v8.0)
+Starting test execution, please wait...
+
+Failed! - Failed: 2, Passed: 8, Skipped: 0, Total: 10, Duration: 234ms - MyApp.Tests.dll`
+	assertCounts(t, "dotnet test ./MyApp.sln", out, 8, 10)
+}
+
+func TestParseTestCounts_UnknownRunner(t *testing.T) {
+	// A command that is not a recognized test runner should return nil.
+	assertCounts(t, "ls -la", "some output with 3 passed in it", 0, 0)
+}
+
+func TestParseTestCounts_NilOnEmptySummary(t *testing.T) {
+	// A recognized runner with no parseable summary line should return nil.
+	assertCounts(t, "go test ./...", "build failed\nexit status 1", 0, 0)
+}

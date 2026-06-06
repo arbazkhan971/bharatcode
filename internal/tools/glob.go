@@ -20,6 +20,7 @@ type globTool struct {
 type globArgs struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
 }
 
 var schemaGlob = json.RawMessage(`{
@@ -29,9 +30,18 @@ var schemaGlob = json.RawMessage(`{
   "required": ["pattern"],
   "properties": {
     "pattern": {"type": "string", "description": "Glob pattern. ** may cross directory boundaries."},
-    "path": {"type": "string", "description": "Optional workspace-relative directory to search from."}
+    "path": {"type": "string", "description": "Optional workspace-relative directory to search from."},
+    "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of paths to return (newest-first). Defaults to the built-in cap; values above it are clamped."}
   }
 }`)
+
+// globMatchCap is the maximum number of paths glob returns when the caller sets
+// no (or an over-large) limit. A bare "**/*" on a big repository can match tens
+// of thousands of files; without a cap glob would be the lone file-discovery
+// tool to flood the model's context, while grep (grepMatchCap), view, and bash
+// all bound their output. Results are sorted newest-first before capping, so the
+// most recently touched files survive the trim.
+const globMatchCap = 1000
 
 //go:embed glob.md
 var globDescription string
@@ -136,11 +146,29 @@ func (t *globTool) Run(ctx context.Context, raw json.RawMessage) (res Result, er
 		return Result{Content: "No files matched."}, nil
 	}
 	sortGlobMatches(matches)
+
+	// Resolve the effective cap: an explicit limit wins but is clamped to the
+	// built-in globMatchCap so a huge user value cannot reintroduce flooding; an
+	// absent or non-positive limit falls back to the cap.
+	limit := globMatchCap
+	if args.Limit > 0 && args.Limit < limit {
+		limit = args.Limit
+	}
+	total := len(matches)
+	capped := total > limit
+	if capped {
+		matches = matches[:limit]
+	}
+
 	paths := make([]string, len(matches))
 	for i, m := range matches {
 		paths[i] = m.path
 	}
-	return Result{Content: strings.Join(paths, "\n")}, nil
+	content := strings.Join(paths, "\n")
+	if capped {
+		content += fmt.Sprintf("\n[results capped: showing first %d of %d files]", limit, total)
+	}
+	return Result{Content: content}, nil
 }
 
 // globMatch pairs a matched workspace-relative path with its modification time

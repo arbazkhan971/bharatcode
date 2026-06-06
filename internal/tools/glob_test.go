@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,63 @@ func TestGlobUnbalancedBraceTreatedLiterally(t *testing.T) {
 
 	lines := strings.Split(result.Content, "\n")
 	require.Equal(t, []string{"weird{name.txt"}, lines)
+}
+
+func TestGlobRespectsLimit(t *testing.T) {
+	workDir := t.TempDir()
+	for i, name := range []string{"a.go", "b.go", "c.go", "d.go", "e.go"} {
+		writeFile(t, workDir, name, "package a\n")
+		// Stagger mtimes so the newest-first order is deterministic: e.go newest.
+		touch(t, workDir, name, time.Date(2026, 1, 1, 12, i, 0, 0, time.UTC))
+	}
+
+	tool := newGlobTool(Dependencies{WorkDir: workDir})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"pattern": "*.go", "limit": 2}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	lines := strings.Split(result.Content, "\n")
+	require.Equal(t, []string{
+		"e.go",
+		"d.go",
+		"[results capped: showing first 2 of 5 files]",
+	}, lines)
+}
+
+func TestGlobLimitAboveMatchCountHasNoNotice(t *testing.T) {
+	workDir := t.TempDir()
+	writeFile(t, workDir, "a.go", "package a\n")
+	writeFile(t, workDir, "b.go", "package a\n")
+	writeFile(t, workDir, "c.go", "package a\n")
+
+	tool := newGlobTool(Dependencies{WorkDir: workDir})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"pattern": "*.go", "limit": 10}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	require.NotContains(t, result.Content, "results capped")
+	lines := strings.Split(result.Content, "\n")
+	require.ElementsMatch(t, []string{"a.go", "b.go", "c.go"}, lines)
+}
+
+func TestGlobDefaultCapBoundsOutput(t *testing.T) {
+	workDir := t.TempDir()
+	total := globMatchCap + 5
+	for i := 0; i < total; i++ {
+		writeFile(t, workDir, fmt.Sprintf("f%04d.go", i), "package a\n")
+	}
+
+	tool := newGlobTool(Dependencies{WorkDir: workDir})
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"pattern": "*.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	lines := strings.Split(result.Content, "\n")
+	// globMatchCap path lines plus the trailing notice line.
+	require.Len(t, lines, globMatchCap+1)
+	require.Equal(t,
+		fmt.Sprintf("[results capped: showing first %d of %d files]", globMatchCap, total),
+		lines[len(lines)-1])
 }
 
 func TestGlobRecencyAcrossDirectories(t *testing.T) {

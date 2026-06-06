@@ -18,6 +18,28 @@ func TestParseProviderErrorClassifiesAnthropicPromptTooLong(t *testing.T) {
 	require.ErrorIs(t, err, ErrContextLimit)
 }
 
+// TestParseProviderErrorClassifiesGeminiInputTokenOverflow asserts that Gemini's
+// over-budget rejection — an error envelope whose message reads "The input token
+// count (X) exceeds the maximum number of tokens allowed (Y)" rather than the
+// OpenAI/Anthropic wording — is mapped to ErrContextLimit directly from the parsed
+// envelope, not only via the 400-body fallback scan, so the agent's compaction
+// path triggers regardless of the HTTP status the envelope arrives on.
+func TestParseProviderErrorClassifiesGeminiInputTokenOverflow(t *testing.T) {
+	body := []byte(`{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"The input token count (1100000) exceeds the maximum number of tokens allowed (1048576)."}}`)
+	err := parseProviderError(body)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextLimit)
+}
+
+// TestParseProviderErrorIgnoresUnrelatedBadRequest asserts a generic invalid
+// request whose message carries none of the context-overflow markers stays
+// unclassified, so parseProviderError does not mistake it for a recoverable
+// overflow.
+func TestParseProviderErrorIgnoresUnrelatedBadRequest(t *testing.T) {
+	body := []byte(`{"error":{"type":"invalid_request_error","message":"messages: at least one message is required"}}`)
+	require.Nil(t, parseProviderError(body))
+}
+
 // TestMentionsContextLimitMatchesAnthropicWording guards the 400-body fallback
 // scan that classifyHTTPError uses when the error envelope does not parse,
 // ensuring Anthropic's distinct phrasing is still recognized as a context

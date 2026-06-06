@@ -952,6 +952,10 @@ type geminiPromptFeedback struct {
 }
 
 type geminiUsageMetadata struct {
+	// PromptTokenCount is the total prompt size. Unlike Anthropic's input_tokens
+	// (which excludes cached tokens), Gemini folds CachedContentTokenCount into
+	// this total, so toUsage subtracts the cached portion back out to get the
+	// non-cached input — see below.
 	PromptTokenCount        int `json:"promptTokenCount"`
 	CandidatesTokenCount    int `json:"candidatesTokenCount"`
 	CachedContentTokenCount int `json:"cachedContentTokenCount"`
@@ -963,8 +967,19 @@ type geminiUsageMetadata struct {
 }
 
 func (u geminiUsageMetadata) toUsage() Usage {
+	// Gemini's promptTokenCount is the total prompt size *including* the cached
+	// tokens, whereas the ledger prices InputTokens and CacheReadTokens
+	// additively (the Anthropic convention, where input_tokens already excludes
+	// the cached portion). Subtract the cached tokens back out of InputTokens so
+	// they are billed once at the cache rate rather than twice — once at the full
+	// input rate and again at the cache rate. Clamp at zero to stay robust against
+	// a malformed response where the cached count somehow exceeds the prompt total.
+	input := u.PromptTokenCount - u.CachedContentTokenCount
+	if input < 0 {
+		input = 0
+	}
 	return Usage{
-		InputTokens:     u.PromptTokenCount,
+		InputTokens:     input,
 		OutputTokens:    u.CandidatesTokenCount + u.ThoughtsTokenCount,
 		CacheReadTokens: u.CachedContentTokenCount,
 	}

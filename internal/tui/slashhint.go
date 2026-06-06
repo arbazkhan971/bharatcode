@@ -67,6 +67,42 @@ var slashCommandDescriptions = map[string]string{
 	"/quit":        "exit",
 }
 
+// slashCommandArgHints maps a built-in slash command that takes arguments to the
+// placeholder describing what to type after it, so the moment the user finishes a
+// command name and presses space the menu can keep guiding them — showing the
+// accepted arguments (and, for enumerated options, the exact tokens) rather than
+// going blank. The placeholders mirror the argument hints in slashHelpLines so the
+// inline cue and /help agree. Angle brackets mark a required argument, square
+// brackets an optional one, matching the convention Claude Code and opencode use
+// for inline argument hints.
+var slashCommandArgHints = map[string]string{
+	"/keys":        "[filter]",
+	"/tab":         "[new|next|prev|close|N]",
+	"/export":      "[md|html]",
+	"/copy":        "[last|all]",
+	"/search":      "<term>",
+	"/goal":        "[text|run|stop|clear]",
+	"/permissions": "[read-only|auto|full]",
+	"/theme":       "[dark|light|high-contrast]",
+}
+
+// slashArgHint returns the argument-usage placeholder to surface once the user has
+// typed a complete slash command followed by whitespace — the point at which the
+// completion menu would otherwise vanish because the name is settled and the rest
+// is arguments. It returns "" unless the buffer is exactly a known arg-taking
+// command name immediately followed by a space, so an in-progress name (no space
+// yet, still handled by the command menu) or a command that takes no arguments
+// shows nothing. The hint persists while the argument is typed, so an enumerated
+// option list (theme names, tab actions) stays visible as a reminder rather than
+// disappearing on the first keystroke.
+func slashArgHint(buffer string) string {
+	sp := strings.IndexAny(buffer, " \t")
+	if sp < 0 {
+		return ""
+	}
+	return slashCommandArgHints[buffer[:sp]]
+}
+
 // slashHintDescIndex returns the index of the command whose description should
 // be shown, or -1 when none applies. A description is shown for the command the
 // user has settled on: the one marked active during a Tab cycle, or the sole
@@ -176,6 +212,18 @@ func (m *model) renderSlashHint(width int) string {
 			const indent = "  "
 			if len([]rune(indent))+len([]rune(note)) <= width {
 				return indent + m.theme.Muted.Render(note)
+			}
+		}
+		// Once the command name is settled and the user has moved on to its
+		// arguments (a trailing space), keep guiding them with the argument-usage
+		// placeholder instead of going blank, so the accepted arguments stay visible
+		// while they type. The cue is dropped when it would not fit one row, so the
+		// layout height is never exceeded.
+		if hint := slashArgHint(buffer); hint != "" {
+			const indent = "  "
+			usage := "usage: " + buffer[:strings.IndexAny(buffer, " \t")] + " " + hint
+			if len([]rune(indent))+len([]rune(usage)) <= width {
+				return indent + m.theme.Muted.Render(usage)
 			}
 		}
 		return ""

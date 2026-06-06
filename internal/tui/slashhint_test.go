@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -362,4 +363,63 @@ func TestRenderSlashHint_NoteDroppedWhenNarrow(t *testing.T) {
 	typeString(t, m, "/zzzqq")
 	require.Empty(t, m.renderSlashHint(m.width),
 		"no room for the note, so nothing is rendered")
+}
+
+// TestSlashArgHint asserts the argument-usage placeholder surfaces only once a
+// known arg-taking command name is settled and followed by whitespace, persists
+// while the argument is typed, and stays empty for a name still in progress or a
+// command that takes no arguments.
+func TestSlashArgHint(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "<term>", slashArgHint("/search "),
+		"a settled arg-taking command followed by a space surfaces its placeholder")
+	require.Equal(t, "[dark|light|high-contrast]", slashArgHint("/theme da"),
+		"the placeholder persists while the argument is being typed")
+	require.Empty(t, slashArgHint("/search"),
+		"an in-progress name (no space yet) is left to the command menu")
+	require.Empty(t, slashArgHint("/help "),
+		"a command that takes no arguments shows no placeholder")
+	require.Empty(t, slashArgHint("hello world"),
+		"ordinary prose shows no placeholder")
+}
+
+// TestSlashCommandArgHintsMatchHelp asserts every inline argument placeholder
+// also appears in the command's /help line, so the inline cue and /help never
+// drift apart.
+func TestSlashCommandArgHintsMatchHelp(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	help := strings.Join(m.slashHelpLines(), "\n")
+	for cmd, hint := range slashCommandArgHints {
+		require.Contains(t, help, cmd+" "+hint,
+			"the /help line for %s must carry the same argument hint as the inline cue", cmd)
+	}
+}
+
+// TestRenderSlashHint_ArgUsage is the end-to-end contract: once the command name
+// is settled and a space follows, the rendered view guides the user with the
+// usage placeholder instead of going blank.
+func TestRenderSlashHint_ArgUsage(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/theme ")
+	hint := stripANSI(m.renderSlashHint(m.width))
+	require.NotContains(t, hint, "\n", "the usage cue must stay on one row")
+	require.Contains(t, hint, "usage: /theme [dark|light|high-contrast]",
+		"a settled command followed by a space shows its argument usage")
+}
+
+// TestRenderSlashHint_ArgUsageDroppedWhenNarrow asserts the usage cue is omitted
+// rather than wrapping when the row is too narrow, keeping the input height fixed.
+func TestRenderSlashHint_ArgUsageDroppedWhenNarrow(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.width = 8
+	typeString(t, m, "/theme ")
+	require.Empty(t, m.renderSlashHint(m.width),
+		"no room for the usage cue, so nothing is rendered")
 }

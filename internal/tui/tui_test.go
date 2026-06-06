@@ -784,3 +784,100 @@ func TestTurnTokens_SurfacesInStatusBar(t *testing.T) {
 	require.Contains(t, rendered(), "1.5k in · 256 out",
 		"a completed turn's token segment must surface in the status bar")
 }
+
+// TestFormatTurnCostUSD asserts the cost formatter produces the right decimal
+// precision at each order of magnitude, and returns an empty string for zero.
+func TestFormatTurnCostUSD(t *testing.T) {
+	t.Parallel()
+
+	require.Empty(t, formatTurnCostUSD(0), "zero cost must produce no segment")
+	require.Empty(t, formatTurnCostUSD(-0.001), "negative cost must produce no segment")
+	require.Equal(t, "$0.0023", formatTurnCostUSD(0.0023), "sub-cent cost uses 4 decimal places")
+	require.Equal(t, "$0.0099", formatTurnCostUSD(0.0099), "just-below-cent cost uses 4 decimal places")
+	require.Equal(t, "$0.032", formatTurnCostUSD(0.032), "cent-range cost uses 3 decimal places")
+	require.Equal(t, "$0.500", formatTurnCostUSD(0.5), "half-dollar cost uses 3 decimal places")
+	require.Equal(t, "$1.23", formatTurnCostUSD(1.23), "dollar-range cost uses 2 decimal places")
+	require.Equal(t, "$12.50", formatTurnCostUSD(12.5), "ten-dollar cost uses 2 decimal places")
+}
+
+// TestTurnCostUSD asserts the cost calculator finds pricing by model ID, applies
+// the per-MTok formula, and returns 0 when the model has no pricing configured.
+func TestTurnCostUSD(t *testing.T) {
+	t.Parallel()
+
+	models := []config.Model{
+		{
+			ID:                    "claude-sonnet",
+			Provider:              "anthropic",
+			InputPricePerMTokUSD:  3.0,
+			OutputPricePerMTokUSD: 15.0,
+		},
+		{
+			ID:                    "free-model",
+			Provider:              "local",
+			InputPricePerMTokUSD:  0,
+			OutputPricePerMTokUSD: 0,
+		},
+	}
+
+	// 1000 input tokens at $3/MTok + 100 output tokens at $15/MTok
+	// = 0.003 + 0.0015 = 0.0045
+	got := turnCostUSD(models, "claude-sonnet", 1000, 100)
+	require.InDelta(t, 0.0045, got, 1e-9, "cost must apply input+output per-MTok rates")
+
+	// Model found but pricing is zero.
+	require.Equal(t, 0.0, turnCostUSD(models, "free-model", 5000, 500),
+		"a model with zero pricing must return 0")
+
+	// Model not found.
+	require.Equal(t, 0.0, turnCostUSD(models, "unknown-model", 5000, 500),
+		"an unknown model must return 0")
+
+	// Empty model list.
+	require.Equal(t, 0.0, turnCostUSD(nil, "claude-sonnet", 1000, 100),
+		"a nil model list must return 0")
+}
+
+// TestTurnCost_AppearsInStatusBar verifies the end-to-end path: when the model
+// config carries pricing, handleRunDone appends a cost segment to lastTurnTokens
+// so it surfaces in the status bar render.
+func TestTurnCost_AppearsInStatusBar(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	// Override the model's pricing in the config used by the test deps.
+	m.deps.Cfg.Models[0].InputPricePerMTokUSD = 3.0
+	m.deps.Cfg.Models[0].OutputPricePerMTokUSD = 15.0
+
+	m.handleRunDone(runDoneMsg{
+		last: &message.Message{
+			Usage: &message.TokenUsage{InputTokens: 1000, OutputTokens: 100},
+		},
+	})
+
+	// 1000*3/1e6 + 100*15/1e6 = 0.003 + 0.0015 = $0.0045
+	require.Contains(t, m.lastTurnTokens, "$0.0045",
+		"a turn with priced model must include the USD cost in the token segment")
+	require.Contains(t, m.lastTurnTokens, "1.0k in · 100 out",
+		"the token counts must still appear alongside the cost")
+}
+
+// TestTurnCost_AbsentWhenNoPricing verifies that the cost segment is omitted
+// when the model has no pricing configured, keeping the bar clean for local or
+// free models where a "$0.0000" label would be meaningless.
+func TestTurnCost_AbsentWhenNoPricing(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	// testDeps sets kimi-k2 with zero pricing; cost must be absent.
+	m.handleRunDone(runDoneMsg{
+		last: &message.Message{
+			Usage: &message.TokenUsage{InputTokens: 5000, OutputTokens: 500},
+		},
+	})
+
+	require.NotContains(t, m.lastTurnTokens, "$",
+		"a model with no pricing must not show a cost segment")
+	require.Contains(t, m.lastTurnTokens, "5.0k in · 500 out",
+		"the token segment must still appear without a cost suffix")
+}

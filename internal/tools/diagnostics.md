@@ -36,6 +36,11 @@ other locations to a diagnostic (the conflicting prior declaration, an unused
 import's use site), each is listed indented as `related: path:line:column:
 message` so you can act on the cross-reference directly.
 
+When a scan surfaces a very large number of diagnostics, only the first 200 are
+listed in full and a trailing `... and N more not shown (M total)` line records
+what was elided; the summary header still reports the true total. Narrow the
+scope with the `path` or `severity` argument to see the rest.
+
 Failure cases:
 
 Malformed JSON, an unavailable LSP manager, a path outside the BharatCode

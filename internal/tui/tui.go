@@ -400,6 +400,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleAgentEvent(msg)
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.PasteMsg:
+		// Bracketed-paste delivers the clipboard content as one PasteMsg.
+		// Append it verbatim (preserving embedded newlines) so users can paste
+		// multi-line text — code snippets, bullet lists, error traces — into
+		// the prompt without losing structure. Mirrors Claude Code / goose.
+		if m.focus == focusInput {
+			s := string(msg)
+			m.inputHistory.pushUndo(m.input.String())
+			m.input.WriteString(s)
+			m.inputHistory.resetRecall()
+			m.inputHistory.resetCompletion()
+		}
+		return m, nil
 	case tea.MouseWheelMsg:
 		return m.handleMouseWheel(msg)
 	default:
@@ -630,6 +643,17 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		return m.submitInput()
+	case "alt+enter":
+		// Alt+Enter inserts a literal newline so users can compose multi-line
+		// prompts — useful for code blocks, numbered steps, or context that
+		// benefits from structure. Mirrors Shift+Enter in Claude Code / goose.
+		if m.focus == focusInput {
+			m.inputHistory.pushUndo(m.input.String())
+			m.input.WriteByte('\n')
+			m.inputHistory.resetRecall()
+			m.inputHistory.resetCompletion()
+		}
+		return m, nil
 	case "ctrl+z":
 		// Undo the most recent input edit, walking the buffer back one step at a
 		// time. Ctrl+Z is the universal undo key in editors and CLIs (readline,
@@ -708,6 +732,27 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+}
+
+// renderInputArea renders the prompt input with "> " on the first line and
+// "  " continuation indent on subsequent lines so a multi-line prompt aligns
+// correctly. cursor (e.g. "▌") is appended at the end; pass "" when unfocused.
+// A single-line input renders identically to the previous "> " + s + cursor
+// code, so this is a pure extension.
+func renderInputArea(s, cursor string) string {
+	lines := strings.Split(s, "\n")
+	var b strings.Builder
+	for i, line := range lines {
+		if i == 0 {
+			b.WriteString("> ")
+		} else {
+			b.WriteByte('\n')
+			b.WriteString("  ")
+		}
+		b.WriteString(line)
+	}
+	b.WriteString(cursor)
+	return b.String()
 }
 
 // deleteLastWord removes the trailing word from an append-only prompt buffer:
@@ -1037,10 +1082,11 @@ func (m *model) renderMain() string {
 		panel := m.renderFiletree(filetreeWidth, m.layout.chat.H)
 		chatBody = joinPanels(panel, chatBody, filetreeWidth, m.layout.chat.H)
 	}
-	input := "> " + m.input.String()
+	cursor := ""
 	if m.focus == focusInput {
-		input += "▌"
+		cursor = "▌"
 	}
+	input := renderInputArea(m.input.String(), cursor)
 	// An empty prompt shows a muted placeholder advertising the discovery
 	// affordances — slash commands, @-file mentions, and the help listing — the
 	// way Claude Code and opencode hint at their input shortcuts. It is dropped
@@ -1546,6 +1592,7 @@ var keybindingGroups = []keyGroup{
 	}},
 	{title: "Prompt", bindings: []keyBinding{
 		{"Enter", "send the prompt"},
+		{"Alt+Enter", "add a new line (multi-line prompt)"},
 		{"Backspace", "delete the character before the cursor"},
 		{"Alt+Backspace", "delete the last word (also Ctrl+Backspace)"},
 		{"Ctrl+U", "clear the whole prompt line"},

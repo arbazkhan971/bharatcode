@@ -109,6 +109,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseBustedFailures(output)
 	case runnerHaskell:
 		return parseHaskellFailures(output)
+	case runnerBazel:
+		return parseBazelFailures(output)
 	default:
 		return nil
 	}
@@ -155,6 +157,7 @@ const (
 	runnerGotestsum
 	runnerBusted
 	runnerHaskell
+	runnerBazel
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -345,6 +348,17 @@ var (
 	// test" chain. A Haskell invocation carries none of the other runners'
 	// substrings.
 	haskellRe = regexp.MustCompile(`\bstack test\b|\bcabal\b[^&|;]*\btest\b`)
+	// `bazel test //...`/`bazelisk test`/`bazel coverage` drive Bazel's test
+	// runner, whose final summary lists each test target as a right-padded
+	// "//pkg:target    FAILED in <time>" row (the per-target log path on the
+	// indented line beneath). Both "bazel" and a following "test" (or "coverage",
+	// which also runs the tests) token are required at word boundaries, so
+	// "bazel test //foo", "bazelisk test", and "bazel coverage //..." match while
+	// "bazel build //..." / "bazel run //x" and prose like "the bazel cache" do
+	// not. The "[^&|;]*" keeps the match within a single command rather than
+	// spanning a "bazel build && go test" chain. A Bazel invocation carries none
+	// of the other runners' substrings.
+	bazelRe = regexp.MustCompile(`\bbazel(?:isk)?\b[^&|;]*\b(?:test|coverage)\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -619,6 +633,16 @@ func classifyTestRunner(command string) testRunner {
 		// run that drives tasty instead prints no "Failures:" header, so the parser
 		// simply surfaces nothing rather than misreading it.
 		return runnerHaskell
+	case bazelRe.MatchString(c):
+		// `bazel test //...`/`bazelisk test` drive Bazel, whose run summary lists
+		// each failed target as "//pkg:target    FAILED in <time>" with the
+		// per-target test.log path on the indented line beneath. Checked before the
+		// JS runners since a Bazel invocation carries none of their substrings, but
+		// kept explicit to guard against future overlap. (Bazel wraps the language's
+		// own runner — go test, JUnit, pytest — but only its target-level pass/fail
+		// summary is reliably present, so it gets its own parser keyed on the "//"
+		// target rows.)
+		return runnerBazel
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -2974,6 +2998,55 @@ func parseHaskellFailures(output string) []testFailure {
 			}
 			lastLoc = ""
 		}
+	}
+	return failures
+}
+
+var (
+	// "//pkg:target                         FAILED in 0.3s" — Bazel's per-target
+	// result row in the run summary. The target is right-padded with spaces to a
+	// fixed column before the status, so any run of whitespace separates them.
+	// The "in ..." tail varies: a plain "in 0.3s", a flaky "in 2 out of 3 in
+	// 0.5s", or (rarely) just "FAILED" with no timing, so everything after the
+	// status word is ignored. Group 1 is the "//pkg:target" label.
+	bazelFailRe = regexp.MustCompile(`^(//\S+)\s+FAILED(?:\s.*)?$`)
+	// "  /home/user/.cache/bazel/.../testlogs/pkg/target/test.log" — the indented
+	// path to a failed target's log, printed on the line beneath its FAILED row.
+	// Used as the failure's detail so the model can open the captured output.
+	bazelLogRe = regexp.MustCompile(`^\s+(\S+\.log)\s*$`)
+)
+
+// parseBazelFailures extracts failing targets from `bazel test` output. Bazel
+// wraps each language's own runner but reliably prints a target-level summary
+// row per test ("//pkg:target    FAILED in <time>"), so the target is the unit
+// surfaced here. The detail is the indented test.log path Bazel prints beneath a
+// failed row, when present, so the model can open the captured output for the
+// underlying assertion. A target's row can appear more than once (e.g. a flaky
+// retry, or repeated across streamed and summary sections), so failures are
+// deduplicated by target in first-seen order.
+func parseBazelFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := bazelFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		target := m[1]
+		if seen[target] {
+			continue
+		}
+		seen[target] = true
+		f := testFailure{Name: target}
+		// The log path, when Bazel printed one, sits on the immediately following
+		// indented line.
+		if i+1 < len(lines) {
+			if d := bazelLogRe.FindStringSubmatch(lines[i+1]); d != nil {
+				f.Detail = strings.TrimSpace(d[1])
+			}
+		}
+		failures = append(failures, f)
 	}
 	return failures
 }

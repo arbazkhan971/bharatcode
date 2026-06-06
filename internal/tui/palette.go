@@ -137,6 +137,7 @@ func (m *model) paletteBody() string {
 	if start > 0 {
 		lines = append(lines, m.theme.Muted.Render(fmt.Sprintf("⋯ %d more above", start)))
 	}
+	q := strings.ToLower(m.paletteFilter)
 	for i := start; i < end; i++ {
 		e := visible[i]
 		if i == m.paletteCursor {
@@ -148,6 +149,20 @@ func (m *model) paletteBody() string {
 				row += m.theme.Muted.Render("  (" + key + ")")
 			}
 			lines = append(lines, row)
+		} else if q != "" {
+			// Highlight the runes in the command name that matched the filter so
+			// the user can see at a glance why each entry appeared — the same
+			// per-character emphasis the slash-command and @-file menus use.
+			core := strings.TrimPrefix(e.name, "/")
+			namePart := "  " + m.theme.Muted.Render("/") + m.highlightMatch(core, q)
+			suffix := ""
+			if e.desc != "" {
+				suffix += " — " + e.desc
+			}
+			if key := slashCommandKeys[e.name]; key != "" {
+				suffix += "  (" + key + ")"
+			}
+			lines = append(lines, namePart+m.theme.Muted.Render(suffix))
 		} else {
 			row := "  " + e.name
 			if e.desc != "" {

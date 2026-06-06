@@ -32,9 +32,10 @@ type fakeNavigate struct {
 	hovErr  error
 	sigErr  error
 
-	lastPath string
-	lastLine int
-	lastCol  int
+	lastPath        string
+	lastLine        int
+	lastCol         int
+	lastIncludeDecl bool
 }
 
 func (f *fakeNavigate) Definition(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
@@ -52,8 +53,9 @@ func (f *fakeNavigate) Implementation(_ context.Context, path string, line, col 
 	return f.implementation, f.implErr
 }
 
-func (f *fakeNavigate) References(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
+func (f *fakeNavigate) References(_ context.Context, path string, line, col int, includeDeclaration bool) ([]lsp.Location, error) {
 	f.lastPath, f.lastLine, f.lastCol = path, line, col
+	f.lastIncludeDecl = includeDeclaration
 	return f.references, f.refErr
 }
 
@@ -302,6 +304,42 @@ func TestNavigateReferencesSortsAndDeduplicates(t *testing.T) {
 	require.False(t, result.IsError)
 	// References carry a scope summary header ahead of the deduplicated list.
 	require.Equal(t, "2 references across 1 file:\nmain.go:3:1\nmain.go:9:5", result.Content)
+}
+
+func TestNavigateReferencesDefaultsToIncludingDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{references: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	// No include_declaration key: references must keep its long-standing default
+	// of asking the server to include the symbol's declaration.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "references",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.True(t, src.lastIncludeDecl, "include_declaration should default to true")
+}
+
+func TestNavigateReferencesExcludesDeclarationWhenAsked(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{references: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 4, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	// An explicit include_declaration:false must reach the source so only use
+	// sites (not the declaration) are requested.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "references", "include_declaration": false,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.False(t, src.lastIncludeDecl, "include_declaration:false should be passed through")
 }
 
 func TestNavigateReferencesCountsDistinctFiles(t *testing.T) {

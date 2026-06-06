@@ -13,7 +13,8 @@ questions:
   abstract method, lists the concrete types/methods that satisfy it.
 - `references`: where is this symbol used? Lists every use site across the
   workspace, including the declaration. Use this before renaming or changing a
-  signature to gauge blast radius.
+  signature to gauge blast radius. Pass `include_declaration: false` to list
+  only the use sites, leaving the declaration out.
 - `incoming_calls`: which functions call this one? Lists the callers from the
   language server's call hierarchy. More precise than `references` for a
   function: it reports only call sites, not every textual mention.
@@ -37,6 +38,9 @@ Arguments:
 - `action` string, optional: `definition` (default), `type_definition`,
   `implementation`, `references`, `incoming_calls`, `outgoing_calls`, `hover`,
   or `signature`.
+- `include_declaration` boolean, optional: only meaningful for `references`.
+  Defaults to `true` (the declaration is listed among the references); set it to
+  `false` to list only the use sites.
 
 What success looks like:
 

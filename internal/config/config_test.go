@@ -341,6 +341,33 @@ func TestOptionsJSONCustom(t *testing.T) {
 	require.NotContains(t, string(out), "request_timeout")
 }
 
+func TestOptionsAutoUpdateRoundTrips(t *testing.T) {
+	// When set, auto_update must survive a marshal/unmarshal cycle in both the
+	// zero-RequestTimeout branch and the populated-RequestTimeout branch of
+	// MarshalJSON, since those are two separate code paths.
+	for _, timeout := range []time.Duration{0, 30 * time.Second} {
+		orig := Options{AutoUpdate: true, RequestTimeout: timeout}
+		out, err := json.Marshal(orig)
+		require.NoError(t, err)
+		require.Contains(t, string(out), `"auto_update":true`)
+
+		var got Options
+		require.NoError(t, json.Unmarshal(out, &got))
+		require.True(t, got.AutoUpdate)
+		require.Equal(t, timeout, got.RequestTimeout)
+	}
+
+	// Omitempty: a false AutoUpdate must not appear in the marshaled output, and
+	// an absent field must unmarshal to false.
+	out, err := json.Marshal(Options{})
+	require.NoError(t, err)
+	require.NotContains(t, string(out), "auto_update")
+
+	var off Options
+	require.NoError(t, json.Unmarshal([]byte(`{"log_level":"info"}`), &off))
+	require.False(t, off.AutoUpdate)
+}
+
 func TestValidationRulesDetailed(t *testing.T) {
 	tests := []struct {
 		name    string

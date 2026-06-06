@@ -133,6 +133,12 @@ func TestClassifyTestRunner(t *testing.T) {
 		"busted":                                     runnerBusted,
 		"busted spec/":                               runnerBusted,
 		"busted --output=TAP spec/foo_spec.lua":      runnerBusted,
+		"stack test":                                 runnerHaskell,
+		"stack test --fast":                          runnerHaskell,
+		"cabal test":                                 runnerHaskell,
+		"cabal v2-test":                              runnerHaskell,
+		"cabal new-test all":                         runnerHaskell,
+		"echo cabal build only":                      runnerNone,
 		"echo the adjusted plan":                     runnerNone,
 		"echo running test data":                     runnerNone,
 		"echo about cucumbers":                       runnerNone,
@@ -1579,6 +1585,78 @@ func TestParseBustedFailures_NoFailures(t *testing.T) {
 	out := `●●●
 3 successes / 0 failures / 0 errors / 0 pending : 0.002 seconds`
 	if got := parseTestFailures("busted spec/", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseHaskellFailures(t *testing.T) {
+	// hspec closes a failing run with a "Failures:" section that numbers each
+	// failed example ("N) <description>") and prints its source location on the
+	// indented line directly above. The description becomes the name and that
+	// location the detail.
+	out := `
+Math.Addition
+  adds two numbers [✔]
+  is commutative [✘]
+Math.Division
+  divides safely [✘]
+
+Failures:
+
+  test/MathSpec.hs:14:7:
+  1) Math.Addition is commutative
+       expected: 5
+        but got: 6
+
+  test/MathSpec.hs:22:3:
+  2) Math.Division divides safely
+       uncaught exception: DivideByZero
+
+  To rerun use: --match "/Math.Addition/is commutative/"
+
+Randomized with seed 1234
+
+Finished in 0.0031 seconds
+3 examples, 2 failures`
+	got := parseTestFailures("stack test", out)
+	want := []testFailure{
+		{Name: "Math.Addition is commutative", Detail: "test/MathSpec.hs:14:7"},
+		{Name: "Math.Division divides safely", Detail: "test/MathSpec.hs:22:3"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseHaskellFailures_NoLocation(t *testing.T) {
+	// A failure whose block carries no source-location line surfaces with the
+	// description but no detail rather than borrowing the previous block's.
+	out := `Failures:
+
+  test/Spec.hs:3:1:
+  1) located failure
+       expected: True
+
+  2) unlocated failure
+       expected: ok
+
+2 examples, 2 failures`
+	got := parseTestFailures("cabal test", out)
+	want := []testFailure{
+		{Name: "located failure", Detail: "test/Spec.hs:3:1"},
+		{Name: "unlocated failure"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseHaskellFailures_NoFailuresSection(t *testing.T) {
+	// Without a "Failures:" header (a passing run, or a run driving a different
+	// framework such as tasty) nothing is reported, even when numbered lines
+	// appear elsewhere in the output.
+	out := `Math.Addition
+  1 adds two numbers [✔]
+
+Finished in 0.0009 seconds
+1 example, 0 failures`
+	if got := parseTestFailures("stack test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

@@ -672,7 +672,8 @@ func classifyTestRunner(command string) testRunner {
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
-		strings.Contains(c, "pnpm test"):
+		strings.Contains(c, "yarn run test"), strings.Contains(c, "pnpm test"),
+		strings.Contains(c, "pnpm run test"):
 		return runnerJest
 	default:
 		return runnerNone

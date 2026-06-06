@@ -337,7 +337,13 @@ var contextWindowRules = []struct {
 	// the specific "grok-4"/"grok-code" rules must precede the family one to avoid
 	// falling through to 131k. The grok-4-fast line lifted the window again to 2M;
 	// its id also carries the "grok-4" marker, so its rule must precede grok-4's.
+	// The grok-4.1-fast refresh keeps the 2M window but its id ("grok-4.1-fast")
+	// contains neither the literal "grok-4-fast" substring (the dotted version digit
+	// breaks it) nor anything but the bare "grok-4" marker, so without its own rule
+	// it would fall through to grok-4's 256k — an ~8x undercount. It must precede
+	// grok-4 for the same reason grok-4-fast does.
 	{"grok-4-fast", 2_000_000},
+	{"grok-4.1-fast", 2_000_000},
 	{"grok-4", 256_000},
 	{"grok-code", 256_000},
 	{"grok", 131_072},

@@ -193,6 +193,14 @@ func TestInferContextWindow(t *testing.T) {
 		// "grok-4" marker, so its rule must win over grok-4's 256k rule.
 		{"grok-4-fast", 2_000_000},
 		{"grok-4-fast-reasoning", 2_000_000},
+		// The grok-4.1-fast refresh keeps the 2M window but its dotted id breaks the
+		// literal "grok-4-fast" substring, so it needs its own rule to avoid falling
+		// through to grok-4's 256k.
+		{"grok-4.1-fast", 2_000_000},
+		{"grok-4.1-fast-non-reasoning", 2_000_000},
+		// Plain grok-4.1 (non-fast) carries only the bare "grok-4" marker and keeps
+		// the 256k window, so it must resolve via the grok-4 rule, not grok-4.1-fast's.
+		{"grok-4.1", 256_000},
 		{"sonar", 128_000},
 		{"sonar-pro", 200_000},
 		{"codestral-latest", 256_000},

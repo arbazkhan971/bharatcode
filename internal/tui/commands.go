@@ -700,7 +700,21 @@ func (m *model) handleDiff() (tea.Model, tea.Cmd) {
 	if stat := viewer.StatLines(patch, max(1, m.width-6)); stat != "" {
 		rendered = stat + "\n\n" + rendered
 	}
-	m.dialogs.Push(&dialog.ScrollableText{DialogID: "diff", Title: "Diff", Body: rendered, Theme: m.theme, Height: m.height})
+	// Capture the raw patch in a closure so 'y' in the dialog copies it to the
+	// clipboard without requiring any extra model state.
+	rawPatch := patch
+	copyFn := systemClipboardCopy
+	if m.copyToClipboard != nil {
+		copyFn = m.copyToClipboard
+	}
+	m.dialogs.Push(&dialog.ScrollableText{
+		DialogID: "diff",
+		Title:    "Diff",
+		Body:     rendered,
+		Theme:    m.theme,
+		Height:   m.height,
+		CopyFn:   func() error { return copyFn(rawPatch) },
+	})
 	return m, nil
 }
 

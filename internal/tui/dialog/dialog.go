@@ -151,10 +151,19 @@ type ScrollableText struct {
 	// rows for the title, blank separator, scroll-hint footer, and modal
 	// border, and fills the rest with body lines.
 	Height int
+	// CopyFn, when non-nil, is called when the user presses 'y'. It should
+	// write the dialog's raw content to the system clipboard and return an
+	// error on failure. The 'y copy' hint is included in the scroll footer
+	// only when CopyFn is set, so dialogs that do not opt in are unchanged.
+	CopyFn func() error
 	// scroll is the current line offset into the body. It is updated in place
 	// by HandleKey and read by Render, so the dialog scrolls without needing
 	// external state in the model.
 	scroll int
+	// copyMsg is a transient status line set after a 'y' copy attempt: "Copied!"
+	// on success or a short error description on failure. Render shows it in
+	// the footer in place of the normal scroll hint for one render cycle.
+	copyMsg string
 }
 
 // ID returns the stable dialog id.
@@ -217,18 +226,31 @@ func (t *ScrollableText) Render(width int) string {
 	sb.WriteString(strings.Join(window, "\n"))
 
 	// When the body doesn't fit, append a one-line scroll indicator so the
-	// reader knows there is more content and which keys navigate it.
-	if total > rows {
+	// reader knows there is more content and which keys navigate it. When a
+	// copy was just attempted, show the outcome instead and clear it so
+	// subsequent renders revert to the normal hint.
+	if t.copyMsg != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(t.copyMsg)
+		t.copyMsg = ""
+	} else if total > rows {
 		above := t.scroll
 		below := total - end
 		sb.WriteString("\n\n")
-		if above > 0 && below > 0 {
-			sb.WriteString(fmt.Sprintf("↑ %d above · ↓ %d below · PgUp/PgDn/Home/End scroll · Esc close", above, below))
-		} else if above > 0 {
-			sb.WriteString(fmt.Sprintf("↑ %d above · PgUp/Home scroll · Esc close", above))
-		} else {
-			sb.WriteString(fmt.Sprintf("↓ %d below · PgDn/End scroll · Esc close", below))
+		copyHint := ""
+		if t.CopyFn != nil {
+			copyHint = "y copy · "
 		}
+		if above > 0 && below > 0 {
+			sb.WriteString(fmt.Sprintf("↑ %d above · ↓ %d below · %sPgUp/PgDn/Home/End scroll · Esc close", above, below, copyHint))
+		} else if above > 0 {
+			sb.WriteString(fmt.Sprintf("↑ %d above · %sPgUp/Home scroll · Esc close", above, copyHint))
+		} else {
+			sb.WriteString(fmt.Sprintf("↓ %d below · %sPgDn/End scroll · Esc close", below, copyHint))
+		}
+	} else if t.CopyFn != nil {
+		// Body fits on screen; still surface the copy hint so the user knows 'y' works.
+		sb.WriteString("\n\ny copy · Esc close")
 	}
 
 	body := sb.String()
@@ -238,11 +260,11 @@ func (t *ScrollableText) Render(width int) string {
 	return t.Theme.Modal.Render(body)
 }
 
-// HandleKey handles scroll navigation (Up/j, Down/k, PgUp, PgDn, Home/g, End/G)
-// and dismissal (Esc, Enter, q). The j/k/g/G aliases match vim-style navigation
-// so users familiar with that convention do not have to reach for arrow keys
-// in the diff or /keys overlay. Navigation keys do not pop the dialog; dismissal
-// keys do.
+// HandleKey handles scroll navigation (Up/j, Down/k, PgUp, PgDn, Home/g, End/G),
+// clipboard copy (y, when CopyFn is set), and dismissal (Esc, Enter, q). The
+// j/k/g/G aliases match vim-style navigation so users familiar with that
+// convention do not have to reach for arrow keys in the diff or /keys overlay.
+// Navigation keys do not pop the dialog; dismissal keys do.
 func (t *ScrollableText) HandleKey(msg tea.KeyPressMsg) (bool, bool) {
 	rows := t.visibleRows()
 	maxS := t.maxScroll()
@@ -250,6 +272,15 @@ func (t *ScrollableText) HandleKey(msg tea.KeyPressMsg) (bool, bool) {
 	switch msg.String() {
 	case "esc", "enter", "q":
 		return true, true
+	case "y":
+		if t.CopyFn != nil {
+			if err := t.CopyFn(); err != nil {
+				t.copyMsg = "Copy failed: " + err.Error()
+			} else {
+				t.copyMsg = "Copied!"
+			}
+		}
+		return true, false
 	case "up", "k":
 		if t.scroll > 0 {
 			t.scroll--

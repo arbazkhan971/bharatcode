@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -365,5 +366,143 @@ func TestScrollableText_VimG_Upper_JumpsToBottom(t *testing.T) {
 	}
 	if strings.Contains(out, "line1") {
 		t.Fatalf("line1 must not be visible after G, got:\n%s", out)
+	}
+}
+
+// TestScrollableText_YKey_NoCopyFn asserts that pressing 'y' without a CopyFn
+// is handled silently — the dialog stays open and no copy is attempted.
+func TestScrollableText_YKey_NoCopyFn(t *testing.T) {
+	d := &ScrollableText{DialogID: "x", Title: "T", Body: makeBody(3), Theme: styles.Theme{}, Height: 13}
+	handled, pop := d.HandleKey(keyChar('y'))
+	if !handled {
+		t.Fatal("y must be handled even without CopyFn")
+	}
+	if pop {
+		t.Fatal("y must not pop the dialog")
+	}
+	// No copyMsg should be set when CopyFn is nil.
+	if d.copyMsg != "" {
+		t.Fatalf("copyMsg must remain empty without CopyFn, got %q", d.copyMsg)
+	}
+}
+
+// TestScrollableText_YKey_CallsCopyFn asserts that pressing 'y' invokes CopyFn
+// and that a "Copied!" status message is written to copyMsg on success.
+func TestScrollableText_YKey_CallsCopyFn(t *testing.T) {
+	var got string
+	d := &ScrollableText{
+		DialogID: "x",
+		Title:    "T",
+		Body:     makeBody(3),
+		Theme:    styles.Theme{},
+		Height:   13,
+		CopyFn:   func() error { got = "called"; return nil },
+	}
+	handled, pop := d.HandleKey(keyChar('y'))
+	if !handled {
+		t.Fatal("y must be handled when CopyFn is set")
+	}
+	if pop {
+		t.Fatal("y must not pop the dialog")
+	}
+	if got != "called" {
+		t.Fatal("CopyFn must be called on y press")
+	}
+	if d.copyMsg != "Copied!" {
+		t.Fatalf("copyMsg must be \"Copied!\" on success, got %q", d.copyMsg)
+	}
+}
+
+// TestScrollableText_YKey_CopyFnError asserts that a failing CopyFn stores an
+// error description in copyMsg rather than silently succeeding.
+func TestScrollableText_YKey_CopyFnError(t *testing.T) {
+	d := &ScrollableText{
+		DialogID: "x",
+		Title:    "T",
+		Body:     makeBody(3),
+		Theme:    styles.Theme{},
+		Height:   13,
+		CopyFn:   func() error { return fmt.Errorf("no clipboard") },
+	}
+	d.HandleKey(keyChar('y'))
+	if !strings.Contains(d.copyMsg, "no clipboard") {
+		t.Fatalf("copyMsg must contain the error, got %q", d.copyMsg)
+	}
+}
+
+// TestScrollableText_CopyMsgClearedOnRender asserts that copyMsg is shown once
+// in the render output and then cleared so subsequent renders show the normal
+// scroll hint rather than a stale copy status.
+func TestScrollableText_CopyMsgClearedOnRender(t *testing.T) {
+	var copied string
+	d := &ScrollableText{
+		DialogID: "x",
+		Title:    "T",
+		Body:     makeBody(20),
+		Theme:    styles.Theme{},
+		Height:   13,
+		CopyFn:   func() error { copied = "yes"; return nil },
+	}
+	d.HandleKey(keyChar('y'))
+	if copied != "yes" {
+		t.Fatal("CopyFn must have been called")
+	}
+	first := d.Render(200)
+	if !strings.Contains(first, "Copied!") {
+		t.Fatalf("first render must show Copied!, got:\n%s", first)
+	}
+	second := d.Render(200)
+	if strings.Contains(second, "Copied!") {
+		t.Fatalf("second render must not show Copied! after it was cleared, got:\n%s", second)
+	}
+}
+
+// TestScrollableText_CopyHintInScrollFooter asserts that the scroll footer
+// includes "y copy" when CopyFn is set and the body overflows the viewport.
+func TestScrollableText_CopyHintInScrollFooter(t *testing.T) {
+	d := &ScrollableText{
+		DialogID: "x",
+		Title:    "T",
+		Body:     makeBody(20),
+		Theme:    styles.Theme{},
+		Height:   13,
+		CopyFn:   func() error { return nil },
+	}
+	out := d.Render(200)
+	if !strings.Contains(out, "y copy") {
+		t.Fatalf("scroll footer must include 'y copy' when CopyFn is set, got:\n%s", out)
+	}
+}
+
+// TestScrollableText_NoCopyHintWithoutCopyFn asserts that the scroll footer
+// does NOT include "y copy" when CopyFn is nil.
+func TestScrollableText_NoCopyHintWithoutCopyFn(t *testing.T) {
+	d := &ScrollableText{
+		DialogID: "x",
+		Title:    "T",
+		Body:     makeBody(20),
+		Theme:    styles.Theme{},
+		Height:   13,
+	}
+	out := d.Render(200)
+	if strings.Contains(out, "y copy") {
+		t.Fatalf("scroll footer must not include 'y copy' without CopyFn, got:\n%s", out)
+	}
+}
+
+// TestScrollableText_CopyHintWhenBodyFits asserts that the "y copy · Esc close"
+// hint is appended even when the body fits entirely on screen (no scroll needed).
+func TestScrollableText_CopyHintWhenBodyFits(t *testing.T) {
+	d := &ScrollableText{
+		DialogID: "x",
+		Title:    "T",
+		Body:     "short",
+		Theme:    styles.Theme{},
+		Height:   30,
+		CopyFn:   func() error { return nil },
+	}
+	out := d.Render(200)
+	if !strings.Contains(out, "y copy") {
+		t.Fatalf("short body with CopyFn must still show 'y copy' hint, got:\n%s", out)
 	}
 }

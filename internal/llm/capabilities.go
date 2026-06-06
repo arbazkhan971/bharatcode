@@ -390,6 +390,17 @@ var contextWindowRules = []struct {
 	{"llama-4-scout", 10_485_760},
 	{"llama-4", 1_048_576},
 	{"llama", 128_000},
+	// TII Falcon — the Falcon3 generation (7B/10B instruct) ships a 32k context
+	// window, far larger than the 8k Falcon2-11B and the 2k original Falcon1 line
+	// (40B/180B). The "falcon3" marker must precede the "falcon" family rule to
+	// avoid resolving Falcon3 to a quarter of its real window. The conservative 8k
+	// family default covers Falcon2-11B correctly and accepts a slight overcount
+	// for the obsolete Falcon1 line. Ids carry no broader family marker above, so
+	// without these rules they fall through to "unknown" (0) when a user adds
+	// them (commonly via OpenRouter as "tiiuae/falcon3-...") without an explicit
+	// context_window.
+	{"falcon3", 32_768},
+	{"falcon", 8_192},
 	// Mixtral 8x22B (open-mixtral-8x22b) doubled the window to 64k, twice the 32k
 	// of the original 8x7B. Its id carries the "mixtral" marker, so this specific
 	// rule must precede the family one to avoid resolving it to half its real
@@ -536,6 +547,12 @@ var contextWindowRules = []struct {
 	// 128k, so the specific marker precedes the family one.
 	{"command-a", 256_000},
 	{"command", 128_000},
+	// Cohere Aya multilingual line (Aya-23-35B, Aya Expanse 8B/32B) — all
+	// variants ship an 8k context window. The "aya" marker carries no broader
+	// family marker above, so without this rule an Aya id falls through to
+	// "unknown" (0) when a user adds one (commonly via OpenRouter as
+	// "cohere/aya-expanse-...") without an explicit context_window.
+	{"aya", 8_192},
 	// Zhipu GLM-4 and Nvidia Nemotron both expose a 128k window. GLM-4.6 lifted
 	// its window to 200k, so its specific marker must precede the family rule to
 	// avoid falling through to 128k.
@@ -589,6 +606,17 @@ var contextWindowRules = []struct {
 	// Baidu ERNIE — the ERNIE 4.5 family exposes a 128k window. Its id carries no
 	// broader marker above, so this rule keeps it from falling through to 0.
 	{"ernie", 131_072},
+	// InternLM (Shanghai AI Lab) — the InternLM2.5-1M-7B variant ships a 1M context
+	// window, its headline long-context feature. The InternLM2.x and InternLM3 lines
+	// ship a 32k window. The "internlm2_5-1m" marker must precede "internlm2" to
+	// avoid resolving the 1M variant to the standard 32k window. Ids carry no
+	// broader family marker above, so without these rules they fall through to
+	// "unknown" (0) when a user adds one (commonly via OpenRouter as
+	// "internlm/internlm2_5-...") without an explicit context_window.
+	{"internlm2_5-1m", 1_048_576},
+	{"internlm2", 32_768},
+	{"internlm3", 32_768},
+	{"internlm", 8_192},
 	// Tencent Hunyuan — the modern Hunyuan line (Hunyuan-A13B, Hunyuan-Large, and
 	// the Hunyuan-TurboS/T1 reasoning models) ships a 256k native context window,
 	// its headline long-context feature. The id carries no broader family marker
@@ -622,6 +650,16 @@ var contextWindowRules = []struct {
 	{"nova", 300_000},
 	// AI21 Jamba 1.5 (Large/Mini, also Bedrock-served) exposes a 256k window.
 	{"jamba", 256_000},
+	// Writer Palmyra (served via the Writer API, Amazon Bedrock, and OpenRouter)
+	// — the Palmyra X5 flagship ships a 1M-token window, its headline feature,
+	// while Palmyra X4 and the rest of the line (Med/Fin/Creative) stay at 128k.
+	// Both ids carry the bare "palmyra" marker, so the specific "palmyra-x5" rule
+	// must precede the family one to avoid resolving the flagship to an ~8x
+	// undercount. The "palmyra" marker shares no substring with any rule above, so
+	// without these rules the ids fall through to "unknown" (0) when a user adds
+	// them (commonly via Bedrock or OpenRouter) without an explicit context_window.
+	{"palmyra-x5", 1_000_000},
+	{"palmyra", 128_000},
 	// Indian-built models served via openai_compatible. Sarvam's flagship (sarvam-m)
 	// ships a 32k window; Krutrim's spectre line an 8k window. Neither id contains a
 	// broader family marker above, so without these rules they fall through to

@@ -1151,3 +1151,102 @@ func TestPlanFold_NoChangeStillNumbered(t *testing.T) {
 	require.Equal(t, 4, total, "the markers account for every hidden line")
 	require.Equal(t, total, count, "every hidden line is flagged for the renderer")
 }
+
+// TestDetectLang_Go asserts that a Go file header is identified by chroma.
+func TestDetectLang_Go(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "Go", detectLang("--- a/main.go\n+++ b/main.go\n"))
+}
+
+// TestDetectLang_Python asserts that a Python file header is identified.
+func TestDetectLang_Python(t *testing.T) {
+	t.Parallel()
+	lang := detectLang("--- a/script.py\n+++ b/script.py\n")
+	require.Equal(t, "Python", lang)
+}
+
+// TestDetectLang_UnknownExt asserts that a diff with no recognised extension
+// returns "" so syntax highlighting is disabled for that file.
+func TestDetectLang_UnknownExt(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "", detectLang("--- a/file.unknownxyz\n+++ b/file.unknownxyz\n"))
+}
+
+// TestDetectLang_DevNull asserts that /dev/null is skipped so a new-file diff
+// picks the language from the destination path.
+func TestDetectLang_DevNull(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "Go", detectLang("--- /dev/null\n+++ b/main.go\n"))
+}
+
+// TestDetectLang_Empty asserts that an empty patch returns "".
+func TestDetectLang_Empty(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "", detectLang(""))
+}
+
+// TestSyntaxHighlight_GoKeyword asserts that a Go keyword is rendered with the
+// accent style when a language is set on the Viewer.
+func TestSyntaxHighlight_GoKeyword(t *testing.T) {
+	t.Parallel()
+	theme := styles.Default()
+	v := New(theme)
+	v.lang = "Go"
+	got := v.syntaxHighlight("func main() {}")
+	require.Contains(t, got, theme.Accent.Render("func"))
+}
+
+// TestSyntaxHighlight_GoStringLiteral asserts that a Go double-quoted string is
+// rendered with the warn style.
+func TestSyntaxHighlight_GoStringLiteral(t *testing.T) {
+	t.Parallel()
+	theme := styles.Default()
+	v := New(theme)
+	v.lang = "Go"
+	got := v.syntaxHighlight(`fmt.Println("hello")`)
+	require.Contains(t, got, theme.Warn.Render(`"hello"`))
+}
+
+// TestSyntaxHighlight_NoLang asserts that when lang is empty syntaxHighlight
+// returns the input unchanged so callers always get displayable text.
+func TestSyntaxHighlight_NoLang(t *testing.T) {
+	t.Parallel()
+	v := New(styles.Default())
+	require.Equal(t, "func main() {}", v.syntaxHighlight("func main() {}"))
+}
+
+// TestRenderUnified_ContextLinesHighlighted asserts that context lines in a
+// recognized-language diff are syntax-highlighted (a keyword appears accented)
+// while added and removed lines keep their diff styles.
+func TestRenderUnified_ContextLinesHighlighted(t *testing.T) {
+	t.Parallel()
+	theme := styles.Default()
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,3 @@\n func greet() {}\n-old()\n+new()\n"
+	got := New(theme).RenderUnified(patch, 120)
+	// The context line " func greet() {}" should have "func" accented.
+	require.Contains(t, got, theme.Accent.Render("func"))
+	// Added and removed lines must still carry their diff colors.
+	require.Contains(t, got, theme.DiffRemove.Render("-old()"))
+	require.Contains(t, got, theme.DiffAdd.Render("+new()"))
+}
+
+// TestRenderUnified_NoHighlightForUnknownExt asserts that a diff with no
+// recognised extension leaves context lines unstyled.
+func TestRenderUnified_NoHighlightForUnknownExt(t *testing.T) {
+	t.Parallel()
+	theme := styles.Default()
+	patch := "--- a/file.unknownxyz\n+++ b/file.unknownxyz\n@@ -1,1 +1,1 @@\n func greet() {}\n"
+	got := New(theme).RenderUnified(patch, 120)
+	require.NotContains(t, got, theme.Accent.Render("func"),
+		"context lines in unknown-lang diffs must not be syntax-highlighted")
+}
+
+// TestRenderUnifiedNumbered_ContextLinesHighlighted asserts that the numbered
+// renderer also syntax-highlights context lines for recognised languages.
+func TestRenderUnifiedNumbered_ContextLinesHighlighted(t *testing.T) {
+	t.Parallel()
+	theme := styles.Default()
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,3 @@\n func greet() {}\n-old()\n+new()\n"
+	got := New(theme).RenderUnifiedNumbered(patch, 120)
+	require.Contains(t, got, theme.Accent.Render("func"))
+}

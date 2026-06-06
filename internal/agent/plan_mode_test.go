@@ -117,8 +117,14 @@ func TestPlanModeRefusesWritesThenExecutesAfterApproval(t *testing.T) {
 	require.Len(t, provider.reqs, 4, "approved turn should run two more provider turns")
 	require.NotContains(t, provider.reqs[2].SystemPrompt, "Plan mode is active",
 		"approved turn must not prompt for a plan")
-	require.Equal(t, "base prompt", provider.reqs[2].SystemPrompt,
-		"approved turn uses the unmodified base system prompt")
+	require.True(t, strings.HasPrefix(provider.reqs[2].SystemPrompt, "base prompt"),
+		"approved turn leads with the unmodified base system prompt")
+	// The approved turn carries the persistent active-goal frame: the session's
+	// original request is re-injected so the agent stays anchored to it.
+	require.Contains(t, provider.reqs[2].SystemPrompt, "Active goal for this session",
+		"approved turn re-injects the active-goal frame")
+	require.Contains(t, provider.reqs[2].SystemPrompt, "change the greeting",
+		"active-goal frame carries the user's original request")
 }
 
 // TestExtractPlanTextFromAssistantMessage proves that ExtractPlanText pulls the

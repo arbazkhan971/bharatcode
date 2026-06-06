@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,6 +95,30 @@ contain, in order:
 4. Your recommendations for the next steps to take.
 
 Do not attempt any further actions; just deliver this handoff as your reply.`
+
+// goalFrameHeader and goalFrameFooter wrap the user's original request when the
+// Loop re-injects it as an "active goal" frame on every provider call. Anchoring
+// the goal in the system prompt — outside the conversation history — keeps the
+// agent pointed at what the user actually asked for even after dozens of steps
+// and after compaction has dropped the opening messages from history. This is
+// BharatCode's persistent goal frame.
+const goalFrameHeader = `
+
+<system-reminder>
+Active goal for this session — the user's original request. Keep it in focus and
+make sure your work continues to serve it, even as the conversation grows and
+earlier messages scroll out of context:
+
+`
+
+const goalFrameFooter = `
+</system-reminder>`
+
+// maxGoalFrameRunes caps the length of the re-injected goal so a very long
+// opening message cannot bloat every system prompt for the rest of the session.
+// Beyond this the goal is truncated with an ellipsis; the full request still
+// lives in the conversation history.
+const maxGoalFrameRunes = 1500
 
 // writeClassTools names the file-mutating tools whose successful runs fire a
 // FileEdit lifecycle hook. The agent loop detects mutations by tool name so it
@@ -268,6 +293,17 @@ type Loop struct {
 	// It is atomic for the same reason planMode is: it is read by the provider
 	// call path while a concurrent goroutine could observe the Loop.
 	finalTurn atomic.Bool
+
+	// goalMu guards goalFrameText.
+	goalMu sync.Mutex
+	// goalFrameText holds the user's original request for the session — the
+	// first user message. Run captures it from the full on-disk history at the
+	// top of every turn (before compaction, which only trims the in-memory
+	// history) and systemPrompt re-injects it as the active-goal frame so the
+	// agent stays anchored to what the user asked for even after the opening
+	// messages have scrolled out of the conversation. It is read on the provider
+	// call path and written by Run, so a mutex guards it.
+	goalFrameText string
 }
 
 // New constructs a Loop from cfg.
@@ -516,7 +552,7 @@ func (l *Loop) fitHistory(ctx context.Context, history []message.Message) ([]mes
 		return history, nil
 	}
 
-	budget := fitBudget(window, l.cfg.SystemPrompt)
+	budget := fitBudget(window, l.framedSystemPrompt())
 	if fitsBudget(history, budget) {
 		return history, nil
 	}
@@ -606,6 +642,13 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	if len(history) == 1 {
 		l.fireHook(runCtx, hooks.SessionStart, hooks.SessionPayload{SessionID: sessionID})
 	}
+
+	// Capture the user's original goal from the FULL on-disk history (before
+	// compaction trims the in-memory copy) so systemPrompt can re-inject it as
+	// an active frame every turn. The on-disk history always retains the first
+	// user message, so this stays correct for the life of the session even once
+	// compaction has dropped that message from the working history.
+	l.setGoalFrame(firstUserGoal(history))
 
 	history = l.applyCompaction(history)
 
@@ -948,13 +991,85 @@ func (l *Loop) callProvider(ctx context.Context, history []message.Message) (mes
 // plan-mode instruction so the agent is prompted to produce a plan rather than
 // execute; once Approve clears plan mode, the base prompt is used unchanged.
 func (l *Loop) systemPrompt() string {
+	base := l.framedSystemPrompt()
 	if l.finalTurn.Load() {
-		return l.cfg.SystemPrompt + maxStepsPrompt
+		return base + maxStepsPrompt
 	}
 	if l.planMode.Load() {
-		return l.cfg.SystemPrompt + planModePrompt
+		return base + planModePrompt
 	}
-	return l.cfg.SystemPrompt
+	return base
+}
+
+// framedSystemPrompt returns the base system prompt with the active-goal frame
+// appended when one has been captured. It is the stable prefix shared by every
+// provider call this turn (the plan-mode and max-steps reminders are layered on
+// top in systemPrompt), so fitHistory budgets against it to reserve room for the
+// re-injected goal.
+func (l *Loop) framedSystemPrompt() string {
+	base := l.cfg.SystemPrompt
+	if goal := l.goalFrame(); goal != "" {
+		base += goalFrameHeader + goal + goalFrameFooter
+	}
+	return base
+}
+
+// goalFrame returns the captured active-goal text, or "" when none has been set.
+func (l *Loop) goalFrame() string {
+	l.goalMu.Lock()
+	defer l.goalMu.Unlock()
+	return l.goalFrameText
+}
+
+// setGoalFrame records the active-goal text re-injected by systemPrompt.
+func (l *Loop) setGoalFrame(text string) {
+	l.goalMu.Lock()
+	defer l.goalMu.Unlock()
+	l.goalFrameText = text
+}
+
+// firstUserGoal returns the trimmed text of the first user message in history,
+// truncated to maxGoalFrameRunes, or "" when no user message carries text. It is
+// the user's original objective that the Loop re-injects as the active-goal
+// frame each turn.
+func firstUserGoal(history []message.Message) string {
+	for _, m := range history {
+		if m.Role != message.RoleUser {
+			continue
+		}
+		text := strings.TrimSpace(messageText(m))
+		if text == "" {
+			continue
+		}
+		runes := []rune(text)
+		if len(runes) > maxGoalFrameRunes {
+			return string(runes[:maxGoalFrameRunes]) + "…"
+		}
+		return text
+	}
+	return ""
+}
+
+// messageText concatenates the text blocks of m in order, separating them with
+// newlines. Non-text blocks (tool calls, attachments) are ignored.
+func messageText(m message.Message) string {
+	var b strings.Builder
+	for _, block := range m.Content {
+		var text string
+		switch t := block.(type) {
+		case message.TextBlock:
+			text = t.Text
+		case *message.TextBlock:
+			text = t.Text
+		default:
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(text)
+	}
+	return b.String()
 }
 
 func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCall) (result tools.Result) {

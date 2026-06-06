@@ -111,7 +111,11 @@ func TestCompactReplacesProviderHistoryPreservesInvariantsAndDisk(t *testing.T) 
 	req := provider.reqs[0]
 
 	// (b) The system prompt is preserved (carried separately, never compacted).
-	require.Equal(t, "SYSTEM-PROMPT-SENTINEL-b8c9", req.SystemPrompt)
+	// It leads with the base prompt and carries the re-injected active-goal frame.
+	require.True(t, strings.HasPrefix(req.SystemPrompt, "SYSTEM-PROMPT-SENTINEL-b8c9"),
+		"system prompt must lead with the base prompt")
+	require.Contains(t, req.SystemPrompt, "Active goal for this session",
+		"system prompt must carry the re-injected goal frame")
 
 	// (a) The provider request uses the stub's condensed history.
 	require.True(t, reqContains(req, "CONDENSED-SUMMARY-MARKER-d4e5"),

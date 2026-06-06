@@ -104,6 +104,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"ginkgo --focus 'Book'":                      runnerGinkgo,
 		"go run github.com/onsi/ginkgo/v2/ginkgo -r": runnerGinkgo,
 		"echo the ginkgoes sway":                     runnerNone,
+		"jasmine":                                    runnerJasmine,
+		"npx jasmine":                                runnerJasmine,
+		"node_modules/.bin/jasmine spec/foo_spec.js": runnerJasmine,
 		"echo forge testbed":                         runnerNone,
 		"echo subtle differences":                    runnerNone,
 		"echo rake testing notes":                    runnerNone,
@@ -1698,6 +1701,73 @@ func TestParseGinkgoFailures_Deduplicates(t *testing.T) {
 		{Name: "Widget renders [It] draws a border", Detail: "/app/widget_test.go:12"},
 	}
 	assertFailures(t, got, want)
+}
+
+func TestParseJasmineFailures(t *testing.T) {
+	out := `Randomized with seed 12345
+Started
+F.F
+
+
+Failures:
+1) A calculator adds two numbers
+  Message:
+    Expected 3 to be 4.
+  Stack:
+    Error: Expected 3 to be 4.
+        at <Jasmine>
+        at UserContext.<anonymous> (spec/calcSpec.js:5:21)
+
+2) A calculator throws on divide by zero
+  Message:
+    Expected function to throw an Error.
+  Stack:
+    Error: Expected function to throw an Error.
+        at UserContext.<anonymous> (spec/calcSpec.js:12:30)
+
+3 specs, 2 failures
+Finished in 0.012 seconds`
+	got := parseTestFailures("npx jasmine", out)
+	want := []testFailure{
+		{Name: "A calculator adds two numbers", Detail: "Expected 3 to be 4."},
+		{Name: "A calculator throws on divide by zero", Detail: "Expected function to throw an Error."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseJasmineFailures_IgnoresPendingSection(t *testing.T) {
+	// Jasmine lists pending specs in their own "Pending:" block using the same
+	// "N) <name>" numbering as failures; only the "Failures:" block is parsed, and
+	// the scan stops at the "Pending:" header so a pending spec is never counted.
+	out := `Failures:
+1) Widget renders a border
+  Message:
+    Expected '' to be 'solid'.
+  Stack:
+    Error: ...
+
+Pending:
+1) Widget animates
+  Temporarily disabled with xit
+
+2 specs, 1 failure, 1 pending spec`
+	got := parseTestFailures("jasmine", out)
+	want := []testFailure{
+		{Name: "Widget renders a border", Detail: "Expected '' to be 'solid'."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseJasmineFailures_NoFailures(t *testing.T) {
+	// A passing run prints no "Failures:" block, so nothing is extracted.
+	out := `Started
+...
+
+3 specs, 0 failures
+Finished in 0.004 seconds`
+	if got := parseTestFailures("jasmine", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
 }
 
 func assertFailures(t *testing.T, got, want []testFailure) {

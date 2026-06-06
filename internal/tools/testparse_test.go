@@ -190,6 +190,65 @@ testing.tRunner.func1.2(...)
 	assertFailures(t, got, want)
 }
 
+func TestParseGoTestFailures_UnrecoveredPanic(t *testing.T) {
+	// A test that panics without recovering crashes the test binary before Go can
+	// print a "--- FAIL:" line, so the only signal is the bare column-0 "panic:"
+	// line plus the goroutine stack. The panicking test must be recovered from the
+	// stack frame naming it, with the panic message as the detail.
+	out := `=== RUN   TestExplodes
+panic: runtime error: index out of range [3] with length 3
+
+goroutine 6 [running]:
+github.com/x/y.TestExplodes(0xc000102000)
+	/home/x/y/explode_test.go:12 +0x18
+testing.tRunner(0xc000102000, 0x5f1234)
+	/usr/local/go/src/testing/testing.go:1576 +0x10b
+created by testing.(*T).Run in goroutine 1
+	/usr/local/go/src/testing/testing.go:1629 +0x3ea
+exit status 2
+FAIL	github.com/x/y	0.005s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestExplodes", Detail: "panic: runtime error: index out of range [3] with length 3"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_UnrecoveredPanicSubtestClosure(t *testing.T) {
+	// A panic inside a subtest closure surfaces a "...TestName.funcN(" frame; the
+	// parent test name (not the closure suffix) should be recovered, and a panic
+	// with no test in its stack (a background goroutine) is left unattributed.
+	out := `panic: send on closed channel
+
+goroutine 9 [running]:
+github.com/x/y.TestServer.func2(0xc000130000)
+	/home/x/y/server_test.go:44 +0x5c
+testing.tRunner(0xc000130000, 0xc00009e000)
+	/usr/local/go/src/testing/testing.go:1576 +0x10b
+exit status 2
+FAIL	github.com/x/y	0.030s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestServer", Detail: "panic: send on closed channel"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_PanicNoTestInStack(t *testing.T) {
+	// A panic whose stack names no test function (raised in an unrelated runtime
+	// goroutine) cannot be attributed, so no spurious failure is invented.
+	out := `panic: close of nil channel
+
+goroutine 1 [running]:
+main.run(...)
+	/home/x/y/main.go:9
+exit status 2`
+	got := parseTestFailures("go test ./...", out)
+	if len(got) != 0 {
+		t.Fatalf("expected no failures for an unattributable panic, got %#v", got)
+	}
+}
+
 func TestParseGoTestFailures_JSON(t *testing.T) {
 	// `go test -json` wraps every line in an event object, so the text "--- FAIL:"
 	// matcher never fires; the JSON parser keys on "fail" events instead and pulls

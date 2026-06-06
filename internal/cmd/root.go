@@ -4,13 +4,22 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/app"
+	"github.com/arbazkhan971/bharatcode/internal/offline"
+	"github.com/arbazkhan971/bharatcode/internal/selfupdate"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tui"
 	"github.com/spf13/cobra"
 )
+
+// startupUpdateTimeout bounds the opt-in auto-update probe+install at launch so
+// a slow or unreachable network can never delay the TUI by more than a moment.
+// The whole step is best-effort: any failure is a non-fatal warning.
+const startupUpdateTimeout = 6 * time.Second
 
 type rootOptions struct {
 	configPath      string
@@ -72,6 +81,10 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 			defer closeApp(ctx, application)
+			// Opt-in, best-effort self-update before the TUI takes over the
+			// screen. Gated to the interactive path so non-interactive commands
+			// and tests never trigger a network self-replace.
+			maybeAutoUpdate(ctx, application, opts, cmd.ErrOrStderr())
 			initialSessionID := resolveInitialSession(ctx, application, opts)
 			if err := runTUI(ctx, application, initialSessionID); err != nil {
 				return fmt.Errorf("running tui: %w", err)
@@ -157,4 +170,58 @@ func closeApp(ctx context.Context, application *app.App) {
 		return
 	}
 	_ = application.Close(ctx)
+}
+
+// maybeAutoUpdate performs the opt-in startup self-update. It is intentionally
+// conservative and silent unless something happens: it returns immediately
+// unless every guard passes — config Options.AutoUpdate is set, the process is
+// not offline, the build carries a real stamped version/commit (so a dev or
+// `go install` build never nags or mutates itself), and stdout is an
+// interactive terminal (so pipes, CI, and tests never trigger a network
+// self-replace). When all hold it runs a time-bounded check and, if a newer
+// release exists, downloads and installs it in place, printing a single-line
+// notice. The new binary takes effect on the next launch; the running process
+// is deliberately not re-executed. Every failure is a non-fatal warning that
+// never blocks startup.
+func maybeAutoUpdate(ctx context.Context, application *app.App, opts *rootOptions, warn io.Writer) {
+	if application == nil || application.Cfg == nil {
+		return
+	}
+	if !application.Cfg.Options.AutoUpdate {
+		return
+	}
+	if (opts != nil && opts.offline) || offline.EnabledFromEnv() {
+		return
+	}
+	// Only a real release build (stamped version + commit) should self-update.
+	if version == "" || commit == "" || commit == "0000000" {
+		return
+	}
+	if !stdoutIsTerminal() {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, startupUpdateTimeout)
+	defer cancel()
+
+	status, err := selfupdate.Check(ctx, selfupdate.DefaultAPIURL, commit)
+	if err != nil || !status.UpdateAvailable {
+		return
+	}
+	if err := selfupdate.Apply(ctx, selfupdate.ApplyOptions{}); err != nil {
+		_, _ = fmt.Fprintf(warn, "bharatcode: auto-update skipped: %v\n", err)
+		return
+	}
+	_, _ = fmt.Fprintln(warn, "bharatcode: updated to the latest release; restart to use it.")
+}
+
+// stdoutIsTerminal reports whether standard output is an interactive character
+// device. It is the guard that keeps the startup self-update off the network in
+// non-interactive contexts (pipes, redirects, CI, unit tests).
+func stdoutIsTerminal() bool {
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }

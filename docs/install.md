@@ -74,6 +74,41 @@ make build        # stamps version + commit into the binary
 ./bin/bharatcode version
 ```
 
+## Upgrading
+
+If you installed with a package manager, prefer its own upgrade path
+(`brew upgrade bharatcode`, `npm install -g bharatcode`, re-running the install
+script, etc.). Otherwise BharatCode can update itself in place:
+
+```sh
+bharatcode update            # check only: reports whether a newer build exists
+bharatcode update --apply    # download the latest release and replace this binary
+```
+
+`--apply` downloads the release archive for your platform, verifies it against
+the release's published SHA-256 `checksums.txt` (a checksum mismatch or a
+missing manifest is a hard failure — it never installs unverified bytes), then
+atomically swaps the new binary over the running one. Restart `bharatcode`
+afterwards to run the new version. Both `update` and `update --apply` are
+disabled in offline mode, which forbids the network access they require.
+
+To have BharatCode check on startup and self-update automatically, opt in via
+config:
+
+```json
+{
+  "options": {
+    "auto_update": true
+  }
+}
+```
+
+With `auto_update` enabled, an interactive launch does a brief, best-effort
+check and, if a newer release exists, installs it in the background and prints a
+one-line notice; the update takes effect the next time you start BharatCode. The
+check is skipped in offline mode and for unstamped builds (such as
+`go install`), and any failure is a non-fatal warning that never blocks startup.
+
 ## Verify
 
 ```sh

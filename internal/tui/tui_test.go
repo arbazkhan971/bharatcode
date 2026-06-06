@@ -239,14 +239,32 @@ func TestAgentList_MarksActiveAgent(t *testing.T) {
 // TestScrollStatus_OnlyWhenScrolledUp asserts the scroll segment is empty at the
 // bottom (the common case keeps the status bar unchanged) and reports the count
 // of newer lines hidden below once the view is scrolled up, with singular/plural
-// agreement.
+// agreement. An unknown scrollable range (maxScroll 0) shows the bare count with
+// no position suffix.
 func TestScrollStatus_OnlyWhenScrolledUp(t *testing.T) {
 	t.Parallel()
 
-	require.Empty(t, scrollStatus(0), "an anchored view must add no scroll segment")
-	require.Empty(t, scrollStatus(-3), "a clamped-negative offset must add no segment")
-	require.Equal(t, "↓ 1 line below", scrollStatus(1))
-	require.Equal(t, "↓ 12 lines below", scrollStatus(12))
+	require.Empty(t, scrollStatus(0, 0), "an anchored view must add no scroll segment")
+	require.Empty(t, scrollStatus(-3, 10), "a clamped-negative offset must add no segment")
+	require.Equal(t, "↓ 1 line below", scrollStatus(1, 0))
+	require.Equal(t, "↓ 12 lines below", scrollStatus(12, 0))
+}
+
+// TestScrollStatus_PositionSuffix asserts the "N% back" suffix reports the
+// reading position as scroll over maxScroll, so the raw line count is
+// contextualized against the whole scrollback the way a pager prints its
+// position. The percentage rounds to nearest, is floored at 1% while scrolled so
+// it never reads 0% off the bottom, and is capped at 100% at the very top.
+func TestScrollStatus_PositionSuffix(t *testing.T) {
+	t.Parallel()
+
+	// Halfway up a 24-line scrollback: 12/24 rounds to 50%.
+	require.Equal(t, "↓ 12 lines below · 50% back", scrollStatus(12, 24))
+	// At the very top the view is the full distance back.
+	require.Equal(t, "↓ 24 lines below · 100% back", scrollStatus(24, 24))
+	// A single line up a long history rounds toward 0 but is floored at 1%, so the
+	// suffix never falsely implies the view is anchored.
+	require.Equal(t, "↓ 1 line below · 1% back", scrollStatus(1, 500))
 }
 
 // TestRunningStatus_OnlyWhileTurnInFlight asserts the working segment is empty

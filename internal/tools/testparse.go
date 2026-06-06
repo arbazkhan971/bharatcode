@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // testFailure is one failed test extracted from a test-runner's output. Name is
@@ -2123,10 +2124,21 @@ func parseGinkgoFailures(output string) []testFailure {
 // explicit rather than silent.
 const maxSummarizedFailures = 50
 
+// maxFailureDetailWidth bounds the length of a single failure's detail line in
+// the inline summary. A detail is one line of runner output, but that line can
+// be arbitrarily long — an assertion that prints a large expected-vs-actual diff
+// or a deeply nested value renders as a single multi-hundred-character string.
+// Rendering it verbatim per failure floods the bash result and the model's
+// context. The untruncated detail is always preserved in
+// Metadata[MetadataTestFailures], so nothing is lost — only the inline render is
+// clipped, with a trailing ellipsis so the truncation is explicit.
+const maxFailureDetailWidth = 200
+
 // summarizeTestFailures renders a compact, agent-friendly block listing the
 // failed tests (and their detail line when known). At most maxSummarizedFailures
 // entries are shown; any beyond that are collapsed into a "... and N more" line.
-// Returns "" for no failures.
+// Each detail is clipped to maxFailureDetailWidth runes. Returns "" for no
+// failures.
 func summarizeTestFailures(failures []testFailure) string {
 	if len(failures) == 0 {
 		return ""
@@ -2139,7 +2151,7 @@ func summarizeTestFailures(failures []testFailure) string {
 	}
 	for _, f := range shown {
 		if f.Detail != "" {
-			fmt.Fprintf(&b, "\n  %s — %s", f.Name, f.Detail)
+			fmt.Fprintf(&b, "\n  %s — %s", f.Name, truncateDetail(f.Detail))
 		} else {
 			fmt.Fprintf(&b, "\n  %s", f.Name)
 		}
@@ -2148,4 +2160,15 @@ func summarizeTestFailures(failures []testFailure) string {
 		fmt.Fprintf(&b, "\n  ... and %d more", remaining)
 	}
 	return b.String()
+}
+
+// truncateDetail clips detail to maxFailureDetailWidth runes, appending a
+// single-character ellipsis when it had to cut. The cut lands on a rune boundary
+// so multi-byte content is never split mid-character.
+func truncateDetail(detail string) string {
+	if utf8.RuneCountInString(detail) <= maxFailureDetailWidth {
+		return detail
+	}
+	runes := []rune(detail)
+	return string(runes[:maxFailureDetailWidth]) + "…"
 }

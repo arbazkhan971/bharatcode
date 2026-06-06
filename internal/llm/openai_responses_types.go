@@ -137,10 +137,24 @@ type responsesUsage struct {
 // toUsage maps the Responses usage object onto BharatCode's provider-neutral
 // Usage. Cached input tokens populate CacheReadTokens; the Responses API does
 // not report a cache-write count.
+//
+// input_tokens is the total prompt size *including* the cached portion
+// (cached_tokens is a subset nested under input_tokens_details), whereas the
+// ledger prices InputTokens and CacheReadTokens additively (the Anthropic
+// convention, where input_tokens already excludes the cached portion). Subtract
+// the cached tokens back out so they are billed once at the cache rate rather
+// than twice. Clamp at zero against a malformed response where the cached count
+// exceeds the input total. Mirrors the same correction on the chat/completions
+// and Gemini paths.
 func (u responsesUsage) toUsage() Usage {
+	cacheRead := u.InputTokensDetails.CachedTokens
+	input := u.InputTokens - cacheRead
+	if input < 0 {
+		input = 0
+	}
 	return Usage{
-		InputTokens:     u.InputTokens,
+		InputTokens:     input,
 		OutputTokens:    u.OutputTokens,
-		CacheReadTokens: u.InputTokensDetails.CachedTokens,
+		CacheReadTokens: cacheRead,
 	}
 }

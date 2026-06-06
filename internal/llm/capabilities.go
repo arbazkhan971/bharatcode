@@ -622,6 +622,16 @@ var contextWindowRules = []struct {
 	{"nova", 300_000},
 	// AI21 Jamba 1.5 (Large/Mini, also Bedrock-served) exposes a 256k window.
 	{"jamba", 256_000},
+	// Writer Palmyra (served via the Writer API, Amazon Bedrock, and OpenRouter)
+	// — the Palmyra X5 flagship ships a 1M-token window, its headline feature,
+	// while Palmyra X4 and the rest of the line (Med/Fin/Creative) stay at 128k.
+	// Both ids carry the bare "palmyra" marker, so the specific "palmyra-x5" rule
+	// must precede the family one to avoid resolving the flagship to an ~8x
+	// undercount. The "palmyra" marker shares no substring with any rule above, so
+	// without these rules the ids fall through to "unknown" (0) when a user adds
+	// them (commonly via Bedrock or OpenRouter) without an explicit context_window.
+	{"palmyra-x5", 1_000_000},
+	{"palmyra", 128_000},
 	// Indian-built models served via openai_compatible. Sarvam's flagship (sarvam-m)
 	// ships a 32k window; Krutrim's spectre line an 8k window. Neither id contains a
 	// broader family marker above, so without these rules they fall through to

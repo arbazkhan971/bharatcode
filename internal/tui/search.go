@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -18,6 +19,7 @@ import (
 // term; current points at the active match within matches.
 type searchState struct {
 	term    string
+	re      *regexp.Regexp // non-nil when the query was a /pattern/ regex term
 	matches []int
 	current int
 	// wrapped records whether the most recent next/previous-match jump rolled
@@ -55,6 +57,7 @@ func (s *searchState) statusSegment() string {
 // reset clears the search so the viewport is no longer pinned to a match.
 func (s *searchState) reset() {
 	s.term = ""
+	s.re = nil
 	s.matches = nil
 	s.current = 0
 	s.wrapped = false
@@ -67,6 +70,11 @@ func (s *searchState) reset() {
 // argument it advances to the next match of the active term, or explains that a
 // term is required when nothing is being searched. A term with no match clears
 // any prior search and reports that nothing was found.
+//
+// When the argument is wrapped in /…/ or /…/i it is compiled as a regular
+// expression, following the vim search convention. An 'i' flag after the
+// closing slash makes the pattern case-insensitive. An invalid pattern is
+// reported through a dialog instead of silently matching nothing.
 func (m *model) handleSearch(text string) (tea.Model, tea.Cmd) {
 	_, term := splitSlash(text)
 	term = strings.TrimSpace(term)
@@ -77,7 +85,7 @@ func (m *model) handleSearch(text string) (tea.Model, tea.Cmd) {
 		if m.search.active() {
 			return m.searchNext(), nil
 		}
-		m.dialogs.Push(&dialog.Text{DialogID: "search", Title: "Search", Body: "Usage: /search <term>", Theme: m.theme})
+		m.dialogs.Push(&dialog.Text{DialogID: "search", Title: "Search", Body: "Usage: /search <term>  or  /search /regex/[i]", Theme: m.theme})
 		return m, nil
 	}
 
@@ -87,7 +95,50 @@ func (m *model) handleSearch(text string) (tea.Model, tea.Cmd) {
 		return m.searchNext(), nil
 	}
 
+	// /pattern/ or /pattern/i triggers regex mode.
+	re, err := parseRegexTerm(term)
+	if err != nil {
+		m.dialogs.Push(&dialog.Text{
+			DialogID: "search",
+			Title:    "Search",
+			Body:     fmt.Sprintf("Invalid regex %q: %s", term, err),
+			Theme:    m.theme,
+		})
+		return m, nil
+	}
+	if re != nil {
+		return m.startSearchRe(term, re), nil
+	}
+
 	return m.startSearch(term), nil
+}
+
+// parseRegexTerm returns a compiled *regexp.Regexp when term follows the
+// vim-style /pattern/ or /pattern/i syntax (starts with '/' and ends with '/'
+// or '/i'). The trailing 'i' flag prepends (?i) to make the pattern
+// case-insensitive. A term that does not match the /…/ envelope returns nil,
+// nil so the caller falls back to literal search. An invalid pattern returns
+// nil plus the compilation error so the caller can surface it to the user.
+func parseRegexTerm(term string) (*regexp.Regexp, error) {
+	if len(term) < 3 || term[0] != '/' {
+		return nil, nil
+	}
+	inner := term[1:]
+	flags := ""
+	switch {
+	case strings.HasSuffix(inner, "/i"):
+		inner = inner[:len(inner)-2]
+		flags = "(?i)"
+	case strings.HasSuffix(inner, "/"):
+		inner = inner[:len(inner)-1]
+	default:
+		return nil, nil // no closing slash — treat as literal
+	}
+	re, err := regexp.Compile(flags + inner)
+	if err != nil {
+		return nil, err
+	}
+	return re, nil
 }
 
 // startSearch begins a fresh search for term, computing the matching lines
@@ -113,6 +164,33 @@ func (m *model) startSearch(term string) tea.Model {
 		DialogID: "search",
 		Title:    "Search",
 		Body:     fmt.Sprintf("Match 1 of %d for %q. /search again or Ctrl+/ for next; Ctrl+\\ for previous; Esc to clear.", len(matches), term),
+		Theme:    m.theme,
+	})
+	return m
+}
+
+// startSearchRe begins a fresh regex search. displayTerm is the original user
+// input (e.g. "/foo.*/i") stored in the state for same-term advance detection;
+// re is the compiled pattern used for matching and highlighting.
+func (m *model) startSearchRe(displayTerm string, re *regexp.Regexp) tea.Model {
+	matches := chat.SearchLinesRe(m.renderedChatBody(), re)
+	if len(matches) == 0 {
+		m.search.reset()
+		m.dialogs.Push(&dialog.Text{
+			DialogID: "search",
+			Title:    "Search",
+			Body:     fmt.Sprintf("No matches for %q.", displayTerm),
+			Theme:    m.theme,
+		})
+		return m
+	}
+
+	m.search = searchState{term: displayTerm, re: re, matches: matches, current: 0}
+	m.scrollToMatch()
+	m.dialogs.Push(&dialog.Text{
+		DialogID: "search",
+		Title:    "Search",
+		Body:     fmt.Sprintf("Match 1 of %d for %q. /search again or Ctrl+/ for next; Ctrl+\\ for previous; Esc to clear.", len(matches), displayTerm),
 		Theme:    m.theme,
 	})
 	return m
@@ -204,7 +282,11 @@ func (m *model) highlightMatches(body string) string {
 		if idx == current {
 			style = m.theme.Match
 		}
-		lines[idx] = highlightTerm(lines[idx], m.search.term, style)
+		if m.search.re != nil {
+			lines[idx] = highlightTermRe(lines[idx], m.search.re, style)
+		} else {
+			lines[idx] = highlightTerm(lines[idx], m.search.term, style)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -240,6 +322,19 @@ func highlightTerm(line, term string, style lipgloss.Style) string {
 		i++
 	}
 	return b.String()
+}
+
+// highlightTermRe wraps every substring of line matched by re with style,
+// leaving non-matching text unchanged. It is the regex counterpart to
+// highlightTerm and is used when the active search was entered as /pattern/.
+// An empty match (zero-length) is skipped to avoid an infinite loop.
+func highlightTermRe(line string, re *regexp.Regexp, style lipgloss.Style) string {
+	return re.ReplaceAllStringFunc(line, func(match string) string {
+		if match == "" {
+			return match
+		}
+		return style.Render(match)
+	})
 }
 
 // matchesTerm reports whether the leading runes of s equal sub, comparing under

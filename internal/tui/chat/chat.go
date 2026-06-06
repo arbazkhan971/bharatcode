@@ -3,6 +3,7 @@ package chat
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -213,6 +214,23 @@ func SearchFold(term string) bool {
 		}
 	}
 	return true
+}
+
+// SearchLinesRe reports the indices of lines in text that match re, following
+// the same "\n"-split line space as SearchLines so the returned indices can be
+// used interchangeably with those from SearchLines to scroll and highlight. A
+// pattern that matches nothing, or an empty text, returns nil.
+func SearchLinesRe(text string, re *regexp.Regexp) []int {
+	if re == nil {
+		return nil
+	}
+	var matches []int
+	for i, line := range strings.Split(text, "\n") {
+		if re.MatchString(line) {
+			matches = append(matches, i)
+		}
+	}
+	return matches
 }
 
 // Render returns the rendered message list for width.

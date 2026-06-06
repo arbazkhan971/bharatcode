@@ -5,7 +5,9 @@
       "type": "anthropic",
       "api_key_env": "ANTHROPIC_API_KEY",
       "models": [
-        "claude-sonnet-4-5"
+        "claude-sonnet-4-5",
+        "claude-opus-4-5",
+        "claude-haiku-4-5"
       ]
     },
     {
@@ -16,6 +18,7 @@
         "gpt-4o",
         "gpt-4o-mini",
         "gpt-4.1",
+        "gpt-4.1-mini",
         "o3",
         "o4-mini"
       ]
@@ -112,6 +115,8 @@
       "base_url": "https://api.x.ai/v1",
       "api_key_env": "XAI_API_KEY",
       "models": [
+        "grok-3",
+        "grok-3-mini",
         "grok-2-latest"
       ]
     },
@@ -226,11 +231,29 @@
   ],
   "models": [
     {
+      "id": "claude-opus-4-5",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 15.00,
+      "output_price_per_mtok_usd": 75.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
       "id": "claude-sonnet-4-5",
       "provider": "anthropic",
       "context_window": 200000,
       "input_price_per_mtok_usd": 3.00,
       "output_price_per_mtok_usd": 15.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 0.80,
+      "output_price_per_mtok_usd": 4.00,
       "supports_images": true,
       "supports_tools": true
     },
@@ -258,6 +281,15 @@
       "context_window": 1047576,
       "input_price_per_mtok_usd": 2.00,
       "output_price_per_mtok_usd": 8.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "gpt-4.1-mini",
+      "provider": "openai",
+      "context_window": 1047576,
+      "input_price_per_mtok_usd": 0.40,
+      "output_price_per_mtok_usd": 1.60,
       "supports_images": true,
       "supports_tools": true
     },
@@ -397,6 +429,24 @@
       "supports_images": true,
       "supports_tools": true,
       "thinking_budget": 16384
+    },
+    {
+      "id": "grok-3",
+      "provider": "xai",
+      "context_window": 131072,
+      "input_price_per_mtok_usd": 3.00,
+      "output_price_per_mtok_usd": 15.00,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "grok-3-mini",
+      "provider": "xai",
+      "context_window": 131072,
+      "input_price_per_mtok_usd": 0.30,
+      "output_price_per_mtok_usd": 0.50,
+      "supports_images": false,
+      "supports_tools": true
     },
     {
       "id": "grok-2-latest",

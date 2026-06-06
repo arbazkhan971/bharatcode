@@ -122,7 +122,16 @@ func TestInferContextWindow(t *testing.T) {
 		// default (32k) and not "unknown" (0).
 		{"magistral-small-2506", 128_000},
 		{"magistral-medium-latest", 128_000},
-		{"qwen2.5-coder", 32_768},
+		// Qwen2.5 and Qwen2 open-weight models (7B+) ship a 131k window; the
+		// "qwen2.5"/"qwen2" rules must win over the bare "qwen" family default (32k).
+		{"qwen2.5-coder-32b-instruct", 131_072},
+		{"qwen2.5-72b-instruct", 131_072},
+		{"qwen2.5-7b-instruct", 131_072},
+		// OpenRouter vendor-namespaced forms must resolve the same way.
+		{"qwen/qwen2.5-72b-instruct", 131_072},
+		// Qwen2 (previous generation) also ships a 131k window on 7B+ variants.
+		{"qwen2-72b-instruct", 131_072},
+		{"qwen2-7b-instruct", 131_072},
 		// Qwen3 lifted the window past the 32k Qwen2.x default: Qwen3-Coder is 256k
 		// and the Qwen3 2507 instruct line 128k. Both ids carry the "qwen" marker, so
 		// the specific rules must win over the family default rather than fall to 32k.
@@ -150,8 +159,6 @@ func TestInferContextWindow(t *testing.T) {
 		{"qwen-plus", 131_072},
 		{"qwen-plus-latest", 131_072},
 		{"qwen-max", 32_768},
-		// Qwen2.x ids still resolve to the conservative 32k family default.
-		{"qwen2.5-72b-instruct", 32_768},
 		// Qwen's QwQ reasoning and QVQ vision-reasoning lines ship a 128k window but
 		// their ids carry no "qwen" marker, so without dedicated rules they would
 		// fall through to "unknown" (0).

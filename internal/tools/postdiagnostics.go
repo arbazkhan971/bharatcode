@@ -95,6 +95,9 @@ func postWriteDiagnostics(ctx context.Context, src editDiagnoser, workDir, path 
 		truncated = len(shown) - maxPostWriteDiagnostics
 		shown = shown[:maxPostWriteDiagnostics]
 	}
+	// Cache file contents so the offending source line can be shown beneath each
+	// diagnostic without re-reading a file once per diagnostic it carries.
+	lineCache := map[string][]string{}
 	for _, d := range shown {
 		fmt.Fprintf(
 			&b, "%s:%d:%d: %s: %s",
@@ -106,6 +109,15 @@ func postWriteDiagnostics(ctx context.Context, src editDiagnoser, workDir, path 
 		)
 		b.WriteString(diagnosticTail(d))
 		b.WriteByte('\n')
+		// Surface the offending source line indented beneath the message so the
+		// model sees the code at fault without a separate view, matching the
+		// diagnostics tool and goose/opencode. Omitted when the file or line
+		// cannot be read.
+		if snippet := sourceLine(lineCache, d.Path, d.Range.Start.Line); snippet != "" {
+			b.WriteString("    ")
+			b.WriteString(snippet)
+			b.WriteByte('\n')
+		}
 	}
 	if truncated > 0 {
 		fmt.Fprintf(&b, "… and %d more\n", truncated)

@@ -93,7 +93,7 @@ func (t *webFetchTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return errorResult("invalid web_fetch arguments: " + err.Error()), nil
 	}
-	args.URL = strings.TrimSpace(args.URL)
+	args.URL = rewriteGitHubURL(strings.TrimSpace(args.URL))
 	if args.URL == "" {
 		return errorResult("url is required"), nil
 	}
@@ -160,6 +160,7 @@ func FetchPageText(ctx context.Context, rawURL string, maxBytes int) (text strin
 	if maxBytes <= 0 || maxBytes > hardLimit {
 		maxBytes = hardLimit
 	}
+	rawURL = rewriteGitHubURL(rawURL)
 	parsed, parseErr := url.Parse(rawURL)
 	if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" ||
 		(parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -191,6 +192,74 @@ func FetchPageText(ctx context.Context, rawURL string, maxBytes int) (text strin
 		content = htmlToMarkdown(content)
 	}
 	return strings.TrimSpace(content), truncated, nil
+}
+
+// rewriteGitHubURL converts GitHub viewer URLs to their raw-content equivalents
+// so web_fetch returns file text directly rather than GitHub's navigation-heavy
+// HTML page. The rewrite is transparent: fetched content is identical to what
+// the "Raw" button on GitHub delivers.
+//
+// Conversions performed:
+//
+//	github.com/owner/repo/blob/ref[/path] → raw.githubusercontent.com/owner/repo/ref[/path]
+//	github.com/owner/repo/raw/ref[/path]  → raw.githubusercontent.com/owner/repo/ref[/path]
+//	gist.github.com/user/id               → gist.github.com/user/id/raw
+//
+// Line-number anchors (e.g. #L42-L58) are stripped because they are
+// meaningless to the raw-content server. All other URLs are returned unchanged.
+func rewriteGitHubURL(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	host := strings.ToLower(u.Host)
+
+	// gist.github.com/user/id → gist.github.com/user/id/raw
+	if host == "gist.github.com" {
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		// Exactly two segments means it's a gist root page; three segments
+		// (user/id/raw) or more is already raw or a specific file — leave alone.
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			rewritten := *u
+			rewritten.Path = "/" + parts[0] + "/" + parts[1] + "/raw"
+			rewritten.Fragment = ""
+			return rewritten.String()
+		}
+		return rawURL
+	}
+
+	if host != "github.com" && host != "www.github.com" {
+		return rawURL
+	}
+
+	// Split at most into 5 segments: owner, repo, viewType, ref, rest-of-path.
+	trimmed := strings.TrimPrefix(u.Path, "/")
+	parts := strings.SplitN(trimmed, "/", 5)
+	if len(parts) < 4 {
+		return rawURL
+	}
+	owner, repo, viewType, ref := parts[0], parts[1], parts[2], parts[3]
+	if owner == "" || repo == "" || ref == "" {
+		return rawURL
+	}
+
+	switch viewType {
+	case "blob", "raw":
+		rewritten := *u
+		rewritten.Host = "raw.githubusercontent.com"
+		filePath := ""
+		if len(parts) == 5 && parts[4] != "" {
+			filePath = "/" + parts[4]
+		}
+		rewritten.Path = "/" + owner + "/" + repo + "/" + ref + filePath
+		rewritten.Fragment = "" // strip line-number anchors like #L42-L58
+		return rewritten.String()
+	}
+	return rawURL
 }
 
 // shouldRenderHTML decides whether a fetched body should be reduced from HTML to

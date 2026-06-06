@@ -26,6 +26,11 @@ const (
 	EventTurnFinished
 	// EventRunError indicates an infrastructure error or recovered panic.
 	EventRunError
+	// EventAutoCompacted indicates the loop automatically compacted the
+	// conversation because the context fill percentage reached the configured
+	// threshold. The TUI surfaces this as an inline notice so users know why
+	// the visible history shrank.
+	EventAutoCompacted
 )
 
 // Event is published for significant agent-loop transitions.

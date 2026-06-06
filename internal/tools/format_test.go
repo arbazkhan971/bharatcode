@@ -77,6 +77,84 @@ func TestFormatAppliesEditsAndWritesFile(t *testing.T) {
 	require.Equal(t, "package main\nfunc f() {}\n", string(got))
 }
 
+func TestFormatSurfacesPostWriteDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFormatFile(t, dir, "package main\nfunc  f(){}\n")
+	src := &fakeFormat{edits: []lsp.TextEdit{
+		{
+			Range:   lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 2, Character: 0}},
+			NewText: "func f() {}\n",
+		},
+	}}
+	tool := &formatTool{
+		source: src,
+		deps:   Dependencies{WorkDir: dir},
+		diag: &fakeDiagnoser{diags: []lsp.Diagnostic{
+			diag(path, 0, 0, lsp.Error, "undefined: bar"),
+		}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The reformatted file is re-checked and its errors surfaced, both inline and
+	// in metadata, matching the edit/rename/codeactions tools.
+	require.Contains(t, result.Content, "Diagnostics after editing")
+	require.Contains(t, result.Content, "undefined: bar")
+	require.Contains(t, result.Metadata["diagnostics"], "undefined: bar")
+}
+
+func TestFormatPreviewSkipsDiagnosticsRecheck(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFormatFile(t, dir, "package main\nfunc  f(){}\n")
+	src := &fakeFormat{edits: []lsp.TextEdit{
+		{
+			Range:   lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 2, Character: 0}},
+			NewText: "func f() {}\n",
+		},
+	}}
+	diagnoser := &fakeDiagnoser{diags: []lsp.Diagnostic{
+		diag(path, 0, 0, lsp.Error, "undefined: bar"),
+	}}
+	tool := &formatTool{source: src, deps: Dependencies{WorkDir: dir}, diag: diagnoser}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go", "preview": true}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// A preview writes nothing, so the diagnoser must not be consulted and no
+	// diagnostics are appended.
+	require.Empty(t, diagnoser.changed)
+	require.NotContains(t, result.Content, "Diagnostics after editing")
+	require.Nil(t, result.Metadata["diagnostics"])
+}
+
+func TestFormatOmitsDiagnosticsWhenClean(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFormatFile(t, dir, "package main\nfunc  f(){}\n")
+	src := &fakeFormat{edits: []lsp.TextEdit{
+		{
+			Range:   lsp.Range{Start: lsp.Position{Line: 1, Character: 0}, End: lsp.Position{Line: 2, Character: 0}},
+			NewText: "func f() {}\n",
+		},
+	}}
+	// Only hint-level diagnostics: nothing actionable should be appended.
+	tool := &formatTool{
+		source: src,
+		deps:   Dependencies{WorkDir: dir},
+		diag: &fakeDiagnoser{diags: []lsp.Diagnostic{
+			diag(path, 0, 0, lsp.Hint, "consider simplifying"),
+		}},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.NotContains(t, result.Content, "Diagnostics after editing")
+	require.Nil(t, result.Metadata["diagnostics"])
+}
+
 func TestFormatPreviewShowsDiffWithoutWriting(t *testing.T) {
 	dir := t.TempDir()
 	original := "package main\nfunc  f(){}\n"

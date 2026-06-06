@@ -290,6 +290,77 @@ func TestPaletteBody_EmptyMatchMessage(t *testing.T) {
 	require.Contains(t, body, "no commands match")
 }
 
+// TestPaletteBody_ShowsShortcutForCommandWithKey asserts that the palette body
+// includes the keyboard shortcut hint for commands that have a slashCommandKeys
+// entry, so users learn the faster Ctrl+X path while browsing the palette.
+func TestPaletteBody_ShowsShortcutForCommandWithKey(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+
+	// Position the cursor on /model (the first command with a Ctrl+X shortcut).
+	// /model is within paletteBuiltinOrder; find its index so the cursor lands on it.
+	entries := m.allPaletteEntries()
+	modelIdx := -1
+	for i, e := range entries {
+		if e.name == "/model" {
+			modelIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqualf(t, modelIdx, 0, "/model must appear in allPaletteEntries")
+
+	m.paletteCursor = modelIdx
+	body := plainText(m.paletteBody())
+	require.Contains(t, body, "Ctrl+P", "palette body must show Ctrl+P shortcut next to /model (selected row)")
+}
+
+// TestPaletteBody_ShowsShortcutOnUnselectedRow asserts that palette rows that
+// are NOT selected also display their keyboard shortcut hint.
+func TestPaletteBody_ShowsShortcutOnUnselectedRow(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+
+	// Find /agent (Ctrl+A) and ensure it is NOT the selected row, but still
+	// within the visible window. Position the cursor one row after /agent.
+	entries := m.allPaletteEntries()
+	agentIdx := -1
+	for i, e := range entries {
+		if e.name == "/agent" {
+			agentIdx = i
+			break
+		}
+	}
+	require.GreaterOrEqualf(t, agentIdx, 0, "/agent must appear in allPaletteEntries")
+
+	// Select the row just after /agent so /agent is unselected but visible.
+	nextIdx := agentIdx + 1
+	if nextIdx >= len(entries) {
+		nextIdx = agentIdx - 1
+	}
+	m.paletteCursor = nextIdx
+	body := plainText(m.paletteBody())
+	require.Contains(t, body, "Ctrl+A", "palette body must show Ctrl+A shortcut next to unselected /agent row")
+}
+
+// TestPaletteBody_NoSpuriousShortcut asserts that a command without a
+// slashCommandKeys entry does NOT gain a shortcut hint in the palette body.
+func TestPaletteBody_NoSpuriousShortcut(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+
+	// /help has no slashCommandKeys entry and must not show any "(Ctrl+…)" suffix.
+	// Filter to just /help so it is the only visible row.
+	m.paletteFilter = "help"
+	m.paletteCursor = 0
+	body := plainText(m.paletteBody())
+	require.Contains(t, body, "/help", "/help must appear in the filtered palette")
+	// No shortcut should appear for /help.
+	for _, key := range slashCommandKeys {
+		require.NotContains(t, body, "("+key+")",
+			"palette body for /help must not show shortcut (%s) that belongs to another command", key)
+	}
+}
+
 // TestKeybindingGroups_IncludesPalette asserts the /keys overlay lists the
 // Ctrl+K command-palette binding so users can discover it from the help text.
 func TestKeybindingGroups_IncludesPalette(t *testing.T) {

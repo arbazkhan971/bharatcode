@@ -526,6 +526,20 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.inputHistory.resetRecall()
 		m.inputHistory.resetCompletion()
 		return m, nil
+	case "ctrl+u":
+		// Clear the whole prompt in one stroke, the readline "delete to start of
+		// line" binding. The input is an append-only buffer (no cursor), so there
+		// is nothing before a cursor to spare — Ctrl+U wipes it entirely, sparing
+		// the user from holding Backspace to discard a long mistyped prompt the way
+		// Claude Code and opencode let one clear the line. It is a no-op on an empty
+		// buffer and, like Backspace, cancels any recall walk and completion cycle.
+		if m.input.Len() == 0 {
+			return m, nil
+		}
+		m.input.Reset()
+		m.inputHistory.resetRecall()
+		m.inputHistory.resetCompletion()
+		return m, nil
 	default:
 		if msg.Key().Text != "" {
 			m.input.WriteString(msg.Key().Text)
@@ -1186,6 +1200,10 @@ var keybindingGroups = []keyGroup{
 		{"Up/Down", "recall previous prompts"},
 		{"PgUp/PgDn", "scroll the chat a page at a time"},
 		{"Home/End", "jump to the oldest/newest message"},
+	}},
+	{title: "Editing", bindings: []keyBinding{
+		{"Backspace", "delete the character before the cursor"},
+		{"Ctrl+U", "clear the whole prompt line"},
 	}},
 	{title: "Tabs", bindings: []keyBinding{
 		{"Ctrl+T", "new tab"},

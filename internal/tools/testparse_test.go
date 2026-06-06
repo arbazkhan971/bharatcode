@@ -123,6 +123,11 @@ func TestClassifyTestRunner(t *testing.T) {
 		"cucumber":                                   runnerCucumber,
 		"bundle exec cucumber":                       runnerCucumber,
 		"npx cucumber-js features/":                  runnerCucumber,
+		"karma start karma.conf.js":                  runnerKarma,
+		"npx karma start --single-run":               runnerKarma,
+		"ng test":                                    runnerKarma,
+		"ng test --watch=false":                      runnerKarma,
+		"echo running test data":                     runnerNone,
 		"echo about cucumbers":                       runnerNone,
 		"echo the robotics demo":                     runnerNone,
 		"echo the trumpeters tune up":                runnerNone,
@@ -1934,6 +1939,51 @@ func TestParseCucumberFailures_None(t *testing.T) {
 	out := `2 scenarios (2 passed)
 6 steps (6 passed)`
 	if got := parseTestFailures("cucumber", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseKarmaFailures(t *testing.T) {
+	// Karma's progress reporter prints "<browser> <suite> <test> FAILED" per
+	// failing spec, with the assertion on the tab-indented line beneath. The
+	// browser prefix ("<name> <version> (<platform>)") is stripped from Name, and
+	// the run-summary "Executed N of M (X FAILED)" line — whose FAILED is inside
+	// parentheses — is not mistaken for a failure.
+	out := `HeadlessChrome 120.0.0 (Linux x86_64): Executed 1 of 3 SUCCESS (0 secs / 0.1 secs)
+HeadlessChrome 120.0.0 (Linux x86_64) AppComponent should create the app FAILED
+	Expected undefined to be truthy.
+	    at <Jasmine>
+HeadlessChrome 120.0.0 (Linux x86_64) MathService adds numbers FAILED
+	Expected 5 to equal 4.
+	    at UserContext.<anonymous> (src/math.service.spec.ts:12:21)
+HeadlessChrome 120.0.0 (Linux x86_64): Executed 3 of 3 (2 FAILED) (0.2 secs / 0.15 secs)`
+	got := parseTestFailures("ng test --watch=false", out)
+	want := []testFailure{
+		{Name: "AppComponent should create the app", Detail: "Expected undefined to be truthy."},
+		{Name: "MathService adds numbers", Detail: "Expected 5 to equal 4."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseKarmaFailures_DedupesAcrossBrowsers(t *testing.T) {
+	// The same spec failing in two browsers emits two "<browser> ... FAILED" lines
+	// sharing one description; it is reported once.
+	out := `Chrome 120.0.0 (Linux x86_64) Widget renders FAILED
+	Error: boom
+Firefox 121.0.0 (Linux x86_64) Widget renders FAILED
+	Error: boom`
+	got := parseTestFailures("karma start", out)
+	want := []testFailure{
+		{Name: "Widget renders", Detail: "Error: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseKarmaFailures_None(t *testing.T) {
+	// A passing run prints only the SUCCESS summary, so nothing is extracted.
+	out := `HeadlessChrome 120.0.0 (Linux x86_64): Executed 3 of 3 SUCCESS (0.2 secs / 0.15 secs)
+TOTAL: 3 SUCCESS`
+	if got := parseTestFailures("ng test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

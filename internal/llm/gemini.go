@@ -23,17 +23,6 @@ const defaultGeminiBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 // no room for output after the reasoning pass. See buildGeminiRequest.
 const defaultGeminiMaxTokens = 8192
 
-// geminiThinkingBudgetForEffort maps the provider-independent reasoning_effort
-// label onto a Gemini thinkingBudget (in tokens). It lets a user opt a Gemini
-// 2.5 model into native thinking with the same "minimal"/"low"/"medium"/"high"
-// knob the OpenAI reasoning models use, instead of having to pick a raw token
-// count. The
-// chosen budgets sit inside the range both Flash (0–24576) and Pro (128–32768)
-// accept, so the same effort is valid across the 2.5 family. The "auto" and
-// "dynamic" labels map to -1, Gemini's sentinel for dynamic thinking: the model
-// sizes its own reasoning per request instead of being held to a fixed budget.
-// An empty or unrecognized label returns 0, which leaves thinking unconfigured
-// (the model's own default applies).
 // geminiSafetyCategories lists the harm categories Gemini scores on both the
 // prompt and the response. The agent relaxes every category to BLOCK_NONE (see
 // geminiSafetySettings) so that legitimate software-engineering content — shell
@@ -71,8 +60,33 @@ var geminiSafetySettings = func() []geminiSafetySetting {
 // "reason as little as possible" while staying valid across the whole 2.5 line.
 const geminiMinimalThinkingBudget = 512
 
+// geminiThinkingDisabled is the sentinel geminiThinkingBudgetForEffort returns for
+// the "none" effort, meaning "do not reason at all". It is distinct from 0 (which
+// the builder uses for "thinking unconfigured") so the request builder can tell
+// "turn thinking off" apart from "leave the model's default". The actual wire value
+// for disabling is a thinkingBudget of 0, emitted by the builder only for models
+// that accept it (the Gemini 2.5 Flash line); see geminiModelCanDisableThinking.
+const geminiThinkingDisabled = -2
+
+// geminiThinkingBudgetForEffort maps the provider-independent reasoning_effort
+// label onto a Gemini thinkingBudget (in tokens). It lets a user opt a Gemini
+// 2.5 model into native thinking with the same "minimal"/"low"/"medium"/"high"
+// knob the OpenAI reasoning models use, instead of having to pick a raw token
+// count. The chosen budgets sit inside the range both Flash (0–24576) and Pro
+// (128–32768) accept, so the same effort is valid across the 2.5 family. The
+// "auto" and "dynamic" labels map to -1, Gemini's sentinel for dynamic thinking:
+// the model sizes its own reasoning per request instead of being held to a fixed
+// budget. The "none" label maps to geminiThinkingDisabled, the request to turn
+// reasoning off. An empty or unrecognized label returns 0, which leaves thinking
+// unconfigured (the model's own default applies).
 func geminiThinkingBudgetForEffort(effort string) int {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "none":
+		// Parity with the OpenAI/OpenRouter reasoning knob, where "none" turns
+		// reasoning off. Returned as a distinct sentinel rather than 0 so the
+		// builder can disable thinking (a 0 thinkingBudget) on models that allow it
+		// instead of falling through to "unconfigured" and leaving thinking on.
+		return geminiThinkingDisabled
 	case "minimal":
 		// Parity with the OpenAI reasoning knob (where "minimal" is the fastest,
 		// least-reasoning setting) and with the Gemini 3 path, which already maps
@@ -148,6 +162,24 @@ func geminiThinkingLevel(req Request) string {
 // resolve to the Gemini 2.5 generation (see geminiThinkingModelSubstrings).
 func isGemini3Model(id string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(id)), "gemini-3")
+}
+
+// geminiModelCanDisableThinking reports whether the Gemini 2.5 model named by id
+// accepts a thinkingBudget of 0 to turn reasoning off. Only the Flash line —
+// gemini-2.5-flash, gemini-2.5-flash-lite, and the rolling gemini-flash-latest /
+// gemini-flash-lite-latest aliases that resolve to it — allows it. Gemini 2.5 Pro
+// cannot disable thinking (its budget floors at 128 and a 0 is a 400), so it is
+// excluded. Gemini 3 controls reasoning with thinkingLevel rather than a numeric
+// budget and is handled on its own path, so it is not matched here. The match is
+// the same case-insensitive substring scan used by the other capability checks.
+func geminiModelCanDisableThinking(id string) bool {
+	lid := strings.ToLower(strings.TrimSpace(id))
+	if !strings.Contains(lid, "flash") {
+		return false
+	}
+	return strings.Contains(lid, "gemini-2.5") ||
+		strings.Contains(lid, "gemini-flash-latest") ||
+		strings.Contains(lid, "gemini-flash-lite-latest")
 }
 
 // geminiProvider speaks Google's native Generative Language API
@@ -513,7 +545,22 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 			} else {
 				budget = geminiThinkingBudgetForEffort(req.ReasoningEffort)
 			}
-			if budget != 0 {
+			if budget == geminiThinkingDisabled {
+				// "none": turn reasoning off by pinning the budget to 0, but only on
+				// the Flash line that accepts it. Gemini 2.5 Pro cannot disable
+				// thinking and 400s on a 0 budget, so there "none" is left as the
+				// model's default (thinkingConfig omitted), mirroring the graceful
+				// degradation the other thinking paths apply to unsupported requests.
+				// No maxOutputTokens reservation is needed: a disabled pass consumes
+				// no thinking tokens.
+				if geminiModelCanDisableThinking(req.Model) {
+					if out.GenerationConfig == nil {
+						out.GenerationConfig = &geminiGenerationConfig{}
+					}
+					disabled := 0
+					out.GenerationConfig.ThinkingConfig = &geminiThinkingConfig{ThinkingBudget: &disabled}
+				}
+			} else if budget != 0 {
 				if out.GenerationConfig == nil {
 					out.GenerationConfig = &geminiGenerationConfig{}
 				}

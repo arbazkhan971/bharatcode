@@ -5,7 +5,7 @@
 
 ## Purpose
 
-Minimal Language Server Protocol client that auto-discovers and starts language servers based on the files present in the project, then surfaces diagnostics (errors and warnings) so the agent can inject them into prompts. Supported servers: `gopls` for Go, `typescript-language-server` for TypeScript and JavaScript, `pyright` for Python, `rust-analyzer` for Rust, and `clangd` for C and C++. One server per language per project. Lifecycle is session-scoped: a server starts the first time a relevant file is opened, stays alive for the duration of the BharatCode session, and is terminated cleanly on app shutdown. The module is deliberately thin — diagnostics in, diagnostics out — and does not attempt to be a general LSP toolkit.
+Minimal Language Server Protocol client that auto-discovers and starts language servers based on the files present in the project, then surfaces diagnostics (errors and warnings) so the agent can inject them into prompts. Supported servers: `gopls` for Go, `typescript-language-server` for TypeScript and JavaScript, `pyright` for Python, `rust-analyzer` for Rust, `clangd` for C and C++, `ruby-lsp` for Ruby, `bash-language-server` for shell scripts, `lua-language-server` for Lua, `zls` for Zig, and `intelephense` for PHP. Additional servers can be added or overridden via config. One server per language per project. Lifecycle is session-scoped: a server starts the first time a relevant file is opened, stays alive for the duration of the BharatCode session, and is terminated cleanly on app shutdown. The module is deliberately thin — diagnostics in, diagnostics out — and does not attempt to be a general LSP toolkit.
 
 ## Public interface
 

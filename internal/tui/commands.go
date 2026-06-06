@@ -165,7 +165,7 @@ func (m *model) sessionPickerBody() string {
 	if end < len(visible) {
 		lines = append(lines, m.theme.Muted.Render(fmt.Sprintf("⋯ %d more below", len(visible)-end)))
 	}
-	lines = append(lines, "", "type to fuzzy filter · ↑/↓ to move · home/end to jump · enter to restore · esc to cancel")
+	lines = append(lines, "", "type to fuzzy filter · ↑/↓ to move · pgup/pgdn by page · home/end to jump · enter to restore · esc to cancel")
 	return strings.Join(lines, "\n")
 }
 
@@ -238,6 +238,29 @@ func (m *model) handleSessionPickerKey(msg tea.KeyPressMsg) (consumed bool, cmd 
 		// message). A no-op on an empty or single-row list.
 		if last := len(m.visibleSessions()) - 1; last >= 0 && m.sessionCursor != last {
 			m.sessionCursor = last
+			m.refreshSessionPicker()
+		}
+		return true, nil
+	case "pgup":
+		// Page up moves the cursor a windowful at a time, mirroring the chat's
+		// PgUp, so a long session list is traversable faster than one row per
+		// keystroke. The step is clamped at the first row.
+		if m.sessionCursor > 0 {
+			m.sessionCursor -= sessionWindow
+			if m.sessionCursor < 0 {
+				m.sessionCursor = 0
+			}
+			m.refreshSessionPicker()
+		}
+		return true, nil
+	case "pgdown":
+		// Page down is the mirror of PgUp, advancing the cursor a windowful and
+		// clamping at the last visible row.
+		if last := len(m.visibleSessions()) - 1; last >= 0 && m.sessionCursor < last {
+			m.sessionCursor += sessionWindow
+			if m.sessionCursor > last {
+				m.sessionCursor = last
+			}
 			m.refreshSessionPicker()
 		}
 		return true, nil

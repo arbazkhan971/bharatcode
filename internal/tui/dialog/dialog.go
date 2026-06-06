@@ -238,8 +238,10 @@ func (t *ScrollableText) Render(width int) string {
 	return t.Theme.Modal.Render(body)
 }
 
-// HandleKey handles scroll navigation (Up, Down, PgUp, PgDn, Home, End) and
-// dismissal (Esc, Enter, q). Navigation keys do not pop the dialog; dismissal
+// HandleKey handles scroll navigation (Up/j, Down/k, PgUp, PgDn, Home/g, End/G)
+// and dismissal (Esc, Enter, q). The j/k/g/G aliases match vim-style navigation
+// so users familiar with that convention do not have to reach for arrow keys
+// in the diff or /keys overlay. Navigation keys do not pop the dialog; dismissal
 // keys do.
 func (t *ScrollableText) HandleKey(msg tea.KeyPressMsg) (bool, bool) {
 	rows := t.visibleRows()
@@ -248,12 +250,12 @@ func (t *ScrollableText) HandleKey(msg tea.KeyPressMsg) (bool, bool) {
 	switch msg.String() {
 	case "esc", "enter", "q":
 		return true, true
-	case "up":
+	case "up", "k":
 		if t.scroll > 0 {
 			t.scroll--
 		}
 		return true, false
-	case "down":
+	case "down", "j":
 		if t.scroll < maxS {
 			t.scroll++
 		}
@@ -270,10 +272,10 @@ func (t *ScrollableText) HandleKey(msg tea.KeyPressMsg) (bool, bool) {
 			t.scroll = maxS
 		}
 		return true, false
-	case "home":
+	case "home", "g":
 		t.scroll = 0
 		return true, false
-	case "end":
+	case "end", "G":
 		t.scroll = maxS
 		return true, false
 	default:

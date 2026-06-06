@@ -3,7 +3,7 @@ When to call this tool: use `bash` when BharatCode needs to run a shell command 
 Arguments:
 - `command` string: the command passed to `bash -c`.
 - `timeout` integer, optional: seconds before BharatCode stops the process.
-- `cwd` string, optional: working directory for the command; defaults to the workspace.
+- `cwd` string, optional: working directory for the command. When omitted, defaults to the directory left by the previous foreground bash call in this session (persistent CWD); if no previous call has changed the directory, falls back to the workspace root. An explicit `cwd` overrides the cached value but does not update it — only a `cd` executed inside `command` advances the session CWD.
 - `background` boolean, optional: start the process and return a `job_id` immediately.
 - `env` object (string→string), optional: extra environment variables merged over the inherited environment for this command only. Prefer this to inline `VAR=val command` prefixes, which break across pipes (`VAR=val a | b` sets `VAR` only for `a`) and subshells.
 - `stdin` string, optional: text written to the command's standard input. Use this to feed content to a command that reads stdin (e.g. `patch -p1`, `git apply`, `python3 -`, `tee FILE`, `jq`) instead of embedding it as a heredoc or quoted string in `command`, which avoids shell-quoting bugs. When omitted, the command sees no input (immediate EOF).

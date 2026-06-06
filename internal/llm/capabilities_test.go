@@ -975,6 +975,68 @@ func TestDefaultsCatalogGrok41(t *testing.T) {
 	require.True(t, openrouterModels["x-ai/grok-4.1-fast"], "openrouter provider must list x-ai/grok-4.1-fast in its models")
 }
 
+// TestDefaultsCatalogMistralModels verifies the embedded defaults include the
+// three newly-added Mistral models — mistral-small-latest (Small 3.2),
+// devstral-small-2507 (coding), and magistral-medium-latest (reasoning) — in the
+// native mistral provider so users who configure MISTRAL_API_KEY can reach them
+// without manual configuration. It also confirms that inferContextWindow resolves
+// their ids to the correct 128k window independent of the catalog.
+func TestDefaultsCatalogMistralModels(t *testing.T) {
+	cfg := config.Default()
+
+	byID := make(map[string]config.Model, len(cfg.Models))
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+
+	entries := []struct {
+		id            string
+		wantCtxWindow int
+		wantTools     bool
+	}{
+		// Mistral Small 3.2 (mistral-small-latest): affordable general-purpose tier.
+		{"mistral-small-latest", 128_000, true},
+		// Devstral Small 2507: coding-specialist model, now also on the native Mistral
+		// endpoint (not just OpenRouter).
+		{"devstral-small-2507", 128_000, true},
+		// Magistral Medium: Mistral's reasoning line with a 128k window.
+		{"magistral-medium-latest", 128_000, true},
+	}
+	for _, e := range entries {
+		m, ok := byID[e.id]
+		require.Truef(t, ok, "defaults catalog must include mistral model %q", e.id)
+		require.Equalf(t, "mistral", m.Provider, "model %q has wrong provider", e.id)
+		require.Equalf(t, e.wantCtxWindow, m.ContextWindow, "model %q has wrong context_window", e.id)
+		require.Equalf(t, e.wantTools, m.SupportsTools, "model %q SupportsTools mismatch", e.id)
+		require.Falsef(t, m.SupportsImages, "model %q must not claim image support", e.id)
+	}
+
+	// The heuristic must resolve these ids without consulting the catalog, using
+	// the mistral-small, devstral, and magistral rules in contextWindowRules.
+	for _, e := range entries {
+		require.Equalf(t, e.wantCtxWindow, inferContextWindow(e.id),
+			"inferContextWindow must recognize mistral id %q", e.id)
+	}
+
+	// All three models must appear in the mistral provider's model list.
+	var mistralProvider *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "mistral" {
+			mistralProvider = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, mistralProvider, "defaults must include a provider named 'mistral'")
+	providerModels := make(map[string]bool, len(mistralProvider.Models))
+	for _, id := range mistralProvider.Models {
+		providerModels[id] = true
+	}
+	for _, e := range entries {
+		require.Truef(t, providerModels[e.id],
+			"mistral provider must list model %q in its models", e.id)
+	}
+}
+
 // TestDefaultsCatalogQwen3OpenRouter verifies that the two Qwen3 models added to
 // the OpenRouter catalog ship with the correct context windows and capabilities,
 // and that the heuristic resolves their vendor-namespaced ids independently of

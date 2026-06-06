@@ -220,6 +220,23 @@ func TestInferContextWindow(t *testing.T) {
 		// broader family marker, so without it these fall through to 0.
 		{"hunyuan-a13b-instruct", 262_144},
 		{"tencent/hunyuan-large", 262_144},
+		// ByteDance Doubao (Volcengine Ark): the classic pro/lite endpoints encode
+		// the window in the id, so the size suffix wins over the family default; the
+		// Doubao-1.5 generation reuses the suffix in both dot and dash spellings; and
+		// the suffix-less Doubao-Seed line is 256k. A bare Doubao id falls back to the
+		// conservative 128k family default. Without these rules every Doubao id falls
+		// through to "unknown" (0).
+		{"doubao-pro-256k", 262_144},
+		{"doubao-lite-256k", 262_144},
+		{"doubao-pro-128k", 131_072},
+		{"doubao-pro-32k", 32_768},
+		{"doubao-lite-32k", 32_768},
+		{"doubao-pro-4k", 4_096},
+		{"doubao-1.5-pro-256k", 262_144},
+		{"doubao-1-5-pro-32k", 32_768},
+		{"doubao-seed-1.6", 262_144},
+		{"doubao-seed-1-6-flash", 262_144},
+		{"doubao-1.5-vision-pro", 131_072},
 		// Amazon Nova (Bedrock): Premier is 1M, Pro/Lite are 300k, Micro is 128k.
 		// Premier and Micro carry the "nova" marker, so their specific rules must
 		// win over the 300k family default.

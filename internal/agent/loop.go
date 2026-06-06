@@ -632,8 +632,55 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	if userMsg.CreatedAt.IsZero() {
 		userMsg.CreatedAt = time.Now().UTC()
 	}
+
+	// UserPromptSubmit fires before the prompt is appended and the turn runs. A
+	// matching hook may block the prompt — the model is never called and the turn
+	// ends with a recorded notice — or return additional context that is appended
+	// as a follow-on user message so the model sees it this turn without
+	// polluting the goal frame (which keys off the first user message's own text).
+	var injectedContext string
+	if l.cfg.Hooks != nil {
+		decision, err := l.cfg.Hooks.Fire(runCtx, hooks.UserPromptSubmit, hooks.PromptPayload{
+			Prompt:    messageText(userMsg),
+			SessionID: sessionID,
+		})
+		if err != nil {
+			l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventRunError, Err: err})
+			return fmt.Errorf("firing UserPromptSubmit hook: %w", err)
+		}
+		if decision.Block {
+			reason := strings.TrimSpace(decision.Reason)
+			if reason == "" {
+				reason = "no reason provided"
+			}
+			// Record the prompt and the block notice so the transcript reflects
+			// what happened, then end the turn without calling the model.
+			if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, userMsg); err != nil {
+				return fmt.Errorf("appending user message: %w", err)
+			}
+			notice := textMessage(sessionID, message.RoleAssistant, "Prompt blocked by hook: "+reason)
+			if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, notice); err != nil {
+				return fmt.Errorf("appending block notice: %w", err)
+			}
+			l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventTurnFinished, Message: &notice})
+			return nil
+		}
+		injectedContext = strings.TrimSpace(decision.AdditionalContext)
+	}
+
 	if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, userMsg); err != nil {
 		return fmt.Errorf("appending user message: %w", err)
+	}
+	// appended counts the messages this turn just wrote so the first-turn check
+	// below stays correct whether or not a hook injected a follow-on context
+	// message.
+	appended := 1
+	if injectedContext != "" {
+		ctxMsg := textMessage(sessionID, message.RoleUser, injectedContext)
+		if err := l.cfg.Sessions.AppendMessage(runCtx, sessionID, ctxMsg); err != nil {
+			return fmt.Errorf("appending hook context: %w", err)
+		}
+		appended = 2
 	}
 
 	history, err := l.cfg.Sessions.Messages(runCtx, sessionID)
@@ -642,10 +689,10 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	}
 
 	// SessionStart fires when a session's first turn begins, not on every Run.
-	// The just-appended user message is the only message in history exactly when
-	// this is the session's first turn, so a later Run on the same session never
-	// refires it.
-	if len(history) == 1 {
+	// The messages this turn just appended are the only ones in history exactly
+	// when this is the session's first turn, so a later Run on the same session
+	// never refires it.
+	if len(history) == appended {
 		l.fireHook(runCtx, hooks.SessionStart, hooks.SessionPayload{SessionID: sessionID})
 	}
 

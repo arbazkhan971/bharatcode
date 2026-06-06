@@ -6,7 +6,8 @@
 ## Purpose
 
 User-defined shell hooks fired at lifecycle events: `PreToolUse`,
-`PostToolUse`, `SessionStart`, `SessionEnd`, `FileEdit`, and similar. Hooks
+`PostToolUse`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `FileEdit`,
+and similar. Hooks
 are configured per project in `.bharatcode.json` and run in parallel with a
 per-hook timeout. Each hook is a shell command; BharatCode pipes a JSON payload
 describing the event over stdin and parses the hook's stdout as a JSON
@@ -17,7 +18,7 @@ that tool call; otherwise execution continues.
 ## Public interface
 
 ```go
-type Event string // PreToolUse, PostToolUse, SessionStart, SessionEnd, FileEdit, ...
+type Event string // PreToolUse, PostToolUse, UserPromptSubmit, SessionStart, SessionEnd, FileEdit, ...
 
 type HookDef struct {
     Event   Event
@@ -27,10 +28,11 @@ type HookDef struct {
 }
 
 type Decision struct {
-    Block    bool
-    Reason   string
-    Approve  bool
-    Continue bool
+    Block             bool
+    Reason            string
+    Approve           bool
+    AdditionalContext string // UserPromptSubmit: text injected into the turn.
+    Continue          bool
 }
 
 type Engine struct{ /* unexported */ }
@@ -66,13 +68,20 @@ Implemented in `internal/hooks/hooks.go` with focused tests in
 Built behavior:
 
 - Converts `config.Hook` entries into internal `HookDef` values.
-- Supports `PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`,
-  `FileEdit`, `OnError`, and `OnSession` event names.
+- Supports `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `SessionStart`,
+  `SessionEnd`, `FileEdit`, `OnError`, and `OnSession` event names.
+- `UserPromptSubmit` fires when the user submits a prompt, before the turn
+  runs (matched against the `prompt` text). A blocking decision abandons the
+  turn — the model is never called and an assistant notice records the reason —
+  while `{"decision":{"additional_context":"..."}}` injects that text into the
+  turn as a follow-on user message, leaving the original prompt (and the goal
+  frame) untouched.
 - Runs matching hooks concurrently with a per-hook timeout.
 - Pipes the marshaled JSON payload to the hook command through `shell.Shell`.
 - Supports empty-match, glob-match, and slash-delimited regex-match rules.
-- Matches tool events by `tool`, file edit events by `path` or `file_path`,
-  session events by `session_id`, and error events by `error`.
+- Matches tool events by `tool`, prompt events by `prompt`, file edit events by
+  `path` or `file_path`, session events by `session_id`, and error events by
+  `error`.
 - Parses decision envelopes leniently; empty stdout, malformed JSON, timed-out
   commands, and non-zero hook exits are logged and treated as pass-through.
 - Aggregates decisions according to the module rules.

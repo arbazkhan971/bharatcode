@@ -8,6 +8,7 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/hooks"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
+	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/tools"
 	"github.com/stretchr/testify/require"
@@ -110,6 +111,12 @@ func TestRunFiresLifecycleHooks(t *testing.T) {
 
 	require.NoError(t, loop.Run(ctx, sessionID, userMessage("update the file")))
 
+	// UserPromptSubmit fired once at the very start, carrying the prompt text.
+	require.Equal(t, 1, capture.count(hooks.UserPromptSubmit), "UserPromptSubmit must fire once before the turn")
+	promptPayload, ok := capture.payloadFor(hooks.UserPromptSubmit)
+	require.True(t, ok)
+	require.Equal(t, hooks.PromptPayload{Prompt: "update the file", SessionID: sessionID}, promptPayload)
+
 	// SessionStart fired exactly once with the session ID.
 	require.Equal(t, 1, capture.count(hooks.SessionStart), "SessionStart must fire once at run start")
 	startPayload, ok := capture.payloadFor(hooks.SessionStart)
@@ -135,6 +142,7 @@ func TestRunFiresLifecycleHooks(t *testing.T) {
 	require.Equal(
 		t,
 		[]hooks.Event{
+			hooks.UserPromptSubmit,
 			hooks.SessionStart,
 			hooks.PreToolUse,
 			hooks.PostToolUse,
@@ -281,4 +289,96 @@ func (t *erroringTool) Run(ctx context.Context, args json.RawMessage) (tools.Res
 	_ = ctx
 	_ = args
 	return tools.Result{Content: "write failed", IsError: true}, nil
+}
+
+// decisionHooks is a hookFirer that returns a fixed decision for one chosen
+// event and a pass-through for every other, isolating the UserPromptSubmit
+// block and context-injection paths.
+type decisionHooks struct {
+	on       hooks.Event
+	decision hooks.Decision
+}
+
+func (d decisionHooks) Fire(ctx context.Context, event hooks.Event, payload any) (hooks.Decision, error) {
+	_ = ctx
+	_ = payload
+	if event == d.on {
+		return d.decision, nil
+	}
+	return hooks.Decision{Continue: true}, nil
+}
+
+// A UserPromptSubmit hook that blocks abandons the turn: the model is never
+// called and an assistant notice carrying the reason is recorded.
+func TestRunUserPromptSubmitHookBlocksPrompt(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	provider := &scriptProvider{}
+	loop := New(Config{
+		Name:     "coder",
+		Model:    "fake-model",
+		Provider: provider,
+		Tools:    newFakeRegistry(),
+		Sessions: repo,
+		Hooks:    decisionHooks{on: hooks.UserPromptSubmit, decision: hooks.Decision{Block: true, Reason: "contains a secret"}},
+		Bus:      pubsub.NewTopic[Event]("agent-test", 16),
+	})
+
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("here is my api key")))
+
+	// A blocked prompt never reaches the provider.
+	require.Empty(t, provider.reqs, "a blocked prompt must not reach the provider")
+
+	// The transcript records the prompt and an assistant notice with the reason.
+	msgs, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	require.Equal(t, message.RoleUser, msgs[0].Role)
+	require.Equal(t, message.RoleAssistant, msgs[1].Role)
+	require.Contains(t, textOf(msgs[1]), "Prompt blocked by hook: contains a secret")
+}
+
+// A UserPromptSubmit hook that returns additional context injects it as a
+// follow-on user message: the model sees it this turn, but the original prompt
+// (and therefore the goal frame) is left untouched.
+func TestRunUserPromptSubmitHookInjectsContext(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "ok"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 5, OutputTokens: 2}},
+		},
+	}}
+	loop := New(Config{
+		Name:     "coder",
+		Model:    "fake-model",
+		Provider: provider,
+		Tools:    newFakeRegistry(),
+		Sessions: repo,
+		Hooks:    decisionHooks{on: hooks.UserPromptSubmit, decision: hooks.Decision{AdditionalContext: "CONVENTION-NOTE-7f3a: run gofmt"}},
+		Bus:      pubsub.NewTopic[Event]("agent-test", 16),
+	})
+
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("refactor the parser")))
+
+	// The injected context reached the model on this turn.
+	require.NotEmpty(t, provider.reqs)
+	require.True(t, reqContains(provider.reqs[0], "CONVENTION-NOTE-7f3a"),
+		"injected context must be sent to the provider")
+
+	// It is persisted as a follow-on user message after the original prompt.
+	msgs, err := repo.Messages(ctx, sessionID)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(msgs), 2)
+	require.Equal(t, "refactor the parser", textOf(msgs[0]))
+	require.Equal(t, message.RoleUser, msgs[1].Role)
+	require.Contains(t, textOf(msgs[1]), "CONVENTION-NOTE-7f3a")
+
+	// The goal frame keys off the original first user message, not the injection.
+	require.Equal(t, "refactor the parser", firstUserGoal(msgs))
 }

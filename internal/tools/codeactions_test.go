@@ -217,6 +217,48 @@ func TestCodeActionsDeduplicatesEntries(t *testing.T) {
 	require.Equal(t, "1. Remove unused [quickfix]", result.Content)
 }
 
+func TestCodeActionsListIncludesMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		// Two quickfix actions (exact kind and sub-kind) and one refactor.
+		{Title: "Import \"fmt\"", Kind: "quickfix", IsPreferred: true, Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{NewText: "x"}}},
+		}},
+		{Title: "Remove unused import", Kind: "quickfix.import", Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{NewText: "y"}}},
+		}},
+		{Title: "Extract function", Kind: "refactor.extract", Data: json.RawMessage(`{"title":"Extract function"}`)},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, 3, result.Metadata[MetadataCodeActionCount], "total action count in metadata")
+	require.Equal(t, 2, result.Metadata[MetadataCodeActionQuickfixes], "quickfix count in metadata")
+}
+
+func TestCodeActionsListMetadataZeroQuickfixesWhenNone(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Extract function", Kind: "refactor.extract", Data: json.RawMessage(`{"title":"Extract function"}`)},
+		{Title: "Organize Imports", Kind: "source.organizeImports"},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, 2, result.Metadata[MetadataCodeActionCount])
+	require.Equal(t, 0, result.Metadata[MetadataCodeActionQuickfixes])
+}
+
 func TestCodeActionsEmptyReportsDirectly(t *testing.T) {
 	dir := t.TempDir()
 	writeCodeActionsFile(t, dir)

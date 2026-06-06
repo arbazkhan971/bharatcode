@@ -502,6 +502,17 @@ func codeActionFixesNote(messages []string) string {
 	return fmt.Sprintf("(fixes %q +%d more)", first, len(messages)-1)
 }
 
+// Metadata keys the codeactions listing sets so downstream consumers (the agent
+// loop, the TUI) can react to action counts without re-parsing the rendered list.
+const (
+	// MetadataCodeActionCount holds the int total of available code actions.
+	MetadataCodeActionCount = "count"
+	// MetadataCodeActionQuickfixes holds the int count of actions whose kind is
+	// "quickfix" or a "quickfix.*" sub-kind (the set the agent should consider
+	// first for error fixes).
+	MetadataCodeActionQuickfixes = "quickfixes"
+)
+
 // codeActionsResult renders an already-ordered action list as a numbered list.
 // The numbering matches the index `apply` expects. An empty input reports
 // directly.
@@ -514,7 +525,26 @@ func codeActionsResult(ordered []lsp.CodeAction) Result {
 	for i, a := range ordered {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, codeActionEntry(a))
 	}
-	return Result{Content: strings.TrimRight(b.String(), "\n")}
+	return Result{
+		Content:  strings.TrimRight(b.String(), "\n"),
+		Metadata: codeActionsListMetadata(ordered),
+	}
+}
+
+// codeActionsListMetadata tallies the action list so callers can react to
+// availability without re-parsing the rendered text — mirroring diagnosticsMetadata.
+func codeActionsListMetadata(ordered []lsp.CodeAction) map[string]any {
+	quickfixes := 0
+	for _, a := range ordered {
+		k := strings.ToLower(strings.TrimSpace(a.Kind))
+		if k == "quickfix" || strings.HasPrefix(k, "quickfix.") {
+			quickfixes++
+		}
+	}
+	return map[string]any{
+		MetadataCodeActionCount:      len(ordered),
+		MetadataCodeActionQuickfixes: quickfixes,
+	}
 }
 
 // codeActionApplyNote summarizes how an action would take effect so the model

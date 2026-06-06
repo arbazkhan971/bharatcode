@@ -103,6 +103,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseBehaveFailures(output)
 	case runnerKarma:
 		return parseKarmaFailures(output)
+	case runnerGotestsum:
+		return parseGotestsumFailures(output)
 	default:
 		return nil
 	}
@@ -146,6 +148,7 @@ const (
 	runnerCucumber
 	runnerBehave
 	runnerKarma
+	runnerGotestsum
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -338,6 +341,14 @@ func classifyTestRunner(command string) testRunner {
 		// summary block differs from libtest's "--- FAIL:" lines, and a "ginkgo"
 		// invocation never contains "go test" at a word boundary.
 		return runnerGinkgo
+	case strings.Contains(c, "gotestsum"):
+		// `gotestsum` wraps `go test -json` and renders its own human output, whose
+		// default (pkgname) format closes with a "=== Failed" block listing each
+		// failure as "=== FAIL: <pkg> <Test> (0.00s)". That summary differs from the
+		// "--- FAIL:" lines goTestRe keys on, and a "gotestsum" invocation never
+		// contains "go test" at a word boundary, so it is claimed here before the
+		// plain `go test` runner.
+		return runnerGotestsum
 	case goTestRe.MatchString(c):
 		return runnerGo
 	case rspecRe.MatchString(c):
@@ -802,6 +813,51 @@ func goCompileErrFromOutput(out string) string {
 		return strings.TrimSpace(line)
 	}
 	return ""
+}
+
+// gotestsum's default (pkgname) reporter closes a run with a "=== Failed" block
+// printing each failed test as "=== FAIL: <pkg> <Test> (0.00s)" — the package is
+// the module-relative path, the test name a single token (Go renders subtest
+// spaces as underscores), and an optional " (re-run N)" suffix precedes the
+// "(<elapsed>s)" timing. Group 1 is the package, group 2 the test.
+var gotestsumFailRe = regexp.MustCompile(`^=== FAIL: (\S+) (\S+)(?: \(re-run \d+\))? \([0-9.]+s\)$`)
+
+// parseGotestsumFailures extracts failures from `gotestsum` output. Each
+// "=== FAIL: <pkg> <Test> (..s)" summary line names a failed test (Name is
+// "<pkg> <Test>" so two packages' identically-named tests stay distinct); the
+// detail is the first assertion ("file.go:line:") or panic line in the test's
+// output that gotestsum reprints beneath, before the next "=== " header. When no
+// such summary is present — gotestsum run with the summary hidden or a
+// standard-verbose/quiet format — it falls back to the plain `go test` parser,
+// which handles the raw "--- FAIL:" lines and the -json stream gotestsum consumes.
+func parseGotestsumFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	for i := 0; i < len(lines); i++ {
+		m := gotestsumFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		f := testFailure{Name: m[1] + " " + m[2]}
+		for j := i + 1; j < len(lines); j++ {
+			if strings.HasPrefix(lines[j], "=== ") {
+				break
+			}
+			if d := goDetailRe.FindStringSubmatch(lines[j]); d != nil {
+				f.Detail = strings.TrimSpace(d[1])
+				break
+			}
+			if p := goPanicRe.FindStringSubmatch(strings.TrimSpace(lines[j])); p != nil {
+				f.Detail = "panic: " + strings.TrimSpace(p[1])
+				break
+			}
+		}
+		failures = append(failures, f)
+	}
+	if len(failures) > 0 {
+		return failures
+	}
+	return parseGoTestFailures(output)
 }
 
 // "FAILED tests/test_x.py::test_y - AssertionError: ..." (pytest short summary).

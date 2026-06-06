@@ -127,6 +127,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"npx karma start --single-run":               runnerKarma,
 		"ng test":                                    runnerKarma,
 		"ng test --watch=false":                      runnerKarma,
+		"gotestsum":                                  runnerGotestsum,
+		"gotestsum --format pkgname -- ./...":        runnerGotestsum,
+		"gotestsum -- -run TestFoo ./pkg":            runnerGotestsum,
 		"echo running test data":                     runnerNone,
 		"echo about cucumbers":                       runnerNone,
 		"echo the robotics demo":                     runnerNone,
@@ -292,6 +295,62 @@ func TestParseGoTestNoFailures(t *testing.T) {
 	if got := parseTestFailures("go test ./...", out); got != nil {
 		t.Errorf("expected nil failures, got %v", got)
 	}
+}
+
+func TestParseGotestsumFailures(t *testing.T) {
+	// gotestsum's default pkgname reporter prints per-package status lines and
+	// closes with a "=== Failed" summary block; the "--- FAIL:" framing lines are
+	// stripped, so the parser keys on the "=== FAIL:" lines and reads the detail
+	// from the indented output gotestsum reprints beneath each.
+	out := `✓  pkg/calc (cached)
+✖  pkg/calc
+
+=== Failed
+=== FAIL: pkg/calc TestAdd (0.00s)
+    add_test.go:12: expected 3, got 2
+
+=== FAIL: pkg/calc TestSub/negative (0.01s)
+    sub_test.go:20: boom
+
+DONE 5 tests, 2 failures in 0.123s`
+	got := parseTestFailures("gotestsum --format pkgname -- ./...", out)
+	want := []testFailure{
+		{Name: "pkg/calc TestAdd", Detail: "add_test.go:12: expected 3, got 2"},
+		{Name: "pkg/calc TestSub/negative", Detail: "sub_test.go:20: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGotestsumFailures_RerunAndPanic(t *testing.T) {
+	// A flaky test re-run carries a " (re-run N)" suffix before the timing, and a
+	// panicking test surfaces its "panic:" line as the detail.
+	out := `=== Failed
+=== FAIL: pkg/flaky TestFlaky (re-run 1) (0.00s)
+panic: kaboom
+
+=== FAIL: pkg/flaky TestOther (0.00s)
+    other_test.go:3: nope`
+	got := parseTestFailures("gotestsum -- ./...", out)
+	want := []testFailure{
+		{Name: "pkg/flaky TestFlaky", Detail: "panic: kaboom"},
+		{Name: "pkg/flaky TestOther", Detail: "other_test.go:3: nope"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGotestsumFailures_FallbackToGoText(t *testing.T) {
+	// Run with the summary hidden (or a standard-verbose format), gotestsum emits
+	// no "=== FAIL:" block — only the raw "--- FAIL:" lines — so the parser falls
+	// back to the plain `go test` parser.
+	out := `=== RUN   TestFoo
+--- FAIL: TestFoo (0.01s)
+    foo_test.go:42: expected 1, got 2
+FAIL`
+	got := parseTestFailures("gotestsum --no-summary -- ./...", out)
+	want := []testFailure{
+		{Name: "TestFoo", Detail: "foo_test.go:42: expected 1, got 2"},
+	}
+	assertFailures(t, got, want)
 }
 
 func TestParsePytestFailures_Summary(t *testing.T) {

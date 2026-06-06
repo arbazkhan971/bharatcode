@@ -53,7 +53,10 @@ reports one, and a note of how it would take effect — an inline edit, a
 server-side command, both, or `resolve to apply` for a refactoring the server
 computes lazily (still applyable; `apply` resolves it first). An action the
 server flags as the recommended fix for the position is marked `(preferred)` —
-prefer it when several quick fixes compete. An action the server cannot offer in
+prefer it when several quick fixes compete. A quick fix keyed on a diagnostic is
+annotated `(fixes "<message>")` naming the problem it resolves (with `+N more`
+when it addresses several), so you can match a fix to the error `diagnostics`
+reported without reading the title alone. An action the server cannot offer in
 this context is marked `(disabled: <reason>)` and cannot be applied; `apply`
 refuses it with the reason rather than writing a no-op.
 

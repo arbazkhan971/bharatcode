@@ -3491,6 +3491,26 @@ var (
 	// dotnet vstest: "Failed: 2, Passed: 8, Skipped: 0, Total: 10, ..."
 	dotnetPassedCountRe = regexp.MustCompile(`Passed: (\d+)`)
 	dotnetTotalCountRe  = regexp.MustCompile(`Total: (\d+)`)
+
+	// mocha/cypress/hardhat: "  10 passing (123ms)" and "  2 failing"
+	mochaPassingCountRe = regexp.MustCompile(`^\s*(\d+) passing\b`)
+	mochaFailingCountRe = regexp.MustCompile(`^\s*(\d+) failing\b`)
+
+	// ExUnit: "3 tests, 2 failures" or "1 test, 1 failure" or "4 tests, 0 failures"
+	exUnitCountsRe = regexp.MustCompile(`\b(\d+) tests?, (\d+) failures?\b`)
+
+	// PHPUnit success: "OK (N tests, M assertions)"
+	phpunitOkCountRe = regexp.MustCompile(`\bOK \((\d+) tests?`)
+	// PHPUnit summary: "Tests: N, Assertions: M, Failures: F, Errors: E" — on
+	// the FAILURES! summary line; Errors may be absent.
+	phpunitTestsSummaryRe    = regexp.MustCompile(`\bTests: (\d+)`)
+	phpunitFailuresSummaryRe = regexp.MustCompile(`\bFailures: (\d+)`)
+	phpunitErrorsSummaryRe   = regexp.MustCompile(`\bErrors: (\d+)`)
+
+	// Gradle: "3 tests completed, 2 failed" or "3 tests completed" (all pass).
+	// The "tests" token uses a word boundary so "3 tests completed" matches but
+	// "latest tests completed" (prose) does not fire on the count group.
+	gradleCountsRe = regexp.MustCompile(`\b(\d+) tests? completed(?:, (\d+) failed)?`)
 )
 
 // parseTestCounts extracts aggregate pass and total counts from the output of
@@ -3514,6 +3534,14 @@ func parseTestCounts(command, output string) *testCounts {
 		return parseRSpecCounts(output)
 	case runnerDotnet:
 		return parseDotnetCounts(output)
+	case runnerMocha:
+		return parseMochaCounts(output)
+	case runnerExUnit:
+		return parseExUnitCounts(output)
+	case runnerPHPUnit:
+		return parsePHPUnitCounts(output)
+	case runnerGradle:
+		return parseGradleCounts(output)
 	default:
 		return nil
 	}
@@ -3680,6 +3708,90 @@ func parseDotnetCounts(output string) *testCounts {
 		total, _ := strconv.Atoi(totalM[1])
 		if total > 0 {
 			return &testCounts{passed: passed, total: total}
+		}
+	}
+	return nil
+}
+
+// parseMochaCounts reads mocha/cypress/hardhat counts from the two-line summary
+// "  N passing (Xms)" and "  M failing". Both lines are scanned independently
+// so a run with zero failures (no "M failing" line) still reports a total.
+func parseMochaCounts(output string) *testCounts {
+	passed, failed := 0, 0
+	for _, ln := range splitLines(output) {
+		if m := mochaPassingCountRe.FindStringSubmatch(ln); m != nil {
+			passed, _ = strconv.Atoi(m[1])
+		}
+		if m := mochaFailingCountRe.FindStringSubmatch(ln); m != nil {
+			failed, _ = strconv.Atoi(m[1])
+		}
+	}
+	total := passed + failed
+	if total == 0 {
+		return nil
+	}
+	return &testCounts{passed: passed, total: total}
+}
+
+// parseExUnitCounts reads ExUnit's trailing "N tests, M failures" summary line
+// (singular "test"/"failure" are also matched so a single-test run is covered).
+func parseExUnitCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if m := exUnitCountsRe.FindStringSubmatch(ln); m != nil {
+			total, _ := strconv.Atoi(m[1])
+			failures, _ := strconv.Atoi(m[2])
+			if total > 0 {
+				return &testCounts{passed: total - failures, total: total}
+			}
+		}
+	}
+	return nil
+}
+
+// parsePHPUnitCounts reads PHPUnit's per-run summary. Two shapes are handled:
+//   - "OK (N tests, M assertions)" — every test passed; total = N, passed = N.
+//   - "Tests: N, Assertions: M, Failures: F, Errors: E" — on the FAILURES! line;
+//     passed = N - F - E.  Errors may be absent (older PHPUnit output), in which
+//     case only Failures are subtracted from the total.
+func parsePHPUnitCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if m := phpunitOkCountRe.FindStringSubmatch(ln); m != nil {
+			total, _ := strconv.Atoi(m[1])
+			if total > 0 {
+				return &testCounts{passed: total, total: total}
+			}
+		}
+		if mT := phpunitTestsSummaryRe.FindStringSubmatch(ln); mT != nil {
+			total, _ := strconv.Atoi(mT[1])
+			failures, errors := 0, 0
+			if mF := phpunitFailuresSummaryRe.FindStringSubmatch(ln); mF != nil {
+				failures, _ = strconv.Atoi(mF[1])
+			}
+			if mE := phpunitErrorsSummaryRe.FindStringSubmatch(ln); mE != nil {
+				errors, _ = strconv.Atoi(mE[1])
+			}
+			if total > 0 {
+				return &testCounts{passed: total - failures - errors, total: total}
+			}
+		}
+	}
+	return nil
+}
+
+// parseGradleCounts reads Gradle's "N tests completed, M failed" summary. When
+// the "M failed" suffix is absent all tests passed. The line is emitted by the
+// test task's progress logger and is present on both success and failure runs.
+func parseGradleCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if m := gradleCountsRe.FindStringSubmatch(ln); m != nil {
+			total, _ := strconv.Atoi(m[1])
+			failed := 0
+			if m[2] != "" {
+				failed, _ = strconv.Atoi(m[2])
+			}
+			if total > 0 {
+				return &testCounts{passed: total - failed, total: total}
+			}
 		}
 	}
 	return nil

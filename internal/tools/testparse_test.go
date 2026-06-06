@@ -3294,3 +3294,120 @@ func TestParseTestCounts_NilOnEmptySummary(t *testing.T) {
 	// A recognized runner with no parseable summary line should return nil.
 	assertCounts(t, "go test ./...", "build failed\nexit status 1", 0, 0)
 }
+
+func TestParseTestCounts_Mocha(t *testing.T) {
+	out := `  Array
+    #indexOf()
+      ✓ returns the index when present
+      1) returns -1 when not present
+
+  1 passing (12ms)
+  2 failing`
+	assertCounts(t, "npx mocha", out, 1, 3)
+}
+
+func TestParseTestCounts_MochaAllPass(t *testing.T) {
+	out := `  Array
+    #indexOf()
+      ✓ returns the index when present
+
+  1 passing (5ms)`
+	assertCounts(t, "mocha", out, 1, 1)
+}
+
+func TestParseTestCounts_MochaCypress(t *testing.T) {
+	// `cypress run` routes to runnerMocha and emits the same summary shape.
+	out := `  1 passing (1s)
+  1 failing`
+	assertCounts(t, "npx cypress run", out, 1, 2)
+}
+
+func TestParseTestCounts_MochaNoSummary(t *testing.T) {
+	// No passing/failing lines — return nil rather than a zero-total result.
+	assertCounts(t, "npx mocha", "Error: Cannot find module './foo'", 0, 0)
+}
+
+func TestParseTestCounts_ExUnit(t *testing.T) {
+	out := `..
+
+  1) test adds two numbers (CalculatorTest)
+     Assertion with == failed
+
+Finished in 0.03 seconds
+3 tests, 2 failures`
+	assertCounts(t, "mix test", out, 1, 3)
+}
+
+func TestParseTestCounts_ExUnitAllPass(t *testing.T) {
+	out := `....
+
+Finished in 0.02 seconds
+4 tests, 0 failures`
+	assertCounts(t, "mix test", out, 4, 4)
+}
+
+func TestParseTestCounts_ExUnitSingular(t *testing.T) {
+	// "1 test, 1 failure" — singular forms are also matched.
+	out := `  1) test something (MyTest)
+     test/my_test.exs:42
+
+1 test, 1 failure`
+	assertCounts(t, "mix test test/my_test.exs", out, 0, 1)
+}
+
+func TestParseTestCounts_PHPUnit(t *testing.T) {
+	out := `PHPUnit 10.5.0 by Sebastian Bergmann and contributors.
+
+..F.E                                                               5 / 5 (100%)
+
+Time: 00:00.123, Memory: 8.00 MB
+
+FAILURES!
+Tests: 5, Assertions: 4, Failures: 1, Errors: 1.`
+	assertCounts(t, "vendor/bin/phpunit", out, 3, 5)
+}
+
+func TestParseTestCounts_PHPUnitAllPass(t *testing.T) {
+	out := `PHPUnit 10.5.0 by Sebastian Bergmann and contributors.
+
+..                                                                  2 / 2 (100%)
+
+Time: 00:00.020, Memory: 6.00 MB
+
+OK (2 tests, 2 assertions)`
+	assertCounts(t, "phpunit", out, 2, 2)
+}
+
+func TestParseTestCounts_PHPUnitNoErrors(t *testing.T) {
+	// Older PHPUnit summary omits the "Errors:" field.
+	out := `FAILURES!
+Tests: 2, Assertions: 2, Failures: 1.`
+	assertCounts(t, "php artisan test", out, 1, 2)
+}
+
+func TestParseTestCounts_Gradle(t *testing.T) {
+	out := `com.example.CalculatorTest > testAdd() FAILED
+    org.opentest4j.AssertionFailedError: expected: <5> but was: <4>
+
+3 tests completed, 2 failed
+
+> Task :test FAILED`
+	assertCounts(t, "./gradlew test", out, 1, 3)
+}
+
+func TestParseTestCounts_GradleAllPass(t *testing.T) {
+	out := `com.example.CalculatorTest > testAdd() PASSED
+
+3 tests completed
+
+BUILD SUCCESSFUL in 2s`
+	assertCounts(t, "gradle test", out, 3, 3)
+}
+
+func TestParseTestCounts_GradleNoSummaryLine(t *testing.T) {
+	// Quiet build output with no "N tests completed" line returns nil.
+	out := `> Task :test
+
+BUILD SUCCESSFUL in 2s`
+	assertCounts(t, "gradle test", out, 0, 0)
+}

@@ -55,20 +55,77 @@ type Tracker struct {
 	database *db.DB
 	queries  *sqlc.Queries
 	bus      *pubsub.Topic[Change]
+	blobDir  string // content-addressed snapshot store; "" disables snapshots
 
 	mu            sync.RWMutex
 	lastReadCache map[string]map[string]string // sessionID -> path -> hash
 }
 
-// NewTracker constructs a Tracker. bus may be nil, in which case
-// Changes are persisted but not published.
+// NewTracker constructs a Tracker without content snapshots: file
+// changes are recorded by hash only and cannot be reverted. bus may be
+// nil, in which case Changes are persisted but not published.
 func NewTracker(database *db.DB, bus *pubsub.Topic[Change]) *Tracker {
+	return NewTrackerWithSnapshots(database, bus, "")
+}
+
+// NewTrackerWithSnapshots is like NewTracker but additionally persists
+// the before/after content of every recorded write to a
+// content-addressed blob store under blobDir, enabling RevertSession to
+// restore files to their pre-session state. A blobDir of "" disables
+// snapshots. Snapshotting is best-effort and never blocks a write.
+func NewTrackerWithSnapshots(database *db.DB, bus *pubsub.Topic[Change], blobDir string) *Tracker {
 	return &Tracker{
 		database:      database,
 		queries:       database.Queries,
 		bus:           bus,
+		blobDir:       blobDir,
 		lastReadCache: make(map[string]map[string]string),
 	}
+}
+
+// putBlob stores content under its content hash in the snapshot store.
+// It is a best-effort no-op when snapshots are disabled or content is
+// nil. Writes are idempotent: a blob already present (content
+// addressed) is left untouched. Failures are logged, never returned —
+// a snapshot miss only costs the ability to revert that one write.
+func (t *Tracker) putBlob(hash string, content []byte) {
+	if t.blobDir == "" || hash == "" || content == nil {
+		return
+	}
+	if err := os.MkdirAll(t.blobDir, 0o700); err != nil {
+		slog.Warn("Creating snapshot dir failed", "dir", t.blobDir, "err", err)
+		return
+	}
+	dst := filepath.Join(t.blobDir, hash)
+	if _, err := os.Stat(dst); err == nil {
+		return // already stored; content addressing makes this safe
+	}
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, content, 0o600); err != nil {
+		slog.Warn("Writing snapshot blob failed", "hash", hash, "err", err)
+		return
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		slog.Warn("Finalizing snapshot blob failed", "hash", hash, "err", err)
+		_ = os.Remove(tmp)
+	}
+}
+
+// getBlob returns the content stored under hash, or ok=false when no
+// such blob exists (including when snapshots are disabled or hash is
+// empty). A genuine read error is returned.
+func (t *Tracker) getBlob(hash string) (content []byte, ok bool, err error) {
+	if t.blobDir == "" || hash == "" {
+		return nil, false, nil
+	}
+	data, err := os.ReadFile(filepath.Join(t.blobDir, hash))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("reading snapshot blob %s: %w", hash, err)
+	}
+	return data, true, nil
 }
 
 // Sentinel errors.
@@ -277,6 +334,11 @@ func (t *Tracker) RecordWrite(ctx context.Context, sessionID, path string, oldCo
 	if err := t.refreshReadBaseline(ctx, sessionID, normPath, afterHash); err != nil {
 		slog.Warn("Refreshing read baseline after write failed", "session_id", sessionID, "path", normPath, "err", err)
 	}
+
+	// Snapshot the before/after content so the write can later be reverted.
+	// Best-effort and content addressed, so it is cheap and idempotent.
+	t.putBlob(beforeHash, oldContent)
+	t.putBlob(afterHash, newContent)
 
 	change := Change{
 		SessionID:  fc.SessionID,

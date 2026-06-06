@@ -196,7 +196,10 @@ func New(ctx context.Context, opts Options) (*App, error) {
 
 	app.Ledger = ledger.New(app.DB, &app.Cfg.Ledger, app.Cfg.Models, app.Bus.Ledger)
 	app.Sessions = session.NewRepo(app.DB)
-	app.FileTracker = filetracker.NewTracker(app.DB, app.Bus.FileChanges)
+	// Colocate the revert snapshot store next to the database so file
+	// changes can be rolled back with `bharatcode revert`.
+	snapshotDir := filepath.Join(filepath.Dir(dbPath), "snapshots")
+	app.FileTracker = filetracker.NewTrackerWithSnapshots(app.DB, app.Bus.FileChanges, snapshotDir)
 
 	app.LLM, err = llm.NewRegistry(app.Cfg)
 	if err != nil {

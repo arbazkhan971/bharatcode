@@ -23,10 +23,53 @@ func TestOpenAIUsageCachedTokensFromDetails(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(raw), &u))
 
 	got := u.toUsage()
-	require.Equal(t, 1000, got.InputTokens)
+	// prompt_tokens includes the 512 cached tokens, which the ledger prices
+	// additively at the cache rate, so they are subtracted back out of the
+	// non-cached input count: 1000 - 512 = 488.
+	require.Equal(t, 488, got.InputTokens)
 	require.Equal(t, 200, got.OutputTokens)
 	require.Equal(t, 512, got.CacheReadTokens, "cached_tokens must map to CacheReadTokens")
 	require.Equal(t, 0, got.CacheWriteTokens)
+}
+
+// TestOpenAIUsageInputExcludesCachedTokens asserts the cached prompt tokens are
+// not double-counted: prompt_tokens is the total prompt size including the
+// cached portion, so toUsage subtracts the cache reads back out of InputTokens.
+// The ledger prices InputTokens and CacheReadTokens additively, so leaving the
+// full prompt_tokens in InputTokens would bill the cached tokens twice. This
+// covers the DeepSeek flat-field shape, where prompt_cache_hit_tokens +
+// prompt_cache_miss_tokens sum to prompt_tokens.
+func TestOpenAIUsageInputExcludesCachedTokens(t *testing.T) {
+	raw := `{
+		"prompt_tokens": 800,
+		"completion_tokens": 50,
+		"prompt_cache_hit_tokens": 300,
+		"prompt_cache_miss_tokens": 500
+	}`
+
+	var u openAIUsage
+	require.NoError(t, json.Unmarshal([]byte(raw), &u))
+
+	got := u.toUsage()
+	require.Equal(t, 500, got.InputTokens, "input must exclude the 300 cached tokens")
+	require.Equal(t, 300, got.CacheReadTokens)
+}
+
+// TestOpenAIUsageInputClampsAtZero asserts a malformed response whose cached
+// count exceeds prompt_tokens does not produce a negative InputTokens.
+func TestOpenAIUsageInputClampsAtZero(t *testing.T) {
+	raw := `{
+		"prompt_tokens": 100,
+		"completion_tokens": 5,
+		"prompt_tokens_details": {"cached_tokens": 250}
+	}`
+
+	var u openAIUsage
+	require.NoError(t, json.Unmarshal([]byte(raw), &u))
+
+	got := u.toUsage()
+	require.Equal(t, 0, got.InputTokens)
+	require.Equal(t, 250, got.CacheReadTokens)
 }
 
 // TestOpenAIUsageFlatCacheFieldsWin asserts the DeepSeek-style flat cache

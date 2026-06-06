@@ -191,8 +191,22 @@ func (u openAIUsage) toUsage() Usage {
 	if cacheWrite == 0 {
 		cacheWrite = u.PromptCacheMissTokens
 	}
+	// prompt_tokens is the total prompt size *including* the cached tokens
+	// (OpenAI reports cache hits as a subset under prompt_tokens_details, and
+	// DeepSeek's prompt_cache_hit_tokens + prompt_cache_miss_tokens sum to
+	// prompt_tokens), whereas the ledger prices InputTokens and CacheReadTokens
+	// additively (the Anthropic convention, where input_tokens already excludes
+	// the cached portion). Subtract the cached tokens back out so they are billed
+	// once at the cache rate rather than twice — once at the full input rate and
+	// again at the cache rate. Clamp at zero to stay robust against a malformed
+	// response where the cached count somehow exceeds the prompt total. Mirrors
+	// the same correction applied on the Gemini path.
+	input := u.PromptTokens - cacheRead
+	if input < 0 {
+		input = 0
+	}
 	return Usage{
-		InputTokens:      u.PromptTokens,
+		InputTokens:      input,
 		OutputTokens:     u.CompletionTokens,
 		CacheReadTokens:  cacheRead,
 		CacheWriteTokens: cacheWrite,

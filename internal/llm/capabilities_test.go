@@ -776,3 +776,85 @@ func TestDefaultsCatalogOpenAIReasoningModels(t *testing.T) {
 	require.True(t, providerModels["o3-pro"],
 		"openai provider must list o3-pro in its models")
 }
+
+// TestDefaultsCatalogOpenRouterPopular verifies the embedded defaults include a
+// meaningful selection of popular models via the openrouter provider so users
+// who configure OPENROUTER_API_KEY have access to diverse frontier models
+// without manual configuration. It also checks that each model's context_window
+// matches what inferContextWindow would derive from the vendor-namespaced id,
+// catching any future catalog/capabilities drift.
+func TestDefaultsCatalogOpenRouterPopular(t *testing.T) {
+	cfg := config.Default()
+
+	byID := make(map[string]config.Model, len(cfg.Models))
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+
+	entries := []struct {
+		id            string
+		wantCtxWindow int
+		wantImages    bool
+		wantTools     bool
+	}{
+		// DeepSeek R1 reasoning model: 131k context, no vision, no tool use.
+		{"deepseek/deepseek-r1", 131_072, false, false},
+		// Llama 4 Scout via OpenRouter routes to backends that serve the full 10M
+		// native context window, unlike Groq which caps at 131k.
+		{"meta-llama/llama-4-scout", 10_485_760, true, true},
+		// Llama 4 Maverick: 1M context, vision and tool use.
+		{"meta-llama/llama-4-maverick", 1_048_576, true, true},
+		// Gemini 2.5 Flash and Pro via OpenRouter: 1M context, vision, tools.
+		{"google/gemini-2.5-flash", 1_048_576, true, true},
+		{"google/gemini-2.5-pro", 1_048_576, true, true},
+		// Grok 4 via OpenRouter: 256k context, vision, tools.
+		{"x-ai/grok-4", 256_000, true, true},
+		// Devstral coding model: 128k context, no vision, tools.
+		{"mistralai/devstral-small-2507", 128_000, false, true},
+	}
+	for _, e := range entries {
+		m, ok := byID[e.id]
+		require.Truef(t, ok, "defaults catalog must include openrouter model %q", e.id)
+		require.Equalf(t, "openrouter", m.Provider, "model %q has wrong provider", e.id)
+		require.Equalf(t, e.wantCtxWindow, m.ContextWindow, "model %q has wrong context_window", e.id)
+		require.Equalf(t, e.wantImages, m.SupportsImages, "model %q SupportsImages mismatch", e.id)
+		require.Equalf(t, e.wantTools, m.SupportsTools, "model %q SupportsTools mismatch", e.id)
+	}
+
+	// The heuristic must recognize all vendor-namespaced OpenRouter ids and
+	// resolve them to their real context windows without explicit catalog entries.
+	heuristicCases := []struct {
+		id   string
+		want int
+	}{
+		{"deepseek/deepseek-r1", 131_072},
+		{"meta-llama/llama-4-scout", 10_485_760},
+		{"meta-llama/llama-4-maverick", 1_048_576},
+		{"google/gemini-2.5-flash", 1_048_576},
+		{"google/gemini-2.5-pro", 1_048_576},
+		{"x-ai/grok-4", 256_000},
+		{"mistralai/devstral-small-2507", 128_000},
+	}
+	for _, tc := range heuristicCases {
+		require.Equalf(t, tc.want, inferContextWindow(tc.id),
+			"inferContextWindow must recognize openrouter id %q", tc.id)
+	}
+
+	// All new models must appear in the openrouter provider's model list.
+	var openrouterProvider *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "openrouter" {
+			openrouterProvider = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, openrouterProvider, "defaults must include a provider named 'openrouter'")
+	providerModels := make(map[string]bool, len(openrouterProvider.Models))
+	for _, id := range openrouterProvider.Models {
+		providerModels[id] = true
+	}
+	for _, e := range entries {
+		require.Truef(t, providerModels[e.id],
+			"openrouter provider must list model %q in its models", e.id)
+	}
+}

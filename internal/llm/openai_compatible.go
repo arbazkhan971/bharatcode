@@ -81,16 +81,23 @@ func (p *openAICompatibleProvider) Stream(ctx context.Context, req Request) (<-c
 	if err != nil {
 		return nil, fmt.Errorf("building provider request: %w", err)
 	}
-	// OpenRouter proxies models from many upstreams (Anthropic, Gemini, Grok,
-	// DeepSeek), most of which are not OpenAI reasoning models and so are never
-	// matched by the reasoning_effort/max_completion_tokens path in
-	// buildOpenAIRequest. OpenRouter exposes a single `reasoning` object that
-	// enables extended thinking for any of them, so set it here for OpenRouter
-	// when a thinking budget or effort is configured. The OpenAI o-series keeps
-	// its native path (reasoning_effort), so it is excluded to avoid sending two
-	// competing reasoning controls.
-	if isOpenRouter(p.baseURL) && !isReasoningModel(req.Model) {
-		body.Reasoning = openRouterReasoning(req)
+	if isOpenRouter(p.baseURL) {
+		// Ask OpenRouter for native usage accounting so the trailing usage chunk
+		// carries the upstream provider's real token counts (and cache breakdown)
+		// instead of OpenRouter's default GPT-tokenizer estimate. This applies to
+		// every model, reasoning or not, so it sits outside the reasoning gate below.
+		body.Usage = &openAIUsageRequest{Include: true}
+		// OpenRouter proxies models from many upstreams (Anthropic, Gemini, Grok,
+		// DeepSeek), most of which are not OpenAI reasoning models and so are never
+		// matched by the reasoning_effort/max_completion_tokens path in
+		// buildOpenAIRequest. OpenRouter exposes a single `reasoning` object that
+		// enables extended thinking for any of them, so set it here for OpenRouter
+		// when a thinking budget or effort is configured. The OpenAI o-series keeps
+		// its native path (reasoning_effort), so it is excluded to avoid sending two
+		// competing reasoning controls.
+		if !isReasoningModel(req.Model) {
+			body.Reasoning = openRouterReasoning(req)
+		}
 	}
 	resp, err := postOpenAIJSON(ctx, p.client, p.baseURL, appendPath(p.baseURL, "/chat/completions"), apiKey, body)
 	if err != nil {

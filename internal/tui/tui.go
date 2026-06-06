@@ -1456,6 +1456,15 @@ func countBindings(groups []keyGroup) int {
 // that term for all of its bindings, so "/keys tabs" still surfaces the whole
 // Tabs section; a group with no surviving binding is dropped. An empty or
 // whitespace-only filter returns every group unchanged.
+//
+// When the substring pass finds nothing, the filter falls back to a fuzzy
+// subsequence match (see fuzzyFilterKeybindingGroups), so a run-together or
+// abbreviated query — "swtab" for "switch … tab", "prevmatch" for the
+// previous-match key — still surfaces its binding rather than the bare "no
+// shortcuts match" note. This mirrors the subsequence fallback the slash-command
+// menu uses (matchSlash), keeping fuzzy discovery consistent across the TUI's
+// filters. Substring matches always win when present, so a precise query is
+// never broadened.
 func filterKeybindingGroups(filter string) []keyGroup {
 	q := strings.ToLower(strings.TrimSpace(filter))
 	if q == "" {
@@ -1478,6 +1487,41 @@ func filterKeybindingGroups(filter string) []keyGroup {
 				}
 			}
 			if matchesAll {
+				kept = append(kept, b)
+			}
+		}
+		if len(kept) > 0 {
+			out = append(out, keyGroup{title: g.title, bindings: kept})
+		}
+	}
+	if len(out) == 0 {
+		return fuzzyFilterKeybindingGroups(q)
+	}
+	return out
+}
+
+// fuzzyFilterKeybindingGroups is the subsequence fallback filterKeybindingGroups
+// reaches for when no binding matches the filter by substring. The query's
+// whitespace is dropped — so a multi-word query is matched as one run, letting
+// "switch tab" and "switchtab" behave alike — and a binding is kept when that run
+// is an ordered subsequence of its "title key description" haystack. A binding's
+// own group title is folded into its haystack so a section name still helps a
+// fuzzy query land, matching the substring pass. Groups are returned in their
+// source order with only their surviving bindings, and a query matching nothing
+// even fuzzily yields no groups, leaving the overlay to show its "no shortcuts
+// match" note.
+func fuzzyFilterKeybindingGroups(query string) []keyGroup {
+	token := strings.Join(strings.Fields(query), "")
+	if token == "" {
+		return nil
+	}
+	var out []keyGroup
+	for _, g := range keybindingGroups {
+		title := strings.ToLower(g.title)
+		var kept []keyBinding
+		for _, b := range g.bindings {
+			hay := title + " " + strings.ToLower(b.key) + " " + strings.ToLower(b.desc)
+			if isSubsequence(token, hay) {
 				kept = append(kept, b)
 			}
 		}

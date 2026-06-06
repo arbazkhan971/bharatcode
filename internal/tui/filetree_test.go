@@ -107,6 +107,71 @@ func TestFiletreePanel_SelectingEditedFile_RendersDiff(t *testing.T) {
 	require.Contains(t, out, "new line")
 }
 
+func TestFiletreePanel_MarksEditedFiles(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "package main\n")
+	writeFile(t, root, "beta.go", "package main\n")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+
+	editInput, err := json.Marshal(map[string]string{
+		"path":       filepath.Join(root, "beta.go"),
+		"old_string": "old line",
+		"new_string": "new line",
+	})
+	require.NoError(t, err)
+	m.editDiffSource = func() []message.Message {
+		return []message.Message{{
+			Role: message.RoleAssistant,
+			Content: []message.ContentBlock{
+				message.ToolUseBlock{ID: "t1", Name: "edit", Input: editInput},
+			},
+		}}
+	}
+
+	// Open the panel; the cursor starts on the unedited alpha.go.
+	_, _ = m.Update(ctrlKey('f'))
+	require.Equal(t, "alpha.go", m.filetree.selected())
+
+	out := plainText(m.renderMain())
+	// The edited, non-cursor beta.go carries the "●" marker in place of its
+	// indent; the unedited alpha.go (under the cursor) shows the "> " indicator
+	// and no marker.
+	require.Contains(t, out, "● beta.go")
+	require.Contains(t, out, "> alpha.go")
+	require.NotContains(t, out, "● alpha.go")
+
+	// Move the cursor onto beta.go: it loses the marker to the cursor indicator,
+	// and the now-unselected alpha.go still has no marker.
+	_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	require.Equal(t, "beta.go", m.filetree.selected())
+	out = plainText(m.renderMain())
+	require.Contains(t, out, "> beta.go")
+	require.NotContains(t, out, "● alpha.go")
+}
+
+// TestFiletreePanel_NoMarkerWithoutEdits proves an untouched workspace lists
+// every file with its plain indent, so the marker only ever flags real edits.
+func TestFiletreePanel_NoMarkerWithoutEdits(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "package main\n")
+	writeFile(t, root, "beta.go", "package main\n")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	m.editDiffSource = func() []message.Message { return nil }
+
+	_, _ = m.Update(ctrlKey('f'))
+	out := plainText(m.renderMain())
+	require.Contains(t, out, "beta.go")
+	require.NotContains(t, out, "●")
+}
+
 func TestFiletreeScrollStart_KeepsCursorVisible(t *testing.T) {
 	t.Parallel()
 

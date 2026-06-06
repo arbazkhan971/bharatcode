@@ -1217,7 +1217,7 @@ func TestSyntaxHighlight_NoLang(t *testing.T) {
 
 // TestRenderUnified_ContextLinesHighlighted asserts that context lines in a
 // recognized-language diff are syntax-highlighted (a keyword appears accented)
-// while added and removed lines keep their diff styles.
+// while modified lines get word-diff emphasis on their changed runs.
 func TestRenderUnified_ContextLinesHighlighted(t *testing.T) {
 	t.Parallel()
 	theme := styles.Default()
@@ -1225,9 +1225,60 @@ func TestRenderUnified_ContextLinesHighlighted(t *testing.T) {
 	got := New(theme).RenderUnified(patch, 120)
 	// The context line " func greet() {}" should have "func" accented.
 	require.Contains(t, got, theme.Accent.Render("func"))
-	// Added and removed lines must still carry their diff colors.
-	require.Contains(t, got, theme.DiffRemove.Render("-old()"))
-	require.Contains(t, got, theme.DiffAdd.Render("+new()"))
+	// The changed identifiers are emphasized; shared tokens keep the base style.
+	require.Contains(t, got, theme.DiffRemoveEmph.Render("old"))
+	require.Contains(t, got, theme.DiffAddEmph.Render("new"))
+	require.Contains(t, got, theme.DiffRemove.Render("()"))
+	require.Contains(t, got, theme.DiffAdd.Render("()"))
+}
+
+// TestRenderUnified_WordHighlight checks that RenderUnified applies the same
+// intra-line word-diff emphasis as RenderUnifiedNumbered: paired add/remove
+// lines have only their changed runs emphasized, and surplus unpaired lines keep
+// the plain add/remove style.
+func TestRenderUnified_WordHighlight(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,1 +1,1 @@\n-func old() {}\n+func new() {}\n"
+	got := New(theme).RenderUnified(patch, 120)
+
+	// Shared prefix and suffix keep the base colors; only the differing word is
+	// emphasized on each side — matching RenderUnifiedNumbered behaviour.
+	require.Contains(t, got, theme.DiffRemove.Render("-func "))
+	require.Contains(t, got, theme.DiffRemoveEmph.Render("old"))
+	require.Contains(t, got, theme.DiffAddEmph.Render("new"))
+	require.Contains(t, got, theme.DiffAdd.Render("() {}"))
+}
+
+// TestRenderUnified_WordHighlight_NoSharedToken checks that when added and
+// removed lines share no token the plain add/remove style is used, matching
+// the RenderUnifiedNumbered fallback.
+func TestRenderUnified_WordHighlight_NoSharedToken(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,1 +1,1 @@\n-xyz\n+abc\n"
+	got := New(theme).RenderUnified(patch, 120)
+
+	require.Contains(t, got, theme.DiffRemove.Render("-xyz"))
+	require.Contains(t, got, theme.DiffAdd.Render("+abc"))
+	require.NotContains(t, got, theme.DiffRemoveEmph.Render("xyz"))
+	require.NotContains(t, got, theme.DiffAddEmph.Render("abc"))
+}
+
+// TestRenderUnified_WordHighlight_UnpairedSurplus checks that a surplus added
+// line (one with no removed counterpart) keeps the plain add style and is not
+// mistakenly emphasized.
+func TestRenderUnified_WordHighlight_UnpairedSurplus(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "@@ -1,1 +1,2 @@\n-alpha one\n+alpha two\n+brand new line\n"
+	got := New(theme).RenderUnified(patch, 120)
+
+	require.Contains(t, got, theme.DiffAddEmph.Render("two"))
+	require.Contains(t, got, theme.DiffAdd.Render("+brand new line"))
 }
 
 // TestRenderUnified_NoHighlightForUnknownExt asserts that a diff with no

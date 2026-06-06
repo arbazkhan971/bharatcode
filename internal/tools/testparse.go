@@ -107,6 +107,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseGotestsumFailures(output)
 	case runnerBusted:
 		return parseBustedFailures(output)
+	case runnerHaskell:
+		return parseHaskellFailures(output)
 	default:
 		return nil
 	}
@@ -152,6 +154,7 @@ const (
 	runnerKarma
 	runnerGotestsum
 	runnerBusted
+	runnerHaskell
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -329,6 +332,19 @@ var (
 	// word boundary — from matching. A busted invocation carries none of the other
 	// runners' substrings.
 	bustedRe = regexp.MustCompile(`\bbusted\b`)
+	// `stack test`/`cabal test` (and the `cabal v2-test`/`cabal new-test`
+	// aliases) drive a Haskell test suite — overwhelmingly hspec, whose reporter
+	// closes a failing run with a "Failures:" block numbering each failed example
+	// ("N) <description>") with its "<file>.hs:<line>:<col>:" source location on
+	// the indented line above. \bstack test\b admits "stack test --fast"; the
+	// cabal form requires both "cabal" and a following "test" token at word
+	// boundaries, so "cabal test", "cabal v2-test", and "cabal new-test" match
+	// while "cabal build" / "cabal run" and prose like "the cabal was tested"
+	// (where "test" runs into a following word) do not. The "[^&|;]*" keeps the
+	// match within a single command rather than spanning a "cabal build && go
+	// test" chain. A Haskell invocation carries none of the other runners'
+	// substrings.
+	haskellRe = regexp.MustCompile(`\bstack test\b|\bcabal\b[^&|;]*\btest\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -594,6 +610,15 @@ func classifyTestRunner(command string) testRunner {
 		// since a busted invocation carries none of their substrings, but kept
 		// explicit to guard against future overlap.
 		return runnerBusted
+	case haskellRe.MatchString(c):
+		// `stack test`/`cabal test` drive a Haskell suite (hspec), whose report
+		// closes with a "Failures:" block of numbered "N) <description>" entries,
+		// each preceded by an indented "<file>.hs:<line>:<col>:" source location.
+		// Checked before the JS runners since a Haskell invocation carries none of
+		// their substrings, but kept explicit to guard against future overlap. A
+		// run that drives tasty instead prints no "Failures:" header, so the parser
+		// simply surfaces nothing rather than misreading it.
+		return runnerHaskell
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -2892,6 +2917,63 @@ func parseBustedFailures(output string) []testFailure {
 			failures = append(failures, f)
 		}
 		i = j
+	}
+	return failures
+}
+
+var (
+	// hspec closes a failing run with a "Failures:" section listing each failed
+	// example as "N) <full description>". Group 1 is the description, used as the
+	// name so it reads like the other runners' human-readable identifiers. The
+	// leading "\s*\d+\)" matches hspec's indented "  1) ..." numbering.
+	haskellFailRe = regexp.MustCompile(`^\s*\d+\) (.+\S)\s*$`)
+	// The indented source-location line hspec prints directly above each numbered
+	// failure, e.g. "  test/FooSpec.hs:14:7: " (a trailing space, or nothing,
+	// follows the final colon). Group 1 is the "<file>:<line>:<col>" coordinate,
+	// surfaced as the failure detail so the model can jump straight to the
+	// assertion. The "$" anchor (after an optional colon and trailing spaces)
+	// keeps message lines that merely mention a path from matching. ".l?hs"
+	// admits both ordinary (.hs) and literate (.lhs) Haskell sources.
+	haskellLocRe = regexp.MustCompile(`^\s*(\S+\.l?hs:\d+:\d+):?\s*$`)
+)
+
+// parseHaskellFailures extracts failing examples from a Haskell test run
+// (hspec, the dominant framework, driven by `stack test`/`cabal test`). hspec
+// closes a failing run with a "Failures:" section that numbers each failed
+// example ("N) <description>") and prints its "<file>.hs:<line>:<col>:" source
+// location on the indented line directly above. The description becomes the
+// name and that location the detail. Parsing is gated on the "Failures:" header
+// so ordinary numbered output earlier in the log is never misread as a failure,
+// and a run that drives a different framework (tasty), which prints no such
+// header, simply yields nothing rather than a false positive.
+func parseHaskellFailures(output string) []testFailure {
+	lines := splitLines(output)
+	inFailures := false
+	// The most recent source-location line seen; it precedes the numbered
+	// failure it belongs to, and is cleared once consumed so a failure without
+	// its own location does not borrow the previous one's.
+	lastLoc := ""
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		if !inFailures {
+			if strings.TrimSpace(ln) == "Failures:" {
+				inFailures = true
+			}
+			continue
+		}
+		if m := haskellLocRe.FindStringSubmatch(ln); m != nil {
+			lastLoc = m[1]
+			continue
+		}
+		if m := haskellFailRe.FindStringSubmatch(ln); m != nil {
+			name := strings.TrimSpace(m[1])
+			if name != "" && !seen[name] {
+				seen[name] = true
+				failures = append(failures, testFailure{Name: name, Detail: lastLoc})
+			}
+			lastLoc = ""
+		}
 	}
 	return failures
 }

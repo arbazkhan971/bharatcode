@@ -74,6 +74,10 @@ func TestInferContextWindow(t *testing.T) {
 		{"meta-llama/Llama-4-Scout-17B-16E-Instruct", 10_485_760},
 		{"meta-llama/llama-4-maverick", 1_048_576},
 		{"mixtral-8x7b", 32_768},
+		// Mixtral 8x22B doubled the window to 64k; its id carries the "mixtral"
+		// marker, so the specific rule must win over the 32k family default.
+		{"open-mixtral-8x22b", 65_536},
+		{"mistralai/mixtral-8x22b-instruct", 65_536},
 		// Mistral Large 2 lifted the window to 128k; its id carries the "mistral"
 		// marker, so the specific rule must win over the family default (32k).
 		{"mistral-large-latest", 128_000},

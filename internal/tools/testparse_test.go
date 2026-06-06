@@ -356,6 +356,31 @@ func TestParseGoTestFailures_SetupFailed(t *testing.T) {
 	assertFailures(t, got, want)
 }
 
+func TestParseGoTestFailures_VetFailed(t *testing.T) {
+	// "go test" runs "go vet" before the tests; when vet finds a problem it
+	// prints a "FAIL pkg [vet failed]" line with no "--- FAIL:" markers. The
+	// first vet diagnostic on that package becomes the detail.
+	out := `# github.com/x/y
+./foo.go:10:5: assign merges two assignments into one
+FAIL	github.com/x/y [vet failed]`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "github.com/x/y [vet failed]", Detail: "./foo.go:10:5: assign merges two assignments into one"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_VetFailedNoDetail(t *testing.T) {
+	// A vet failure that prints no file-level diagnostic (e.g. the vet message
+	// landed in a different package block) still surfaces the package name.
+	out := "FAIL\tgithub.com/x/y [vet failed]"
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "github.com/x/y [vet failed]"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseGoTestFailures_BuildFailedPerPackage(t *testing.T) {
 	// Each "# pkg" header scopes the compiler error that follows, so a build
 	// failure picks up its own package's error rather than a stale one.

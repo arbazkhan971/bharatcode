@@ -137,6 +137,11 @@ func TestSlashCommand_Keys_OpensShortcutDialog(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
+	// Expand the terminal to 200 rows so the scrollable keybindings dialog
+	// displays all content in a single render without requiring the user to
+	// scroll — the test contract is that every important shortcut is documented,
+	// not that it fits in a small terminal.
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 200})
 	m.input.WriteString("/keys")
 	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
 	require.True(t, m.dialogs.Contains("keybindings"),

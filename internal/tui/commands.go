@@ -509,7 +509,7 @@ func (m *model) handleDiff() (tea.Model, tea.Cmd) {
 	if stat := viewer.StatLines(patch, max(1, m.width-6)); stat != "" {
 		rendered = stat + "\n\n" + rendered
 	}
-	m.dialogs.Push(&dialog.Text{DialogID: "diff", Title: "Diff", Body: rendered, Theme: m.theme})
+	m.dialogs.Push(&dialog.ScrollableText{DialogID: "diff", Title: "Diff", Body: rendered, Theme: m.theme, Height: m.height})
 	return m, nil
 }
 

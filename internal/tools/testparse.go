@@ -393,6 +393,16 @@ var (
 	// where the "t" is followed by another word character. "npm test" is checked
 	// first in the jest case so this only needs to catch the short alias.
 	npmShortRe = regexp.MustCompile(`\bnpm t\b`)
+	// "nx test <app>" and "nx run <app>:test" drive the NX build system's test
+	// target, which defaults to Jest (via @nx/jest:jest) for Angular, NestJS, and
+	// React projects. The two canonical forms are covered:
+	//   nx test myapp [--args]         — the shorthand target alias
+	//   nx run myapp:test [--args]     — the explicit project:target form
+	// \bnx\s+test\b admits "nx test", "npx nx test", and "pnpm exec nx test"
+	// while keeping prose like "the nx refactoring" (no "test" token) from
+	// matching. The run-form's [^&|;]* stays within a single command segment so
+	// "nx run myapp:build && jest" is not misread as an NX test run.
+	nxTestRe = regexp.MustCompile(`\bnx\s+test\b|\bnx\s+run\b[^&|;]*:test\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -696,6 +706,14 @@ func classifyTestRunner(command string) testRunner {
 		// zig invocation carries none of their substrings, but kept explicit to
 		// guard against future overlap.
 		return runnerZig
+	case nxTestRe.MatchString(c):
+		// `nx test <app>` and `nx run <app>:test` drive the NX build system's Jest
+		// executor (@nx/jest:jest), the default for Angular, NestJS, and React
+		// projects. The Jest parser handles the output; vitest is also covered
+		// because both "✕" (jest) and "×" (vitest) are matched by jestFailRe.
+		// Checked before the generic jest/npm-script runners since an NX invocation
+		// may not contain "jest" or "vitest" in the command itself.
+		return runnerJest
 	// `bun run test` invokes an arbitrary npm-style test script via bun's package
 	// manager (the same role npm/yarn/pnpm play), so it is classified alongside
 	// those runners rather than as `runnerBun` (bun's native test runner). `bun

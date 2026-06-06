@@ -1,8 +1,10 @@
 // Package offline implements BharatCode's sovereignty offline mode: a verifiable
 // guarantee that no source code or prompt leaves the local machine. When the
 // mode is active BharatCode rejects any LLM provider whose endpoint is not on
-// localhost and disables the web_fetch and web_search tools, so the only network
-// traffic is to a model running on the same machine.
+// localhost, rejects non-loopback MCP servers, disables the web_fetch and
+// web_search tools, and refuses bash commands that invoke a known network-egress
+// client (see EgressCommand), so the only network traffic is to a model running
+// on the same machine.
 package offline
 
 import (

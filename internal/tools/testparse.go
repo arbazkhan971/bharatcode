@@ -961,15 +961,22 @@ func looksLikeGoTestJSON(output string) bool {
 // and its output carried a compiler diagnostic, it is a build failure. Those are
 // surfaced as a "pkg [build failed]" entry after the test failures, matching the
 // text parser's handling of "FAIL pkg [build failed]" (which `-json` never emits).
+//
+// When `-timeout` fires the timeout panic and "running tests:" block arrive as
+// package-scoped output events; there are no test-level "fail" events. The
+// hanging tests are recovered from the "running tests:" block, mirroring the
+// text parser's parseGoTestTimeoutRunning logic.
 func parseGoTestJSONFailures(output string) []testFailure {
 	var order []string
 	failed := map[string]bool{}
 	detail := map[string]string{}
-	// Per-package state for surfacing build failures: the count of failed tests
-	// (to suppress the package entry once individual tests reported), the first
-	// compiler diagnostic seen, and the order packages first failed in.
+	// Per-package state for surfacing build failures and timeout-hanging tests:
+	// the count of failed tests (to suppress the package entry once individual
+	// tests reported), the first compiler diagnostic seen, all package-scoped
+	// output lines (for timeout recovery), and the order packages first failed in.
 	testsInPkg := map[string]int{}
 	compileErrByPkg := map[string]string{}
+	pkgOutputLines := map[string][]string{}
 	pkgFailed := map[string]bool{}
 	var pkgOrder []string
 	for _, ln := range splitLines(output) {
@@ -984,9 +991,12 @@ func parseGoTestJSONFailures(output string) []testFailure {
 		switch ev.Action {
 		case "output":
 			if ev.Test == "" {
-				// Package-scoped output: capture the first compiler diagnostic in
-				// case this package turns out to be a build failure.
 				if ev.Package != "" {
+					// Collect package-scoped lines for build-failure and timeout recovery.
+					pkgOutputLines[ev.Package] = append(pkgOutputLines[ev.Package],
+						strings.TrimRight(ev.Output, "\r\n"))
+					// Capture the first compiler diagnostic in case this package
+					// turns out to be a build failure.
 					if _, ok := compileErrByPkg[ev.Package]; !ok {
 						if d := goCompileErrFromOutput(ev.Output); d != "" {
 							compileErrByPkg[ev.Package] = d
@@ -1022,17 +1032,26 @@ func parseGoTestJSONFailures(output string) []testFailure {
 	for _, name := range order {
 		failures = append(failures, testFailure{Name: name, Detail: detail[name]})
 	}
-	// Append build failures for packages that failed without any individual test
-	// failing and whose output carried a compiler diagnostic.
+	// Append build failures / timeout-hanging tests for packages that failed.
 	for _, pkg := range pkgOrder {
-		if testsInPkg[pkg] > 0 {
-			continue
+		// Surface a build failure only when no individual tests reported: a
+		// package that had test-level failures already carries diagnostic value.
+		if testsInPkg[pkg] == 0 {
+			if ce := compileErrByPkg[pkg]; ce != "" {
+				failures = append(failures, testFailure{Name: pkg + " [build failed]", Detail: ce})
+				continue
+			}
 		}
-		ce := compileErrByPkg[pkg]
-		if ce == "" {
-			continue // failed for some other reason already reported via its tests
+		// Recover tests that were killed by a -timeout panic. The timeout panic
+		// and "running tests:" block arrive as package-scoped output events with
+		// no test-level "fail" counterparts; reuse the text-parser logic on the
+		// collected lines. Pass existing failures so already-reported tests are
+		// not double-counted. This runs even when some tests already reported
+		// failures: a -timeout run can have both a test that asserted first and
+		// other tests still running when the binary was killed.
+		if hung := parseGoTestTimeoutRunning(pkgOutputLines[pkg], failures); len(hung) > 0 {
+			failures = append(failures, hung...)
 		}
-		failures = append(failures, testFailure{Name: pkg + " [build failed]", Detail: ce})
 	}
 	return failures
 }

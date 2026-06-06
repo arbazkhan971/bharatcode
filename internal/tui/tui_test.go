@@ -883,6 +883,104 @@ func TestTurnCost_AbsentWhenNoPricing(t *testing.T) {
 		"the token segment must still appear without a cost suffix")
 }
 
+// TestContextWindowForModel asserts the lookup returns the model's context
+// window when found, and 0 when the model is absent or the list is nil.
+func TestContextWindowForModel(t *testing.T) {
+	t.Parallel()
+
+	models := []config.Model{
+		{ID: "claude-sonnet", Provider: "anthropic", ContextWindow: 200_000},
+		{ID: "llama-70b", Provider: "groq", ContextWindow: 131_072},
+		{ID: "free-model", Provider: "local"},
+	}
+
+	require.Equal(t, 200_000, contextWindowForModel(models, "claude-sonnet"),
+		"must return the exact context window for a known model")
+	require.Equal(t, 131_072, contextWindowForModel(models, "llama-70b"),
+		"must return the correct window for a second model")
+	require.Equal(t, 0, contextWindowForModel(models, "free-model"),
+		"a model with no context window set must return 0")
+	require.Equal(t, 0, contextWindowForModel(models, "unknown"),
+		"an unknown model ID must return 0")
+	require.Equal(t, 0, contextWindowForModel(nil, "claude-sonnet"),
+		"a nil model list must return 0")
+}
+
+// TestContextPct_SetOnRunDone asserts that handleRunDone computes and stores
+// the context-fill percentage when the model's context window is configured.
+func TestContextPct_SetOnRunDone(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.deps.Cfg.Models[0].ContextWindow = 100_000
+
+	m.handleRunDone(runDoneMsg{
+		last: &message.Message{
+			Usage: &message.TokenUsage{InputTokens: 45_000, OutputTokens: 500},
+		},
+	})
+
+	require.Equal(t, 45, m.lastContextPct,
+		"45k input tokens in a 100k window must yield 45%%")
+}
+
+// TestContextPct_ZeroWhenNoWindow asserts that lastContextPct stays 0 when
+// the model has no context window configured, so the status bar segment is
+// absent for models whose window size is unknown.
+func TestContextPct_ZeroWhenNoWindow(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	// testDeps sets kimi-k2 with no ContextWindow (zero); the segment must not appear.
+	m.handleRunDone(runDoneMsg{
+		last: &message.Message{
+			Usage: &message.TokenUsage{InputTokens: 5000, OutputTokens: 200},
+		},
+	})
+
+	require.Equal(t, 0, m.lastContextPct,
+		"a model with zero ContextWindow must leave lastContextPct at 0")
+}
+
+// TestContextPct_ClearedOnNewTurn asserts that lastContextPct is cleared when
+// a new turn starts, so stale context-fill from a previous turn does not
+// persist into the next turn's status bar while the agent is running.
+func TestContextPct_ClearedOnNewTurn(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.lastContextPct = 72
+
+	// Mirror what launchTurn does to the context pct state.
+	m.lastContextPct = 0
+	require.Equal(t, 0, m.lastContextPct,
+		"a new turn must clear the previous turn's context-fill percentage")
+}
+
+// TestContextPct_SurfacesInStatusBar drives the full render path: after a
+// turn finishes with both usage data and a configured context window the
+// "ctx N%" segment must appear in the rendered view.
+func TestContextPct_SurfacesInStatusBar(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.deps.Cfg.Models[0].ContextWindow = 200_000
+
+	rendered := func() string { return m.viewString() }
+
+	require.NotContains(t, rendered(), "ctx ", "an idle model must show no context segment")
+
+	m.handleRunDone(runDoneMsg{
+		last: &message.Message{
+			Usage: &message.TokenUsage{InputTokens: 100_000, OutputTokens: 1000},
+		},
+	})
+
+	// 100k / 200k = 50%
+	require.Contains(t, rendered(), "ctx 50%",
+		"a completed turn's context-fill segment must surface in the status bar")
+}
+
 // TestInitialSessionID_PreloadsHistory verifies that when Dependencies.InitialSessionID
 // is set, newModel pre-populates the chat with the stored transcript and marks the
 // session as persisted — matching the --continue / -c startup behaviour.

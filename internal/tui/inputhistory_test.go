@@ -470,6 +470,50 @@ func TestCompleteSlash_CyclesDynamicCommand(t *testing.T) {
 	require.Equal(t, "/triage", got)
 }
 
+// TestCompleteSlashPrev_SeedsOnLastMatch asserts the first Shift+Tab on a
+// slash prefix lands on the final candidate rather than the first, so a user can
+// reach the end of the menu in one step the way a backward cycle should.
+func TestCompleteSlashPrev_SeedsOnLastMatch(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	matches := matchSlash(st.candidates(), "/s")
+	require.Greater(t, len(matches), 1, "the test needs an ambiguous prefix")
+
+	got, ok := st.completeSlashPrev("/s")
+	require.True(t, ok, "a backward step on a matching prefix seeds the cycle")
+	require.Equal(t, matches[len(matches)-1], got,
+		"the first Shift+Tab lands on the last match")
+}
+
+// TestCompleteSlashPrev_StepsBackwardAndWraps asserts Shift+Tab reverses an
+// active Tab cycle and that stepping back past the first match wraps to the last,
+// the mirror image of the forward cycle.
+func TestCompleteSlashPrev_StepsBackwardAndWraps(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	matches := matchSlash(st.candidates(), "/s")
+	require.Greater(t, len(matches), 1, "the test needs an ambiguous prefix")
+
+	// Two forward Tabs settle on the second match.
+	c1, ok := st.completeSlash("/s")
+	require.True(t, ok)
+	c2, ok := st.completeSlash(c1)
+	require.True(t, ok)
+	require.Equal(t, matches[1], c2)
+
+	// One backward step returns to the first match...
+	back, ok := st.completeSlashPrev(c2)
+	require.True(t, ok)
+	require.Equal(t, matches[0], back)
+
+	// ...and a further backward step wraps to the last.
+	wrapped, ok := st.completeSlashPrev(back)
+	require.True(t, ok)
+	require.Equal(t, matches[len(matches)-1], wrapped)
+}
+
 // TestSlashHintCommands_SurfacesDynamicCommand asserts the hint dropdown lists a
 // dynamic command for an ambiguous prefix it shares with a built-in, so recipes
 // and custom prompts are as visible while typing as the built-ins.

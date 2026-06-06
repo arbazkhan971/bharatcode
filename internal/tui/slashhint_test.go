@@ -4,8 +4,35 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 )
+
+// keyShiftTab is a Shift+Tab key press, the backward completion-cycle binding.
+func keyShiftTab() tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyTab, Mod: tea.ModShift})
+}
+
+// TestHandleKey_ShiftTabCyclesSlashBackward asserts the Shift+Tab binding routes
+// through handleKey to the backward slash-completion cycle: after two forward
+// Tabs settle on the second match, Shift+Tab returns to the first, proving the
+// key is wired and reverses the cycle.
+func TestHandleKey_ShiftTabCyclesSlashBackward(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	matches := matchSlash(m.inputHistory.candidates(), "/s")
+	require.Greater(t, len(matches), 1, "the test needs an ambiguous prefix")
+
+	m.setInput("/s")
+	_, _ = m.Update(keyTab())
+	require.Equal(t, matches[0], m.input.String(), "the first Tab seeds on the first match")
+	_, _ = m.Update(keyTab())
+	require.Equal(t, matches[1], m.input.String(), "a second Tab advances forward")
+
+	_, _ = m.Update(keyShiftTab())
+	require.Equal(t, matches[0], m.input.String(), "Shift+Tab steps the cycle backward")
+}
 
 // TestOverflowSuffix asserts the truncation indicator reports the hidden-match
 // count when matches were dropped and falls back to a bare ellipsis otherwise,

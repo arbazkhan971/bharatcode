@@ -263,8 +263,25 @@ func isSubsequence(token, s string) bool {
 // state, which is safe because slash and mention completion never run on the
 // same buffer (one needs a leading "/", the other a trailing "@" token).
 func (s *inputState) completeMention(current, root string) (string, bool) {
+	return s.stepMention(current, root, +1)
+}
+
+// completeMentionPrev cycles @-file completion backward, the reverse of
+// completeMention, so Shift+Tab steps back to a match the user overshot rather
+// than cycling the whole list around. With no active cycle it seeds one on the
+// last match, mirroring completeSlashPrev.
+func (s *inputState) completeMentionPrev(current, root string) (string, bool) {
+	return s.stepMention(current, root, -1)
+}
+
+// stepMention moves the @-file completion cycle by dir (+1 forward, -1
+// backward), wrapping at either end. It is the shared core of completeMention
+// and completeMentionPrev and mirrors stepSlash: an active cycle continues only
+// while the buffer still shows the match we placed there, and a fresh cycle
+// starts on the first match forward or the last backward.
+func (s *inputState) stepMention(current, root string, dir int) (string, bool) {
 	if len(s.completionMatches) > 0 && current == s.completionMatches[s.completionIndex] {
-		s.completionIndex = (s.completionIndex + 1) % len(s.completionMatches)
+		s.completionIndex = wrapIndex(s.completionIndex+dir, len(s.completionMatches))
 		return s.completionMatches[s.completionIndex], true
 	}
 
@@ -283,8 +300,8 @@ func (s *inputState) completeMention(current, root string) (string, bool) {
 		matches[i] = prefix + f
 	}
 	s.completionMatches = matches
-	s.completionIndex = 0
-	return matches[0], true
+	s.completionIndex = seedIndex(dir, len(matches))
+	return matches[s.completionIndex], true
 }
 
 // mentionHintFiles returns the file paths to surface in the @-mention completion

@@ -142,10 +142,28 @@ func (s *inputState) recallNext(current string) (string, bool) {
 // Tab on a prefix shows the first match; subsequent Tabs cycle through the
 // matches.
 func (s *inputState) completeSlash(current string) (string, bool) {
-	// Continue an active cycle only while the buffer still shows the match we
-	// placed there; any edit ends the cycle and reseeds from the new buffer.
+	return s.stepSlash(current, +1)
+}
+
+// completeSlashPrev cycles slash-command completion backward, the reverse of
+// completeSlash, so Shift+Tab can step back to a match the user overshot rather
+// than cycling the whole list around to reach it again. With no active cycle it
+// seeds one positioned on the last match, so the first Shift+Tab on a prefix
+// lands on the final candidate.
+func (s *inputState) completeSlashPrev(current string) (string, bool) {
+	return s.stepSlash(current, -1)
+}
+
+// stepSlash moves the slash-command completion cycle by dir (+1 forward, -1
+// backward), wrapping at either end. It is the shared core of completeSlash and
+// completeSlashPrev. Continuing an active cycle only while the buffer still
+// shows the match we placed there; any edit ends the cycle and reseeds from the
+// new buffer. A fresh cycle starts on the first match when stepping forward or
+// the last when stepping backward, so a single Shift+Tab reaches the end of the
+// list directly.
+func (s *inputState) stepSlash(current string, dir int) (string, bool) {
 	if len(s.completionMatches) > 0 && current == s.completionMatches[s.completionIndex] {
-		s.completionIndex = (s.completionIndex + 1) % len(s.completionMatches)
+		s.completionIndex = wrapIndex(s.completionIndex+dir, len(s.completionMatches))
 		return s.completionMatches[s.completionIndex], true
 	}
 
@@ -158,8 +176,26 @@ func (s *inputState) completeSlash(current string) (string, bool) {
 		return current, false
 	}
 	s.completionMatches = matches
-	s.completionIndex = 0
-	return matches[0], true
+	s.completionIndex = seedIndex(dir, len(matches))
+	return matches[s.completionIndex], true
+}
+
+// wrapIndex returns i reduced into the range [0, n) with negative values
+// wrapping to the end, so a completion cycle steps off either end onto the
+// other. n is always positive at the call sites (a non-empty match list).
+func wrapIndex(i, n int) int {
+	return ((i % n) + n) % n
+}
+
+// seedIndex returns the index a freshly-seeded completion cycle starts on for a
+// step direction dir: the first match (0) when stepping forward, the last when
+// stepping backward, so the very first Shift+Tab lands on the final candidate
+// rather than the first.
+func seedIndex(dir, n int) int {
+	if dir < 0 {
+		return n - 1
+	}
+	return 0
 }
 
 // setDynamicCommands records the runtime-contributed slash commands (recipes and

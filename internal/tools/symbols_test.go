@@ -194,10 +194,45 @@ func TestSymbolsKindFilterRejectsUnknownKind(t *testing.T) {
 	}}
 	tool := &symbolsTool{source: src, workDir: dir}
 
-	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Run", "kind": "func"}))
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Run", "kind": "callable"}))
 	require.NoError(t, err)
 	require.True(t, result.IsError)
-	require.Contains(t, result.Content, "unknown symbol kind(s): func")
+	require.Contains(t, result.Content, "unknown symbol kind(s): callable")
+}
+
+func TestSymbolsKindFilterAcceptsAliases(t *testing.T) {
+	dir := t.TempDir()
+	src := &fakeSymbols{workspace: []lsp.Symbol{
+		{Name: "Run", Kind: lsp.Method, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 0}}},
+		{Name: "Run", Kind: lsp.Function, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 4}}},
+		{Name: "RunMode", Kind: lsp.Constant, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 8}}},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	// "func" and "const" are shorthands resolved to "function"/"constant"; the
+	// method is dropped. The shorthands must be honoured rather than rejected.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Run", "kind": "func, const"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t,
+		"a.go:5:1: function Run\n"+
+			"a.go:9:1: constant RunMode",
+		result.Content)
+}
+
+func TestSymbolsKindFilterAcceptsHyphenFreeSpelling(t *testing.T) {
+	dir := t.TempDir()
+	src := &fakeSymbols{workspace: []lsp.Symbol{
+		{Name: "T", Kind: lsp.TypeParameter, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 0}}},
+		{Name: "Run", Kind: lsp.Function, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 4}}},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	// "typeparameter" (no hyphen) resolves to the rendered "type-parameter" label.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "T", "kind": "typeparameter"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "a.go:1:1: type-parameter T", result.Content)
 }
 
 func TestSymbolsKindFilterNoMatches(t *testing.T) {

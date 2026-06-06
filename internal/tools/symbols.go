@@ -301,11 +301,35 @@ var validSymbolKindLabels = func() map[string]bool {
 	return labels
 }()
 
+// symbolKindAliases maps the shorthand and punctuation variants a model is
+// likely to reach for onto the canonical label symbolKindString renders, so a
+// natural "func"/"var"/"typeparameter" filter is honoured rather than rejected.
+// Keys are lowercase; each resolves to exactly one canonical label so the filter
+// stays unambiguous. The hyphen-free spellings ("enummember", "typeparameter")
+// cover models that drop the hyphen the renderer uses.
+var symbolKindAliases = map[string]string{
+	"func":          "function",
+	"fn":            "function",
+	"var":           "variable",
+	"const":         "constant",
+	"iface":         "interface",
+	"ctor":          "constructor",
+	"prop":          "property",
+	"enummember":    "enum-member",
+	"enum_member":   "enum-member",
+	"typeparam":     "type-parameter",
+	"type_param":    "type-parameter",
+	"typeparameter": "type-parameter",
+}
+
 // symbolKindFilter parses a comma-separated list of kind labels (as
 // symbolKindString renders them, e.g. "function,method") into a lookup set,
-// case-insensitively. Labels that name no known kind are returned separately so
-// the caller can reject the request with a clear error rather than silently
-// filtering everything out. Blank entries (from stray commas) are skipped.
+// case-insensitively. Common shorthands ("func", "var", "const") and hyphen-free
+// spellings are resolved to their canonical label via symbolKindAliases first, so
+// a natural input is accepted rather than reported as unknown. Labels that name
+// no known kind are returned separately so the caller can reject the request with
+// a clear error rather than silently filtering everything out. Blank entries
+// (from stray commas) are skipped.
 func symbolKindFilter(spec string) (map[string]bool, []string) {
 	want := map[string]bool{}
 	var unknown []string
@@ -313,6 +337,9 @@ func symbolKindFilter(spec string) (map[string]bool, []string) {
 		label := strings.ToLower(strings.TrimSpace(part))
 		if label == "" {
 			continue
+		}
+		if canonical, ok := symbolKindAliases[label]; ok {
+			label = canonical
 		}
 		if !validSymbolKindLabels[label] {
 			unknown = append(unknown, label)

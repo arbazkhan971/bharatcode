@@ -21,8 +21,9 @@ Arguments:
   searching the workspace.
 - `kind` string, optional: comma-separated kind labels to restrict results to,
   e.g. `function`, `method`, `class`, `struct`, `interface`, `variable`,
-  `constant`, `enum`. Use the same labels shown in the output. Omit to list every
-  kind.
+  `constant`, `enum`. Use the same labels shown in the output. Common shorthands
+  (`func`, `fn`, `var`, `const`, `iface`) and hyphen-free spellings
+  (`typeparameter`) are accepted too. Omit to list every kind.
 
 What success looks like:
 

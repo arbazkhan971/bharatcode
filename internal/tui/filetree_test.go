@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -460,4 +461,63 @@ func TestFilterFiles_AppliesPickerTieBreaks(t *testing.T) {
 	// The shared helper means the quick-filter and the @-file picker rank the same
 	// candidate set identically.
 	require.Equal(t, rankFilesByToken("ae", files), got)
+}
+
+// TestElideName_KeepsBaseName proves a path too long for the panel column is
+// shortened from the left — dropping leading directory segments behind a "…" —
+// so the base name a reader scans for survives, rather than the right-truncating
+// clampLine lopping the file name off the end.
+func TestElideName_KeepsBaseName(t *testing.T) {
+	t.Parallel()
+
+	// A path within width is returned byte-for-byte unchanged.
+	require.Equal(t, "pkg/util.go", elideName("pkg/util.go", 20))
+	require.Equal(t, "pkg/util.go", elideName("pkg/util.go", len("pkg/util.go")))
+
+	// A path past width keeps its base name, prefixed with an ellipsis, and the
+	// result occupies exactly width runes.
+	got := elideName("internal/tui/statusbar/statusbar.go", 18)
+	require.Equal(t, 18, len([]rune(got)))
+	require.True(t, strings.HasPrefix(got, "…"), "elision marks the dropped prefix")
+	require.True(t, strings.HasSuffix(got, "statusbar.go"), "the base name survives: %q", got)
+
+	// Degenerate widths collapse to a lone ellipsis rather than panicking or
+	// emptying the row.
+	require.Equal(t, "…", elideName("a/b/c.go", 1))
+	require.Equal(t, "…", elideName("a/b/c.go", 0))
+}
+
+// TestFiletreePanel_LongPathKeepsBaseName proves the rendered listing elides a
+// deeply-nested path from the left so its file name stays on screen in the
+// fixed-width panel, the way git's "--stat" and the file panels of Claude Code
+// and opencode trim a long path.
+func TestFiletreePanel_LongPathKeepsBaseName(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	// A path comfortably wider than the 32-column panel, so right-truncation would
+	// have cut the base name off entirely.
+	rel := "internal/very/deeply/nested/package/handler.go"
+	writeFile(t, root, rel, "package nested\n")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+	require.Equal(t, []string{rel}, m.filetree.files)
+
+	stripped := stripANSI(m.renderMain())
+	// Find the cursor's listing row ("> …"). Its base name survives behind the
+	// elision marker, and the dropped leading segments mean the full path is not
+	// shown intact on that row — only the diff header below names it in full.
+	var listingRow string
+	for _, line := range strings.Split(stripped, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "> ") {
+			listingRow = line
+			break
+		}
+	}
+	require.NotEmpty(t, listingRow, "the cursor listing row is rendered")
+	require.Contains(t, listingRow, "handler.go", "the base name stays visible")
+	require.Contains(t, listingRow, "…", "the dropped leading segments are marked")
+	require.NotContains(t, listingRow, "internal/very", "the over-long path is elided, not shown intact")
 }

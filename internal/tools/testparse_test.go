@@ -88,6 +88,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"kaocha":                                runnerClojure,
 		"lein kaocha --focus foo":               runnerClojure,
 		"clojure script.clj":                    runnerNone,
+		"forge test":                            runnerFoundry,
+		"forge test --match-test test_Inc -vvv": runnerFoundry,
+		"echo forge testbed":                    runnerNone,
 		"echo subtle differences":               runnerNone,
 		"echo rake testing notes":               runnerNone,
 		"ls -la":                                runnerNone,
@@ -1435,6 +1438,55 @@ func TestParseClojureTestFailures_NoFailures(t *testing.T) {
 Ran 2 tests containing 2 assertions.
 0 failures, 0 errors.`
 	if got := parseTestFailures("lein test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseFoundryTestFailures(t *testing.T) {
+	out := `
+Ran 3 tests for test/Counter.t.sol:CounterTest
+[PASS] testFuzz_SetNumber(uint256) (runs: 256, μ: 27567, ~: 28387)
+[FAIL: assertion failed: 1 != 2] test_Increment() (gas: 28392)
+[FAIL: arithmetic underflow or overflow (0x11)] test_Decrement() (gas: 12044)
+Suite result: FAILED. 1 passed; 2 failed; 0 skipped; finished in 1.20ms`
+	got := parseTestFailures("forge test", out)
+	want := []testFailure{
+		{Name: "test_Increment()", Detail: "assertion failed: 1 != 2"},
+		{Name: "test_Decrement()", Detail: "arithmetic underflow or overflow (0x11)"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseFoundryTestFailures_LegacyReasonAndBareMarker(t *testing.T) {
+	// Older forge builds spell the marker "[FAIL. Reason: ...]", and a setup
+	// revert can surface as a bare "[FAIL]" with no reason.
+	out := `[FAIL. Reason: Assertion failed] test_Old() (gas: 1234)
+[FAIL] test_NoReason() (gas: 5678)`
+	got := parseTestFailures("forge test --match-test test_Old", out)
+	want := []testFailure{
+		{Name: "test_Old()", Detail: "Assertion failed"},
+		{Name: "test_NoReason()"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseFoundryTestFailures_Deduplicates(t *testing.T) {
+	// A fuzz failure can be reported more than once (e.g. across shrink output);
+	// the same test name must not yield duplicate entries.
+	out := `[FAIL: assertion failed] testFuzz_Add(uint256) (runs: 12, gas: 100)
+[FAIL: assertion failed] testFuzz_Add(uint256) (runs: 1, gas: 100)`
+	got := parseTestFailures("forge test", out)
+	want := []testFailure{
+		{Name: "testFuzz_Add(uint256)", Detail: "assertion failed"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseFoundryTestFailures_NoFailures(t *testing.T) {
+	out := `Ran 1 test for test/Counter.t.sol:CounterTest
+[PASS] test_Increment() (gas: 28392)
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 1.20ms`
+	if got := parseTestFailures("forge test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

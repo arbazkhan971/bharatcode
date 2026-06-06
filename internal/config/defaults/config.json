@@ -7,7 +7,9 @@
       "models": [
         "claude-sonnet-4-5",
         "claude-opus-4-5",
-        "claude-haiku-4-5"
+        "claude-haiku-4-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-8"
       ]
     },
     {
@@ -230,6 +232,24 @@
     }
   ],
   "models": [
+    {
+      "id": "claude-opus-4-8",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 15.00,
+      "output_price_per_mtok_usd": 75.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 3.00,
+      "output_price_per_mtok_usd": 15.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
     {
       "id": "claude-opus-4-5",
       "provider": "anthropic",

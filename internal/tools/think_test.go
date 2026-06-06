@@ -67,6 +67,11 @@ func TestThinkTool_MissingThought(t *testing.T) {
 	assert.True(t, res.IsError)
 }
 
+func TestThinkTool_IsReadOnly(t *testing.T) {
+	// think has no side effects and must be eligible for concurrent batching.
+	require.True(t, IsReadOnly(newThinkTool(Dependencies{})))
+}
+
 func TestThinkTool_MultilineThought(t *testing.T) {
 	tool := newThinkTool(Dependencies{})
 	thought := "Step 1: read the file.\nStep 2: find the bug.\nStep 3: write the fix."

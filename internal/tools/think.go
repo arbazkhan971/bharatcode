@@ -36,6 +36,7 @@ func newThinkTool(_ Dependencies) Tool {
 func (t *thinkTool) Name() string            { return "think" }
 func (t *thinkTool) Description() string     { return thinkDescription }
 func (t *thinkTool) Schema() json.RawMessage { return copySchema(thinkSchema) }
+func (t *thinkTool) IsReadOnly() bool        { return true }
 
 func (t *thinkTool) Run(_ context.Context, raw json.RawMessage) (Result, error) {
 	args, bad := decodeArgs[thinkArgs](raw)

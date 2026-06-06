@@ -21,6 +21,42 @@ import (
 // picker so the dialog stays readable.
 const recentSessionLimit = 20
 
+// sessionWindow caps how many session rows the picker draws at once. A full
+// recentSessionLimit-long list (plus the filter line and the keybinding hint)
+// can run taller than a short terminal, and the dialog clamps width but not
+// height, so without a cap the cursor could scroll off the top of the screen
+// with no way to see the selected row. When more rows match than fit, the
+// picker scrolls a window of this many rows that follows the cursor and stands
+// the hidden rows in with a muted "⋯ N more above/below" marker — the way the
+// diff viewer folds long context and the completion menus report overflow. It
+// is smaller than recentSessionLimit so the windowing actually engages on a
+// long list.
+const sessionWindow = 10
+
+// sessionWindowBounds returns the half-open [start, end) range of session rows
+// the picker shows for a list of total rows with the cursor at cursor, scrolling
+// a window of at most sessionWindow rows so the selected row stays visible. The
+// window is centered on the cursor where possible and clamped to either end, so
+// the first and last rows are reachable without a half-empty window, and an
+// out-of-range cursor still yields a valid in-bounds window. When the whole list
+// fits within the window it is shown entire ([0,total)), leaving the short-list
+// case byte-for-byte unchanged.
+func sessionWindowBounds(cursor, total int) (start, end int) {
+	if total <= sessionWindow {
+		return 0, total
+	}
+	start = cursor - sessionWindow/2
+	if start < 0 {
+		start = 0
+	}
+	end = start + sessionWindow
+	if end > total {
+		end = total
+		start = end - sessionWindow
+	}
+	return start, end
+}
+
 // openSessionPicker loads recent sessions and pushes a selectable picker. When
 // no sessions exist it surfaces an informational dialog instead.
 func (m *model) openSessionPicker() (tea.Model, tea.Cmd) {
@@ -96,7 +132,15 @@ func (m *model) sessionPickerBody() string {
 	if len(visible) == 0 {
 		lines = append(lines, "(no sessions match)")
 	}
-	for i, s := range visible {
+	// Draw only the window of rows around the cursor so a long list never
+	// overflows the modal; the rows scrolled out of view are stood in for by a
+	// muted "⋯ N more" marker on whichever side they fell.
+	start, end := sessionWindowBounds(m.sessionCursor, len(visible))
+	if start > 0 {
+		lines = append(lines, m.theme.Muted.Render(fmt.Sprintf("⋯ %d more above", start)))
+	}
+	for i := start; i < end; i++ {
+		s := visible[i]
 		marker := "  "
 		if i == m.sessionCursor {
 			marker = "> "
@@ -117,6 +161,9 @@ func (m *model) sessionPickerBody() string {
 			row += " · " + m.theme.Muted.Render("(current)")
 		}
 		lines = append(lines, row)
+	}
+	if end < len(visible) {
+		lines = append(lines, m.theme.Muted.Render(fmt.Sprintf("⋯ %d more below", len(visible)-end)))
 	}
 	lines = append(lines, "", "type to fuzzy filter · ↑/↓ to move · home/end to jump · enter to restore · esc to cancel")
 	return strings.Join(lines, "\n")

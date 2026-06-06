@@ -146,6 +146,71 @@ func TestSymbolsFilteredOutlineStaysFlat(t *testing.T) {
 	require.Equal(t, "main.go:9:1: method Run (in Server)", result.Content)
 }
 
+func TestSymbolsWorkspaceFiltersByKind(t *testing.T) {
+	dir := t.TempDir()
+	src := &fakeSymbols{workspace: []lsp.Symbol{
+		{Name: "Run", Kind: lsp.Method, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 0}}},
+		{Name: "Run", Kind: lsp.Function, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 4}}},
+		{Name: "RunMode", Kind: lsp.Constant, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 8}}},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	// Only the function survives the kind filter; the method and constant are dropped.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Run", "kind": "function"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "a.go:5:1: function Run", result.Content)
+}
+
+func TestSymbolsKindFilterAcceptsMultipleLabels(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	// A comma-separated kind list keeps both functions and methods but drops the
+	// struct; the kind filter also flattens the outline (no tree indentation).
+	src := &fakeSymbols{document: []lsp.Symbol{
+		{Name: "Server", Kind: lsp.Struct, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2}}, Depth: 0},
+		{Name: "Run", Kind: lsp.Method, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8}}, ContainerName: "Server", Depth: 1},
+		{Name: "handle", Kind: lsp.Function, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 12}}},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go", "kind": "function, method"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t,
+		"main.go:9:1: method Run (in Server)\n"+
+			"main.go:13:1: function handle",
+		result.Content)
+}
+
+func TestSymbolsKindFilterRejectsUnknownKind(t *testing.T) {
+	dir := t.TempDir()
+	src := &fakeSymbols{workspace: []lsp.Symbol{
+		{Name: "Run", Kind: lsp.Function, Path: filepath.Join(dir, "a.go")},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Run", "kind": "func"}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "unknown symbol kind(s): func")
+}
+
+func TestSymbolsKindFilterNoMatches(t *testing.T) {
+	dir := t.TempDir()
+	src := &fakeSymbols{workspace: []lsp.Symbol{
+		{Name: "Run", Kind: lsp.Function, Path: filepath.Join(dir, "a.go")},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Run", "kind": "struct"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "No symbols found.", result.Content)
+}
+
 func TestSymbolsWorkspaceRequiresQuery(t *testing.T) {
 	tool := &symbolsTool{source: &fakeSymbols{}, workDir: t.TempDir()}
 	result, err := tool.Run(context.Background(), json.RawMessage(`{}`))

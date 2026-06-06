@@ -121,6 +121,7 @@ func NewRegistry(deps Dependencies) *Registry {
 	r.Register(newJobListTool(deps))
 	r.Register(newJobKillTool(deps))
 	r.Register(newMemoryTool(deps))
+	r.Register(newThinkTool(deps))
 	return r
 }
 

@@ -635,6 +635,9 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	if text == "/search" || strings.HasPrefix(text, "/search ") {
 		return m.handleSearch(text)
 	}
+	if text == "/keys" || strings.HasPrefix(text, "/keys ") {
+		return m.handleKeys(text), nil
+	}
 	if text == "/tab" || strings.HasPrefix(text, "/tab ") {
 		return m.handleTabCommand(text)
 	}
@@ -644,13 +647,6 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.handleTabsList()
 	case "/help":
 		m.helpVisible = true
-	case "/keys":
-		m.dialogs.Push(&dialog.Text{
-			DialogID: "keybindings",
-			Title:    "Keyboard shortcuts",
-			Body:     keybindingHelpBody(),
-			Theme:    m.theme,
-		})
 	case "/clear":
 		m.chat.Clear()
 		m.search.reset()
@@ -688,6 +684,30 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.handleUnknownSlash(text)
 	}
 	return m, nil
+}
+
+// handleKeys runs the /keys slash command, opening the keyboard-shortcut
+// overlay. A bare "/keys" lists every shortcut; "/keys <filter>" narrows the
+// overlay to the shortcuts whose key, description, or section title matches the
+// filter, so a user hunting for one binding ("/keys tab", "/keys scroll") sees
+// just the relevant rows instead of scanning the whole keymap — the way the
+// Claude Code and opencode command palettes filter as you type. The active
+// filter is echoed in the dialog title so it is clear the listing is a subset,
+// and a filter matching nothing shows a quiet "no shortcuts match" note rather
+// than an empty overlay.
+func (m *model) handleKeys(text string) tea.Model {
+	_, filter := splitSlash(text)
+	title := "Keyboard shortcuts"
+	if filter != "" {
+		title += " · " + filter
+	}
+	m.dialogs.Push(&dialog.Text{
+		DialogID: "keybindings",
+		Title:    title,
+		Body:     keybindingHelpBodyFiltered(filter),
+		Theme:    m.theme,
+	})
+	return m
 }
 
 // handleUnknownSlash resolves a slash command that is not built in. It first
@@ -1147,7 +1167,7 @@ func dynamicSlashDescriptions(deps Dependencies) map[string]string {
 func (m *model) slashHelpLines() []string {
 	lines := []string{
 		"/help - list commands",
-		"/keys - show keyboard shortcuts",
+		"/keys [filter] - show keyboard shortcuts, optionally narrowed to a filter",
 		"/clear - clear visible chat",
 		"/sessions - restore a recent session",
 		"/tab [new|next|prev|close|N] - open or switch session tabs (Ctrl+T new, Ctrl+Right/Left switch)",
@@ -1271,8 +1291,19 @@ var keybindingGroups = []keyGroup{
 // keeping the overlay aligned. Width is measured in runes so a multi-byte key
 // glyph (the "←/→" arrows) lines up with the rest.
 func keybindingHelpBody() string {
+	return renderKeyGroups(keybindingGroups)
+}
+
+// renderKeyGroups formats the given shortcut groups as the /keys overlay body:
+// each group's title on its own line above its indented binding rows, with the
+// key column padded to a width shared across every group so descriptions align
+// regardless of section (measured in runes so the multi-byte "←/→" arrows line
+// up). Groups are separated by a blank line and no trailing blank line is left.
+// Pulling this out of keybindingHelpBody lets the full and filtered overlays
+// render identically from whichever subset of groups they show.
+func renderKeyGroups(groups []keyGroup) string {
 	keyWidth := 0
-	for _, g := range keybindingGroups {
+	for _, g := range groups {
 		for _, b := range g.bindings {
 			if n := len([]rune(b.key)); n > keyWidth {
 				keyWidth = n
@@ -1281,7 +1312,7 @@ func keybindingHelpBody() string {
 	}
 
 	var b strings.Builder
-	for gi, g := range keybindingGroups {
+	for gi, g := range groups {
 		if gi > 0 {
 			b.WriteByte('\n')
 		}
@@ -1293,6 +1324,51 @@ func keybindingHelpBody() string {
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// keybindingHelpBodyFiltered renders the /keys overlay narrowed to the shortcuts
+// matching filter (see filterKeybindingGroups). An empty or whitespace-only
+// filter renders the full overlay unchanged. When the filter matches nothing it
+// returns a quiet "no shortcuts match" note rather than an empty body, so the
+// overlay always explains itself.
+func keybindingHelpBodyFiltered(filter string) string {
+	if strings.TrimSpace(filter) == "" {
+		return keybindingHelpBody()
+	}
+	groups := filterKeybindingGroups(filter)
+	if len(groups) == 0 {
+		return fmt.Sprintf("No shortcuts match %q.", strings.TrimSpace(filter))
+	}
+	return renderKeyGroups(groups)
+}
+
+// filterKeybindingGroups returns the keyGroups whose bindings match filter, a
+// case-insensitive substring tested against each binding's key and description.
+// A group whose title itself matches keeps all of its bindings, so "/keys tabs"
+// surfaces the whole Tabs section; otherwise only the matching rows are kept and
+// a group with no surviving binding is dropped. An empty or whitespace-only
+// filter returns every group unchanged.
+func filterKeybindingGroups(filter string) []keyGroup {
+	q := strings.ToLower(strings.TrimSpace(filter))
+	if q == "" {
+		return keybindingGroups
+	}
+	var out []keyGroup
+	for _, g := range keybindingGroups {
+		titleHit := strings.Contains(strings.ToLower(g.title), q)
+		var kept []keyBinding
+		for _, b := range g.bindings {
+			if titleHit ||
+				strings.Contains(strings.ToLower(b.key), q) ||
+				strings.Contains(strings.ToLower(b.desc), q) {
+				kept = append(kept, b)
+			}
+		}
+		if len(kept) > 0 {
+			out = append(out, keyGroup{title: g.title, bindings: kept})
+		}
+	}
+	return out
 }
 
 // firstNonEmptyLine returns the first non-blank line of s, trimmed and

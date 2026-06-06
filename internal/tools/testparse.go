@@ -736,6 +736,15 @@ var (
 	// binary-aborting panic — which prints no "--- FAIL:" line — to the test whose
 	// frame appears in the panic's stack trace.
 	goPanicStackTestRe = regexp.MustCompile(`\.(Test[^.\s(]*)(?:\.func\d+)?\(`)
+	// "panic: test timed out after 30s" — the panic Go emits when the test binary
+	// exceeds its -timeout deadline. Group 1 captures the duration string ("30s").
+	// Distinct from the generic goPanicRe so parseGoTestTimeoutRunning can pair it
+	// with the "running tests:" block that follows without affecting other parsers.
+	goTimeoutPanicRe = regexp.MustCompile(`^panic: test timed out after (.+)$`)
+	// "\tTestFoo (9.5s)" — one entry in the "running tests:" block Go prints
+	// immediately after a timeout panic, before the goroutine dump. Group 1 is the
+	// test name. The leading tab is literal; the name runs to the first space.
+	goRunningTestRe = regexp.MustCompile(`^\t(Test[^\s(]+) \(`)
 )
 
 // parseGoTestFailures handles `go test` verbose/non-verbose output. Each
@@ -804,6 +813,10 @@ func parseGoTestFailures(output string) []testFailure {
 	// — Go emits a bare column-0 "panic: <msg>" followed by the goroutine stack.
 	// Recover the panicking test from that stack so it still surfaces.
 	failures = append(failures, parseGoTestPanics(lines, failures)...)
+	// Parallel tests blocked on IO at timeout may have no visible Test* frame in
+	// the goroutine dump; the "running tests:" block printed before the dump names
+	// them directly. Supply any names not already attributed by parseGoTestPanics.
+	failures = append(failures, parseGoTestTimeoutRunning(lines, failures)...)
 	return failures
 }
 
@@ -843,6 +856,49 @@ func parseGoTestPanics(lines []string, existing []testFailure) []testFailure {
 		}
 		seen[name] = true
 		out = append(out, testFailure{Name: name, Detail: "panic: " + strings.TrimSpace(p[1])})
+	}
+	return out
+}
+
+// parseGoTestTimeoutRunning supplements parseGoTestPanics for -timeout panics.
+// When `go test -timeout` is exceeded Go prints a "running tests:" block that
+// lists every in-flight test by name before dumping goroutine stacks. Tests
+// blocked on a syscall (or in non-Go code) do not have a runnable goroutine,
+// so their Test* function never appears in the stack dump and parseGoTestPanics
+// misses them. This function extracts those names from the "running tests:" list
+// and adds any that are not already in existing, using "panic: test timed out
+// after Xs" as the detail — identical to what parseGoTestPanics would have used
+// — so the detail is consistent regardless of which path attributed the failure.
+func parseGoTestTimeoutRunning(lines []string, existing []testFailure) []testFailure {
+	seen := make(map[string]bool, len(existing))
+	for _, f := range existing {
+		seen[f.Name] = true
+	}
+	var out []testFailure
+	for i := 0; i < len(lines); i++ {
+		m := goTimeoutPanicRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		detail := "panic: test timed out after " + m[1]
+		// The "running tests:" header must immediately follow the panic line.
+		i++
+		if i >= len(lines) || strings.TrimSpace(lines[i]) != "running tests:" {
+			continue
+		}
+		i++
+		for ; i < len(lines); i++ {
+			tm := goRunningTestRe.FindStringSubmatch(lines[i])
+			if tm == nil {
+				break
+			}
+			name := tm[1]
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, testFailure{Name: name, Detail: detail})
+		}
 	}
 	return out
 }

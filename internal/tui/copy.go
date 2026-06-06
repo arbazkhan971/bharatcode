@@ -78,6 +78,24 @@ func (m *model) scrollChatPageDown() {
 	}
 }
 
+// scrollChatLineUp reveals one older line of the transcript — the finest
+// keyboard scroll step, between the mouse-wheel notch and a full PageUp — so a
+// reader can nudge the viewport a single line to bring a partly-clipped line
+// fully into view. The offset is bound-checked at render time, so this only
+// nudges it.
+func (m *model) scrollChatLineUp() {
+	m.chatScroll++
+}
+
+// scrollChatLineDown returns one line toward the newest content, clamped so it
+// never underflows past the bottom.
+func (m *model) scrollChatLineDown() {
+	m.chatScroll--
+	if m.chatScroll < 0 {
+		m.chatScroll = 0
+	}
+}
+
 // scrollChatTop jumps to the oldest content; clampChat pins the sentinel to the
 // real top at render time.
 func (m *model) scrollChatTop() {

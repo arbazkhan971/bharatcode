@@ -86,7 +86,11 @@ func (m *model) sessionPickerBody() string {
 	visible := m.visibleSessions()
 	lines := make([]string, 0, len(visible)+4)
 	if m.sessionFilter != "" {
-		lines = append(lines, "Filter: "+m.sessionFilter, "")
+		// Echo the filter with a "N of M" tally so the user can see how far the
+		// query has narrowed the list at a glance, the way the completion menus
+		// report their match counts rather than leaving the reader to count rows.
+		count := m.theme.Muted.Render(fmt.Sprintf("· %d of %d", len(visible), len(m.sessionCandidates)))
+		lines = append(lines, "Filter: "+m.sessionFilter+" "+count, "")
 	}
 	if len(visible) == 0 {
 		lines = append(lines, "(no sessions match)")

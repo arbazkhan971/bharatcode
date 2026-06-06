@@ -210,6 +210,16 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 // the model knows the list was truncated rather than complete.
 const navigateLocationCap = 200
 
+// navigateSnippetMax caps how many characters of a location's source-line
+// snippet renderLocations appends after the `path:line:column:` coordinate. The
+// snippet is an inline annotation, one per location, so a single reference into
+// a minified or generated file (whose lines run to many thousands of characters)
+// would otherwise dominate the output budget. The cap mirrors the view tool's
+// per-line truncation (truncateLine), kept smaller here since these snippets are
+// supplementary context rather than the primary content; the trailing marker
+// truncateLine appends records that the line was clipped.
+const navigateSnippetMax = 200
+
 // locationsResult renders LSP locations as a sorted, deduplicated list of
 // `path:line:column: <source line>` entries, paths made workspace-relative
 // where possible. The trailing source line is the trimmed text at the location
@@ -342,5 +352,8 @@ func sourceLine(cache map[string][]string, path string, line int) string {
 	if line < 0 || line >= len(lines) {
 		return ""
 	}
-	return strings.TrimSpace(lines[line])
+	// Cap the snippet so a location inside a minified/generated file's very wide
+	// line stays a one-line annotation instead of flooding the output, mirroring
+	// the view tool's per-line truncation.
+	return truncateLine(strings.TrimSpace(lines[line]), navigateSnippetMax)
 }

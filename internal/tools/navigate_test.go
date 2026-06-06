@@ -400,6 +400,33 @@ func TestNavigateReferencesAppendsSourceLines(t *testing.T) {
 	require.Equal(t, "2 references across 1 file:\nmain.go:3:6: func Run() {}\nmain.go:5:14: func main() { Run() }", result.Content)
 }
 
+func TestNavigateTruncatesWideSourceLine(t *testing.T) {
+	dir := t.TempDir()
+	// A single very wide line, as found in a minified/generated file. The snippet
+	// must be clipped so it stays a one-line annotation rather than flooding the
+	// output with the whole line.
+	wide := strings.Repeat("x", navigateSnippetMax+500)
+	content := "package main\nvar data = \"" + wide + "\"\n"
+	path := writeNavFileContent(t, dir, content)
+	src := &fakeNavigate{definition: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 4}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 2, "action": "definition",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// The clip marker is present and the full wide line is not, so the snippet
+	// cannot dominate the output budget.
+	require.Contains(t, result.Content, "characters truncated]")
+	require.NotContains(t, result.Content, wide)
+	// The rendered snippet stays bounded: at most the cap plus the short marker,
+	// far below the original line's width.
+	require.Less(t, len(result.Content), navigateSnippetMax+200)
+}
+
 func TestNavigateReferencesCapsLongList(t *testing.T) {
 	dir := t.TempDir()
 	path := writeNavFile(t, dir)

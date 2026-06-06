@@ -53,6 +53,7 @@ var slashCommandDescriptions = map[string]string{
 	"/diff":        "show the latest edit diff",
 	"/revert":      "undo this session's file changes",
 	"/status":      "show model, session, and spend",
+	"/mcp":         "list MCP servers and their connection state",
 	"/plan":        "restrict to read-only tools and propose a plan",
 	"/approve":     "exit plan mode and re-enable execution",
 	"/goal":        "show, set, run, or clear the goal",

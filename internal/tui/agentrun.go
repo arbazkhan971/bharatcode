@@ -135,8 +135,11 @@ func (m *model) runAgent(prompt string, imgBlocks []message.ImageBlock) tea.Cmd 
 	ctx := m.ctx
 	repo := m.deps.Sessions
 	return func() tea.Msg {
+		// Expand @URL mentions inside the goroutine — network I/O must not run
+		// in the Bubble Tea Update handler (which is synchronous).
+		expanded, _ := expandURLMentions(ctx, prompt)
 		content := make([]message.ContentBlock, 0, 1+len(imgBlocks))
-		content = append(content, message.TextBlock{Text: prompt})
+		content = append(content, message.TextBlock{Text: expanded})
 		for _, img := range imgBlocks {
 			content = append(content, img)
 		}

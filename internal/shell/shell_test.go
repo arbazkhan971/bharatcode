@@ -61,6 +61,37 @@ func TestShell_RunBasic(t *testing.T) {
 	}
 }
 
+func TestShell_Stdin(t *testing.T) {
+	bus := pubsub.NewTopic[pubsub.ShellJobPayload]("test_shell_stdin", 64)
+	defer bus.Close()
+
+	sh := shell.New(bus)
+	defer sh.Shutdown()
+
+	t.Run("stdin is piped to the command", func(t *testing.T) {
+		job, err := sh.Run(context.Background(), "cat", shell.RunOpts{Stdin: "line one\nline two\n"})
+		require.NoError(t, err)
+		require.Equal(t, shell.StatusCompleted, job.Status)
+		require.Equal(t, "line one\nline two\n", job.Stdout)
+	})
+
+	t.Run("multiline content survives without shell quoting", func(t *testing.T) {
+		// Content full of shell metacharacters that would be a nightmare to
+		// embed in the command string is delivered verbatim via stdin.
+		content := "$(rm -rf /); `whoami`; 'quotes' \"and\" \\backslashes\\\n"
+		job, err := sh.Run(context.Background(), "cat", shell.RunOpts{Stdin: content})
+		require.NoError(t, err)
+		require.Equal(t, content, job.Stdout)
+	})
+
+	t.Run("empty stdin yields immediate EOF", func(t *testing.T) {
+		job, err := sh.Run(context.Background(), "wc -c", shell.RunOpts{})
+		require.NoError(t, err)
+		require.Equal(t, shell.StatusCompleted, job.Status)
+		require.Equal(t, "0", strings.TrimSpace(job.Stdout))
+	})
+}
+
 func TestShell_Timeout(t *testing.T) {
 	bus := pubsub.NewTopic[pubsub.ShellJobPayload]("test_shell_timeout", 64)
 	defer bus.Close()

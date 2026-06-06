@@ -1265,6 +1265,40 @@ func TestParseCypressFailures(t *testing.T) {
 	assertFailures(t, got, want)
 }
 
+func TestParseHardhatFailures(t *testing.T) {
+	// `hardhat test` drives Mocha with the spec reporter, so it routes to the Mocha
+	// parser: the numbered "N) <title>" block (title ending in a colon) followed by
+	// the assertion message is the same shape the Mocha parser handles.
+	out := `  Token contract
+    ✓ assigns the total supply to the owner (89ms)
+    1) reverts a transfer that exceeds the balance
+
+  1 passing (1s)
+  1 failing
+
+  1) Token contract
+       reverts a transfer that exceeds the balance:
+     AssertionError: Expected transaction to be reverted with reason 'insufficient balance'
+      at Context.<anonymous> (test/Token.js:24:7)
+`
+	got := parseTestFailures("npx hardhat test", out)
+	want := []testFailure{
+		{Name: "Token contract reverts a transfer that exceeds the balance", Detail: "AssertionError: Expected transaction to be reverted with reason 'insufficient balance'"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseHardhatFailures_NoFailures(t *testing.T) {
+	out := `  Token contract
+    ✓ assigns the total supply to the owner (89ms)
+
+  1 passing (1s)
+`
+	if got := parseTestFailures("hardhat test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
 func TestParseCypressFailures_NoFailures(t *testing.T) {
 	out := `  Login flow
     ✓ shows the form (52ms)

@@ -495,7 +495,13 @@ func (m *Manager) FormatRange(ctx context.Context, path string, rng Range) ([]Te
 // offers for the range in file, starting a server if needed. A nil slice with a
 // nil error means no server is configured for the file or the server offers no
 // actions for the range.
-func (m *Manager) CodeActions(ctx context.Context, file string, rng Range) ([]CodeAction, error) {
+// CodeActions returns the quick fixes and refactorings the language server
+// offers for the range in file. When only is non-empty it restricts the request
+// to those LSP CodeActionKinds: this is passed through to the server's request
+// context, letting it produce whole-file "source.*" actions (organize imports,
+// fix-all) that some servers compute only when explicitly asked for them. A nil
+// or empty only requests every available action.
+func (m *Manager) CodeActions(ctx context.Context, file string, rng Range, only []string) ([]CodeAction, error) {
 	abs, err := filepath.Abs(file)
 	if err != nil {
 		return nil, fmt.Errorf("resolving code actions path: %w", err)
@@ -514,7 +520,7 @@ func (m *Manager) CodeActions(ctx context.Context, file string, rng Range) ([]Co
 		return nil, nil
 	}
 
-	actions, err := c.codeAction(ctx, abs, rng)
+	actions, err := c.codeAction(ctx, abs, rng, only)
 	if err != nil {
 		return nil, err
 	}

@@ -545,7 +545,7 @@ func TestCodeActionsReturnsActions(t *testing.T) {
 	defer done()
 
 	rng := Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 4}}
-	actions, err := manager.CodeActions(ctx, source, rng)
+	actions, err := manager.CodeActions(ctx, source, rng, nil)
 	require.NoError(t, err)
 	// A CodeAction entry retains the raw server object as resolve data; a bare
 	// command entry does not. Assert that distinction, then clear Data so the rest

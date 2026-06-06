@@ -568,6 +568,54 @@ func TestNewRegistryInfersContextWindow(t *testing.T) {
 		"an explicit context_window must not be overridden")
 }
 
+// TestDefaultsCatalogLlama4 verifies the embedded defaults include Llama 4
+// Scout and Maverick entries so users who configure TOGETHER_API_KEY or
+// GROQ_API_KEY get the large-context Llama 4 models out of the box.  The test
+// also confirms that the context windows recorded in the catalog match the
+// values the inferContextWindow heuristic would derive from the model ids,
+// catching any future catalog/capabilities drift.
+func TestDefaultsCatalogLlama4(t *testing.T) {
+	cfg := config.Default()
+
+	byID := make(map[string]config.Model, len(cfg.Models))
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+
+	entries := []struct {
+		id            string
+		wantProvider  string
+		wantCtxWindow int
+		wantImages    bool
+	}{
+		// Together: Scout ships the full 10M native window; Maverick is 1M.
+		{"meta-llama/Llama-4-Scout-17B-16E-Instruct", "together", 10_485_760, true},
+		{"meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "together", 1_048_576, true},
+		// Groq: Scout is capped at Groq's hardware limit (131k) even though the
+		// native model supports 10M, so the catalog overrides the heuristic.
+		{"meta-llama/llama-4-scout-17b-16e-instruct", "groq", 131_072, true},
+	}
+	for _, e := range entries {
+		m, ok := byID[e.id]
+		require.Truef(t, ok, "defaults catalog must include model %q", e.id)
+		require.Equalf(t, e.wantProvider, m.Provider, "model %q has wrong provider", e.id)
+		require.Equalf(t, e.wantCtxWindow, m.ContextWindow, "model %q has wrong context_window", e.id)
+		require.Equalf(t, e.wantImages, m.SupportsImages, "model %q has wrong supports_images", e.id)
+	}
+
+	// The heuristic must recognize the Scout id class (via "llama-4-scout") and
+	// the Maverick class (via "llama-4") independent of what the catalog says, so
+	// context_window=0 catalog entries would still be filled in correctly.
+	require.Equal(t, 10_485_760, inferContextWindow("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
+		"inferContextWindow must recognize Llama 4 Scout ids")
+	require.Equal(t, 1_048_576, inferContextWindow("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
+		"inferContextWindow must recognize Llama 4 Maverick ids")
+	// Groq uses lowercase ids; the heuristic is case-insensitive so it must
+	// resolve the same window as the Together form.
+	require.Equal(t, 10_485_760, inferContextWindow("meta-llama/llama-4-scout-17b-16e-instruct"),
+		"inferContextWindow must recognize lowercase Groq Llama 4 Scout id")
+}
+
 // TestDefaultsCatalogAnthropicTiers verifies the embedded defaults include all
 // three current Anthropic tiers (opus, sonnet, haiku) so users who configure
 // ANTHROPIC_API_KEY get meaningful model choice out of the box.

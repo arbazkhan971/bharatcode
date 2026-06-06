@@ -317,6 +317,38 @@ ERROR tests/test_c.py
 	assertFailures(t, got, want)
 }
 
+func TestParsePytestFailures_ParametrizedIDWithSpaces(t *testing.T) {
+	// Parametrized node ids carry the param values in brackets, which routinely
+	// contain spaces ("test_x[a b]") and may even contain the " - " detail
+	// separator ("test_x[1 - 2]"). The whole id must stay together rather than
+	// being clipped at the first space, and the trailing " - <message>" detail
+	// must still split off after the bracketed section.
+	out := `=========================== short test summary info ============================
+FAILED tests/test_a.py::test_x[a b] - AssertionError: assert 1 == 2
+FAILED tests/test_a.py::test_y[1 - 2]
+ERROR tests/test_b.py::test_z[c d] - ValueError: boom`
+	got := parseTestFailures("pytest -q", out)
+	want := []testFailure{
+		{Name: "tests/test_a.py::test_x[a b]", Detail: "AssertionError: assert 1 == 2"},
+		{Name: "tests/test_a.py::test_y[1 - 2]"},
+		{Name: "tests/test_b.py::test_z[c d]", Detail: "ValueError: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParsePytestFailures_VerboseParametrizedIDWithSpaces(t *testing.T) {
+	// The verbose "<id> FAILED" form must likewise keep a bracketed param
+	// section with spaces attached to the node id.
+	out := `tests/test_a.py::test_x[a b] FAILED
+tests/test_a.py::test_y[c d] ERROR`
+	got := parseTestFailures("pytest -v", out)
+	want := []testFailure{
+		{Name: "tests/test_a.py::test_x[a b]"},
+		{Name: "tests/test_a.py::test_y[c d]"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParsePytestFailures_VerboseFallback(t *testing.T) {
 	out := `tests/test_a.py::test_one PASSED
 tests/test_a.py::test_two FAILED

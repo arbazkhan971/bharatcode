@@ -706,6 +706,38 @@ func TestGeminiThinkingBudgetWinsOverReasoningEffort(t *testing.T) {
 	require.Equal(t, 2048, *tc.ThinkingBudget, "explicit budget must win over effort")
 }
 
+func TestGeminiMinimalEffortSendsSmallBudget(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-2.5-flash", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	// "minimal" must configure a real (small) thinkingBudget rather than falling
+	// through to 0, which would leave thinkingConfig off and let the model's far
+	// larger default thinking apply — the opposite of the requested intent.
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-2.5-flash",
+		Messages:        []message.Message{textMsg("think")},
+		ReasoningEffort: "minimal",
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig)
+	tc := captured.GenerationConfig.ThinkingConfig
+	require.NotNil(t, tc, "minimal effort must still configure thinkingConfig")
+	require.NotNil(t, tc.ThinkingBudget)
+	require.Equal(t, geminiMinimalThinkingBudget, *tc.ThinkingBudget)
+}
+
 func TestGeminiOmitsThinkingConfigForEffortOnUnsupportedModel(t *testing.T) {
 	var rawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -738,6 +770,10 @@ func TestGeminiOmitsThinkingConfigForEffortOnUnsupportedModel(t *testing.T) {
 func TestGeminiThinkingBudgetForEffort(t *testing.T) {
 	require.Equal(t, 0, geminiThinkingBudgetForEffort(""))
 	require.Equal(t, 0, geminiThinkingBudgetForEffort("bogus"))
+	require.Equal(t, geminiMinimalThinkingBudget, geminiThinkingBudgetForEffort("minimal"), "minimal maps to the smallest valid 2.5 budget")
+	require.Equal(t, geminiMinimalThinkingBudget, geminiThinkingBudgetForEffort("MINIMAL"), "minimal match must be case-insensitive")
+	require.Greater(t, geminiMinimalThinkingBudget, 128, "minimal budget must clear the Gemini 2.5 Pro floor")
+	require.Less(t, geminiMinimalThinkingBudget, 4096, "minimal budget must sit below the low budget")
 	require.Equal(t, 4096, geminiThinkingBudgetForEffort("low"))
 	require.Equal(t, 8192, geminiThinkingBudgetForEffort("medium"))
 	require.Equal(t, 16384, geminiThinkingBudgetForEffort("HIGH"), "match must be case-insensitive")

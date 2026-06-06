@@ -25,8 +25,9 @@ const defaultGeminiMaxTokens = 8192
 
 // geminiThinkingBudgetForEffort maps the provider-independent reasoning_effort
 // label onto a Gemini thinkingBudget (in tokens). It lets a user opt a Gemini
-// 2.5 model into native thinking with the same "low"/"medium"/"high" knob the
-// OpenAI reasoning models use, instead of having to pick a raw token count. The
+// 2.5 model into native thinking with the same "minimal"/"low"/"medium"/"high"
+// knob the OpenAI reasoning models use, instead of having to pick a raw token
+// count. The
 // chosen budgets sit inside the range both Flash (0–24576) and Pro (128–32768)
 // accept, so the same effort is valid across the 2.5 family. The "auto" and
 // "dynamic" labels map to -1, Gemini's sentinel for dynamic thinking: the model
@@ -62,8 +63,23 @@ var geminiSafetySettings = func() []geminiSafetySetting {
 	return settings
 }()
 
+// geminiMinimalThinkingBudget is the budget mapped from the "minimal" effort on
+// the Gemini 2.5 family: the smallest reasoning allowance that still sits inside
+// the range every 2.5 model accepts. Gemini 2.5 Pro cannot disable thinking and
+// floors its budget at 128 tokens, so a budget below that risks a 400 on Pro; a
+// budget comfortably above the floor (and well below the "low" 4096) expresses
+// "reason as little as possible" while staying valid across the whole 2.5 line.
+const geminiMinimalThinkingBudget = 512
+
 func geminiThinkingBudgetForEffort(effort string) int {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal":
+		// Parity with the OpenAI reasoning knob (where "minimal" is the fastest,
+		// least-reasoning setting) and with the Gemini 3 path, which already maps
+		// "minimal" to its lowest thinkingLevel. Without this case "minimal" fell
+		// through to 0, leaving thinkingConfig unset so the model's own (much
+		// larger) default budget applied — the opposite of the requested intent.
+		return geminiMinimalThinkingBudget
 	case "low":
 		return 4096
 	case "medium":

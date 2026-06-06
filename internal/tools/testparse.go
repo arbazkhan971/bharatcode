@@ -719,55 +719,104 @@ var (
 	// leaf segment (after the last " › ") matches the bare test name printed on
 	// the "✕ <test>" summary line, so it keys the detail lookup.
 	jestDetailHeaderRe = regexp.MustCompile(`^\s*●\s+(.+\S)\s*$`)
+	// " FAIL  src/calc.test.ts > Calculator > subtracts" — vitest's per-failure
+	// block header. Unlike jest (which uses "● <suite> › <test>" headers and a
+	// bare "FAIL <file>" line with no ">"), vitest opens each failed test's block
+	// with "FAIL <file> > <suite> > <test>", using " > " throughout. The trailing
+	// "> "-delimited segment is the leaf test name, matching the inline "× <test>"
+	// summary line; requiring a ">" keeps jest's file-level "FAIL <file>" line
+	// (which has none) from matching.
+	vitestFailHeaderRe = regexp.MustCompile(`^\s*FAIL\s+(.+>.+\S)\s*$`)
 )
 
-// parseJestFailures collects the "✕ <name>" lines emitted by jest and vitest and
-// attaches the assertion message from the matching "● <suite> › <name>" detail
-// block when present. The summary line carries only the leaf test name, so the
-// detail blocks are keyed by their last " › " segment to pair the two; the first
-// non-empty line beneath a header (the "expect(...)"/thrown-exception line) is
-// the detail. A leaf name shared by two tests in different suites resolves to the
-// first block seen — a rare ambiguity worth the message for the common case.
+// detailHeaderLeaf returns the leaf test name when line opens a jest ("● …") or
+// vitest ("FAIL <file> > … > <test>") failure block, and reports whether it did.
+// Both runners print the full suite path in the header; the leaf segment (after
+// the last "›"/">" separator) matches the bare name on the inline "✕ <test>"
+// summary line, so it keys the detail lookup.
+func detailHeaderLeaf(line string) (string, bool) {
+	if m := jestDetailHeaderRe.FindStringSubmatch(line); m != nil {
+		name := strings.TrimSpace(m[1])
+		if idx := strings.LastIndex(name, "›"); idx >= 0 {
+			name = strings.TrimSpace(name[idx+len("›"):])
+		}
+		return name, name != ""
+	}
+	if m := vitestFailHeaderRe.FindStringSubmatch(line); m != nil {
+		name := strings.TrimSpace(m[1])
+		if idx := strings.LastIndex(name, ">"); idx >= 0 {
+			name = strings.TrimSpace(name[idx+1:])
+		}
+		return name, name != ""
+	}
+	return "", false
+}
+
+// parseJestFailures collects the failing tests jest and vitest report. Each
+// "✕ <name>" summary line names a failure; vitest also opens a detailed block
+// with "FAIL <file> > <suite> > <name>", so those headers seed failures too (a
+// vitest reporter may omit the inline "×" line). The assertion message from the
+// matching "● <suite> › <name>" (jest) or "FAIL … > <name>" (vitest) block is
+// attached when present. Names are deduplicated by leaf so the same test counted
+// from both its summary line and its block header yields a single entry.
 func parseJestFailures(output string) []testFailure {
 	lines := splitLines(output)
 	details := jestFailureDetails(lines)
 	var failures []testFailure
+	seen := map[string]bool{}
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: details[name]})
+	}
 	for _, ln := range lines {
 		if m := jestFailRe.FindStringSubmatch(ln); m != nil {
-			name := strings.TrimSpace(jestTimeRe.ReplaceAllString(m[1], ""))
-			if name != "" {
-				failures = append(failures, testFailure{Name: name, Detail: details[name]})
-			}
+			add(strings.TrimSpace(jestTimeRe.ReplaceAllString(m[1], "")))
+			continue
+		}
+		if name, ok := vitestFailHeaderLeaf(ln); ok {
+			add(name)
 		}
 	}
 	return failures
 }
 
+// vitestFailHeaderLeaf returns the leaf test name when line is a vitest
+// "FAIL <file> > … > <test>" block header. It is the failure-seeding counterpart
+// to detailHeaderLeaf, which also recognizes jest's "● …" headers (those always
+// have a paired "✕" summary line, so seeding from them would double-count).
+func vitestFailHeaderLeaf(line string) (string, bool) {
+	m := vitestFailHeaderRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	name := strings.TrimSpace(m[1])
+	if idx := strings.LastIndex(name, ">"); idx >= 0 {
+		name = strings.TrimSpace(name[idx+1:])
+	}
+	return name, name != ""
+}
+
 // jestFailureDetails maps each failing test's leaf name to the first assertion or
-// exception line in its "● <suite> › <name>" block, before the next "●" header.
-// The leaf name (the segment after the last " › ") is used because the inline
-// "✕ <name>" summary line prints only that segment. Whole-file "● Test suite
-// failed to run" blocks produce an entry with no matching summary line, which is
-// harmless.
+// exception line in its "● <suite> › <name>" (jest) or "FAIL <file> > … > <name>"
+// (vitest) block, before the next such header. The leaf name (the segment after
+// the last separator) is used because the inline "✕ <name>" summary line prints
+// only that segment. Whole-file "● Test suite failed to run" blocks produce an
+// entry with no matching summary line, which is harmless.
 func jestFailureDetails(lines []string) map[string]string {
 	details := map[string]string{}
 	for i := 0; i < len(lines); i++ {
-		m := jestDetailHeaderRe.FindStringSubmatch(lines[i])
-		if m == nil {
-			continue
-		}
-		name := strings.TrimSpace(m[1])
-		if idx := strings.LastIndex(name, "›"); idx >= 0 {
-			name = strings.TrimSpace(name[idx+len("›"):])
-		}
-		if name == "" {
+		name, ok := detailHeaderLeaf(lines[i])
+		if !ok {
 			continue
 		}
 		if _, ok := details[name]; ok {
 			continue // keep the first detail per leaf name
 		}
 		for j := i + 1; j < len(lines); j++ {
-			if jestDetailHeaderRe.MatchString(lines[j]) {
+			if _, isHeader := detailHeaderLeaf(lines[j]); isHeader {
 				break
 			}
 			if t := strings.TrimSpace(lines[j]); t != "" {

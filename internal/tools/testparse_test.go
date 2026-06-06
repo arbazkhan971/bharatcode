@@ -420,6 +420,44 @@ func TestParseJestFailures_WithDetail(t *testing.T) {
 	assertFailures(t, got, want)
 }
 
+func TestParseVitestFailures(t *testing.T) {
+	// vitest's default reporter prints a per-file tree (with "×" leaf markers)
+	// followed by a "Failed Tests" section whose blocks open with
+	// "FAIL <file> > <suite> > <test>" and carry the assertion on the next line.
+	out := ` ❯ src/calc.test.ts (3 tests | 2 failed)
+   ✓ adds correctly
+   × subtracts correctly
+   × multiplies
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/calc.test.ts > Calculator > subtracts correctly
+AssertionError: expected 1 to be 5
+
+ FAIL  src/calc.test.ts > Calculator > multiplies
+TypeError: mul is not a function
+`
+	got := parseTestFailures("npx vitest run", out)
+	want := []testFailure{
+		{Name: "subtracts correctly", Detail: "AssertionError: expected 1 to be 5"},
+		{Name: "multiplies", Detail: "TypeError: mul is not a function"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseVitestFailures_HeaderOnly(t *testing.T) {
+	// A reporter that omits the inline "×" tree still emits the "FAIL … > <test>"
+	// block headers, so the failures are seeded from those alone.
+	out := ` FAIL  test/api.test.ts > GET /users > returns 200
+AssertionError: expected 500 to be 200
+`
+	got := parseTestFailures("vitest", out)
+	want := []testFailure{
+		{Name: "returns 200", Detail: "AssertionError: expected 500 to be 200"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseCargoTestFailures(t *testing.T) {
 	out := `running 2 tests
 test tests::ok ... ok

@@ -82,6 +82,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseScalaTestFailures(output)
 	case runnerClojure:
 		return parseClojureTestFailures(output)
+	case runnerFoundry:
+		return parseFoundryTestFailures(output)
 	default:
 		return nil
 	}
@@ -115,6 +117,7 @@ const (
 	runnerJulia
 	runnerScala
 	runnerClojure
+	runnerFoundry
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -157,6 +160,10 @@ var (
 	// like "swift testing guide" from matching while admitting flags and paths
 	// ("swift test --filter FooTests").
 	swiftTestRe = regexp.MustCompile(`\bswift test\b`)
+	// "forge test" drives Foundry's Solidity test runner; \bforge test\b admits
+	// "forge test" and "forge test --match-test X" while keeping prose like
+	// "forge testbed" — where "test" runs into the next word — from matching.
+	forgeTestRe = regexp.MustCompile(`\bforge test\b`)
 	// "ctest" drives CMake's test runner; \bctest\b admits "ctest", "ctest -R Foo",
 	// and "cmake --build . && ctest" while keeping prose like "subjects of the
 	// ctesting" — and the unrelated "go test"/"cargo test" runners, which never
@@ -351,6 +358,13 @@ func classifyTestRunner(command string) testRunner {
 		// the JS runners since a Clojure invocation carries none of their
 		// substrings, but kept explicit to guard against future overlap.
 		return runnerClojure
+	case forgeTestRe.MatchString(c):
+		// `forge test` drives Foundry's Solidity test runner, whose reporter prints
+		// each failing test as "[FAIL: <reason>] <fn>(<args>) (gas: N)" (older
+		// builds spell the marker "[FAIL. Reason: <reason>]"). Checked before the JS
+		// runners since a forge invocation carries none of their substrings, but
+		// kept explicit to guard against future overlap.
+		return runnerFoundry
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1893,6 +1907,41 @@ func parseClojureTestFailures(output string) []testFailure {
 			}
 		}
 		failures = append(failures, f)
+	}
+	return failures
+}
+
+// "[FAIL: assertion failed] test_Increment() (gas: 28379)" — the line Foundry's
+// `forge test` reporter prints for each failing test. The optional reason follows
+// the marker as either "[FAIL: <reason>]" (current) or "[FAIL. Reason: <reason>]"
+// (older builds); group 1 is that reason (empty for a bare "[FAIL]"), and group 2
+// is the Solidity test function with its parameter list — e.g. "test_Increment()"
+// or "testFuzz_SetNumber(uint256)" — which is how a test is re-run via
+// `forge test --match-test`. The trailing " (gas: ...)"/" (runs: ...)" stats are
+// not captured.
+var foundryFailRe = regexp.MustCompile(`^\s*\[FAIL(?:(?:: ?|\. Reason: ?)(.*?))?\]\s+(\w+\([^)]*\))`)
+
+// parseFoundryTestFailures extracts failing tests from Foundry output
+// (`forge test`). Each failure is a "[FAIL: <reason>] <fn>(<args>) (gas: N)" line
+// (older builds write "[FAIL. Reason: <reason>]"); Name is the Solidity test
+// function with its parameter list and Detail is the revert/assertion reason when
+// the marker carries one. Failures are returned in run order and deduplicated by
+// name so a fuzz test reported once per shrink does not produce duplicates.
+func parseFoundryTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		m := foundryFailRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[2])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: strings.TrimSpace(m[1])})
 	}
 	return failures
 }

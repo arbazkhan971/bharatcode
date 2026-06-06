@@ -1116,6 +1116,42 @@ func TestParseMochaFailures_FlatTitle(t *testing.T) {
 	assertFailures(t, got, want)
 }
 
+func TestParseCypressFailures(t *testing.T) {
+	// `cypress run` emits Mocha's spec-reporter output, so it routes to the Mocha
+	// parser. The numbered "N) <title>" block (title ending in a colon) followed by
+	// the assertion message is the same shape the Mocha parser handles.
+	out := `  Running:  login.cy.js
+
+  Login flow
+    ✓ shows the form (52ms)
+    1) rejects a bad password
+
+  1 passing (1s)
+  1 failing
+
+  1) Login flow
+       rejects a bad password:
+     AssertionError: expected 'logged in' to equal 'error'
+      at Context.eval (webpack:///./cypress/e2e/login.cy.js:12:30)
+`
+	got := parseTestFailures("npx cypress run", out)
+	want := []testFailure{
+		{Name: "Login flow rejects a bad password", Detail: "AssertionError: expected 'logged in' to equal 'error'"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseCypressFailures_NoFailures(t *testing.T) {
+	out := `  Login flow
+    ✓ shows the form (52ms)
+
+  1 passing (1s)
+`
+	if got := parseTestFailures("cypress run", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
 func TestParseMochaFailures_NoFailures(t *testing.T) {
 	out := `  Array
     ✓ works

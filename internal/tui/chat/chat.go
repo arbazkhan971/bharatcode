@@ -25,6 +25,7 @@ type item struct {
 	role        message.Role
 	body        string
 	streaming   bool
+	createdAt   time.Time
 	cachedWidth int
 	cachedBody  string
 }
@@ -63,12 +64,15 @@ func (l *List) Append(msg message.Message) {
 	if idx, ok := l.index[id]; ok {
 		l.items[idx].role = msg.Role
 		l.items[idx].body = body
+		if !msg.CreatedAt.IsZero() {
+			l.items[idx].createdAt = msg.CreatedAt
+		}
 		l.items[idx].cachedWidth = 0
 		l.items[idx].cachedBody = ""
 		return
 	}
 	l.index[id] = len(l.items)
-	l.items = append(l.items, item{id: id, role: msg.Role, body: body})
+	l.items = append(l.items, item{id: id, role: msg.Role, body: body, createdAt: msg.CreatedAt})
 }
 
 // Stream appends delta to a streaming assistant message.
@@ -264,6 +268,10 @@ func (l *List) renderItem(idx int, width int) string {
 	if prefix == "" {
 		prefix = "message"
 	}
+	header := prefix
+	if !it.createdAt.IsZero() {
+		header += " · " + formatTimestamp(it.createdAt)
+	}
 
 	var body string
 	// Render assistant prose as markdown once it is complete. While a message
@@ -274,7 +282,7 @@ func (l *List) renderItem(idx int, width int) string {
 		if rendered, ok := l.md.Render(it.body, width-2); ok {
 			body = strings.TrimRight(rendered, "\n")
 			it.cachedWidth = width
-			it.cachedBody = prefix + "\n" + body
+			it.cachedBody = header + "\n" + body
 			return it.cachedBody
 		}
 	}
@@ -284,7 +292,7 @@ func (l *List) renderItem(idx int, width int) string {
 		body += " ▌"
 	}
 	it.cachedWidth = width
-	it.cachedBody = prefix + "\n" + indent(body, "  ")
+	it.cachedBody = header + "\n" + indent(body, "  ")
 	return it.cachedBody
 }
 
@@ -334,4 +342,15 @@ func indent(s string, prefix string) string {
 		return prefix
 	}
 	return prefix + strings.ReplaceAll(s, "\n", "\n"+prefix)
+}
+
+// formatTimestamp returns a compact time string for a message header. Messages
+// from today show only HH:MM; older messages include the date so the reader
+// always knows when a turn happened without cluttering recent conversation.
+func formatTimestamp(t time.Time) string {
+	now := time.Now()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	return t.Format("Jan 2 15:04")
 }

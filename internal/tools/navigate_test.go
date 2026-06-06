@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -575,6 +576,57 @@ func TestNavigateSignatureReturnsText(t *testing.T) {
 	// 1-based coordinates are converted to the 0-based LSP positions.
 	require.Equal(t, 4, src.lastLine)
 	require.Equal(t, 8, src.lastCol)
+}
+
+func TestNavigateHoverCapsLongText(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	// A verbose server hover: far more lines than the byte cap allows. Each line
+	// is short, so the cut lands on a line boundary and the elision notice counts
+	// the dropped lines.
+	var sb strings.Builder
+	const lines = 800 // ~10 bytes/line > navigateHoverByteCap
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&sb, "field%03d int\n", i)
+	}
+	src := &fakeNavigate{hover: sb.String()}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 3, "action": "hover",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The content stays within the cap plus the one-line notice, never the whole
+	// multi-kilobyte hover.
+	require.LessOrEqual(t, len(result.Content), navigateHoverByteCap+64)
+	require.Contains(t, result.Content, "lines truncated]")
+	// The cut falls on a line boundary, so the last shown field line is intact
+	// rather than chopped mid-token.
+	require.Contains(t, result.Content, "field000 int")
+	// The notice's count plus the shown lines reconstruct the true total.
+	var shown, elided int
+	_, perr := fmt.Sscanf(result.Content[strings.LastIndex(result.Content, "... ["):], "... [%d more lines truncated]", &elided)
+	require.NoError(t, perr)
+	shown = strings.Count(result.Content[:strings.LastIndex(result.Content, "\n... [")], "\n") + 1
+	require.Equal(t, lines, shown+elided)
+}
+
+func TestNavigateHoverShortTextUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{hover: "type T struct{ X int }"}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 3, "action": "hover",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Text within the cap is passed through verbatim, with no truncation notice.
+	require.Equal(t, "type T struct{ X int }", result.Content)
+	require.NotContains(t, result.Content, "truncated]")
 }
 
 func TestNavigateEmptyResultsReportDirectly(t *testing.T) {

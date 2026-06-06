@@ -58,7 +58,9 @@ file or line cannot be read). `references`, `incoming_calls`, and
 files:`, `N callers across M files:`, `N callees across M files:`) so you can
 gauge a symbol's blast radius or call-hierarchy fan-out at a glance. For
 `hover` and `signature`, the language server's text, with `signature` marking
-the active overload (`→`) and the parameter the cursor is on.
+the active overload (`→`) and the parameter the cursor is on. A very long hover
+or signature is capped on a line boundary with a `... [N more lines truncated]`
+notice; re-read the source directly if you need the rest.
 
 Failure cases:
 

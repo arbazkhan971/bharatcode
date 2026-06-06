@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
 )
@@ -193,7 +194,7 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if strings.TrimSpace(text) == "" {
 			return Result{Content: "No hover information found."}, nil
 		}
-		return Result{Content: strings.TrimRight(text, "\n")}, nil
+		return Result{Content: boundHoverText(strings.TrimRight(text, "\n"))}, nil
 	case "signature":
 		text, err := t.source.SignatureHelp(ctx, path, line0, col0)
 		if err != nil {
@@ -202,7 +203,7 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if strings.TrimSpace(text) == "" {
 			return Result{Content: "No signature help found."}, nil
 		}
-		return Result{Content: strings.TrimRight(text, "\n")}, nil
+		return Result{Content: boundHoverText(strings.TrimRight(text, "\n"))}, nil
 	default:
 		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, declaration, type_definition, implementation, references, incoming_calls, outgoing_calls, hover, or signature)", action)), nil
 	}
@@ -226,6 +227,42 @@ const navigateLocationCap = 200
 // supplementary context rather than the primary content; the trailing marker
 // truncateLine appends records that the line was clipped.
 const navigateSnippetMax = 200
+
+// navigateHoverByteCap bounds how many bytes of hover/signature text the
+// navigate tool emits. A language server's hover for a heavily documented
+// symbol — a long doc comment, an inlined type with many fields, a re-exported
+// declaration that drags in its whole definition — can run to many kilobytes;
+// surfacing it whole floods the context for marginal value. The cap mirrors the
+// bounded-output philosophy of navigateLocationCap/navigateSnippetMax: the text
+// is cut on a line boundary where possible and a trailing notice records how
+// many lines were elided so the model knows the content was truncated rather
+// than complete, and can re-read the source directly if it needs the rest.
+const navigateHoverByteCap = 4000
+
+// boundHoverText trims text to navigateHoverByteCap bytes, preferring to cut on
+// a line boundary, and appends a notice naming how many lines were dropped.
+// Text already within the cap is returned unchanged. The cut is backed off to a
+// valid rune boundary so a multibyte character is never split.
+func boundHoverText(text string) string {
+	if len(text) <= navigateHoverByteCap {
+		return text
+	}
+	cut := navigateHoverByteCap
+	// Prefer a line boundary so the shown text ends on a whole line rather than
+	// mid-word; fall back to the raw byte cap for a single oversized line.
+	if nl := strings.LastIndexByte(text[:cut], '\n'); nl > 0 {
+		cut = nl
+	}
+	for cut > 0 && !utf8.ValidString(text[:cut]) {
+		cut--
+	}
+	remainder := strings.TrimPrefix(text[cut:], "\n")
+	elided := strings.Count(remainder, "\n")
+	if remainder != "" {
+		elided++
+	}
+	return text[:cut] + fmt.Sprintf("\n... [%d more %s truncated]", elided, plural(elided, "line", "lines"))
+}
 
 // locationsResult renders LSP locations as a sorted, deduplicated list of
 // `path:line:column: <source line>` entries, paths made workspace-relative

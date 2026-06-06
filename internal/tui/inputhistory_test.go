@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/llm"
@@ -538,4 +539,166 @@ func TestSuggestSlash_CorrectsToDynamicCommand(t *testing.T) {
 	st.setDynamicCommands([]string{"/triage"})
 	require.Equal(t, "/triage", suggestSlash(st.candidates(), "trige"),
 		"a one-edit typo of a recipe name is corrected to the recipe")
+}
+
+// --- Undo/redo (Ctrl+Z / Ctrl+Y) tests ---
+
+// keyCtrlZ and keyCtrlY produce the key-press messages for the undo/redo bindings.
+func keyCtrlZ() tea.KeyPressMsg { return keyCtrl('z') }
+func keyCtrlY() tea.KeyPressMsg { return keyCtrl('y') }
+
+// TestInputUndo_UndoesTypingCharByChar verifies that each Ctrl+Z walks the input
+// buffer back by one character, undoing the most recent keystroke first.
+func TestInputUndo_UndoesTypingCharByChar(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "abc")
+	require.Equal(t, "abc", m.input.String())
+
+	_, _ = m.Update(keyCtrlZ())
+	require.Equal(t, "ab", m.input.String(), "first Ctrl+Z undoes the last character")
+	_, _ = m.Update(keyCtrlZ())
+	require.Equal(t, "a", m.input.String(), "second Ctrl+Z undoes one more character")
+	_, _ = m.Update(keyCtrlZ())
+	require.Empty(t, m.input.String(), "third Ctrl+Z undoes back to empty")
+}
+
+// TestInputUndo_UndoesCtrlU verifies that a Ctrl+Z after Ctrl+U reinstates the
+// full prompt that was cleared, so an accidental wipe is recoverable.
+func TestInputUndo_UndoesCtrlU(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "do not lose this")
+	_, _ = m.Update(keyCtrl('u'))
+	require.Empty(t, m.input.String(), "Ctrl+U must clear the buffer")
+
+	_, _ = m.Update(keyCtrlZ())
+	require.Equal(t, "do not lose this", m.input.String(), "Ctrl+Z must reinstate the cleared text")
+}
+
+// TestInputUndo_UndoesBackspace verifies that Ctrl+Z after a Backspace restores
+// the character that was deleted.
+func TestInputUndo_UndoesBackspace(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "hello")
+	_, _ = m.Update(keySpecial("backspace", tea.KeyBackspace))
+	require.Equal(t, "hell", m.input.String())
+
+	_, _ = m.Update(keyCtrlZ())
+	require.Equal(t, "hello", m.input.String(), "Ctrl+Z must restore the backspaced character")
+}
+
+// TestInputUndo_UndoesWordDelete verifies that Ctrl+Z after Alt+Backspace
+// restores the word that was deleted.
+func TestInputUndo_UndoesWordDelete(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "fix the bug")
+	_, _ = m.Update(keyAltBackspace())
+	require.Equal(t, "fix the ", m.input.String())
+
+	_, _ = m.Update(keyCtrlZ())
+	require.Equal(t, "fix the bug", m.input.String(), "Ctrl+Z must restore the word-deleted text")
+}
+
+// TestInputUndo_NoopOnEmpty verifies Ctrl+Z on an empty buffer with no history
+// is inert and does not panic.
+func TestInputUndo_NoopOnEmpty(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.Update(keyCtrlZ())
+	require.Empty(t, m.input.String(), "Ctrl+Z on an empty buffer must be a no-op")
+}
+
+// TestInputRedo_RedoesAfterUndo verifies that Ctrl+Y after a Ctrl+Z reinstates
+// the edit that was undone, walking the redo stack forward.
+func TestInputRedo_RedoesAfterUndo(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "abc")
+	_, _ = m.Update(keyCtrlZ())
+	require.Equal(t, "ab", m.input.String())
+
+	_, _ = m.Update(keyCtrlY())
+	require.Equal(t, "abc", m.input.String(), "Ctrl+Y must redo the undone character")
+}
+
+// TestInputRedo_MultiStep verifies multiple undo/redo steps interleave correctly:
+// undo then redo at each character boundary round-trips cleanly.
+func TestInputRedo_MultiStep(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "xy")
+
+	_, _ = m.Update(keyCtrlZ())
+	_, _ = m.Update(keyCtrlZ())
+	require.Empty(t, m.input.String(), "two undos should reach empty")
+
+	_, _ = m.Update(keyCtrlY())
+	require.Equal(t, "x", m.input.String(), "one redo reinstates first character")
+	_, _ = m.Update(keyCtrlY())
+	require.Equal(t, "xy", m.input.String(), "second redo reinstates second character")
+}
+
+// TestInputRedo_NoopOnEmpty verifies Ctrl+Y with no prior undo is inert.
+func TestInputRedo_NoopOnEmpty(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "hello")
+	_, _ = m.Update(keyCtrlY())
+	require.Equal(t, "hello", m.input.String(), "Ctrl+Y with no undo history must be a no-op")
+}
+
+// TestInputRedo_ClearedByNewEdit verifies that typing after an undo discards the
+// redo stack, so Ctrl+Y cannot reinstate an edit that was superseded by new input.
+func TestInputRedo_ClearedByNewEdit(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "abc")
+	_, _ = m.Update(keyCtrlZ())
+	require.Equal(t, "ab", m.input.String())
+
+	// New edit after undo: this must clear the redo stack.
+	typeString(t, m, "x")
+	require.Equal(t, "abx", m.input.String())
+
+	// Ctrl+Y must be a no-op because the redo stack was cleared.
+	_, _ = m.Update(keyCtrlY())
+	require.Equal(t, "abx", m.input.String(), "Ctrl+Y must be a no-op after a new edit clears the redo stack")
+}
+
+// TestPushUndo_NoDuplicateEntries verifies that pushing the same value twice
+// does not store a duplicate undo entry, so a no-op edit (like Backspace on an
+// empty buffer) does not produce phantom undo steps.
+func TestPushUndo_NoDuplicateEntries(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	st.pushUndo("hello")
+	st.pushUndo("hello") // duplicate — must not be stored again
+	require.Equal(t, 1, len(st.undoStack), "duplicate pushes must not create extra undo entries")
+}
+
+// TestPushUndo_BoundedByMaxUndoHistory verifies the undo stack is capped at
+// maxUndoHistory entries, dropping the oldest when the limit is exceeded.
+func TestPushUndo_BoundedByMaxUndoHistory(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	for i := range maxUndoHistory + 10 {
+		// Each push stores a distinct value so no dedup fires.
+		st.pushUndo(strings.Repeat("x", i+1))
+	}
+	require.Equal(t, maxUndoHistory, len(st.undoStack),
+		"undo stack must be capped at maxUndoHistory entries")
 }

@@ -9,6 +9,11 @@ import (
 // recall. Older entries are dropped once the cap is reached.
 const maxInputHistory = 100
 
+// maxUndoHistory bounds the undo stack depth. Each individual edit (keystroke,
+// backspace, word-delete, clear) pushes one entry; capping the stack prevents
+// unbounded growth during long compositions.
+const maxUndoHistory = 50
+
 // slashCommands is the known set of built-in slash commands offered by Tab
 // completion. It is kept in sync with the commands handled in handleSlash and
 // listed in slashHelpLines.
@@ -75,6 +80,14 @@ type inputState struct {
 	// buffer that no longer equals completionMatches[completionIndex] means the
 	// user edited it, which ends the cycle and reseeds on the next Tab.
 	completionIndex int
+
+	// undoStack holds the input buffer values pushed before each edit, so
+	// Ctrl+Z can walk them back. The stack is bounded by maxUndoHistory; older
+	// entries are dropped. Any new (non-undo/redo) edit clears redoStack.
+	undoStack []string
+	// redoStack holds values displaced by undo, so Ctrl+Y can reinstate them.
+	// It is cleared whenever a new edit is pushed to undoStack.
+	redoStack []string
 }
 
 // record appends a submitted prompt to history and resets recall and
@@ -104,6 +117,48 @@ func (s *inputState) resetRecall() {
 func (s *inputState) resetCompletion() {
 	s.completionMatches = nil
 	s.completionIndex = 0
+}
+
+// pushUndo saves current to the undo stack before an edit is applied and clears
+// the redo stack (a new edit always invalidates the redo history). Duplicate
+// consecutive entries are not stored — a no-op edit (e.g. Backspace on an empty
+// buffer) must not poison the stack with an extra identical entry.
+func (s *inputState) pushUndo(current string) {
+	if len(s.undoStack) > 0 && s.undoStack[len(s.undoStack)-1] == current {
+		s.redoStack = s.redoStack[:0]
+		return
+	}
+	s.undoStack = append(s.undoStack, current)
+	if len(s.undoStack) > maxUndoHistory {
+		s.undoStack = s.undoStack[len(s.undoStack)-maxUndoHistory:]
+	}
+	s.redoStack = s.redoStack[:0]
+}
+
+// undoInput pops the most recent undo entry and returns it as the new buffer
+// value, pushing current onto the redo stack so Ctrl+Y can reinstate it.
+// Returns (current, false) when the undo stack is empty.
+func (s *inputState) undoInput(current string) (string, bool) {
+	if len(s.undoStack) == 0 {
+		return current, false
+	}
+	s.redoStack = append(s.redoStack, current)
+	prev := s.undoStack[len(s.undoStack)-1]
+	s.undoStack = s.undoStack[:len(s.undoStack)-1]
+	return prev, true
+}
+
+// redoInput pops the most recent redo entry and returns it as the new buffer
+// value, pushing current back onto the undo stack so Ctrl+Z can walk it back
+// again. Returns (current, false) when the redo stack is empty.
+func (s *inputState) redoInput(current string) (string, bool) {
+	if len(s.redoStack) == 0 {
+		return current, false
+	}
+	s.undoStack = append(s.undoStack, current)
+	next := s.redoStack[len(s.redoStack)-1]
+	s.redoStack = s.redoStack[:len(s.redoStack)-1]
+	return next, true
 }
 
 // recallPrev walks one entry back in history. current is the live buffer; the

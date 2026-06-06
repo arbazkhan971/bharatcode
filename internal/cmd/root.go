@@ -28,6 +28,7 @@ type rootOptions struct {
 	projectDir      string
 	offline         bool
 	continueSession bool
+	profile         string
 }
 
 var (
@@ -98,6 +99,7 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVar(&opts.yolo, "yolo", false, "approve tool calls without prompting")
 	root.PersistentFlags().StringVar(&opts.projectDir, "project-dir", "", "project directory")
 	root.PersistentFlags().BoolVar(&opts.offline, "offline", false, "offline mode: reject non-localhost providers and disable web tools (code will not leave this machine)")
+	root.PersistentFlags().StringVar(&opts.profile, "profile", "", "name of a config profile overlay to apply (looks for <name>.json alongside config.json)")
 	root.Flags().BoolVarP(&opts.continueSession, "continue", "c", false, "continue the most recent session for this project")
 	root.SetContext(withRootOptions(context.Background(), opts))
 
@@ -158,6 +160,7 @@ func buildApp(ctx context.Context, opts *rootOptions) (*app.App, error) {
 		YOLO:       opts.yolo,
 		Verbose:    opts.verbose,
 		Offline:    opts.offline,
+		Profile:    opts.profile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("constructing app: %w", err)

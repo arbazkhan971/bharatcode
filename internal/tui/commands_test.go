@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/recipe"
@@ -610,6 +612,111 @@ func TestSlashDiff_NoEdit_ShowsPlaceholder(t *testing.T) {
 
 	h.submitSlash(t, "/diff")
 	require.Contains(t, plainText(m.dialogs.Render(200)), "No edit diff is available yet")
+}
+
+// realTracker returns a snapshotting file tracker backed by its own temp
+// database and blob directory, so revert can both read recorded changes and
+// restore original content from snapshots. Every id in sessionIDs is created in
+// the same database first, since file-change rows carry a foreign key to the
+// owning session.
+func realTracker(t *testing.T, sessionIDs ...string) *filetracker.Tracker {
+	t.Helper()
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "ft.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+	repo := session.NewRepo(database)
+	for _, id := range sessionIDs {
+		require.NoError(t, repo.Create(context.Background(), &session.Session{ID: id, Title: "revert", Model: "fake-model", Agent: "coder"}))
+	}
+	return filetracker.NewTrackerWithSnapshots(database, nil, t.TempDir())
+}
+
+// TestSlashRevert_NoSession_ShowsGuidance asserts a bare /revert before any
+// session is persisted explains there is nothing to revert rather than erroring.
+func TestSlashRevert_NoSession_ShowsGuidance(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+	m.deps.FileTracker = realTracker(t)
+
+	h.submitSlash(t, "/revert")
+	require.True(t, m.dialogs.Contains("revert"))
+	require.Contains(t, plainText(m.dialogs.Render(200)), "No active session to revert yet")
+}
+
+// TestSlashRevert_PreviewThenApply asserts /revert first previews the change
+// (leaving disk untouched) and only /revert apply deletes a session-created
+// file, mirroring opencode's /undo behind an explicit confirmation.
+func TestSlashRevert_PreviewThenApply(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+	tracker := realTracker(t, "sess-revert")
+	m.deps.FileTracker = tracker
+
+	dir := t.TempDir()
+	created := filepath.Join(dir, "new.txt")
+	require.NoError(t, os.WriteFile(created, []byte("hello\n"), 0o644))
+	_, err := tracker.RecordWrite(context.Background(), "sess-revert", created, nil, []byte("hello\n"))
+	require.NoError(t, err)
+
+	m.sessionID = "sess-revert"
+	m.sessionPersisted = true
+
+	// Bare /revert is a dry run: the dialog explains and the file survives.
+	h.submitSlash(t, "/revert")
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "Dry run", "bare /revert must preview, not apply")
+	require.Contains(t, body, "/revert apply", "preview must explain how to confirm")
+	require.FileExists(t, created, "preview must not touch the file")
+
+	// Dismiss the preview dialog so the next Enter submits rather than closing it.
+	m.dialogs.Pop()
+
+	// /revert apply performs the deletion (the file was created in-session).
+	h.submitSlash(t, "/revert apply")
+	body = plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "Reverted")
+	require.NoFileExists(t, created, "apply must delete the session-created file")
+}
+
+// TestSlashRevert_RestoresEditedContent asserts /revert apply rewrites an
+// edited file back to the content it had before the session touched it.
+func TestSlashRevert_RestoresEditedContent(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+	tracker := realTracker(t, "sess-edit")
+	m.deps.FileTracker = tracker
+
+	dir := t.TempDir()
+	edited := filepath.Join(dir, "edit.txt")
+	require.NoError(t, os.WriteFile(edited, []byte("new\n"), 0o644))
+	_, err := tracker.RecordWrite(context.Background(), "sess-edit", edited, []byte("original\n"), []byte("new\n"))
+	require.NoError(t, err)
+
+	m.sessionID = "sess-edit"
+	m.sessionPersisted = true
+
+	h.submitSlash(t, "/revert apply")
+	require.Contains(t, plainText(m.dialogs.Render(200)), "Reverted")
+	got, err := os.ReadFile(edited)
+	require.NoError(t, err)
+	require.Equal(t, "original\n", string(got), "apply must restore the pre-session content")
+}
+
+// TestSlashRevert_UnknownArg_ShowsUsage asserts an unrecognized argument yields
+// the usage hint rather than silently doing nothing or applying.
+func TestSlashRevert_UnknownArg_ShowsUsage(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+	m.deps.FileTracker = realTracker(t, "sess-x")
+	m.sessionID = "sess-x"
+	m.sessionPersisted = true
+
+	h.submitSlash(t, "/revert bogus")
+	require.Contains(t, plainText(m.dialogs.Render(200)), "Usage: /revert")
 }
 
 // TestSlashRegistryPrompt_RendersAndSubmits is the prompt-registry contract

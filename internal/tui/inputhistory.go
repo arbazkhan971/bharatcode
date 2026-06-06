@@ -23,6 +23,7 @@ var slashCommands = []string{
 	"/tabs",
 	"/fork",
 	"/diff",
+	"/revert",
 	"/status",
 	"/plan",
 	"/approve",

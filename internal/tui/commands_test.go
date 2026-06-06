@@ -310,6 +310,59 @@ func TestSlashSessions_ShowsLastActiveColumn(t *testing.T) {
 	require.Contains(t, body, "just now", "a freshly-seeded session row must carry a relative last-active label")
 }
 
+// TestSlashSessions_MarksCurrentSession asserts the picker flags the session the
+// user is already in with a "(current)" marker, and only that row, so restoring
+// it reads as a no-op rather than a switch.
+func TestSlashSessions_MarksCurrentSession(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	currentID := seedSession(t, h.repo, "Active session", "fix the parser")
+	otherID := seedSession(t, h.repo, "Other session", "add a flag")
+
+	// Pretend the user is already in the first session.
+	m.sessionID = currentID
+	m.sessionPersisted = true
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "(current)", "the active session must be flagged in the picker")
+
+	// The marker must sit on the active session's row and nowhere else.
+	for _, line := range strings.Split(body, "\n") {
+		switch {
+		case strings.Contains(line, shortSessionID(currentID)):
+			require.Contains(t, line, "(current)",
+				"the active session's row must carry the (current) marker")
+		case strings.Contains(line, shortSessionID(otherID)):
+			require.NotContains(t, line, "(current)",
+				"a non-active session's row must not carry the marker")
+		}
+	}
+}
+
+// TestSlashSessions_NoCurrentMarkerWithoutPersistedSession asserts the picker
+// shows no "(current)" marker before any session has been persisted, so a
+// fresh, unsaved session never spuriously flags an arbitrary row as active.
+func TestSlashSessions_NoCurrentMarkerWithoutPersistedSession(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	_ = seedSession(t, h.repo, "Some session", "fix the parser")
+	require.False(t, m.sessionPersisted, "the model must start without a persisted session")
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+
+	body := plainText(m.dialogs.Render(200))
+	require.NotContains(t, body, "(current)",
+		"no row may be flagged current before a session is persisted")
+}
+
 // TestSlashFork_CreatesAndSwitchesToNewSession is the /fork contract test: it
 // branches the active session into a new persisted session with its own id,
 // switches to it, and copies the transcript.

@@ -27,6 +27,10 @@ const (
 	PreToolUse Event = "PreToolUse"
 	// PostToolUse fires after a tool is executed.
 	PostToolUse Event = "PostToolUse"
+	// UserPromptSubmit fires when the user submits a prompt, before the turn
+	// runs. A matching hook may block the prompt (the turn is abandoned) or
+	// emit additional context that is injected into the turn.
+	UserPromptSubmit Event = "UserPromptSubmit"
 	// SessionStart fires when a session starts.
 	SessionStart Event = "SessionStart"
 	// SessionEnd fires when a session ends.
@@ -70,10 +74,15 @@ type VerifySpec struct {
 
 // Decision is the aggregate result of firing matching hooks.
 type Decision struct {
-	Block    bool   `json:"block,omitempty"`
-	Reason   string `json:"reason,omitempty"`
-	Approve  bool   `json:"approve,omitempty"`
-	Continue bool   `json:"continue,omitempty"`
+	Block   bool   `json:"block,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Approve bool   `json:"approve,omitempty"`
+	// AdditionalContext is text a UserPromptSubmit hook injects into the turn so
+	// the model sees it alongside the user's prompt (e.g. the current git status
+	// or coding conventions). When several hooks set it, the values are joined
+	// with newlines. It is ignored when the decision blocks the prompt.
+	AdditionalContext string `json:"additional_context,omitempty"`
+	Continue          bool   `json:"continue,omitempty"`
 }
 
 // ToolPayload is the JSON payload for PreToolUse and PostToolUse events.
@@ -91,6 +100,20 @@ type ToolPayload struct {
 	Args      any    `json:"args,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 	Result    any    `json:"result,omitempty"`
+}
+
+// PromptPayload is the JSON payload for UserPromptSubmit events.
+//
+// JSON schema:
+//
+//	{
+//	  "event": "UserPromptSubmit",
+//	  "prompt": "the user's submitted text",
+//	  "session_id": "session-id"
+//	}
+type PromptPayload struct {
+	Prompt    string `json:"prompt"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // FileEditPayload is the JSON payload for FileEdit events.
@@ -365,6 +388,8 @@ func parseDecision(stdout string) (Decision, error) {
 }
 
 func aggregate(decisions []Decision) Decision {
+	// A block from any hook wins outright; injected context is discarded because
+	// the prompt is not going to run.
 	for _, decision := range decisions {
 		if decision.Block {
 			return Decision{
@@ -373,10 +398,24 @@ func aggregate(decisions []Decision) Decision {
 			}
 		}
 	}
+	// Otherwise gather every hook's injected context (in firing order) so a
+	// UserPromptSubmit hook can add to the turn even alongside an approval.
+	var contexts []string
+	for _, decision := range decisions {
+		if c := strings.TrimSpace(decision.AdditionalContext); c != "" {
+			contexts = append(contexts, c)
+		}
+	}
+	joined := strings.Join(contexts, "\n")
 	for _, decision := range decisions {
 		if decision.Approve {
-			return Decision{Approve: true}
+			return Decision{Approve: true, AdditionalContext: joined}
 		}
+	}
+	if joined != "" {
+		out := passThrough()
+		out.AdditionalContext = joined
+		return out
 	}
 	return passThrough()
 }
@@ -407,6 +446,8 @@ func matchField(event Event, fields map[string]any) string {
 	switch event {
 	case PreToolUse, PostToolUse:
 		return stringField(fields, "tool")
+	case UserPromptSubmit:
+		return stringField(fields, "prompt")
 	case FileEdit:
 		if path := stringField(fields, "path"); path != "" {
 			return path

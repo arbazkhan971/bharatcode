@@ -84,6 +84,7 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.running = true
 	m.turnStartedAt = m.now
 	m.currentActivity = ""
+	m.turnToolCount = 0   // reset per-turn tool-call counter
 	m.lastTurnTokens = "" // clear previous turn's counts while the new turn runs
 	m.lastContextPct = 0  // clear previous context-window fill while the new turn runs
 	// Inline any @-file references so the model sees their contents, while the
@@ -219,8 +220,10 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		}
 	case agent.EventToolCalled:
 		// Surface the running tool's name in the status bar so a long turn reads
-		// as "Bash"/"Edit" rather than a bare "working".
+		// as "Bash"/"Edit" rather than a bare "working". Count each call so the
+		// status can show total tool invocations for progress clarity.
 		m.currentActivity = ev.ToolName
+		m.turnToolCount++
 		m.chat.Stream(streamID, "\n[tool: "+ev.ToolName+"]\n")
 	case agent.EventToolResult:
 		m.currentActivity = ""

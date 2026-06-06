@@ -224,7 +224,7 @@ func parseProviderError(body []byte) error {
 	switch {
 	case code == "rate_limit_exceeded" || typ == "rate_limit_error":
 		return fmt.Errorf("provider rate limited request: %w", ErrRateLimit)
-	case code == "context_length_exceeded" || mentionsContextLimit(msg):
+	case code == "context_length_exceeded" || code == "tokens_limit_exceeded" || mentionsContextLimit(msg):
 		// Match the over-budget wording every provider uses through the shared
 		// mentionsContextLimit scan rather than re-listing markers here: OpenAI's
 		// "context length", Anthropic's "prompt is too long: N tokens > M maximum",
@@ -271,7 +271,13 @@ func mentionsContextLimit(s string) bool {
 		// exceeds the maximum number of tokens allowed (Y)." rather than using the
 		// OpenAI/Anthropic wording above, so match its marker too.
 		strings.Contains(s, "exceeds the maximum number of tokens") ||
-		strings.Contains(s, "input token count")
+		strings.Contains(s, "input token count") ||
+		// Groq phrases context overflow as "Request too large for model X: token
+		// count (N) exceeds model's context limit (M)". The "context limit"
+		// substring also catches the "context limit exceeded" wording other
+		// providers may use, while being specific enough (requires the "context"
+		// qualifier) not to match unrelated limit messages such as rate limits.
+		strings.Contains(s, "context limit")
 }
 
 type sseEvent struct {

@@ -52,6 +52,13 @@ func TestInferContextWindow(t *testing.T) {
 		{"o1-2024-12-17", 200_000},
 		{"o3-mini", 200_000},
 		{"o4-mini", 200_000},
+		// codex-mini-latest is the Codex-CLI o4-mini fine-tune; its id carries no
+		// o-series marker, so its own rule must resolve it to the inherited 200k
+		// window rather than letting it fall through to "unknown" (0).
+		{"codex-mini-latest", 200_000},
+		// A gpt-5 codex variant must still resolve to the 400k gpt-5 window, not the
+		// codex-mini rule, even though its id also contains "codex".
+		{"gpt-5-codex", 400_000},
 		{"claude-sonnet-4-20250514", 200_000},
 		{"claude-3-5-haiku", 200_000},
 		{"gemini-1.5-pro-latest", 2_097_152},

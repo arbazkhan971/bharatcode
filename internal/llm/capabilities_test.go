@@ -212,12 +212,23 @@ func TestInferAnthropicMaxOutput(t *testing.T) {
 		id   string
 		want int
 	}{
-		// Opus 4.5 lifted its output cap to 64k; its id carries the "claude-opus-4"
-		// marker, so the specific rule must win over the 32k family rule.
+		// Opus 4.5 lifted its output cap to 64k, and every Opus release since holds
+		// there, so the "claude-opus-4" family now defaults to 64k while the two
+		// legacy 32k models (4.0 and 4.1) are carved out specifically.
 		{"claude-opus-4-5", 64_000},
 		{"claude-opus-4-5-20251101", 64_000},
+		// Newer Opus point releases inherit the 64k family default rather than
+		// falling through to the legacy 32k cap.
+		{"claude-opus-4-6", 64_000},
+		{"claude-opus-4-7", 64_000},
+		{"claude-opus-4-8", 64_000},
+		{"claude-opus-4-8-20260101", 64_000},
+		// The legacy 32k Opus models stay at 32k via their specific markers: the
+		// 4.0 dated id, the 4.0 "-0" alias, and 4.1 (alias and dated forms).
 		{"claude-opus-4-20250514", 32_000},
+		{"claude-opus-4-0", 32_000},
 		{"claude-opus-4-1", 32_000},
+		{"claude-opus-4-1-20250805", 32_000},
 		{"claude-sonnet-4-20250514", 64_000},
 		{"claude-sonnet-4-5", 64_000},
 		{"claude-haiku-4-5", 64_000},

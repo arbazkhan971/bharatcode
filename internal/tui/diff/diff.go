@@ -9,12 +9,18 @@ import (
 	"strings"
 	"unicode"
 
+	chroma "github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 )
 
 // Viewer renders unified diff text.
 type Viewer struct {
 	theme styles.Theme
+	// lang is the chroma lexer name detected from the diff's file-path headers
+	// (e.g. "Go", "Python"). It is set at the start of each Render call and
+	// controls whether context lines are syntax-highlighted.
+	lang string
 }
 
 // New constructs a diff viewer.
@@ -32,6 +38,7 @@ func (v *Viewer) RenderUnified(patch string, width int) string {
 	if width < 1 {
 		width = 1
 	}
+	v.lang = detectLang(patch)
 	lines := strings.Split(strings.TrimRight(patch, "\n"), "\n")
 	for i, line := range lines {
 		lines[i] = v.styleLine(clampWidth(expandTabs(line), width))
@@ -55,6 +62,7 @@ func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 	if width < 1 {
 		width = 1
 	}
+	v.lang = detectLang(patch)
 	lines := strings.Split(strings.TrimRight(patch, "\n"), "\n")
 
 	// Size the gutter once up front from the widest line number any row will
@@ -757,6 +765,12 @@ func (v *Viewer) styleLine(line string) string {
 	case strings.HasPrefix(line, "-"):
 		return v.theme.DiffRemove.Render(line)
 	default:
+		// Context line (space-prefixed) — apply syntax highlighting when a
+		// language was detected. The leading space is the diff format marker
+		// and is preserved plain so the gutter alignment is unchanged.
+		if v.lang != "" && strings.HasPrefix(line, " ") {
+			return " " + v.syntaxHighlight(line[1:])
+		}
 		return line
 	}
 }
@@ -1134,4 +1148,79 @@ func isDiffHeader(line string) bool {
 // number that follows.
 func isNoNewlineMarker(line string) bool {
 	return strings.HasPrefix(line, "\\ ")
+}
+
+// detectLang infers a chroma language name from the file-path headers in a
+// unified diff ("--- a/foo.go", "+++ b/foo.go", "diff --git a/foo.py b/foo.py").
+// It scans only the first 20 lines so the cost is bounded even on large patches.
+// "/dev/null" is skipped so a new-file diff detects the language from the
+// destination path. Returns "" when no file name can be found or chroma has no
+// lexer for the extension, silently disabling syntax highlighting.
+func detectLang(patch string) string {
+	for _, line := range strings.SplitN(patch, "\n", 20) {
+		var name string
+		switch {
+		case strings.HasPrefix(line, "--- a/"):
+			name = line[6:]
+		case strings.HasPrefix(line, "+++ b/"):
+			name = line[6:]
+		case strings.HasPrefix(line, "--- "):
+			name = strings.TrimPrefix(line, "--- ")
+		case strings.HasPrefix(line, "+++ "):
+			name = strings.TrimPrefix(line, "+++ ")
+		}
+		if name == "" {
+			continue
+		}
+		// Strip the function-context suffix git may append after a tab
+		// ("@@ … @@ funcName") — the filename ends before the tab.
+		if i := strings.IndexByte(name, '\t'); i >= 0 {
+			name = name[:i]
+		}
+		name = strings.TrimSpace(name)
+		if name == "/dev/null" {
+			continue
+		}
+		if l := lexers.Match(name); l != nil {
+			return l.Config().Name
+		}
+	}
+	return ""
+}
+
+// syntaxHighlight tokenises content using the Viewer's detected language lexer
+// and returns a string with keywords, string literals, comments, and numbers
+// rendered in the theme's accent, warn, muted, and success colours respectively.
+// All other tokens are returned unstyled. When the language is unset, the lexer
+// is not found, or tokenisation fails, content is returned unchanged so callers
+// always get displayable text.
+func (v *Viewer) syntaxHighlight(content string) string {
+	if v.lang == "" {
+		return content
+	}
+	l := lexers.Get(v.lang)
+	if l == nil {
+		return content
+	}
+	iter, err := l.Tokenise(nil, content)
+	if err != nil {
+		return content
+	}
+	var b strings.Builder
+	for tok := iter(); tok != chroma.EOF; tok = iter() {
+		text := tok.Value
+		switch {
+		case tok.Type.InCategory(chroma.Keyword):
+			b.WriteString(v.theme.Accent.Render(text))
+		case tok.Type.InSubCategory(chroma.LiteralString):
+			b.WriteString(v.theme.Warn.Render(text))
+		case tok.Type.InCategory(chroma.Comment):
+			b.WriteString(v.theme.Muted.Render(text))
+		case tok.Type.InSubCategory(chroma.LiteralNumber):
+			b.WriteString(v.theme.Success.Render(text))
+		default:
+			b.WriteString(text)
+		}
+	}
+	return b.String()
 }

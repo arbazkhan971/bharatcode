@@ -767,6 +767,69 @@ func TestGeminiOmitsThinkingConfigForEffortOnUnsupportedModel(t *testing.T) {
 	}
 }
 
+func TestGeminiNoneEffortDisablesThinkingOnFlash(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	cfg := geminiThinkingConfigFor(t, "gemini-2.5-flash", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	// "none" must turn reasoning off on the Flash line by pinning thinkingBudget to
+	// 0 — not fall through to "unconfigured", which would leave the model's default
+	// thinking on, the opposite of the requested intent.
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-2.5-flash",
+		Messages:        []message.Message{textMsg("answer")},
+		ReasoningEffort: "none",
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	require.NotNil(t, captured.GenerationConfig, "none must produce a generationConfig that disables thinking")
+	tc := captured.GenerationConfig.ThinkingConfig
+	require.NotNil(t, tc, "none must configure thinkingConfig to disable thinking")
+	require.NotNil(t, tc.ThinkingBudget)
+	require.Equal(t, 0, *tc.ThinkingBudget, "none must pin the thinkingBudget to 0 to disable thinking")
+	require.False(t, tc.IncludeThoughts, "a disabled thinking pass must not request thought summaries")
+}
+
+func TestGeminiNoneEffortLeavesProDefault(t *testing.T) {
+	var rawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, geminiSSE(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`))
+	}))
+	defer server.Close()
+
+	// Gemini 2.5 Pro cannot disable thinking (its budget floors at 128 and a 0 is a
+	// 400), so "none" must degrade to the model's default rather than smuggle a 0
+	// budget onto it.
+	cfg := geminiThinkingConfigFor(t, "gemini-2.5-pro", server.URL)
+	provider := geminiProviderFor(t, cfg)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:           "gemini-2.5-pro",
+		Messages:        []message.Message{textMsg("answer")},
+		ReasoningEffort: "none",
+	})
+	require.NoError(t, err)
+	_ = collectEvents(events)
+
+	var captured geminiRequest
+	require.NoError(t, json.Unmarshal(rawBody, &captured))
+	if captured.GenerationConfig != nil {
+		require.Nil(t, captured.GenerationConfig.ThinkingConfig, "Pro must not carry a 0 thinkingBudget, which it 400s on")
+	}
+}
+
 func TestGeminiThinkingBudgetForEffort(t *testing.T) {
 	require.Equal(t, 0, geminiThinkingBudgetForEffort(""))
 	require.Equal(t, 0, geminiThinkingBudgetForEffort("bogus"))
@@ -779,6 +842,25 @@ func TestGeminiThinkingBudgetForEffort(t *testing.T) {
 	require.Equal(t, 16384, geminiThinkingBudgetForEffort("HIGH"), "match must be case-insensitive")
 	require.Equal(t, -1, geminiThinkingBudgetForEffort("auto"), "auto must select dynamic thinking")
 	require.Equal(t, -1, geminiThinkingBudgetForEffort("Dynamic"), "dynamic must select dynamic thinking, case-insensitive")
+	require.Equal(t, geminiThinkingDisabled, geminiThinkingBudgetForEffort("none"), "none must map to the disable-thinking sentinel, not 0")
+	require.Equal(t, geminiThinkingDisabled, geminiThinkingBudgetForEffort("NONE"), "none match must be case-insensitive")
+	require.NotEqual(t, 0, geminiThinkingDisabled, "the disable sentinel must differ from the unconfigured 0")
+}
+
+func TestGeminiModelCanDisableThinking(t *testing.T) {
+	// The Gemini 2.5 Flash line (and its rolling aliases) accepts a 0 budget.
+	require.True(t, geminiModelCanDisableThinking("gemini-2.5-flash"))
+	require.True(t, geminiModelCanDisableThinking("gemini-2.5-flash-lite"))
+	require.True(t, geminiModelCanDisableThinking("GEMINI-2.5-FLASH"), "match must be case-insensitive")
+	require.True(t, geminiModelCanDisableThinking("gemini-flash-latest"))
+	require.True(t, geminiModelCanDisableThinking("gemini-flash-lite-latest"))
+	// Gemini 2.5 Pro cannot disable thinking (its budget floors at 128).
+	require.False(t, geminiModelCanDisableThinking("gemini-2.5-pro"))
+	require.False(t, geminiModelCanDisableThinking("gemini-pro-latest"))
+	// Gemini 3 uses thinkingLevel, not a numeric budget, so it is not matched.
+	require.False(t, geminiModelCanDisableThinking("gemini-3-pro-preview"))
+	// A flash model on an older generation that predates thinkingConfig.
+	require.False(t, geminiModelCanDisableThinking("gemini-2.0-flash"))
 }
 
 func TestGeminiThinkingLevelForEffort(t *testing.T) {

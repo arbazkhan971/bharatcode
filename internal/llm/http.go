@@ -56,26 +56,31 @@ func postJSON(ctx context.Context, client *http.Client, url string, apiKey strin
 // host, so the base URL alone selects the auth scheme.
 const azureOpenAIHostSuffix = ".openai.azure.com"
 
-// azureCognitiveServicesHostSuffix marks the other host Azure OpenAI is served on:
+// azureCognitiveServicesHostMarker marks the other host Azure OpenAI is served on:
 // resources created through the Azure AI Foundry portal default to a multi-service
 // "Cognitive Services" / "AI Services" account whose OpenAI route lives at
 // ".../cognitiveservices.azure.com/openai/deployments/<name>?api-version=...". That
 // route authenticates with the same "api-key" header as the classic
 // ".openai.azure.com" host, so it must select the Azure auth scheme too — otherwise
-// the key goes out as a Bearer token the endpoint rejects.
-const azureCognitiveServicesHostSuffix = ".cognitiveservices.azure.com"
+// the key goes out as a Bearer token the endpoint rejects. The marker is left
+// trailing-dot terminated (".cognitiveservices.azure.") rather than pinned to
+// ".com" so the sovereign-cloud variants — Azure Government's
+// ".cognitiveservices.azure.us" and Azure China's ".cognitiveservices.azure.cn" —
+// match too, mirroring how the ".openai.azure." marker generalizes the classic
+// host across top-level domains.
+const azureCognitiveServicesHostMarker = ".cognitiveservices.azure."
 
 // isAzureOpenAI reports whether baseURL points at an Azure OpenAI endpoint. The
 // match is a case-insensitive substring scan so it also recognizes the
 // sovereign-cloud hosts (".openai.azure.us", ".openai.azure.cn") that share the
 // "openai.azure" marker but differ in their top-level domain, plus the
-// ".cognitiveservices.azure.com" host that AI Foundry resources serve the same
-// OpenAI route on.
+// ".cognitiveservices.azure." host that AI Foundry resources serve the same
+// OpenAI route on (likewise across the .com/.us/.cn clouds).
 func isAzureOpenAI(baseURL string) bool {
 	lower := strings.ToLower(baseURL)
 	return strings.Contains(lower, azureOpenAIHostSuffix) ||
 		strings.Contains(lower, ".openai.azure.") ||
-		strings.Contains(lower, azureCognitiveServicesHostSuffix)
+		strings.Contains(lower, azureCognitiveServicesHostMarker)
 }
 
 // postOpenAIJSON POSTs body to an OpenAI-dialect endpoint, selecting the API-key

@@ -346,7 +346,27 @@ func (m *model) renderFiletree(width, height int) string {
 		b.WriteString(m.theme.Muted.Render("No file selected"))
 		return clampHeight(b.String(), height)
 	}
-	b.WriteString(m.theme.Accent.Render("Diff: " + sel))
+
+	viewer := diff.New(m.theme)
+	diffs := m.filetreeDiffs(sel)
+	if len(diffs) == 0 {
+		b.WriteString(m.theme.Accent.Render("Diff: " + sel))
+		b.WriteByte('\n')
+		b.WriteString(m.theme.Muted.Render("No recorded edits for this file."))
+		return clampHeight(b.String(), height)
+	}
+
+	// Lead the selected file's diff with its "+A -B" change counts so the
+	// magnitude of the edit is visible without reading the body, the way /diff
+	// leads with a diffstat. The header already names the file, so only the
+	// per-file counts are appended — not Stat's "1 file changed" preamble, which
+	// would only restate the label.
+	patch := unifiedPatch(diffs)
+	header := m.theme.Accent.Render("Diff: " + sel)
+	if summary := viewer.CountSummary(patch); summary != "" {
+		header += "  " + summary
+	}
+	b.WriteString(header)
 	b.WriteByte('\n')
 
 	// Reserve the lines already used by the listing and labels so the diff body
@@ -358,13 +378,7 @@ func (m *model) renderFiletree(width, height int) string {
 		diffHeight = 1
 	}
 
-	diffs := m.filetreeDiffs(sel)
-	if len(diffs) == 0 {
-		b.WriteString(m.theme.Muted.Render("No recorded edits for this file."))
-		return clampHeight(b.String(), height)
-	}
-	patch := unifiedPatch(diffs)
-	body := diff.New(m.theme).RenderUnifiedNumbered(patch, max(1, width))
+	body := viewer.RenderUnifiedNumbered(patch, max(1, width))
 	b.WriteString(clampHeight(body, diffHeight))
 	return clampHeight(b.String(), height)
 }

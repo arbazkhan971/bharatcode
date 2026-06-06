@@ -257,6 +257,37 @@ func TestStat_StylesSegments(t *testing.T) {
 	require.Contains(t, got, theme.DiffRemove.Render("-1"))
 }
 
+// TestCountSummary_CountsLinesWithoutPreamble checks that CountSummary reports
+// just the "+A -B" change counts, omitting the "N files changed" preamble Stat
+// prepends, so a caller that already names the file shows only the magnitude.
+func TestCountSummary_CountsLinesWithoutPreamble(t *testing.T) {
+	t.Parallel()
+
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,3 +1,3 @@\n package main\n-func old() {}\n+func new() {}\n+// added\n"
+	got := New(styles.Theme{}).CountSummary(patch)
+	require.Equal(t, "+2 -1", got)
+}
+
+// TestCountSummary_EmptyPatch checks that a content-free patch yields no summary
+// so the caller can omit the counts rather than print an empty "+0 -0".
+func TestCountSummary_EmptyPatch(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", New(styles.Theme{}).CountSummary(""))
+}
+
+// TestCountSummary_StylesSegments checks the +A and -R segments carry the add
+// and remove styles, matching Stat so the two summaries read alike.
+func TestCountSummary_StylesSegments(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	got := New(theme).CountSummary(patch)
+	require.Contains(t, got, theme.DiffAdd.Render("+1"))
+	require.Contains(t, got, theme.DiffRemove.Render("-1"))
+}
+
 // TestStatLines_PerFileBreakdown checks that a multi-file patch yields the
 // aggregate header plus one indented row per file with that file's own +A -B
 // counts and its working-tree path (the a/ b/ prefix stripped).

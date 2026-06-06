@@ -55,10 +55,16 @@ func TestKeybindingHelp_AlignedDescriptions(t *testing.T) {
 			// No two-space indent: this is a group header, not a binding row.
 			continue
 		}
-		for key, desc := range descs {
-			if !strings.HasPrefix(trimmed, key) {
-				continue
+		// Pick the most specific (longest) key that prefixes this row, so a row
+		// whose key string extends a shorter one ("Enter (in panel)" vs "Enter") is
+		// measured against its own description rather than the shorter key's.
+		key, desc := "", ""
+		for k, d := range descs {
+			if strings.HasPrefix(trimmed, k) && len([]rune(k)) > len([]rune(key)) {
+				key, desc = k, d
 			}
+		}
+		if key != "" {
 			// The description must follow the padded key; measure its rune offset
 			// from the start of the (indented) row content.
 			idx := strings.Index(trimmed, desc)
@@ -68,7 +74,6 @@ func TestKeybindingHelp_AlignedDescriptions(t *testing.T) {
 				col = runeCol
 			}
 			require.Equal(t, col, runeCol, "binding %q description must align to the shared column", key)
-			break
 		}
 	}
 	require.Greater(t, col, 0, "expected to find at least one aligned binding row")

@@ -216,6 +216,13 @@ type model struct {
 	// behavior); a positive value reveals older lines. The mouse wheel adjusts it.
 	chatScroll int
 
+	// chatMaxScroll is the furthest the chat can be scrolled up — the number of
+	// lines hidden above the window when anchored to the very top — as computed by
+	// clampChat for the most recent render. It lets the scroll indicator report a
+	// reading position relative to the whole scrollback (e.g. "30% back") rather
+	// than only the raw count of newer lines below. Zero when nothing is scrollable.
+	chatMaxScroll int
+
 	// search is the scrollback-search state for /search and the next/prev match
 	// keys. Its zero value is inert (no term, no matches), so a model that has
 	// never searched renders and scrolls exactly as before.
@@ -912,7 +919,7 @@ func (m *model) renderMain() string {
 	// the scroll indicator is computed from it afterwards to reflect the window
 	// actually shown.
 	chatView := m.clampChat(chatBody, chatH)
-	m.status.Scroll = scrollStatus(m.chatScroll)
+	m.status.Scroll = scrollStatus(m.chatScroll, m.chatMaxScroll)
 	parts = append(parts,
 		chatView,
 		clampHeight(input, m.layout.input.H),
@@ -933,6 +940,7 @@ func (m *model) renderMain() string {
 func (m *model) clampChat(s string, height int) string {
 	if height <= 0 {
 		m.chatScroll = 0
+		m.chatMaxScroll = 0
 		return ""
 	}
 	lines := strings.Split(s, "\n")
@@ -940,6 +948,7 @@ func (m *model) clampChat(s string, height int) string {
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
+	m.chatMaxScroll = maxScroll
 	if m.chatScroll > maxScroll {
 		m.chatScroll = maxScroll
 	}
@@ -956,13 +965,25 @@ func (m *model) clampChat(s string, height int) string {
 }
 
 // scrollStatus returns the status-bar segment describing scrollback position
-// when the chat view is scrolled up from the newest output, e.g. "↓ 12 below".
-// scroll is m.chatScroll: the number of lines hidden below the window (0 when
-// anchored to the bottom). It is empty at the bottom, so the segment appears
-// only while the user is reading history and signals that newer lines exist
-// below — the cue Claude Code and opencode give so a scrolled-up reader knows
-// they are not viewing the latest output.
-func scrollStatus(scroll int) string {
+// when the chat view is scrolled up from the newest output, e.g.
+// "↓ 12 lines below · 30% back". scroll is m.chatScroll: the number of lines
+// hidden below the window (0 when anchored to the bottom). maxScroll is
+// m.chatMaxScroll: the furthest the view can be scrolled up, i.e. the total
+// number of lines that can be hidden below once the user reaches the very top.
+// It is empty at the bottom, so the segment appears only while the user is
+// reading history and signals that newer lines exist below — the cue Claude Code
+// and opencode give so a scrolled-up reader knows they are not viewing the
+// latest output.
+//
+// The "N% back" suffix reports how far the view has scrolled into the history —
+// scroll as a fraction of maxScroll — so the raw line count is contextualized
+// against the whole scrollback the way a pager (less, vim) prints its position:
+// "12 lines below" alone cannot tell a 12-of-20 view from a 12-of-5000 one. The
+// percentage rounds to the nearest whole, never reading 0% while scrolled (a
+// non-zero scroll is at least 1%) so the cue never implies the view is anchored
+// when it is not, and is dropped when maxScroll is unknown (zero) so a degenerate
+// state shows only the count.
+func scrollStatus(scroll, maxScroll int) string {
 	if scroll <= 0 {
 		return ""
 	}
@@ -970,7 +991,18 @@ func scrollStatus(scroll int) string {
 	if scroll == 1 {
 		noun = "line"
 	}
-	return fmt.Sprintf("↓ %d %s below", scroll, noun)
+	seg := fmt.Sprintf("↓ %d %s below", scroll, noun)
+	if maxScroll > 0 {
+		pct := (scroll*100 + maxScroll/2) / maxScroll
+		if pct < 1 {
+			pct = 1
+		}
+		if pct > 100 {
+			pct = 100
+		}
+		seg += fmt.Sprintf(" · %d%% back", pct)
+	}
+	return seg
 }
 
 // spinnerFrames are the braille glyphs cycled to signal that the agent is

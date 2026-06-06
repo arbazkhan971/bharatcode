@@ -445,6 +445,143 @@ func TestBashOnlineAllowsEgressCommand(t *testing.T) {
 	require.NotContains(t, result.Content, "offline mode blocks")
 }
 
+// TestBashPersistentCWD verifies that a cd in one bash call propagates to the
+// next call's working directory so the agent does not have to re-specify cwd.
+func TestBashPersistentCWD(t *testing.T) {
+	deps := shellDeps(t, &config.Config{Permissions: config.PermConfig{AllowAll: true}})
+	tool, ok := NewRegistry(deps).Get("bash")
+	require.True(t, ok)
+
+	// First call: cd into a temp directory.
+	dir := t.TempDir()
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "cd " + dir,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "cd must succeed: %s", result.Content)
+
+	// Second call: no cwd arg — should default to the dir we just cd'd into.
+	result, err = tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "pwd",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, dir,
+		"pwd must return the directory set by the previous cd call")
+}
+
+// TestBashExplicitCwdOverridesPersistent verifies that an explicit cwd arg wins
+// over the cached persistent CWD, so callers can always override.
+func TestBashExplicitCwdOverridesPersistent(t *testing.T) {
+	deps := shellDeps(t, &config.Config{Permissions: config.PermConfig{AllowAll: true}})
+	tool, ok := NewRegistry(deps).Get("bash")
+	require.True(t, ok)
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	// Establish dir1 as persistent CWD.
+	_, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"command": "cd " + dir1}))
+	require.NoError(t, err)
+
+	// Call with explicit cwd=dir2 — must use dir2, not dir1.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "pwd",
+		"cwd":     dir2,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, dir2, "explicit cwd must override the cached persistent CWD")
+}
+
+// TestBashCWDPersistsAcrossFailure verifies that CWD is still captured and
+// updated even when the foreground command exits with a non-zero status.
+func TestBashCWDPersistsAcrossFailure(t *testing.T) {
+	deps := shellDeps(t, &config.Config{Permissions: config.PermConfig{AllowAll: true}})
+	tool, ok := NewRegistry(deps).Get("bash")
+	require.True(t, ok)
+
+	dir := t.TempDir()
+
+	// cd to dir, then fail — the cd happened before the exit, so the final cwd is dir.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "cd " + dir + " && false",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError, "false must cause IsError=true")
+
+	// Next call should still use dir as default CWD.
+	result, err = tool.Run(context.Background(), mustJSON(t, map[string]any{"command": "pwd"}))
+	require.NoError(t, err)
+	require.Contains(t, result.Content, dir,
+		"CWD must be retained even after a failed command")
+}
+
+// TestBashCWDSentinelNotExposedToModel verifies that the internal CWD sentinel
+// line does not appear in the output the model sees.
+func TestBashCWDSentinelNotExposedToModel(t *testing.T) {
+	deps := shellDeps(t, &config.Config{Permissions: config.PermConfig{AllowAll: true}})
+	tool, ok := NewRegistry(deps).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "echo hello",
+	}))
+	require.NoError(t, err)
+	require.NotContains(t, result.Content, cwdSentinel,
+		"the CWD sentinel must be stripped from the model-visible output")
+}
+
+// TestExtractCWDFromStderr is a unit test for the helper that parses and strips
+// the CWD sentinel from a raw stderr string.
+func TestExtractCWDFromStderr(t *testing.T) {
+	cases := []struct {
+		name         string
+		stderr       string
+		wantCWD      string
+		wantStripped string
+	}{
+		{
+			name:         "no sentinel",
+			stderr:       "some error\n",
+			wantCWD:      "",
+			wantStripped: "some error",
+		},
+		{
+			name:         "sentinel only",
+			stderr:       cwdSentinel + "/home/user\n",
+			wantCWD:      "/home/user",
+			wantStripped: "",
+		},
+		{
+			name:         "sentinel after real stderr",
+			stderr:       "warning: something\n" + cwdSentinel + "/tmp\n",
+			wantCWD:      "/tmp",
+			wantStripped: "warning: something",
+		},
+		{
+			name:         "multiple sentinels — last wins",
+			stderr:       cwdSentinel + "/first\n" + cwdSentinel + "/second\n",
+			wantCWD:      "/second",
+			wantStripped: "",
+		},
+		{
+			name:         "sentinel with trailing whitespace stripped",
+			stderr:       cwdSentinel + "/path/to/dir \r\n",
+			wantCWD:      "/path/to/dir",
+			wantStripped: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCWD, gotStripped := extractCWDFromStderr(tc.stderr)
+			require.Equal(t, tc.wantCWD, gotCWD, "extracted CWD")
+			require.Equal(t, tc.wantStripped, gotStripped, "stripped stderr")
+		})
+	}
+}
+
 func shellDeps(t *testing.T, cfg *config.Config) Dependencies {
 	t.Helper()
 	if cfg == nil {

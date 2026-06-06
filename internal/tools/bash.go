@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/offline"
@@ -25,6 +27,11 @@ var filterEngine = outputfilter.NewEngine()
 // mirrors the view tool's maxViewLineLength and Claude Code's Read.
 const maxBashLineLength = 2000
 
+// cwdSentinel is the unique prefix the CWD-capture wrapper injects into stderr
+// after every foreground bash command. extractCWDFromStderr strips these lines
+// from the displayed output and returns the final working directory.
+const cwdSentinel = "__BHARATCODE_CWD_SENTINEL_v1__:"
+
 type bashTool struct {
 	permission *permission.Checker
 	shell      *shell.Shell
@@ -34,6 +41,52 @@ type bashTool struct {
 	// bash channel cannot defeat offline mode's "code will not leave this machine"
 	// guarantee the way withholding web_fetch/web_search alone would not.
 	offline bool
+	// cwdMu protects lastCWD, the cached working directory from the previous
+	// foreground bash call. It lets the agent cd once and have subsequent calls
+	// default to that directory — parity with Claude Code / goose shell state.
+	cwdMu   sync.Mutex
+	lastCWD string
+}
+
+// cwdWrappedCommand wraps cmd so that the shell's final working directory is
+// emitted to stderr as a cwdSentinel-prefixed line after the command finishes.
+// A bash EXIT trap is used instead of inline code appended after cmd, for two
+// reasons: (a) a command ending in a `# comment` would swallow any appended
+// `;` code, and (b) an explicit `exit N` inside cmd would skip appended code —
+// but the EXIT trap fires in both cases. The original exit code is preserved.
+// Background commands are NOT wrapped — they run asynchronously and state
+// updates there would race with subsequent foreground calls.
+func cwdWrappedCommand(cmd string) string {
+	// The trap function uses single-quoted '\n' so printf interprets the escape;
+	// "$(pwd)" is double-quoted so the command substitution expands in the trap.
+	// Two newlines separate the preamble from cmd so that cmd's first line is
+	// clean even if the preamble has no trailing newline.
+	return "__bhc_trap() { printf '\\n" + cwdSentinel + "%s\\n' \"$(pwd)\" >&2; }\n" +
+		"trap __bhc_trap EXIT\n" +
+		cmd
+}
+
+// extractCWDFromStderr scans stderr for cwdSentinel lines, returns the last
+// directory found and the stderr with those lines removed. TrimSpace handles
+// any trailing \r from the shell's printf output.
+func extractCWDFromStderr(stderr string) (cwd, stripped string) {
+	lines := strings.Split(stderr, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if after, ok := strings.CutPrefix(line, cwdSentinel); ok {
+			cwd = strings.TrimSpace(after)
+		} else {
+			kept = append(kept, line)
+		}
+	}
+	// Trim trailing blank lines that appear where the sentinel was.
+	for len(kept) > 0 && kept[len(kept)-1] == "" {
+		kept = kept[:len(kept)-1]
+	}
+	if len(kept) == 0 {
+		return cwd, ""
+	}
+	return cwd, strings.Join(kept, "\n")
 }
 
 type bashArgs struct {
@@ -134,7 +187,15 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 
 	opts := shell.RunOpts{Cwd: args.Cwd, Env: args.Env, Stdin: args.Stdin}
 	if opts.Cwd == "" {
-		opts.Cwd = t.workDir
+		// Use the last known CWD from a previous foreground call in this session,
+		// falling back to the workspace root. This mirrors Claude Code / goose: a
+		// cd in one call propagates to the next without the caller re-specifying cwd.
+		t.cwdMu.Lock()
+		opts.Cwd = t.lastCWD
+		t.cwdMu.Unlock()
+		if opts.Cwd == "" {
+			opts.Cwd = t.workDir
+		}
 	}
 	if args.TimeoutSec > 0 {
 		opts.Timeout = time.Duration(args.TimeoutSec) * time.Second
@@ -153,10 +214,25 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 		}, nil
 	}
 
-	job, err := t.shell.Run(ctx, args.Command, opts)
+	// Wrap the command to capture the final CWD via a sentinel printed to stderr.
+	wrappedCmd := cwdWrappedCommand(args.Command)
+	job, err := t.shell.Run(ctx, wrappedCmd, opts)
 	if err != nil {
 		return Result{}, fmt.Errorf("running bash command: %w", err)
 	}
+	// Restore the original command so outputfilter matching ("go build", "npm
+	// install", etc.) works against what the caller actually typed.
+	job.Command = args.Command
+
+	// Extract the captured CWD from stderr, update the session cache, and strip
+	// the sentinel lines so they don't appear in the rendered output.
+	if cwd, strippedStderr := extractCWDFromStderr(job.Stderr); cwd != "" {
+		t.cwdMu.Lock()
+		t.lastCWD = cwd
+		t.cwdMu.Unlock()
+		job.Stderr = strippedStderr
+	}
+
 	content := formatJob(job)
 	metadata := map[string]any{
 		"job_id":    job.ID,

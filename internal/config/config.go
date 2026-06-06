@@ -256,10 +256,17 @@ type LedgerConfig struct {
 // Options is a free-form bag of feature toggles that do not
 // warrant their own struct (yet).
 type Options struct {
-	DisableProviderAutoUpdate bool          `json:"disable_provider_auto_update,omitempty"`
-	DataDir                   string        `json:"data_dir,omitempty"`
-	LogLevel                  string        `json:"log_level,omitempty"` // "debug","info","warn","error"
-	RequestTimeout            time.Duration `json:"request_timeout,omitempty"`
+	DisableProviderAutoUpdate bool `json:"disable_provider_auto_update,omitempty"`
+	// AutoUpdate opts in to self-applying updates on startup: when true (and not
+	// in offline mode, and the binary carries a real stamped version/commit),
+	// BharatCode does a best-effort, time-bounded check at launch and, if a newer
+	// release exists, downloads and installs it in place. It is off by default,
+	// so the binary never mutates itself unless the user asks. The on-disk swap
+	// takes effect on the next start; the running process is never re-executed.
+	AutoUpdate     bool          `json:"auto_update,omitempty"`
+	DataDir        string        `json:"data_dir,omitempty"`
+	LogLevel       string        `json:"log_level,omitempty"` // "debug","info","warn","error"
+	RequestTimeout time.Duration `json:"request_timeout,omitempty"`
 }
 
 // UnmarshalJSON customizes unmarshaling of Options.
@@ -303,11 +310,13 @@ func (o Options) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(struct {
 		DisableProviderAutoUpdate bool   `json:"disable_provider_auto_update,omitempty"`
+		AutoUpdate                bool   `json:"auto_update,omitempty"`
 		DataDir                   string `json:"data_dir,omitempty"`
 		LogLevel                  string `json:"log_level,omitempty"`
 		RequestTimeout            string `json:"request_timeout,omitempty"`
 	}{
 		DisableProviderAutoUpdate: o.DisableProviderAutoUpdate,
+		AutoUpdate:                o.AutoUpdate,
 		DataDir:                   o.DataDir,
 		LogLevel:                  o.LogLevel,
 		RequestTimeout:            o.RequestTimeout.String(),

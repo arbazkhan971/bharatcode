@@ -280,42 +280,56 @@ func (m *model) renderFiletree(width, height int) string {
 		for i := start; i < end; i++ {
 			name := f.files[i]
 			edited := editedSet[name]
-			// An edited file's two-space indent becomes a "● " marker; the gutter
-			// width is unchanged so the names stay aligned.
+			// An edited file's two-space indent becomes a "● " marker; every gutter
+			// (the cursor row's "> " too) is two columns wide so the names stay
+			// aligned regardless of which marker a row carries.
 			indent := "  "
 			if edited {
 				indent = "● "
 			}
-			// Clamp the raw text before styling so ANSI codes are not counted or
-			// sliced through.
-			clamped := clampLine(indent+name, width)
-			runes := []rune(clamped)
-			row := clamped
+			// A panel too narrow for both a two-column gutter and a name falls back
+			// to a plain clamped row so a pathological width never overflows; the
+			// common path elides instead.
+			if width < 3 {
+				clamped := clampLine(indent+name, width)
+				switch {
+				case i == f.cursor:
+					b.WriteString(m.theme.Accent.Render(clampLine("> "+name, width)))
+				case f.filter != "":
+					b.WriteString(m.theme.Muted.Render(clamped))
+				case edited:
+					b.WriteString(m.theme.DiffAdd.Render(clamped))
+				default:
+					b.WriteString(clamped)
+				}
+				b.WriteByte('\n')
+				continue
+			}
+			// Long workspace-relative paths are elided from the left so the base
+			// name — the part a reader scans for — survives the narrow panel, the
+			// way git's "--stat" and the file panels of Claude Code and opencode
+			// trim a long path rather than letting clampLine lop the file name off
+			// the right end. The elision targets the width left beside the gutter.
+			shown := elideName(name, width-2)
+			var row string
 			switch {
 			case i == f.cursor:
 				// The cursor row keeps its "> " indicator in place of the marker;
 				// the selected file's diff renders below, so its edited state is
 				// already evident.
-				row = m.theme.Accent.Render(clampLine("> "+name, width))
+				row = m.theme.Accent.Render(clampLine("> "+shown, width))
 			case f.filter != "":
 				// Emphasize the runes the quick-filter matched, the way the @-file
 				// picker does, so a narrowed listing shows why each entry survived.
-				// The two-column gutter (with any edit marker) is styled and the name
-				// is highlighted against the active filter token; a too-narrow clamp
-				// that loses the gutter falls back to a plain muted row.
-				if len(runes) > 2 {
-					row = m.filetreeGutter(string(runes[:2]), edited) + m.highlightMatch(string(runes[2:]), f.filter)
-				} else {
-					row = m.theme.Muted.Render(clamped)
-				}
+				// The two-column gutter (with any edit marker) is styled and the
+				// elided name is highlighted against the active filter token.
+				row = m.filetreeGutter(indent, edited) + m.highlightMatch(shown, f.filter)
 			case edited:
 				// Outside a filter, draw the marker and the touched file's name in
 				// the add style so it reads as changed at a glance.
-				if len(runes) > 2 {
-					row = m.filetreeGutter(string(runes[:2]), edited) + m.theme.DiffAdd.Render(string(runes[2:]))
-				} else {
-					row = m.theme.DiffAdd.Render(clamped)
-				}
+				row = m.filetreeGutter(indent, edited) + m.theme.DiffAdd.Render(shown)
+			default:
+				row = indent + shown
 			}
 			b.WriteString(row)
 			b.WriteByte('\n')
@@ -599,4 +613,25 @@ func clampLine(s string, width int) string {
 		return s
 	}
 	return string(r[:width])
+}
+
+// elideName shortens a workspace-relative path to at most width runes, dropping
+// leading path segments and prefixing a "…" so the base name — the part a reader
+// scans a file panel for — stays visible, the way git's "--stat" and the file
+// panels of Claude Code and opencode trim a long path rather than cutting the
+// name off its right end. A name already within width is returned unchanged; a
+// width too small for even "…x" collapses to a lone ellipsis. Measured and cut
+// by rune so a multi-byte name is never split mid-rune.
+func elideName(name string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	r := []rune(name)
+	if len(r) <= width {
+		return name
+	}
+	if width == 1 {
+		return "…"
+	}
+	return "…" + string(r[len(r)-(width-1):])
 }

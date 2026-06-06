@@ -273,6 +273,33 @@ func TestDiagnosticsShowsTags(t *testing.T) {
 	require.Contains(t, result.Content, "main.go:5:14: warning: OldAPI is deprecated <deprecated>")
 }
 
+func TestDiagnosticsShowsCodeDescriptionHref(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.js")
+	require.NoError(t, os.WriteFile(path, []byte("console.log('x')\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{
+				Path:     path,
+				Range:    lsp.Range{Start: lsp.Position{Line: 0, Character: 0}},
+				Severity: lsp.Warning,
+				Message:  "Unexpected console statement.",
+				Source:   "eslint",
+				Code:     "no-console",
+				CodeHref: "https://eslint.org/docs/latest/rules/no-console",
+			},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "app.js"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// The rule code, source, and a "see <url>" documentation link all render on
+	// the diagnostic line.
+	require.Contains(t, result.Content, "app.js:1:1: warning: Unexpected console statement. [no-console] (eslint) see https://eslint.org/docs/latest/rules/no-console")
+}
+
 // TestDiagnosticFilesScansRootNamedLikeIgnored guards the path != root exception:
 // when the workspace root itself is named like an ignored directory, its files
 // are still scanned rather than the whole tree being skipped.

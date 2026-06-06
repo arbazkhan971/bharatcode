@@ -384,6 +384,13 @@ func diagnosticTail(d lsp.Diagnostic) string {
 		}
 		fmt.Fprintf(&b, " <%s>", strings.Join(labels, ", "))
 	}
+	// Surface the rule's documentation link when the server supplies one, so the
+	// model can open the canonical explanation of the diagnostic rather than
+	// guessing from its code alone. The "see" label keeps it from reading as
+	// another angle-bracketed tag.
+	if d.CodeHref != "" {
+		fmt.Fprintf(&b, " see %s", d.CodeHref)
+	}
 	return b.String()
 }
 

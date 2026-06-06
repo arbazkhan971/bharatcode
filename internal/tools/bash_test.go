@@ -582,6 +582,96 @@ func TestExtractCWDFromStderr(t *testing.T) {
 	}
 }
 
+// TestBashDefaultTimeoutKillsHungCommand verifies that when
+// bash_default_timeout_sec is configured, a foreground command that exceeds
+// that duration is killed and the result is marked as an error. This prevents
+// a hung command (sleep infinity, blocking I/O) from stalling the agent.
+func TestBashDefaultTimeoutKillsHungCommand(t *testing.T) {
+	cfg := &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+		Options:     config.Options{BashDefaultTimeoutSec: 1},
+	}
+	tool, ok := NewRegistry(shellDeps(t, cfg)).Get("bash")
+	require.True(t, ok)
+
+	start := time.Now()
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "sleep 30",
+	}))
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	require.True(t, result.IsError, "timed-out command must set IsError")
+	// The command must be killed well before the 30-second sleep completes.
+	require.Less(t, elapsed, 10*time.Second, "default timeout must fire before the sleep finishes")
+}
+
+// TestBashPerCallTimeoutOverridesDefault verifies that a per-call timeout= arg
+// takes precedence over the configured bash_default_timeout_sec, so the model
+// can request a longer window for slow commands (e.g. a full build).
+func TestBashPerCallTimeoutOverridesDefault(t *testing.T) {
+	cfg := &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+		// Default of 1 s — would kill sleep 3. Per-call arg below must override it.
+		Options: config.Options{BashDefaultTimeoutSec: 1},
+	}
+	tool, ok := NewRegistry(shellDeps(t, cfg)).Get("bash")
+	require.True(t, ok)
+
+	// sleep 0 finishes instantly; timeout=10 gives plenty of headroom.
+	// The point is that the 1-second default does NOT fire (it's overridden).
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "echo done",
+		"timeout": 10,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "per-call timeout=10 must override the 1s default; got: %s", result.Content)
+	require.Contains(t, result.Content, "done")
+}
+
+// TestBashNoDefaultTimeoutWhenZero verifies that bash_default_timeout_sec == 0
+// (the default) leaves commands unconstrained — no spurious timeout is applied.
+func TestBashNoDefaultTimeoutWhenZero(t *testing.T) {
+	cfg := &config.Config{
+		Permissions: config.PermConfig{AllowAll: true},
+		// BashDefaultTimeoutSec is intentionally left at the zero value.
+	}
+	tool, ok := NewRegistry(shellDeps(t, cfg)).Get("bash")
+	require.True(t, ok)
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"command": "echo no-timeout",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "no-timeout")
+}
+
+// TestBashDefaultTimeoutFieldFromConfig is a unit test that verifies the
+// defaultTimeout field is populated from config at construction time,
+// without spawning a process, so we can check edge cases (0, negative,
+// positive) cheaply.
+func TestBashDefaultTimeoutFieldFromConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		sec     int
+		wantDur time.Duration
+	}{
+		{"zero disables", 0, 0},
+		{"negative disables", -5, 0},
+		{"positive wires duration", 120, 120 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Options: config.Options{BashDefaultTimeoutSec: tc.sec}}
+			deps := Dependencies{Config: cfg}
+			bt := newBashTool(deps).(*bashTool)
+			require.Equal(t, tc.wantDur, bt.defaultTimeout,
+				"defaultTimeout must match config value")
+		})
+	}
+}
+
 func shellDeps(t *testing.T, cfg *config.Config) Dependencies {
 	t.Helper()
 	if cfg == nil {

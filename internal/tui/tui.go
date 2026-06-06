@@ -1268,7 +1268,8 @@ var keybindingGroups = []keyGroup{
 		{"PgUp/PgDn", "scroll the chat a page at a time"},
 		{"Home/End", "jump to the oldest/newest message"},
 	}},
-	{title: "Editing", bindings: []keyBinding{
+	{title: "Prompt", bindings: []keyBinding{
+		{"Enter", "send the prompt"},
 		{"Backspace", "delete the character before the cursor"},
 		{"Ctrl+U", "clear the whole prompt line"},
 	}},

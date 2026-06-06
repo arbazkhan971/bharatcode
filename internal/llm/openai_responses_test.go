@@ -301,6 +301,33 @@ func TestResponsesProviderReasoningGating(t *testing.T) {
 		require.Equal(t, "auto", probe.Reasoning.Summary)
 	})
 
+	t.Run("codex-mini is gated as a reasoning model", func(t *testing.T) {
+		// codex-mini-latest is an o4-mini fine-tune whose id carries no o-series or
+		// gpt-5 prefix; it must still omit temperature and nest the effort under the
+		// reasoning object rather than being misclassified as a chat model.
+		provider, _, gotBody := responsesProvider(t, "codex-mini-latest", cannedResponsesReply)
+
+		_, err := provider.Stream(context.Background(), Request{
+			Model:           "codex-mini-latest",
+			Temperature:     0.7,
+			ReasoningEffort: "high",
+			Messages:        []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+		})
+		require.NoError(t, err)
+
+		require.NotContains(t, string(*gotBody), `"temperature"`)
+		var probe struct {
+			Reasoning *struct {
+				Effort  string `json:"effort"`
+				Summary string `json:"summary"`
+			} `json:"reasoning"`
+		}
+		require.NoError(t, json.Unmarshal(*gotBody, &probe))
+		require.NotNil(t, probe.Reasoning)
+		require.Equal(t, "high", probe.Reasoning.Effort)
+		require.Equal(t, "auto", probe.Reasoning.Summary)
+	})
+
 	t.Run("normal model sends temperature and omits the reasoning object", func(t *testing.T) {
 		provider, _, gotBody := responsesProvider(t, "gpt-4o", cannedResponsesReply)
 

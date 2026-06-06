@@ -53,6 +53,17 @@ func isReasoningModel(id string) bool {
 	if strings.HasPrefix(lid, "gpt-5") && !strings.Contains(lid, gpt5ChatMarker) {
 		return true
 	}
+	// codex-mini-latest is the Codex-CLI model, a fine-tune of o4-mini that
+	// inherits its reasoning behavior: it rejects temperature/max_tokens and takes
+	// the reasoning_effort knob instead. Its id carries neither an o-series prefix
+	// nor the gpt-5 prefix, so without this marker the request builders would
+	// classify it as a chat model and send the temperature the API 400s on (and,
+	// on the Responses path, omit the reasoning summary). The "codex-mini" marker
+	// is specific enough not to catch "gpt-5-codex", which the gpt-5 prefix above
+	// already claims.
+	if strings.Contains(lid, "codex-mini") {
+		return true
+	}
 	for _, prefix := range reasoningModelPrefixes {
 		if lid == prefix || strings.HasPrefix(lid, prefix+"-") {
 			return true

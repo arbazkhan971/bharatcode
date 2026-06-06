@@ -137,12 +137,25 @@ func (t *Text) HandleKey(msg tea.KeyPressMsg) (bool, bool) {
 	}
 }
 
+// clampLines clamps every line of s to at most width runes. When a line is cut
+// short an ellipsis replaces its final visible rune, so the reader can tell the
+// text was truncated rather than mistaking the clipped line for the whole
+// content — matching the ellipsis the status bar and diff viewer add to clamped
+// lines. At width 1 there is no room for both content and a marker, so the lone
+// cell becomes the ellipsis; a non-positive width leaves lines untouched.
 func clampLines(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
 	var lines []string
 	for _, line := range strings.Split(s, "\n") {
 		r := []rune(line)
 		if len(r) > width {
-			line = string(r[:width])
+			if width == 1 {
+				line = "…"
+			} else {
+				line = string(r[:width-1]) + "…"
+			}
 		}
 		lines = append(lines, line)
 	}

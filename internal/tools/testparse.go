@@ -203,8 +203,9 @@ var (
 	// "perl Build.PL && prove" while keeping prose like "approved" / "improved"
 	// — where "prove" is not at a word boundary — from matching.
 	proveRe = regexp.MustCompile(`\bprove\b`)
-	// "swift test" drives SwiftPM's XCTest runner; \b after "test" keeps prose
-	// like "swift testing guide" from matching while admitting flags and paths
+	// "swift test" drives SwiftPM's test runner — XCTest, the newer Swift Testing
+	// (@Test) framework, or both in one run; \b after "test" keeps prose like
+	// "swift testing guide" from matching while admitting flags and paths
 	// ("swift test --filter FooTests").
 	swiftTestRe = regexp.MustCompile(`\bswift test\b`)
 	// "forge test" drives Foundry's Solidity test runner; \bforge test\b admits
@@ -1986,15 +1987,30 @@ var (
 	// the assertion line XCTest prints for a failure, carrying the test id (the
 	// same one quoted in the "Test Case" line) and the one-line message.
 	swiftErrorRe = regexp.MustCompile(`\.swift:\d+: error: (.+?) : (.+)$`)
+	// Swift Testing (the @Test framework that `swift test` runs alongside or in
+	// place of XCTest on Swift 6 / Xcode 16) reports each failure through its
+	// console reporter as "✘ Test <name> recorded an issue at <file>:<line>:<col>:
+	// <message>" (the unicode symbol set uses "✘" U+2718; some terminals render it
+	// "✗" U+2717). A test fails precisely because it recorded one or more issues,
+	// so the distinct names on these lines are exactly the failing tests — keyed
+	// here with their message. The suite- and run-level "✘ Test "<suite>" failed"
+	// / "✘ Test run with N tests failed" lines never say "recorded an issue", so
+	// matching on that phrase avoids double-counting aggregate rows. The location
+	// (" at <file>:<line>:<col>:") is optional so issues without a source position
+	// still surface. Group 1 is the test name, group 2 the message.
+	swiftTestingIssueRe = regexp.MustCompile(`^[✘✗]\s+Test\s+(.+?)\s+recorded an issue(?: at \S+)?:?\s*(.*)$`)
 )
 
-// parseSwiftTestFailures extracts failing tests from `swift test` (XCTest)
-// output. Each "Test Case '<id>' failed" line names a failed test, in run order.
-// The detail is the message from the first "<file>.swift:<line>: error: <id> :
-// <message>" assertion line carrying the same id, so assertion messages surface
-// alongside the names. The id format differs between macOS ("-[Class method]")
-// and Linux ("Class.method"), but is consistent within a run, so it pairs the
-// two lines regardless of platform.
+// parseSwiftTestFailures extracts failing tests from `swift test` output,
+// covering both frameworks SwiftPM can drive. XCTest marks each failure with a
+// "Test Case '<id>' failed" line, its detail taken from the matching
+// "<file>.swift:<line>: error: <id> : <message>" assertion line; the id format
+// differs between macOS ("-[Class method]") and Linux ("Class.method") but is
+// consistent within a run, so it pairs the two lines regardless of platform. The
+// newer Swift Testing (@Test) framework instead prints "✘ Test <name> recorded
+// an issue at <loc>: <message>" per failure, which is matched directly with its
+// message as the detail. A run may emit both shapes; each failing test is
+// reported once, in run order.
 func parseSwiftTestFailures(output string) []testFailure {
 	lines := splitLines(output)
 
@@ -2013,16 +2029,28 @@ func parseSwiftTestFailures(output string) []testFailure {
 	var failures []testFailure
 	seen := map[string]bool{}
 	for _, ln := range lines {
-		m := swiftFailRe.FindStringSubmatch(ln)
-		if m == nil {
+		// XCTest: "Test Case '<id>' failed".
+		if m := swiftFailRe.FindStringSubmatch(ln); m != nil {
+			name := strings.TrimSpace(m[1])
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			failures = append(failures, testFailure{Name: name, Detail: details[name]})
 			continue
 		}
-		name := strings.TrimSpace(m[1])
-		if name == "" || seen[name] {
-			continue
+		// Swift Testing: "✘ Test <name> recorded an issue at <loc>: <message>".
+		// A `swift test` run can drive both frameworks at once, so both line
+		// shapes are recognized in a single pass; the first issue per test keeps
+		// its message and later issues for the same test are folded in.
+		if m := swiftTestingIssueRe.FindStringSubmatch(ln); m != nil {
+			name := strings.TrimSpace(m[1])
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			failures = append(failures, testFailure{Name: name, Detail: strings.TrimSpace(m[2])})
 		}
-		seen[name] = true
-		failures = append(failures, testFailure{Name: name, Detail: details[name]})
 	}
 	return failures
 }

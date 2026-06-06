@@ -699,6 +699,84 @@ func TestDefaultConfigMoonshotPreset(t *testing.T) {
 		"catalog window for Kimi K2 0905 should not undercount the inferred family window")
 }
 
+// TestDefaultConfigOpenAIPreset asserts the embedded default config ships an
+// OpenAI provider with the current model lineup — gpt-4o, gpt-4o-mini, gpt-4.1,
+// and the reasoning models o3 and o4-mini — and that each surfaces in the
+// registry catalog with correct context windows and capabilities. The context
+// windows are also cross-checked against the family heuristic so a stale catalog
+// value never silently undercounts the real window. Fully offline.
+func TestDefaultConfigOpenAIPreset(t *testing.T) {
+	cfg := config.Default()
+
+	var prov *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "openai" {
+			prov = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, prov, "default config should define an openai provider")
+	require.Equal(t, config.ProviderOpenAI, prov.Type)
+	require.Equal(t, "OPENAI_API_KEY", prov.APIKeyEnv)
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	provider, err := reg.Get("openai")
+	require.NoError(t, err)
+	_, ok := provider.(*openAICompatibleProvider)
+	require.True(t, ok, "openai should resolve to the openai_compatible client")
+
+	catalog := make(map[string]Model)
+	for _, m := range reg.ListModels() {
+		catalog[m.ID] = m
+	}
+
+	cases := []struct {
+		id            string
+		contextWindow int
+		supportsImg   bool
+		supportsTools bool
+	}{
+		{"gpt-4o", 128_000, true, true},
+		{"gpt-4o-mini", 128_000, true, true},
+		// gpt-4.1 exposes a ~1M context window; the catalog value must not
+		// undercount the family heuristic.
+		{"gpt-4.1", 1_047_576, true, true},
+		// o3 and o4-mini are reasoning models with a 200k context window.
+		{"o3", 200_000, true, true},
+		{"o4-mini", 200_000, true, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			m, found := catalog[tc.id]
+			require.Truef(t, found, "model %q should appear in the registry catalog", tc.id)
+			require.Equal(t, "openai", m.Provider)
+			require.Equal(t, tc.contextWindow, m.ContextWindow,
+				"model %q context window mismatch", tc.id)
+			require.Equal(t, tc.supportsImg, m.SupportsImages,
+				"model %q supports_images mismatch", tc.id)
+			require.Equal(t, tc.supportsTools, m.SupportsTools,
+				"model %q supports_tools mismatch", tc.id)
+			// The catalog window must not undercount the family heuristic for the
+			// same id: a lower catalog value is the signature of a stale entry.
+			inferred := inferContextWindow(tc.id)
+			if inferred > 0 {
+				require.GreaterOrEqual(t, m.ContextWindow, inferred,
+					"catalog window for %q should not undercount the inferred family window", tc.id)
+			}
+		})
+	}
+
+	// The reasoning models must be classified as such so the request builder
+	// omits unsupported params (temperature, max_tokens) for them.
+	require.True(t, isReasoningModel("o3"), "o3 must be classified as a reasoning model")
+	require.True(t, isReasoningModel("o4-mini"), "o4-mini must be classified as a reasoning model")
+	require.False(t, isReasoningModel("gpt-4o"), "gpt-4o must not be classified as a reasoning model")
+	require.False(t, isReasoningModel("gpt-4.1"), "gpt-4.1 must not be classified as a reasoning model")
+}
+
 func collectEvents(events <-chan Event) []Event {
 	var out []Event
 	for event := range events {

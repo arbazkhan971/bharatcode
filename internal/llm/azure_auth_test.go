@@ -48,6 +48,19 @@ func TestIsAzureOpenAI(t *testing.T) {
 			want:    true,
 		},
 		{
+			// Azure Government AI Foundry resources serve the same OpenAI route on the
+			// ".cognitiveservices.azure.us" host, which must select the api-key scheme too.
+			name:    "azure government cognitive services host",
+			baseURL: "https://res.cognitiveservices.azure.us/openai/deployments/gpt-4o?api-version=2024-06-01",
+			want:    true,
+		},
+		{
+			// Azure China's AI Foundry equivalent is served on ".cognitiveservices.azure.cn".
+			name:    "azure china cognitive services host",
+			baseURL: "https://res.cognitiveservices.azure.cn/openai/deployments/gpt-4o",
+			want:    true,
+		},
+		{
 			name:    "openai public api is not azure",
 			baseURL: "https://api.openai.com/v1",
 			want:    false,
@@ -118,6 +131,35 @@ func TestPostOpenAIJSONAzureCognitiveServicesUsesAPIKeyHeader(t *testing.T) {
 		context.Background(),
 		server.Client(),
 		"https://res.cognitiveservices.azure.com/openai/deployments/gpt-4o?api-version=2024-06-01",
+		server.URL,
+		"azure-secret",
+		map[string]string{"hello": "world"},
+	)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	require.Equal(t, "azure-secret", gotAPIKey)
+	require.Empty(t, gotAuth, "Azure must not receive a Bearer Authorization header")
+}
+
+// TestPostOpenAIJSONAzureSovereignCognitiveServicesUsesAPIKeyHeader asserts an AI
+// Foundry resource on a sovereign-cloud Cognitive Services host
+// (".cognitiveservices.azure.us") authenticates with the "api-key" header too, so
+// Azure Government / China deployments are not handed a Bearer token the endpoint
+// rejects.
+func TestPostOpenAIJSONAzureSovereignCognitiveServicesUsesAPIKeyHeader(t *testing.T) {
+	var gotAuth, gotAPIKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("api-key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	resp, err := postOpenAIJSON(
+		context.Background(),
+		server.Client(),
+		"https://res.cognitiveservices.azure.us/openai/deployments/gpt-4o?api-version=2024-06-01",
 		server.URL,
 		"azure-secret",
 		map[string]string{"hello": "world"},

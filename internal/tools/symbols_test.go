@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
@@ -209,6 +211,37 @@ func TestSymbolsKindFilterNoMatches(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.IsError)
 	require.Equal(t, "No symbols found.", result.Content)
+}
+
+func TestSymbolsWorkspaceCapsLargeResultSet(t *testing.T) {
+	dir := t.TempDir()
+	// A broad query can resolve to far more symbols than fit usefully in context.
+	// Build more than the cap, each on its own line, with zero-padded names so the
+	// deterministic name-tiebreak sort keeps them in a predictable order.
+	const n = symbolMatchCap + 25
+	syms := make([]lsp.Symbol, 0, n)
+	for i := 0; i < n; i++ {
+		syms = append(syms, lsp.Symbol{
+			Name:  fmt.Sprintf("Run%04d", i),
+			Kind:  lsp.Function,
+			Path:  filepath.Join(dir, "a.go"),
+			Range: lsp.Range{Start: lsp.Position{Line: i}},
+		})
+	}
+	tool := &symbolsTool{source: &fakeSymbols{workspace: syms}, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Run"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	lines := strings.Split(result.Content, "\n")
+	// symbolMatchCap rendered entries plus the trailing truncation notice.
+	require.Len(t, lines, symbolMatchCap+1)
+	// The list is sorted by line, so the first entry is the lowest-numbered symbol
+	// and the last rendered entry is the one at the cap boundary.
+	require.Equal(t, "a.go:1:1: function Run0000", lines[0])
+	require.Equal(t, fmt.Sprintf("a.go:%d:1: function Run%04d", symbolMatchCap, symbolMatchCap-1), lines[symbolMatchCap-1])
+	require.Equal(t, fmt.Sprintf("... and %d more (%d total) not shown", n-symbolMatchCap, n), lines[symbolMatchCap])
 }
 
 func TestSymbolsWorkspaceRequiresQuery(t *testing.T) {

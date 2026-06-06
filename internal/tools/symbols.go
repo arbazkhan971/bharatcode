@@ -53,6 +53,15 @@ var schemaSymbols = json.RawMessage(`{
 //go:embed symbols.md
 var symbolsDescription string
 
+// symbolMatchCap bounds how many symbol entries the tool renders. A workspace
+// search for a short or common substring (or a document outline of a very large
+// generated file) can resolve to thousands of symbols; rendering them all floods
+// the context with little marginal value. Capping mirrors the navigate tool's
+// navigateLocationCap bounded-output philosophy: the entries are already sorted
+// deterministically, and a trailing "... and N more" notice records what was
+// elided so the model knows the list was truncated rather than complete.
+const symbolMatchCap = 200
+
 func newSymbolsTool(deps Dependencies) Tool {
 	t := &symbolsTool{workDir: deps.WorkDir}
 	// A nil *lsp.Manager assigned to the SymbolSource interface would produce a
@@ -169,8 +178,17 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 		return Result{Content: "No symbols found."}, nil
 	}
 
+	// Bound the rendered list so a broad query cannot flood the context. The
+	// symbols are already sorted, so the truncation is deterministic, and the
+	// trailing notice below records the true total.
+	total := len(symbols)
+	shown := total
+	if shown > symbolMatchCap {
+		shown = symbolMatchCap
+	}
+
 	var b strings.Builder
-	for _, s := range symbols {
+	for _, s := range symbols[:shown] {
 		path := s.Path
 		if rel, err := filepath.Rel(root, s.Path); err == nil && !strings.HasPrefix(rel, "..") {
 			path = filepath.ToSlash(rel)
@@ -201,6 +219,9 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 			fmt.Fprintf(&b, " (in %s)", s.ContainerName)
 		}
 		b.WriteByte('\n')
+	}
+	if total > shown {
+		fmt.Fprintf(&b, "... and %d more (%d total) not shown\n", total-shown, total)
 	}
 
 	return Result{Content: strings.TrimRight(b.String(), "\n")}, nil

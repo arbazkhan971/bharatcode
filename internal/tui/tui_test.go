@@ -144,6 +144,21 @@ func TestSlashCommand_Keys_OpensShortcutDialog(t *testing.T) {
 	}
 }
 
+func TestSlashCommand_Keys_FilterNarrowsOverlay(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.input.WriteString("/keys scroll")
+	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
+	require.True(t, m.dialogs.Contains("keybindings"),
+		"/keys with a filter must still open the keybindings dialog")
+	out := m.dialogs.Render(100)
+	// The filter echoes in the title and the listing is narrowed to the matching
+	// rows, dropping unrelated shortcuts.
+	require.Contains(t, out, "scroll")
+	require.NotContains(t, out, "open the model picker")
+}
+
 func TestSlashCommand_Goal_ShowSetClear(t *testing.T) {
 	t.Parallel()
 

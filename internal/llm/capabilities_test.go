@@ -260,6 +260,12 @@ func TestInferContextWindow(t *testing.T) {
 		{"kimi-k2-6-instruct", 262_144},
 		{"kimi-k2-instruct", 128_000},
 		{"kimi-k1.5", 128_000},
+		// Moonshot's legacy moonshot-v1 line encodes its window in the id; each
+		// variant must resolve to its own size rather than falling through to 0.
+		{"moonshot-v1-8k", 8_192},
+		{"moonshot-v1-32k", 32_768},
+		{"moonshot-v1-128k", 131_072},
+		{"moonshot-v1-auto", 131_072},
 		{"gpt-oss-120b", 128_000},
 		// Pixtral, Gemma, Cohere Command, GLM and Nemotron open-weight families.
 		{"pixtral-large-latest", 128_000},

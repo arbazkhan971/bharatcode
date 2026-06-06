@@ -506,6 +506,19 @@ var contextWindowRules = []struct {
 	{"glm-4.6", 200_000},
 	{"glm", 128_000},
 	{"nemotron", 128_000},
+	// Moonshot's legacy moonshot-v1 line encodes its window directly in the id —
+	// moonshot-v1-8k / -32k / -128k (and the moonshot-v1-auto router, which sizes
+	// up to the 128k tier). These ids carry neither the "kimi" marker nor any other
+	// family marker above, so without these rules they fall through to "unknown"
+	// (0) when a user configures the Moonshot provider (which ships in the default
+	// catalog) with one of them. The windows are
+	// the 1024-based token counts Moonshot's API documents (128k == 128*1024),
+	// mirroring how the gpt-4-32k and gemma 8k rules above resolve their explicit
+	// size suffixes.
+	{"moonshot-v1-8k", 8_192},
+	{"moonshot-v1-32k", 32_768},
+	{"moonshot-v1-128k", 131_072},
+	{"moonshot-v1-auto", 131_072},
 	// Moonshot Kimi — the modern K2 line serves a 256k window. The K2-Instruct
 	// "0905" refresh doubled the original K2's 128k window to 256k, and both the
 	// K2-Thinking reasoning model and the K2.6 release hold there. Every such id

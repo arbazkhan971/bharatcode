@@ -19,6 +19,13 @@ import (
 // default so the default render is unchanged.
 const filetreeWidth = 32
 
+// filetreePageStep is how many rows a PageUp/PageDown moves the file-tree
+// cursor at once, so a long workspace listing is traversable a windowful at a
+// time rather than one row per keystroke — mirroring the session picker's
+// sessionWindow step and the chat's page scroll. The move is clamped to the
+// listing bounds by moveCursor, so a page near either end lands on the edge row.
+const filetreePageStep = 10
+
 // filetreeIgnored is the basic, gitignore-ish skip set applied while walking the
 // workspace. It intentionally avoids parsing a real .gitignore to stay minimal:
 // it drops version-control metadata, dependency vendor trees, and noise files.
@@ -613,6 +620,17 @@ func (m *model) handleFiletreeKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.C
 		// is one keystroke away rather than a held Down arrow.
 		m.filetree.cursorTo(len(m.filetree.files) - 1)
 		return true, nil
+	case "pgup":
+		// Page up moves the cursor a windowful at a time, mirroring the session
+		// picker's PgUp, so a long workspace listing is traversable faster than one
+		// row per keystroke. moveCursor clamps the step at the first row.
+		m.filetree.moveCursor(-filetreePageStep)
+		return true, nil
+	case "pgdown":
+		// Page down is the mirror of PgUp, advancing the cursor a windowful and
+		// clamping at the last row.
+		m.filetree.moveCursor(filetreePageStep)
+		return true, nil
 	case "/":
 		// Enter quick-filter mode; subsequent keystrokes narrow the listing.
 		m.filetree.filtering = true
@@ -660,6 +678,15 @@ func (m *model) handleFiletreeFilterKey(msg tea.KeyPressMsg) (consumed bool, cmd
 		return true, nil
 	case "end":
 		m.filetree.cursorTo(len(m.filetree.files) - 1)
+		return true, nil
+	case "pgup":
+		// Page through the narrowed view without leaving capture mode, mirroring the
+		// unfiltered listing's PgUp so a long filter result is walked a windowful at
+		// a time while the filter is still being typed.
+		m.filetree.moveCursor(-filetreePageStep)
+		return true, nil
+	case "pgdown":
+		m.filetree.moveCursor(filetreePageStep)
 		return true, nil
 	case "backspace":
 		m.filetree.backspaceFilter()

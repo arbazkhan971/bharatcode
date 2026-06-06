@@ -343,6 +343,78 @@ func TestFiletreePanel_HomeEndJumpToEdges(t *testing.T) {
 	require.Empty(t, m.input.String())
 }
 
+func TestFiletreePanel_PageKeysMoveByWindow(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	const total = filetreePageStep*2 + 5
+	for i := 0; i < total; i++ {
+		writeFile(t, root, fmt.Sprintf("file%02d.go", i), "package main\n")
+	}
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+	require.Len(t, m.filetree.files, total)
+	require.Equal(t, 0, m.filetree.cursor)
+
+	// PageDown advances the cursor one windowful, far faster than a single Down.
+	_, _ = m.Update(keyPgDown())
+	require.Equal(t, filetreePageStep, m.filetree.cursor)
+
+	_, _ = m.Update(keyPgDown())
+	require.Equal(t, filetreePageStep*2, m.filetree.cursor)
+
+	// A PageDown near the bottom clamps to the final row rather than overshooting.
+	_, _ = m.Update(keyPgDown())
+	require.Equal(t, total-1, m.filetree.cursor)
+	_, _ = m.Update(keyPgDown())
+	require.Equal(t, total-1, m.filetree.cursor)
+
+	// PageUp steps back by the same window and clamps at the first row; the input
+	// buffer is never touched while the panel owns the keyboard.
+	_, _ = m.Update(keyPgUp())
+	require.Equal(t, total-1-filetreePageStep, m.filetree.cursor)
+	_, _ = m.Update(keyPgUp())
+	_, _ = m.Update(keyPgUp())
+	require.Equal(t, 0, m.filetree.cursor)
+	require.Empty(t, m.input.String())
+}
+
+func TestFiletreeFilter_PageKeysNavigateNarrowedView(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	const total = filetreePageStep + 4
+	for i := 0; i < total; i++ {
+		writeFile(t, root, fmt.Sprintf("alpha%02d.go", i), "")
+	}
+	// A non-matching file so the filter genuinely narrows the listing.
+	writeFile(t, root, "zeta.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("alpha"))
+	require.True(t, m.filetree.filtering)
+	require.Len(t, m.filetree.files, total)
+	require.Equal(t, 0, m.filetree.cursor)
+
+	// PageDown pages through the narrowed view without leaving capture mode or
+	// reaching the prompt, and the filter token is unchanged.
+	_, _ = m.Update(keyPgDown())
+	require.Equal(t, filetreePageStep, m.filetree.cursor)
+	require.True(t, m.filetree.filtering)
+	require.Equal(t, "alpha", m.filetree.filter)
+	require.Empty(t, m.input.String())
+
+	// PageUp returns by a window, clamping at the first match.
+	_, _ = m.Update(keyPgUp())
+	require.Equal(t, 0, m.filetree.cursor)
+}
+
 func TestFiletreeFilter_HomeEndNavigateNarrowedView(t *testing.T) {
 	t.Parallel()
 

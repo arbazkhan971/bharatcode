@@ -23,7 +23,8 @@
         "gpt-4.1-mini",
         "gpt-4.1-nano",
         "o3",
-        "o4-mini"
+        "o4-mini",
+        "o3-pro"
       ]
     },
     {
@@ -346,6 +347,15 @@
       "context_window": 200000,
       "input_price_per_mtok_usd": 1.10,
       "output_price_per_mtok_usd": 4.40,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "o3-pro",
+      "provider": "openai",
+      "context_window": 200000,
+      "input_price_per_mtok_usd": 20.00,
+      "output_price_per_mtok_usd": 80.00,
       "supports_images": true,
       "supports_tools": true
     },

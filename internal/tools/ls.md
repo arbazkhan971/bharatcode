@@ -8,13 +8,17 @@ Arguments:
 
 - `path` string, optional: workspace-relative directory to list. Defaults to the workspace root.
 - `ignore` array of strings, optional: extra names or glob patterns to hide from the listing.
+- `depth` integer, optional: how many directory levels to descend. `1` (the default) lists only immediate children; a higher value renders an indented recursive tree, capped at 10 levels and 1000 entries.
 
 What success looks like:
 
 The result is a sorted list of immediate children. Directory names end with `/`.
-The tool reads `.gitignore` — the workspace root's and any covering the listed
-directory (e.g. listing `build/` honors `build/.gitignore`) — and hides ignored
-entries such as `node_modules/` by default.
+With `depth` greater than 1 the listing becomes an indented tree (two spaces per
+level) so the shape of a subtree is visible in one call instead of many. The tool
+reads `.gitignore` — the workspace root's and any covering the listed directory
+(e.g. listing `build/` honors `build/.gitignore`) — and hides ignored entries such
+as `node_modules/` by default at every level. A tree that exceeds the entry cap is
+truncated with a trailing note.
 
 Failure cases:
 

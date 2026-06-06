@@ -267,6 +267,12 @@ type Options struct {
 	DataDir        string        `json:"data_dir,omitempty"`
 	LogLevel       string        `json:"log_level,omitempty"` // "debug","info","warn","error"
 	RequestTimeout time.Duration `json:"request_timeout,omitempty"`
+	// AutoCompactThreshold, when positive, enables automatic context compaction.
+	// When the provider reports that the input-token count divided by the model's
+	// context window meets or exceeds this fraction the loop proactively compacts
+	// the in-memory history so the next turn does not overflow. A value of 0
+	// disables auto-compaction (the default). Typical values are 0.85–0.95.
+	AutoCompactThreshold float64 `json:"auto_compact_threshold,omitempty"`
 }
 
 // UnmarshalJSON customizes unmarshaling of Options.

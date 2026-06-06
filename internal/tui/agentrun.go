@@ -237,6 +237,11 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		}
 		m.chat.Stream(streamID, "\n[error: "+msg+"]\n")
 		m.chat.FinishStream(streamID)
+	case agent.EventAutoCompacted:
+		// Surface a brief inline notice so users understand why the visible
+		// history shrank. The notice is injected as a synthetic stream so it
+		// appears between the current assistant bubble and the next one.
+		m.chat.Stream(streamID, "\n[context auto-compacted — older turns summarised to free space]\n")
 	case agent.EventTurnFinished:
 		if text := assistantText(ev.Message); text != "" {
 			m.chat.Stream(streamID, text)

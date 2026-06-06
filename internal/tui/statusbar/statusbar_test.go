@@ -157,7 +157,59 @@ func TestRenderClipsWideBar(t *testing.T) {
 	require.NotContains(t, bar.Render(0), "…", "an unbounded render adds no marker")
 }
 
-// TestTurnTokensSegment asserts the turn-token segment appears only when set,
+// TestContextPctSegment asserts the context-window fill segment appears only
+// when ContextPct > 0, is absent on a fresh bar (zero default), and surfaces
+// as "ctx N%" once set — matching the idle/active toggle pattern of TurnTokens
+// and Working so the bar is unchanged until real usage data arrives.
+func TestContextPctSegment(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+	require.NotContains(t, bar.Render(160), "ctx ", "a zero ContextPct must add no segment")
+
+	bar.ContextPct = 35
+	require.Contains(t, bar.Render(160), "ctx 35%", "a set ContextPct must show ctx N%")
+
+	bar.ContextPct = 72
+	require.Contains(t, bar.Render(160), "ctx 72%", "updating ContextPct must reflect the new value")
+
+	bar.ContextPct = 0
+	require.NotContains(t, bar.Render(160), "ctx ", "resetting ContextPct to zero must remove the segment")
+}
+
+// TestContextPctSegment_Priority asserts the context-pct segment outranks the
+// turn-token segment (prioContextPct > prioTurnTokens), so a narrow window
+// keeps the context indicator — which guides compaction decisions — and drops
+// the turn counts first.
+func TestContextPctSegment_Priority(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{
+		Theme:      styles.Default(),
+		Model:      "m",
+		Agent:      "a",
+		SessionID:  "id",
+		StartedAt:  start,
+		Now:        start,
+		TurnTokens: "1.2k in · 234 out",
+		ContextPct: 45,
+	}
+
+	// Wide enough for both: both must appear.
+	full := bar.Render(160)
+	require.Contains(t, full, "1.2k in · 234 out", "turn tokens must appear on a wide bar")
+	require.Contains(t, full, "ctx 45%", "context pct must appear on a wide bar")
+
+	// Size to just the model anchor plus the context segment: the lower-priority
+	// turn-tokens segment must be shed to make room for ctx N%.
+	narrow := bar.Render(len([]rune("m · ctx 45%")))
+	require.Contains(t, narrow, "ctx 45%", "context pct must survive a narrow window")
+	require.NotContains(t, narrow, " in · ", "turn tokens must be dropped before the context indicator")
+}
+
+// TestContextPctSegment asserts the turn-token segment appears only when set,
 // so the bar is unchanged until a completed turn provides usage data — and
 // disappears cleanly once cleared (e.g. when a new turn starts).
 func TestTurnTokensSegment(t *testing.T) {

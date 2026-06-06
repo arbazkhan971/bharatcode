@@ -227,7 +227,7 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 
 	return Result{
 		Content:  strings.TrimRight(b.String(), "\n"),
-		Metadata: symbolsMetadata(shown, total),
+		Metadata: symbolsMetadata(shown, total, symbols[:shown], root),
 	}, nil
 }
 
@@ -240,15 +240,57 @@ const (
 	// MetadataSymbolTotal holds the true total of matched symbols before any
 	// symbolMatchCap truncation, so callers know whether the list is complete.
 	MetadataSymbolTotal = "total"
+	// MetadataSymbolItems holds a []symbolItem for the shown symbols (capped to
+	// the same symbolMatchCap as the rendered Content so the two are always
+	// consistent). Absent when no symbols were found. Mirrors MetadataDiagnosticItems
+	// in the diagnostics tool and MetadataLocations in the navigate tool.
+	MetadataSymbolItems = "items"
 )
 
-// symbolsMetadata returns the count/total metadata pair for a completed symbols
+// symbolItem is one symbol in the structured metadata list — a machine-readable
+// complement to the human-readable Content so the TUI and agent loop can react
+// to individual symbol sites without re-parsing text. Mirrors diagnosticItem in
+// the diagnostics tool.
+type symbolItem struct {
+	Path          string `json:"path"`
+	Line          int    `json:"line"`
+	Column        int    `json:"column"`
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	Detail        string `json:"detail,omitempty"`
+	ContainerName string `json:"container_name,omitempty"`
+}
+
+// symbolsMetadata returns the count/total/items metadata for a completed symbols
 // query, mirroring codeActionsListMetadata and diagnosticsMetadata.
-func symbolsMetadata(shown, total int) map[string]any {
-	return map[string]any{
+func symbolsMetadata(shown, total int, syms []lsp.Symbol, root string) map[string]any {
+	m := map[string]any{
 		MetadataSymbolCount: shown,
 		MetadataSymbolTotal: total,
 	}
+	if len(syms) == 0 {
+		return m
+	}
+	items := make([]symbolItem, 0, len(syms))
+	for _, s := range syms {
+		p := s.Path
+		if root != "" {
+			if rel, err := filepath.Rel(root, s.Path); err == nil && !strings.HasPrefix(rel, "..") {
+				p = filepath.ToSlash(rel)
+			}
+		}
+		items = append(items, symbolItem{
+			Path:          p,
+			Line:          s.Range.Start.Line + 1,
+			Column:        s.Range.Start.Character + 1,
+			Kind:          symbolKindString(s.Kind),
+			Name:          s.Name,
+			Detail:        s.Detail,
+			ContainerName: s.ContainerName,
+		})
+	}
+	m[MetadataSymbolItems] = items
+	return m
 }
 
 // symbolKindString renders an LSP symbol kind as a lowercase label. Unknown

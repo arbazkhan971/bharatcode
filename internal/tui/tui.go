@@ -197,6 +197,12 @@ type model struct {
 	goalActive    bool
 	goalIteration int
 
+	// Command palette state. paletteCursor is the highlighted row index within
+	// the visible (filtered) command list; paletteFilter is the live
+	// type-to-filter query narrowing the palette by command name or description.
+	paletteCursor int
+	paletteFilter string
+
 	// Session picker state. sessionCandidates holds the listed sessions while
 	// the /sessions picker is open; sessionCursor is the highlighted row within
 	// the currently visible (filtered) rows; sessionFilter is the live
@@ -378,6 +384,14 @@ func (m *model) viewString() string {
 
 func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if top := m.dialogs.Top(); top != nil {
+		// The command palette carries selection state in the model, so it must
+		// intercept navigation, filter-typing, and execution keys before the
+		// generic dialog handler (which only dismisses on enter/esc).
+		if top.ID() == "palette" {
+			if consumed, cmd := m.handlePaletteKey(msg); consumed {
+				return m, cmd
+			}
+		}
 		// The session picker carries selection state in the model, so it must
 		// intercept navigation and selection keys before the generic dialog
 		// handler (which only dismisses on enter/esc).
@@ -496,6 +510,13 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+shift+tab", "ctrl+left":
 		// Cycle to the previous tab (wraps); no-op with a single tab.
 		return m, m.prevTab()
+	case "ctrl+k":
+		// Open the interactive command palette — a filterable, executable list of
+		// every slash command — matching the command-palette UX in Claude Code and
+		// opencode (Ctrl+K / Ctrl+Shift+P). The palette is always available; it is
+		// not blocked by the running state so a user can open it mid-turn to check
+		// what commands exist without interrupting the agent.
+		return m.openCommandPalette()
 	case "ctrl+p":
 		m.pushModelPicker()
 		return m, nil
@@ -1410,6 +1431,7 @@ var keybindingGroups = []keyGroup{
 		{"Ctrl+←/→", "switch to the previous/next tab (also Ctrl+Shift+Tab/Ctrl+Tab)"},
 	}},
 	{title: "Panels & pickers", bindings: []keyBinding{
+		{"Ctrl+K", "open the command palette (filterable list of all commands)"},
 		{"Ctrl+P", "open the model picker"},
 		{"Ctrl+A", "open the agent picker"},
 		{"Ctrl+S", "open settings"},

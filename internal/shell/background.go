@@ -4,6 +4,7 @@ package shell
 import (
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 )
 
@@ -38,6 +39,38 @@ func (s *Shell) Output(jobID string) (Job, error) {
 		Stderr:    stderrStr,
 		// pgid is internal
 	}, nil
+}
+
+// List returns a status snapshot of every tracked job, newest-started first
+// (ties broken by ID for determinism). The returned Jobs carry status metadata
+// only — Stdout/Stderr are left empty so listing stays cheap regardless of how
+// much output a job has captured; call Output for a job's accumulated text.
+// This lets a caller (e.g. the model after losing a job ID across compaction)
+// recover the set of running and recently-finished background jobs.
+func (s *Shell) List() []Job {
+	var jobs []Job
+	s.jobs.Range(func(_, value any) bool {
+		state := value.(*jobState)
+
+		state.mu.RLock()
+		jobs = append(jobs, Job{
+			ID:        state.id,
+			Command:   state.command,
+			StartedAt: state.startedAt,
+			Status:    state.status,
+			ExitCode:  state.exitCode,
+		})
+		state.mu.RUnlock()
+		return true
+	})
+
+	sort.Slice(jobs, func(i, j int) bool {
+		if !jobs[i].StartedAt.Equal(jobs[j].StartedAt) {
+			return jobs[i].StartedAt.After(jobs[j].StartedAt)
+		}
+		return jobs[i].ID < jobs[j].ID
+	})
+	return jobs
 }
 
 // Kill halts a running background job by sending SIGKILL to its process group.

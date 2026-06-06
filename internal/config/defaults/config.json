@@ -59,7 +59,8 @@
       "api_key_env": "GROQ_API_KEY",
       "models": [
         "llama-3.3-70b-versatile",
-        "qwen-2.5-coder-32b"
+        "qwen-2.5-coder-32b",
+        "meta-llama/llama-4-scout-17b-16e-instruct"
       ]
     },
     {
@@ -68,7 +69,9 @@
       "base_url": "https://api.together.xyz/v1",
       "api_key_env": "TOGETHER_API_KEY",
       "models": [
-        "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
       ]
     },
     {
@@ -398,12 +401,39 @@
       "supports_tools": true
     },
     {
+      "id": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "provider": "groq",
+      "context_window": 131072,
+      "input_price_per_mtok_usd": 0.11,
+      "output_price_per_mtok_usd": 0.34,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
       "id": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
       "provider": "together",
       "context_window": 128000,
       "input_price_per_mtok_usd": 0.88,
       "output_price_per_mtok_usd": 0.88,
       "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+      "provider": "together",
+      "context_window": 10485760,
+      "input_price_per_mtok_usd": 0.18,
+      "output_price_per_mtok_usd": 0.59,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "provider": "together",
+      "context_window": 1048576,
+      "input_price_per_mtok_usd": 0.27,
+      "output_price_per_mtok_usd": 0.85,
+      "supports_images": true,
       "supports_tools": true
     },
     {

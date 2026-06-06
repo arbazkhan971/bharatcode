@@ -57,6 +57,26 @@ func (c *client) definition(ctx context.Context, path string, line, col int) ([]
 	return parseDefinition(result)
 }
 
+// declaration issues a textDocument/declaration request for the position and
+// returns the locations the server resolves it to. This differs from
+// textDocument/definition for languages that separate the two — a C/C++ symbol's
+// declaration lives in a header while its definition is in the source file, and a
+// TypeScript symbol can resolve to an ambient `declare` declaration. The response
+// shape matches textDocument/definition, so parseDefinition handles it.
+func (c *client) declaration(ctx context.Context, path string, line, col int) ([]Location, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/declaration", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"position":     map[string]any{"line": line, "character": col},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting declaration: %w", err)
+	}
+	return parseDefinition(result)
+}
+
 // typeDefinition issues a textDocument/typeDefinition request for the position
 // and returns the locations of the type of the symbol there. The response shape
 // matches textDocument/definition, so parseDefinition handles it.

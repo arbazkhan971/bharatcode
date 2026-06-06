@@ -197,6 +197,39 @@ func (m *Manager) Definition(ctx context.Context, path string, line, col int) ([
 	return locations, nil
 }
 
+// Declaration returns the locations the language server resolves the symbol at
+// the position in path to via textDocument/declaration, starting a server if
+// needed. For languages that separate declaration from definition (a C/C++
+// header vs its source file, a TypeScript ambient `declare`), this lands on the
+// declaration site rather than the implementation Definition jumps to. A nil
+// slice with a nil error means no server is configured for the file or the
+// symbol has no declaration.
+func (m *Manager) Declaration(ctx context.Context, path string, line, col int) ([]Location, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving declaration path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	locations, err := c.declaration(ctx, abs, line, col)
+	if err != nil {
+		return nil, err
+	}
+	return locations, nil
+}
+
 // TypeDefinition returns the locations of the type of the symbol at the
 // position in path, starting a server if needed. A nil slice with a nil error
 // means no server is configured for the file or the symbol has no type

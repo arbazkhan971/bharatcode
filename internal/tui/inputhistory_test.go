@@ -117,18 +117,18 @@ func TestInputHistory_EditResetsRecallCursor(t *testing.T) {
 }
 
 // TestInputHistory_RecordsSlashCommands asserts submitted slash commands are
-// recalled by Up just like plain prompts. /help does not start an agent run, so
-// the lightweight model suffices here.
+// recalled by Up just like plain prompts. /clear is used here because it does
+// not push a dialog (which would intercept the Up key before history recall).
 func TestInputHistory_RecordsSlashCommands(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
-	typeString(t, m, "/help")
+	typeString(t, m, "/clear")
 	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
 	require.Empty(t, m.input.String())
 
 	_, _ = m.Update(keyUp())
-	require.Equal(t, "/help", m.input.String(), "submitted slash commands must be recallable")
+	require.Equal(t, "/clear", m.input.String(), "submitted slash commands must be recallable")
 }
 
 // TestInputHistory_NoHistory_UpIsNoop asserts Up/Down do nothing with no

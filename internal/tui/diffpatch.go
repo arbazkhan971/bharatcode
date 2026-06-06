@@ -88,30 +88,51 @@ func editDiffsFromToolUse(use message.ToolUseBlock) []editDiff {
 }
 
 // unifiedPatch renders the before/after diffs as a single unified-diff-format
-// string suitable for diff.Viewer.RenderUnified. Each diff contributes a file
-// header and one hunk computed as a real line-level diff: lines common to both
-// sides render as unchanged context (a leading space), and only the lines that
-// differ are marked removed ("-") or added ("+"). This matches how Claude Code
-// and opencode show an edit — the surrounding code stays put and the eye lands
-// on the changed lines — rather than blanket-replacing the whole fragment. The
-// output is plain text; styling is applied by the viewer.
+// string suitable for diff.Viewer.RenderUnified. Each changed file contributes
+// one file header followed by one hunk per edit, computed as a real line-level
+// diff: lines common to both sides render as unchanged context (a leading
+// space), and only the lines that differ are marked removed ("-") or added
+// ("+"). This matches how Claude Code and opencode show an edit — the
+// surrounding code stays put and the eye lands on the changed lines — rather
+// than blanket-replacing the whole fragment. The output is plain text; styling
+// is applied by the viewer.
+//
+// Consecutive edits to the same file are grouped under a single file header so
+// a multiedit reads as one changed file with several hunks, the way git and
+// Claude Code present multiple edits to one file. Repeating the "+++" header per
+// edit would otherwise make the diffstat count one file as several changed
+// files. Each hunk's line numbers continue from the previous one so the gutter
+// climbs monotonically through the file rather than resetting to 1 per edit.
 func unifiedPatch(diffs []editDiff) string {
 	var b strings.Builder
-	for _, d := range diffs {
-		path := d.Path
-		if path == "" {
-			path = "(unknown)"
-		}
+	for i := 0; i < len(diffs); {
+		path := patchPath(diffs[i])
 		fmt.Fprintf(&b, "--- a/%s\n", path)
 		fmt.Fprintf(&b, "+++ b/%s\n", path)
-		before := splitLines(d.Before)
-		after := splitLines(d.After)
-		fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", len(before), len(after))
-		for _, line := range diffLines(before, after) {
-			b.WriteString(line + "\n")
+		oldLine, newLine := 1, 1
+		for i < len(diffs) && patchPath(diffs[i]) == path {
+			before := splitLines(diffs[i].Before)
+			after := splitLines(diffs[i].After)
+			fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", oldLine, len(before), newLine, len(after))
+			for _, line := range diffLines(before, after) {
+				b.WriteString(line + "\n")
+			}
+			oldLine += len(before)
+			newLine += len(after)
+			i++
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// patchPath returns the file path used in d's diff header, substituting a
+// placeholder for an unnamed edit so a missing path still renders a stable
+// header and groups with other unnamed edits rather than splitting them.
+func patchPath(d editDiff) string {
+	if d.Path == "" {
+		return "(unknown)"
+	}
+	return d.Path
 }
 
 // diffLines computes a line-level unified diff between before and after,

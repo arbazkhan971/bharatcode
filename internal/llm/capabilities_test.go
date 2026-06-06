@@ -887,6 +887,94 @@ func TestDefaultsCatalogOpenRouterPopular(t *testing.T) {
 	}
 }
 
+// TestDefaultsCatalogGrok41 verifies that grok-4.1 and grok-4.1-fast ship in
+// both the native xAI provider and via OpenRouter, with the expected context
+// windows. It also checks that inferContextWindow resolves their ids correctly
+// independent of the catalog — catching any future catalog/capabilities drift.
+// grok-4.1 keeps the 256k window of grok-4; grok-4.1-fast lifts it to 2M,
+// matching grok-4-fast.
+func TestDefaultsCatalogGrok41(t *testing.T) {
+	cfg := config.Default()
+
+	byID := make(map[string]config.Model, len(cfg.Models))
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+
+	entries := []struct {
+		id            string
+		wantProvider  string
+		wantCtxWindow int
+		wantImages    bool
+		wantTools     bool
+	}{
+		// Native xAI provider entries.
+		{"grok-4.1", "xai", 256_000, true, true},
+		{"grok-4.1-fast", "xai", 2_000_000, true, true},
+		// OpenRouter vendor-namespaced forms.
+		{"x-ai/grok-4.1", "openrouter", 256_000, true, true},
+		{"x-ai/grok-4.1-fast", "openrouter", 2_000_000, true, true},
+	}
+	for _, e := range entries {
+		m, ok := byID[e.id]
+		require.Truef(t, ok, "defaults catalog must include model %q", e.id)
+		require.Equalf(t, e.wantProvider, m.Provider, "model %q has wrong provider", e.id)
+		require.Equalf(t, e.wantCtxWindow, m.ContextWindow, "model %q has wrong context_window", e.id)
+		require.Equalf(t, e.wantImages, m.SupportsImages, "model %q SupportsImages mismatch", e.id)
+		require.Equalf(t, e.wantTools, m.SupportsTools, "model %q SupportsTools mismatch", e.id)
+	}
+
+	// The heuristic must resolve these ids without consulting the catalog.
+	// grok-4.1 carries the "grok-4" substring and resolves to 256k via that
+	// rule; grok-4.1-fast carries "grok-4.1-fast" and resolves to 2M.
+	heuristicCases := []struct {
+		id   string
+		want int
+	}{
+		{"grok-4.1", 256_000},
+		{"grok-4.1-fast", 2_000_000},
+		{"x-ai/grok-4.1", 256_000},
+		{"x-ai/grok-4.1-fast", 2_000_000},
+	}
+	for _, tc := range heuristicCases {
+		require.Equalf(t, tc.want, inferContextWindow(tc.id),
+			"inferContextWindow must recognize id %q", tc.id)
+	}
+
+	// Both new ids must appear in the xAI provider's model list.
+	var xaiProvider *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "xai" {
+			xaiProvider = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, xaiProvider, "defaults must include a provider named 'xai'")
+	xaiModels := make(map[string]bool, len(xaiProvider.Models))
+	for _, id := range xaiProvider.Models {
+		xaiModels[id] = true
+	}
+	require.True(t, xaiModels["grok-4.1"], "xai provider must list grok-4.1 in its models")
+	require.True(t, xaiModels["grok-4.1-fast"], "xai provider must list grok-4.1-fast in its models")
+
+	// The OpenRouter vendor-namespaced forms must appear in the openrouter
+	// provider's model list.
+	var openrouterProvider *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "openrouter" {
+			openrouterProvider = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, openrouterProvider, "defaults must include a provider named 'openrouter'")
+	openrouterModels := make(map[string]bool, len(openrouterProvider.Models))
+	for _, id := range openrouterProvider.Models {
+		openrouterModels[id] = true
+	}
+	require.True(t, openrouterModels["x-ai/grok-4.1"], "openrouter provider must list x-ai/grok-4.1 in its models")
+	require.True(t, openrouterModels["x-ai/grok-4.1-fast"], "openrouter provider must list x-ai/grok-4.1-fast in its models")
+}
+
 // TestDefaultsCatalogQwen3OpenRouter verifies that the two Qwen3 models added to
 // the OpenRouter catalog ship with the correct context windows and capabilities,
 // and that the heuristic resolves their vendor-namespaced ids independently of

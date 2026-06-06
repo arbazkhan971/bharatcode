@@ -82,6 +82,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseScalaTestFailures(output)
 	case runnerClojure:
 		return parseClojureTestFailures(output)
+	case runnerGinkgo:
+		return parseGinkgoFailures(output)
 	case runnerFoundry:
 		return parseFoundryTestFailures(output)
 	default:
@@ -118,6 +120,7 @@ const (
 	runnerScala
 	runnerClojure
 	runnerFoundry
+	runnerGinkgo
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -205,6 +208,15 @@ var (
 	// a plain "clojure script.clj" run that is not a test invocation. \b keeps
 	// prose like "include the latest features" from matching.
 	clojureTestRe = regexp.MustCompile(`\blein test\b|\bkaocha\b|\bcl(?:j|ojure)\b[^&|;]*:test\b`)
+	// `ginkgo`, `ginkgo run`, `ginkgo -r`, or `go run .../ginkgo` drive the Ginkgo
+	// BDD runner. \bginkgo\b admits the wrapper invocations while keeping prose
+	// like "the ginkgo tree" from matching only at a word boundary — the same
+	// command-as-prose risk the other command-name runners accept. A "ginkgo"
+	// invocation never contains "go test" at a word boundary, so it must be
+	// classified before the plain `go test` runner claims it (Ginkgo's
+	// "Summarizing N Failures" block differs from the "--- FAIL:" lines goTestRe
+	// keys on).
+	ginkgoRe = regexp.MustCompile(`\bginkgo\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -222,6 +234,14 @@ func classifyTestRunner(command string) testRunner {
 		return runnerNextest
 	case cargoTestRe.MatchString(c):
 		return runnerCargo
+	case ginkgoRe.MatchString(c):
+		// `ginkgo`/`ginkgo run -r` drives the Ginkgo BDD runner, whose report
+		// closes with a "Summarizing N Failure(s):" block listing each failed spec
+		// as "[FAIL]/[PANIC!]/[TIMEOUT] <full spec text>" with the source location
+		// on the line beneath. Checked before the plain `go test` runner: Ginkgo's
+		// summary block differs from libtest's "--- FAIL:" lines, and a "ginkgo"
+		// invocation never contains "go test" at a word boundary.
+		return runnerGinkgo
 	case goTestRe.MatchString(c):
 		return runnerGo
 	case rspecRe.MatchString(c):
@@ -1942,6 +1962,64 @@ func parseFoundryTestFailures(output string) []testFailure {
 		}
 		seen[name] = true
 		failures = append(failures, testFailure{Name: name, Detail: strings.TrimSpace(m[1])})
+	}
+	return failures
+}
+
+var (
+	// "Summarizing 2 Failures:" — the header Ginkgo's reporter prints before the
+	// final block that lists every failed spec. The parser keys on this block
+	// rather than the inline "• [FAILED]" markers because the summary names each
+	// spec in full and is emitted once per spec regardless of retries.
+	ginkgoSummaryRe = regexp.MustCompile(`^\s*Summarizing \d+ Failure`)
+	// "  [FAIL] Book Categorizing when short [It] should be a short book" — one
+	// entry in the summary block. The marker is the outcome (FAIL, PANIC!,
+	// TIMEOUT, SPEC TIMEOUT, INTERRUPTED, ABORTED); group 1 is the full,
+	// space-joined spec text, which is what `ginkgo --focus` re-runs. The inline
+	// per-spec output spells its marker "[FAILED]" (with a D), so anchoring to the
+	// summary block keeps the two from colliding.
+	ginkgoFailRe = regexp.MustCompile(`^\s*\[(?:FAIL|PANIC!|TIMEOUT|SPEC TIMEOUT|INTERRUPTED|ABORTED)\]\s+(.+\S)\s*$`)
+	// "  /path/to/book_test.go:54" — the source location Ginkgo prints on the line
+	// beneath a summary entry, used as the failure's detail.
+	ginkgoLocRe = regexp.MustCompile(`^\s*(\S+\.go:\d+)\s*$`)
+)
+
+// parseGinkgoFailures extracts failing specs from Ginkgo (the Go BDD runner)
+// output. It scans the trailing "Summarizing N Failures:" block: each
+// "[FAIL]/[PANIC!]/[TIMEOUT] <spec>" entry names a failed spec (Name is the full
+// hierarchical spec text), and the "<file>.go:<line>" location printed on the
+// next line becomes its detail. Specs are returned in report order and
+// deduplicated by name. Returns nil when no summary block is present.
+func parseGinkgoFailures(output string) []testFailure {
+	lines := splitLines(output)
+	start := -1
+	for i, ln := range lines {
+		if ginkgoSummaryRe.MatchString(ln) {
+			start = i + 1
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := start; i < len(lines); i++ {
+		m := ginkgoFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		if i+1 < len(lines) {
+			if loc := ginkgoLocRe.FindStringSubmatch(lines[i+1]); loc != nil {
+				f.Detail = strings.TrimSpace(loc[1])
+			}
+		}
+		failures = append(failures, f)
 	}
 	return failures
 }

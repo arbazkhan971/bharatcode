@@ -534,6 +534,39 @@ func TestStatLines_BinaryShowsBinMarker(t *testing.T) {
 	require.Len(t, lines, 4)
 }
 
+// TestIsDiffHeader_BinaryMarkers proves the binary-change markers git emits —
+// the "Binary files … differ" line and the "GIT binary patch" header — are
+// classified as file metadata rather than content, so the renderers style them
+// as headers and the gutter never tries to number them.
+func TestIsDiffHeader_BinaryMarkers(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, isDiffHeader("Binary files a/logo.png and b/logo.png differ"))
+	require.True(t, isDiffHeader("GIT binary patch"))
+	// A line that merely starts like the marker but is not the whole annotation
+	// (e.g. ordinary added content) must not be mistaken for metadata.
+	require.False(t, isDiffHeader("Binary files are great"))
+	require.False(t, isDiffHeader("+Binary files a/x and b/x differ"))
+}
+
+// TestUnifiedNumbered_BinaryLineIsHeader proves the "Binary files … differ"
+// marker renders as styled file metadata with a blank gutter, so a binary change
+// reads as a header rather than as plain, uncolored content the gutter would
+// also mis-number.
+func TestUnifiedNumbered_BinaryLineIsHeader(t *testing.T) {
+	t.Parallel()
+
+	theme := styles.Default()
+	patch := "diff --git a/logo.png b/logo.png\nindex e69de29..d95f3ad 100644\nBinary files a/logo.png and b/logo.png differ\n"
+	got := New(theme).RenderUnifiedNumbered(patch, 120)
+	lines := strings.Split(got, "\n")
+
+	require.Len(t, lines, 3)
+	// The binary marker keeps a blank (4-wide, single-digit) gutter and is styled
+	// with the header style, never numbered as content.
+	require.Equal(t, "    "+theme.DiffHeader.Render("Binary files a/logo.png and b/logo.png differ"), lines[2])
+}
+
 // TestFileStats_PureRenameRecordsOldPath proves a pure rename (one carrying no
 // "+++" content header) is parsed into a FileStat whose OldPath holds the source
 // name and whose renamed() reports true, so the diffstat can show "old => new".

@@ -2,6 +2,7 @@
 package statusbar
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,14 @@ type Bar struct {
 	// "1.2k in · 234 out"). Empty hides the segment; it is cleared when a new
 	// turn starts and set once the turn finishes.
 	TurnTokens string
+	// ContextPct is the context-window fill percentage for the last completed
+	// turn (1–100). Zero hides the segment, so the bar is unchanged until
+	// real usage data arrives. Values are shown as "ctx N%" and styled by
+	// threshold: muted below 50%, warning from 50–79%, error at 80%+, so a
+	// user approaching the limit gets a clear visual signal before the
+	// window fills completely — matching how Claude Code and opencode surface
+	// context-window headroom.
+	ContextPct int
 }
 
 // segment is one " · "-joined field of the status line paired with the priority
@@ -65,6 +74,7 @@ const (
 	prioMode       = 60
 	prioYolo       = 50
 	prioTurnTokens = 35
+	prioContextPct = 45 // outranks turn tokens so context headroom is shed last
 	prioAgent      = 30
 	prioSession    = 25
 	prioUptime     = 20
@@ -110,6 +120,9 @@ func (b Bar) Render(width int) string {
 	}
 	if b.TurnTokens != "" {
 		segs = append(segs, segment{b.TurnTokens, prioTurnTokens})
+	}
+	if b.ContextPct > 0 {
+		segs = append(segs, segment{"ctx " + strconv.Itoa(b.ContextPct) + "%", prioContextPct})
 	}
 
 	line := fitSegments(segs, width)

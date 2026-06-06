@@ -447,9 +447,16 @@ var contextWindowRules = []struct {
 	// up from the 64k the earlier releases shipped.
 	{"deepseek", 131_072},
 	// MiniMax — the MiniMax-01 and MiniMax-M1 lines ship a 1M native context
-	// window (one of the largest among open-weight models). Their ids carry no
-	// broader family marker above, so without this rule they fall through to
-	// "unknown" (0) when a user adds them without an explicit context_window.
+	// window (one of the largest among open-weight models). The newer MiniMax-M2
+	// agentic-coding line (M2 and its point releases M2.1/M2.5/M2.7) is far
+	// smaller at 204,800 tokens, and every M2 id carries the "minimax-m2" marker,
+	// so its specific rule must precede the family one to avoid resolving the M2
+	// line to nearly 5x its real window — an over-report that would let the agent
+	// grow context past the model's true limit before the API rejects it. The
+	// family ids carry no broader family marker above, so without these rules they
+	// fall through to "unknown" (0) when a user adds them without an explicit
+	// context_window.
+	{"minimax-m2", 204_800},
 	{"minimax", 1_000_000},
 	// Baidu ERNIE — the ERNIE 4.5 family exposes a 128k window. Its id carries no
 	// broader marker above, so this rule keeps it from falling through to 0.

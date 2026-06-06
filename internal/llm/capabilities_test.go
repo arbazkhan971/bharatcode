@@ -156,6 +156,13 @@ func TestInferContextWindow(t *testing.T) {
 		{"minimax/minimax-01", 1_000_000},
 		{"MiniMax-M1-80k", 1_000_000},
 		{"minimax-text-01", 1_000_000},
+		// The MiniMax-M2 agentic-coding line ships a much smaller 204,800 window, so
+		// the dedicated "minimax-m2" rule must claim it ahead of the 1M family rule —
+		// both the base id and its point releases (M2.1/M2.5/M2.7), and via an
+		// OpenRouter vendor prefix.
+		{"minimax-m2", 204_800},
+		{"MiniMax-M2", 204_800},
+		{"minimax/minimax-m2.7", 204_800},
 		// Baidu ERNIE 4.5 exposes a 128k window via its own rule.
 		{"ernie-4.5-300b-a47b", 131_072},
 		{"baidu/ernie-4.5-21b-a3b", 131_072},

@@ -27,6 +27,7 @@ type symbolsTool struct {
 type symbolsArgs struct {
 	Query string `json:"query,omitempty"`
 	Path  string `json:"path,omitempty"`
+	Kind  string `json:"kind,omitempty"`
 }
 
 var schemaSymbols = json.RawMessage(`{
@@ -41,6 +42,10 @@ var schemaSymbols = json.RawMessage(`{
     "path": {
       "type": "string",
       "description": "Optional file path. When set, lists symbols defined in that file (an outline) instead of searching the whole workspace."
+    },
+    "kind": {
+      "type": "string",
+      "description": "Restrict results to symbols of these kinds: a comma-separated list of labels like \"function\", \"method\", \"class\", \"struct\", \"interface\", \"variable\", \"constant\", \"enum\". Omit to list every kind. Matches the kind labels shown in the output."
     }
   }
 }`)
@@ -89,13 +94,15 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 	}
 
 	query := strings.TrimSpace(args.Query)
+	kindSpec := strings.TrimSpace(args.Kind)
 
 	// A full document outline (a path with no query) is rendered as an indented
 	// tree so the file's structure — methods under their class, fields under their
 	// struct — reads at a glance, matching how goose/opencode surface outlines. A
 	// workspace search or a filtered outline stays flat: their results are not a
-	// contiguous hierarchy, so indentation would misrepresent the nesting.
-	tree := strings.TrimSpace(args.Path) != "" && query == ""
+	// contiguous hierarchy, so indentation would misrepresent the nesting. A kind
+	// filter removes nodes too, so it also drops to the flat rendering.
+	tree := strings.TrimSpace(args.Path) != "" && query == "" && kindSpec == ""
 
 	var symbols []lsp.Symbol
 	if strings.TrimSpace(args.Path) != "" {
@@ -125,6 +132,27 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 		if err != nil {
 			return Result{}, fmt.Errorf("searching workspace symbols for %q: %w", query, err)
 		}
+	}
+
+	// A kind filter keeps only symbols whose rendered kind label is in the
+	// requested set, letting the model ask for just the functions, methods, or
+	// types in a file/workspace rather than scanning every kind — matching the
+	// kind narrowing goose/opencode expose on symbol queries.
+	if kindSpec != "" {
+		want, unknown := symbolKindFilter(kindSpec)
+		if len(unknown) > 0 {
+			return errorResult(fmt.Sprintf(
+				"unknown symbol kind(s): %s (want labels like function, method, class, struct, interface, variable, constant, enum)",
+				strings.Join(unknown, ", "),
+			)), nil
+		}
+		filtered := symbols[:0]
+		for _, s := range symbols {
+			if want[symbolKindString(s.Kind)] {
+				filtered = append(filtered, s)
+			}
+		}
+		symbols = filtered
 	}
 
 	sort.Slice(symbols, func(i, j int) bool {
@@ -237,4 +265,39 @@ func symbolKindString(kind lsp.SymbolKind) string {
 	default:
 		return "symbol"
 	}
+}
+
+// validSymbolKindLabels is the set of kind labels symbolKindString can emit for
+// a known kind, derived from the kind enumeration so it never drifts from the
+// renderer. The catch-all "symbol" (used for unknown/zero kinds) is intentionally
+// excluded: it names no specific construct, so accepting it as a filter would be
+// meaningless.
+var validSymbolKindLabels = func() map[string]bool {
+	labels := map[string]bool{}
+	for k := lsp.File; k <= lsp.TypeParameter; k++ {
+		labels[symbolKindString(k)] = true
+	}
+	return labels
+}()
+
+// symbolKindFilter parses a comma-separated list of kind labels (as
+// symbolKindString renders them, e.g. "function,method") into a lookup set,
+// case-insensitively. Labels that name no known kind are returned separately so
+// the caller can reject the request with a clear error rather than silently
+// filtering everything out. Blank entries (from stray commas) are skipped.
+func symbolKindFilter(spec string) (map[string]bool, []string) {
+	want := map[string]bool{}
+	var unknown []string
+	for _, part := range strings.Split(spec, ",") {
+		label := strings.ToLower(strings.TrimSpace(part))
+		if label == "" {
+			continue
+		}
+		if !validSymbolKindLabels[label] {
+			unknown = append(unknown, label)
+			continue
+		}
+		want[label] = true
+	}
+	return want, unknown
 }

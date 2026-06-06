@@ -9,6 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func keyShiftUp() tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyUp, Mod: tea.ModShift})
+}
+func keyShiftDown() tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyDown, Mod: tea.ModShift})
+}
+
 func keyPgUp() tea.KeyPressMsg   { return keySpecial("pgup", tea.KeyPgUp) }
 func keyPgDown() tea.KeyPressMsg { return keySpecial("pgdown", tea.KeyPgDown) }
 func keyHome() tea.KeyPressMsg   { return keySpecial("home", tea.KeyHome) }
@@ -101,6 +108,43 @@ func TestHomeEnd_JumpToTopAndBottom(t *testing.T) {
 	bottom := rendered()
 	require.Contains(t, bottom, lastLine, "End must show the newest line")
 	require.NotContains(t, bottom, firstLine, "at the bottom the oldest line must be off-screen")
+}
+
+// TestLineScroll_StepsOneLineEachWay asserts Shift+Up nudges the scrollback by
+// exactly one line — the finest keyboard step, smaller than a mouse-wheel notch
+// or a page — and Shift+Down returns it one line at a time without underflowing
+// past the bottom.
+func TestLineScroll_StepsOneLineEachWay(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	seedScrollableChat(m)
+	require.Equal(t, 0, m.chatScroll, "the view starts anchored to the newest line")
+
+	// Each Shift+Up advances the offset by one line, the smallest possible step.
+	_, _ = m.Update(keyShiftUp())
+	require.Equal(t, 1, m.chatScroll, "one Shift+Up must move the offset by exactly one line")
+	require.Less(t, m.chatScroll, chatScrollStep, "a line step must be finer than a mouse-wheel notch")
+
+	_, _ = m.Update(keyShiftUp())
+	require.Equal(t, 2, m.chatScroll, "a second Shift+Up must step one more line")
+
+	// Shift+Down walks back one line at a time toward the bottom.
+	_, _ = m.Update(keyShiftDown())
+	require.Equal(t, 1, m.chatScroll, "Shift+Down must step back one line")
+}
+
+// TestLineScrollDown_AtBottom_NoUnderflow asserts Shift+Down at the bottom keeps
+// the offset pinned at zero rather than driving it negative.
+func TestLineScrollDown_AtBottom_NoUnderflow(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	appendMsg(m, "a1", message.RoleAssistant, "short content")
+	require.Equal(t, 0, m.chatScroll)
+
+	_, _ = m.Update(keyShiftDown())
+	require.Equal(t, 0, m.chatScroll, "Shift+Down at the bottom must not underflow below zero")
 }
 
 // TestPageDown_AtBottom_NoUnderflow asserts PageDown at the bottom keeps the

@@ -472,6 +472,16 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+f":
 		m.filetree.toggle(m.workspaceRoot)
 		return m, nil
+	case "shift+up":
+		// Scroll the scrollback one line at a time, the finest keyboard step —
+		// plain Up/Down are taken by prompt-history recall, so Shift pairs with
+		// them for line scrolling the way a pager offers a single-line nudge
+		// alongside its page keys. The offset is clamped at render.
+		m.scrollChatLineUp()
+		return m, nil
+	case "shift+down":
+		m.scrollChatLineDown()
+		return m, nil
 	case "pgup":
 		// Page through the scrollback from the keyboard, mirroring the mouse
 		// wheel. PageUp reveals an older page; the offset is clamped at render.
@@ -1216,6 +1226,7 @@ var keybindingGroups = []keyGroup{
 	{title: "Navigation", bindings: []keyBinding{
 		{"Tab", "switch focus, or complete a /command or @file"},
 		{"Up/Down", "recall previous prompts"},
+		{"Shift+Up/Down", "scroll the chat one line at a time"},
 		{"PgUp/PgDn", "scroll the chat a page at a time"},
 		{"Home/End", "jump to the oldest/newest message"},
 	}},

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/app"
+	"github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/spf13/cobra"
@@ -20,6 +22,7 @@ func newRunCmd() *cobra.Command {
 	var agentName string
 	var jsonStream bool
 	var outputLastMessage string
+	var quiet bool
 	cmd := &cobra.Command{
 		Use:     "run [prompt]",
 		Short:   "Run one prompt without opening the TUI",
@@ -79,6 +82,10 @@ func newRunCmd() *cobra.Command {
 			if !jsonStream {
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), response)
 			}
+
+			if !quiet {
+				printRunSummary(cmd.Context(), cmd.ErrOrStderr(), application.Ledger, s.ID)
+			}
 			return nil
 		},
 	}
@@ -86,7 +93,34 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&agentName, "agent", "coder", "agent name to use")
 	cmd.Flags().BoolVar(&jsonStream, "json", false, "stream agent events as newline-delimited JSON")
 	cmd.Flags().StringVar(&outputLastMessage, "output-last-message", "", "write the final assistant message to this file")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress the token/cost summary printed to stderr after each run")
 	return cmd
+}
+
+// printRunSummary queries the ledger for the session's token and cost totals and
+// writes a one-line summary to stderr. It is a no-op when l is nil (no ledger
+// configured) or when the session recorded no calls (e.g. a dry-run or an error
+// before the first provider turn).
+func printRunSummary(ctx context.Context, w io.Writer, l *ledger.Ledger, sessionID string) {
+	if l == nil {
+		return
+	}
+	sum, err := l.Summary(ctx, sessionID, ledger.WindowSession)
+	if err != nil || sum.CallCount == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, formatRunSummary(sum))
+}
+
+// formatRunSummary formats a ledger.Summary as a compact one-line token/cost
+// string suitable for printing after a non-interactive run. Cost is appended
+// only when non-zero (local/free models carry no pricing).
+func formatRunSummary(sum ledger.Summary) string {
+	s := fmt.Sprintf("Tokens: %d in, %d out", sum.InputTokens, sum.OutputTokens)
+	if sum.CostINR > 0 {
+		s += fmt.Sprintf(" · Cost: ₹%s", formatRupees(sum.CostINR))
+	}
+	return s
 }
 
 // runJSON drives loop while streaming each agent.Event to stdout as one JSON

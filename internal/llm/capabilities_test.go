@@ -467,6 +467,50 @@ func TestInferAnthropicMaxOutput(t *testing.T) {
 	}
 }
 
+// TestInferGeminiMaxOutputTokens verifies the per-model output-cap heuristic
+// that drives the Gemini provider's default maxOutputTokens, preventing silent
+// truncation of long responses when a caller leaves MaxTokens unset. The
+// Gemini 2.5 family supports 65536 output tokens but the Gemini API defaults
+// to 8192 when the field is omitted, so the inference must resolve each 2.5
+// variant to its real limit while leaving older generations at 8192.
+func TestInferGeminiMaxOutputTokens(t *testing.T) {
+	cases := []struct {
+		id   string
+		want int
+	}{
+		// Gemini 2.5 Flash and Pro support 65536 output tokens.
+		{"gemini-2.5-flash", 65_536},
+		{"gemini-2.5-pro", 65_536},
+		// Flash Lite is the exception: it caps at 32768. Its id contains "gemini-2.5"
+		// so the specific rule must win over the 65536 family rule.
+		{"gemini-2.5-flash-lite", 32_768},
+		// Rolling latest aliases: Flash and Pro resolve to Gemini 2.5 (65536),
+		// Flash Lite resolves to gemini-2.5-flash-lite (32768).
+		{"gemini-flash-latest", 65_536},
+		{"gemini-pro-latest", 65_536},
+		{"gemini-flash-lite-latest", 32_768},
+		// Gemini 3 line keeps the 65536 output budget.
+		{"gemini-3-pro-preview", 65_536},
+		// Older Gemini generations (2.0, 1.5) cap at 8192.
+		{"gemini-2.0-flash", 8_192},
+		{"gemini-1.5-pro", 8_192},
+		{"gemini-1.5-flash", 8_192},
+		// Case-insensitive and whitespace-tolerant.
+		{"  GEMINI-2.5-FLASH  ", 65_536},
+		{"  GEMINI-2.5-FLASH-LITE  ", 32_768},
+		// Completely unknown ids return 0 so the caller applies defaultGeminiMaxTokens.
+		{"gpt-4o", 0},
+		{"", 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			require.Equal(t, tc.want, inferGeminiMaxOutputTokens(tc.id),
+				"inferGeminiMaxOutputTokens(%q)", tc.id)
+		})
+	}
+}
+
 // TestModelSupportsGeminiThinking verifies the native-thinking gate recognizes
 // the Gemini 2.5 family and the Gemini 3 line while rejecting older models and
 // ids absent from the configured catalog.

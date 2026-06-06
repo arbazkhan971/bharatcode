@@ -371,6 +371,9 @@ func TestInferContextWindow(t *testing.T) {
 		// family default rather than falling through to "unknown" (0).
 		{"grok-3-mini", 131_072},
 		{"x-ai/grok-3-mini", 131_072},
+		// o3-pro is the high-compute o3 variant; its id carries the "o3-" prefix so
+		// the o3 family rule claims it at 200k — it must not fall through to 0.
+		{"o3-pro", 200_000},
 		// Case-insensitive and whitespace-tolerant.
 		{"  GPT-4O  ", 128_000},
 		// Unknown ids stay "unknown" (zero).
@@ -705,4 +708,71 @@ func TestDefaultsCatalogGeminiRollingAliases(t *testing.T) {
 		require.Truef(t, providerModels[a.id],
 			"gemini provider must list rolling alias %q in its models", a.id)
 	}
+}
+
+// TestDefaultsCatalogOpenAIReasoningModels verifies that o3-pro (the
+// high-compute reasoning variant released June 2025) ships in the defaults
+// catalog under the openai provider with the expected pricing and capabilities,
+// and that the openai provider's model list includes it so OPENAI_API_KEY users
+// can reach it without manual configuration.
+func TestDefaultsCatalogOpenAIReasoningModels(t *testing.T) {
+	cfg := config.Default()
+
+	byID := make(map[string]config.Model, len(cfg.Models))
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+
+	models := []struct {
+		id                    string
+		wantProvider          string
+		wantCtxWindow         int
+		wantSupportsImages    bool
+		wantSupportsTools     bool
+		wantMinInputPriceUSD  float64
+		wantMinOutputPriceUSD float64
+	}{
+		{
+			id:                    "o3-pro",
+			wantProvider:          "openai",
+			wantCtxWindow:         200_000,
+			wantSupportsImages:    true,
+			wantSupportsTools:     true,
+			wantMinInputPriceUSD:  10.0, // published at $20/MTok; sanity floor
+			wantMinOutputPriceUSD: 40.0, // published at $80/MTok; sanity floor
+		},
+	}
+
+	for _, want := range models {
+		m, ok := byID[want.id]
+		require.Truef(t, ok, "defaults catalog must include model %q", want.id)
+		require.Equalf(t, want.wantProvider, m.Provider,
+			"model %q has wrong provider", want.id)
+		require.Equalf(t, want.wantCtxWindow, m.ContextWindow,
+			"model %q has wrong context_window", want.id)
+		require.Equalf(t, want.wantSupportsImages, m.SupportsImages,
+			"model %q SupportsImages mismatch", want.id)
+		require.Equalf(t, want.wantSupportsTools, m.SupportsTools,
+			"model %q SupportsTools mismatch", want.id)
+		require.GreaterOrEqualf(t, m.InputPricePerMTokUSD, want.wantMinInputPriceUSD,
+			"model %q input price should be >= %.2f", want.id, want.wantMinInputPriceUSD)
+		require.GreaterOrEqualf(t, m.OutputPricePerMTokUSD, want.wantMinOutputPriceUSD,
+			"model %q output price should be >= %.2f", want.id, want.wantMinOutputPriceUSD)
+	}
+
+	// Verify o3-pro also appears in the openai provider's models list.
+	var openaiProvider *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "openai" {
+			openaiProvider = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, openaiProvider, "defaults must include a provider named 'openai'")
+	providerModels := make(map[string]bool, len(openaiProvider.Models))
+	for _, id := range openaiProvider.Models {
+		providerModels[id] = true
+	}
+	require.True(t, providerModels["o3-pro"],
+		"openai provider must list o3-pro in its models")
 }

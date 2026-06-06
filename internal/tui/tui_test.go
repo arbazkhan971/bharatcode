@@ -284,19 +284,19 @@ func TestRunningStatus_OnlyWhileTurnInFlight(t *testing.T) {
 	t.Parallel()
 
 	start := time.Unix(100, 0)
-	require.Empty(t, runningStatus(time.Time{}, start, ""),
+	require.Empty(t, runningStatus(time.Time{}, start, "", 0),
 		"an idle prompt (zero start) must add no working segment")
 
-	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second), ""),
+	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second), "", 0),
 		"a running turn must report its elapsed time")
 
 	// A negative elapsed (clock skew) must clamp to the first frame, not panic.
-	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(-time.Second), ""), spinnerFrames[0]+" working "),
+	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(-time.Second), "", 0), spinnerFrames[0]+" working "),
 		"a negative elapsed must clamp to the first frame without panicking")
 
 	// The spinner advances one frame per whole second and wraps at the end.
-	first := runningStatus(start, start.Add(time.Second), "")
-	tenth := runningStatus(start, start.Add(time.Duration(len(spinnerFrames))*time.Second), "")
+	first := runningStatus(start, start.Add(time.Second), "", 0)
+	tenth := runningStatus(start, start.Add(time.Duration(len(spinnerFrames))*time.Second), "", 0)
 	require.True(t, strings.HasPrefix(first, spinnerFrames[1]))
 	require.True(t, strings.HasPrefix(tenth, spinnerFrames[0]), "the spinner must wrap around")
 }
@@ -312,20 +312,20 @@ func TestRunningStatus_InterruptHint(t *testing.T) {
 
 	// A short run shows no interrupt hint — it would finish before the reader
 	// could act on it.
-	require.NotContains(t, runningStatus(start, start.Add(3*time.Second), ""), "interrupt",
+	require.NotContains(t, runningStatus(start, start.Add(3*time.Second), "", 0), "interrupt",
 		"a short turn must not advertise the interrupt key")
 
 	// Just before the threshold the hint is still withheld.
-	require.NotContains(t, runningStatus(start, start.Add(interruptHintAfter-time.Second), ""), "interrupt",
+	require.NotContains(t, runningStatus(start, start.Add(interruptHintAfter-time.Second), "", 0), "interrupt",
 		"the hint must stay hidden until the turn passes the threshold")
 
 	// At and past the threshold the hint appears, naming the key that interrupts.
-	atThreshold := runningStatus(start, start.Add(interruptHintAfter), "")
+	atThreshold := runningStatus(start, start.Add(interruptHintAfter), "", 0)
 	require.Contains(t, atThreshold, "(ctrl+c to interrupt)",
 		"a turn at the threshold must advertise the interrupt key")
 	require.Contains(t, atThreshold, "working",
 		"the interrupt hint must not displace the activity label")
-	require.Contains(t, runningStatus(start, start.Add(interruptHintAfter+time.Minute), "Bash"), "(ctrl+c to interrupt)",
+	require.Contains(t, runningStatus(start, start.Add(interruptHintAfter+time.Minute), "Bash", 0), "(ctrl+c to interrupt)",
 		"a long-running tool must keep advertising the interrupt key")
 }
 
@@ -361,12 +361,12 @@ func TestRunningStatus_NamesActiveTool(t *testing.T) {
 	t.Parallel()
 
 	start := time.Unix(100, 0)
-	require.Equal(t, spinnerFrames[3]+" Bash 3s", runningStatus(start, start.Add(3*time.Second), "Bash"),
+	require.Equal(t, spinnerFrames[3]+" Bash 3s", runningStatus(start, start.Add(3*time.Second), "Bash", 0),
 		"a running tool must name itself in the working segment")
-	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second), ""),
+	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second), "", 0),
 		"an empty activity must fall back to the generic working label")
 	// The elapsed and spinner cadence are unchanged by the activity label.
-	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(time.Second), "Edit"), spinnerFrames[1]+" Edit "),
+	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(time.Second), "Edit", 0), spinnerFrames[1]+" Edit "),
 		"the spinner frame must still advance independently of the activity label")
 }
 

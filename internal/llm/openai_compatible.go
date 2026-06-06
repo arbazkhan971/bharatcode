@@ -242,6 +242,15 @@ var openAIReasoningEfforts = map[string]struct{}{
 // apply to the same knob.
 func normalizeOpenAIReasoningEffort(effort, model string) string {
 	e := strings.ToLower(strings.TrimSpace(effort))
+	// The gpt-5.1 generation deprecated "minimal" — its fastest setting on the
+	// original gpt-5 family — and replaced it with "none", 400-ing on "minimal".
+	// Map a configured "minimal" onto the equivalent "none" for those models so a
+	// config written for gpt-5 keeps working when the model is bumped to gpt-5.1
+	// instead of being rejected. Both label the same "spend the least reasoning"
+	// intent, so the degradation is faithful rather than a behavior change.
+	if e == "minimal" && modelSupportsNoneReasoningEffort(model) {
+		return "none"
+	}
 	if _, ok := openAIReasoningEfforts[e]; ok {
 		return e
 	}

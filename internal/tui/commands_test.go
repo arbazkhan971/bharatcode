@@ -296,6 +296,44 @@ func TestSlashSessions_HomeEndJumpToEnds(t *testing.T) {
 	require.Equal(t, 0, m.sessionCursor, "Home must not move below the first row")
 }
 
+// TestSlashSessions_PageKeysMoveByWindow asserts the session picker's PgUp/PgDn
+// bindings step the cursor a windowful at a time (mirroring the chat's page
+// navigation) and clamp at the first and last rows, so a long list is
+// traversable faster than one row per keystroke without walking out of range.
+func TestSlashSessions_PageKeysMoveByWindow(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// Seed more than one window of sessions so paging has somewhere to go.
+	for i := 0; i < sessionWindow+5; i++ {
+		_ = seedSession(t, h.repo, fmt.Sprintf("session %02d", i), "work")
+	}
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+	last := len(m.visibleSessions()) - 1
+	require.Greater(t, last, sessionWindow, "need more than a window of sessions to page")
+
+	// PgDn from the top advances exactly one window.
+	_, _ = m.Update(keyPgDown())
+	require.Equal(t, sessionWindow, m.sessionCursor, "PgDn must advance the cursor by one window")
+
+	// PgUp steps back the same distance, to the first row here.
+	_, _ = m.Update(keyPgUp())
+	require.Equal(t, 0, m.sessionCursor, "PgUp must step back by one window")
+
+	// PgUp at the top is a bounded no-op.
+	_, _ = m.Update(keyPgUp())
+	require.Equal(t, 0, m.sessionCursor, "PgUp must not move below the first row")
+
+	// Repeated PgDn lands on, and clamps at, the last row.
+	for i := 0; i < 5; i++ {
+		_, _ = m.Update(keyPgDown())
+	}
+	require.Equal(t, last, m.sessionCursor, "repeated PgDn must clamp at the last row")
+}
+
 // TestRelativeTime_CoarsensWithGap asserts the session-switcher last-active
 // label coarsens granularity as the gap widens and never reads as a negative or
 // empty age for a fresh or future timestamp.

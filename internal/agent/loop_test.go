@@ -195,6 +195,7 @@ func TestCoordinatorWiresMCPResourcesToolIntoAgents(t *testing.T) {
 		loop, err := coord.Agent(name)
 		require.NoError(t, err, "agent %q", name)
 		require.True(t, hasLLMTool(loop, "mcp_resources"), "agent %q must expose mcp_resources", name)
+		require.True(t, hasLLMTool(loop, "mcp_prompts"), "agent %q must expose mcp_prompts", name)
 	}
 }
 

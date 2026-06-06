@@ -42,6 +42,7 @@ var readClassTools = map[string]bool{
 	"symbols":       true,
 	"navigate":      true,
 	"mcp_resources": true,
+	"mcp_prompts":   true,
 	"web_fetch":     true,
 	"web_search":    true,
 	"job_output":    true,

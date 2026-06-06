@@ -27,7 +27,7 @@ import (
 // It includes "skill" because loading a skill's instruction body is a
 // read-only operation and the task agent should be able to consult the
 // same skills as the coder agent.
-var readOnlyTaskTools = []string{"diagnostics", "glob", "grep", "ls", "mcp_resources", "navigate", "skill", "symbols", "view", "web_fetch", "web_search"}
+var readOnlyTaskTools = []string{"diagnostics", "glob", "grep", "ls", "mcp_prompts", "mcp_resources", "navigate", "skill", "symbols", "view", "web_fetch", "web_search"}
 
 // readOnlySet is the membership form of readOnlyTaskTools, used by the Loop's
 // plan-mode restriction to decide whether a tool is read-only. Both share one
@@ -405,11 +405,12 @@ func (c *Coordinator) extraTools() []tools.Tool {
 	if c.taskTool != nil {
 		out = append(out, c.taskTool)
 	}
-	// The MCP resources tool is always registered, even with no MCP client, so
-	// allow-listing "mcp_resources" (e.g. for the read-only task agent and plan
-	// mode) never fails tool validation — mirroring the skill tool. With no
-	// client it reports that resources are unavailable rather than panicking.
+	// The MCP resources and prompts tools are always registered, even with no
+	// MCP client, so allow-listing them (e.g. for the read-only task agent and
+	// plan mode) never fails tool validation — mirroring the skill tool. With no
+	// client they report unavailability rather than panicking.
 	out = append(out, mcp.ResourcesToolFor(c.deps.MCP))
+	out = append(out, mcp.PromptsToolFor(c.deps.MCP))
 	return out
 }
 

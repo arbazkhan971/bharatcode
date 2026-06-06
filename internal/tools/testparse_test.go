@@ -3411,3 +3411,120 @@ func TestParseTestCounts_GradleNoSummaryLine(t *testing.T) {
 BUILD SUCCESSFUL in 2s`
 	assertCounts(t, "gradle test", out, 0, 0)
 }
+
+func TestParseTestCounts_Unittest(t *testing.T) {
+	out := `..F.
+----------------------------------------------------------------------
+FAIL: test_upper (test_module.TestStringMethods)
+Traceback (most recent call last):
+  File "test_module.py", line 12, in test_upper
+    self.assertEqual('foo'.upper(), 'FOO2')
+AssertionError: 'FOO' != 'FOO2'
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.001s
+
+FAILED (failures=1)`
+	assertCounts(t, "python -m unittest test_module", out, 3, 4)
+}
+
+func TestParseTestCounts_UnittestErrors(t *testing.T) {
+	// "errors=" contributes to the failed count, "failures=" may be absent.
+	out := `E.
+----------------------------------------------------------------------
+ERROR: test_something (test_module.TestSomething)
+...
+----------------------------------------------------------------------
+Ran 2 tests in 0.003s
+
+FAILED (errors=1)`
+	assertCounts(t, "python -m unittest test_module", out, 1, 2)
+}
+
+func TestParseTestCounts_UnittestBoth(t *testing.T) {
+	// Both failures and errors present in the same run.
+	out := `EF.
+----------------------------------------------------------------------
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+FAILED (failures=1, errors=1)`
+	assertCounts(t, "python -m unittest discover", out, 1, 3)
+}
+
+func TestParseTestCounts_UnittestAllPass(t *testing.T) {
+	out := `...
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+OK`
+	assertCounts(t, "python -m unittest test_module", out, 3, 3)
+}
+
+func TestParseTestCounts_Swift(t *testing.T) {
+	out := `Test Suite 'All tests' started at 2024-01-01 00:00:00.000
+Test Suite 'FooTests' started at 2024-01-01 00:00:00.001
+Test Case '-[FooTests testBar]' started.
+Test Case '-[FooTests testBar]' failed (0.001 seconds).
+Test Suite 'FooTests' failed at 2024-01-01 00:00:00.002
+	 Executed 3 tests, with 1 failure (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'All tests' failed at 2024-01-01 00:00:00.003
+	 Executed 3 tests, with 1 failure (0 unexpected) in 0.001 (0.003) seconds`
+	// The last "Executed" line (all-tests suite) is the aggregate.
+	assertCounts(t, "swift test", out, 2, 3)
+}
+
+func TestParseTestCounts_SwiftAllPass(t *testing.T) {
+	out := `Test Suite 'All tests' started at 2024-01-01 00:00:00.000
+Test Suite 'FooTests' passed at 2024-01-01 00:00:00.001
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+Test Suite 'All tests' passed at 2024-01-01 00:00:00.002
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.001 (0.003) seconds`
+	assertCounts(t, "swift test", out, 5, 5)
+}
+
+func TestParseTestCounts_GTest(t *testing.T) {
+	out := `[==========] 10 tests from 2 test suites ran. (20 ms total)
+[ PASSED ] 9 tests.
+[ FAILED ] 1 test, listed below:
+[ FAILED ] FooTest.BarFails`
+	assertCounts(t, "./runTests --gtest_filter=*", out, 9, 10)
+}
+
+func TestParseTestCounts_GTestAllPass(t *testing.T) {
+	out := `[==========] 5 tests from 1 test suite ran. (5 ms total)
+[ PASSED ] 5 tests.`
+	assertCounts(t, "./runTests --gtest_color=yes", out, 5, 5)
+}
+
+func TestParseTestCounts_GTestNoSummary(t *testing.T) {
+	// No "[ PASSED ]" line → nil (e.g. build failure before any tests ran).
+	assertCounts(t, "./runTests --gtest_filter=*", "error: no such file", 0, 0)
+}
+
+func TestParseTestCounts_Deno(t *testing.T) {
+	out := `running 3 tests from ./tests/foo_test.ts
+test ok ... ok (1ms)
+test fail ... FAILED (1ms)
+test skip ... ok (0ms)
+
+FAILED | 2 passed | 1 failed`
+	assertCounts(t, "deno test", out, 2, 3)
+}
+
+func TestParseTestCounts_DenoAllPass(t *testing.T) {
+	out := `running 4 tests from ./tests/bar_test.ts
+test a ... ok (1ms)
+test b ... ok (1ms)
+test c ... ok (1ms)
+test d ... ok (1ms)
+
+ok | 4 passed | 0 failed`
+	assertCounts(t, "deno test", out, 4, 4)
+}
+
+func TestParseTestCounts_DenoNoSummary(t *testing.T) {
+	// If no summary line is present, return nil rather than guessing.
+	assertCounts(t, "deno test", "test foo ... ok (1ms)", 0, 0)
+}

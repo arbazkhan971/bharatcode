@@ -2,8 +2,10 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
@@ -147,6 +149,46 @@ func TestDiagnosticsSeverityFilterEmptyMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.IsError)
 	require.Equal(t, "No diagnostics at or above error severity.", result.Content)
+}
+
+// TestDiagnosticsCapsRenderedEntries asserts that when a scan surfaces more than
+// diagnosticMatchCap diagnostics, only the cap is rendered in full, a trailing
+// "... and N more not shown" notice records what was elided, and the summary
+// header plus metadata still report the true total — mirroring the navigate and
+// symbols tools' bounded-output behaviour.
+func TestDiagnosticsCapsRenderedEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	total := diagnosticMatchCap + 25
+	items := make([]lsp.Diagnostic, total)
+	for i := range items {
+		items[i] = lsp.Diagnostic{
+			Path:     path,
+			Range:    lsp.Range{Start: lsp.Position{Line: i}},
+			Severity: lsp.Error,
+			Message:  fmt.Sprintf("boom %d", i),
+		}
+	}
+	tool := &diagnosticsTool{source: fakeDiagnostics{items: items}, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// The header and metadata report every diagnostic, even the elided ones.
+	require.Contains(t, result.Content, fmt.Sprintf("%d diagnostics across 1 file", total))
+	require.Equal(t, total, result.Metadata[MetadataDiagnosticCount])
+
+	// Exactly diagnosticMatchCap message lines are rendered; the rest are elided.
+	rendered := strings.Count(result.Content, ": error: boom ")
+	require.Equal(t, diagnosticMatchCap, rendered)
+	require.Contains(t, result.Content, fmt.Sprintf("... and %d more not shown (%d total)", total-diagnosticMatchCap, total))
+
+	// The first diagnostic survives the cut; one past the cap does not.
+	require.Contains(t, result.Content, "boom 0\n")
+	require.NotContains(t, result.Content, fmt.Sprintf("boom %d\n", diagnosticMatchCap))
 }
 
 // TestDiagnosticsSeverityFilterRejectsUnknown asserts an unrecognized severity

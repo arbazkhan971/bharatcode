@@ -404,6 +404,51 @@ func TestRenderMentionHint_NoMatchingFiles(t *testing.T) {
 	require.NotContains(t, hint, "\n", "the note must stay on one row")
 }
 
+// TestRenderMentionHint_DidYouMean asserts that a mistyped @-token with no match
+// — not even under the fuzzy subsequence fallback — surfaces a "did you mean"
+// pointer at the nearest real file, the way the slash menu corrects a mistyped
+// command, while a token nowhere near any file shows the bare note alone.
+func TestRenderMentionHint_DidYouMean(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.workspaceRoot = mentionWorkspace(t, "main.go", "internal/server.go")
+
+	// "mian.go" is a transposition of "main.go" (edit distance 2) and is not a
+	// subsequence of it, so the picker finds no match and points at the target.
+	typeString(t, m, "@mian.go")
+	hint := stripANSI(m.renderMentionHint(400))
+	require.Contains(t, hint, "no matching files")
+	require.Contains(t, hint, "did you mean main.go?")
+
+	// A token nowhere near any file gets the bare note with no pointer.
+	m = newSizedModel(t)
+	m.workspaceRoot = mentionWorkspace(t, "main.go", "internal/server.go")
+	typeString(t, m, "@zzzzz")
+	hint = stripANSI(m.renderMentionHint(400))
+	require.Contains(t, hint, "no matching files")
+	require.NotContains(t, hint, "did you mean")
+}
+
+// TestMentionSuggestion_NearestBaseName asserts the suggester matches on a file's
+// base name across directories and withholds a guess when the edit distance is as
+// long a leap as simply retyping the token, mirroring suggestSlash.
+func TestMentionSuggestion_NearestBaseName(t *testing.T) {
+	t.Parallel()
+
+	root := mentionWorkspace(t, "cmd/main.go", "internal/handler.go")
+
+	// A typo in a nested file's base name is corrected to its full path.
+	require.Equal(t, "internal/handler.go", mentionSuggestion("hanlder.go", root))
+
+	// A short stub is not "corrected" into an unrelated file: turning "go" into a
+	// real name takes as many edits as just typing it.
+	require.Equal(t, "", mentionSuggestion("go", root))
+
+	// Nothing close enough yields no suggestion.
+	require.Equal(t, "", mentionSuggestion("qqqqqqqq", root))
+}
+
 // TestRenderMentionHint_BareAtNoNote asserts a bare "@" (empty token) never shows
 // the "no matching files" note: it lists the workspace, and an empty workspace is
 // not a failed search. It also confirms a no-match note is dropped when it would

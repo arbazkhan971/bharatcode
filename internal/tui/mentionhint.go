@@ -330,6 +330,50 @@ func mentionHintFiles(buffer, root string, st *inputState) (files []string, acti
 	return files, -1
 }
 
+// mentionSuggestion returns the workspace file whose base name sits closest to an
+// unmatched @-token, or "" when none is near enough. It mirrors suggestSlash:
+// when a typed @file resolves to nothing — not even under the picker's fuzzy
+// subsequence fallback — the picker can still point at the nearest real file
+// ("did you mean internal/main.go?") the way the slash menu corrects a mistyped
+// command, rather than only reporting the empty search. The token's base name
+// (its final path segment) is compared case-insensitively against each file's
+// base name by Levenshtein distance; the nearest within maxSuggestDistance wins,
+// ties broken by the listing order so the result is deterministic. As in
+// suggestSlash, a suggestion is withheld when the edit distance is as long a leap
+// as simply retyping either name, so a one- or two-letter stub is never
+// "corrected" to an unrelated file.
+func mentionSuggestion(token, root string) string {
+	base := baseName(strings.ToLower(token))
+	if base == "" {
+		return ""
+	}
+	baseLen := len([]rune(base))
+
+	best := ""
+	bestDist := maxSuggestDistance + 1
+	for _, f := range listWorkspaceFiles(root) {
+		name := baseName(strings.ToLower(f))
+		d := levenshtein(base, name)
+		if d > maxSuggestDistance || d >= len([]rune(name)) || d >= baseLen {
+			continue
+		}
+		if d < bestDist {
+			best, bestDist = f, d
+		}
+	}
+	return best
+}
+
+// baseName returns the final path segment of a slash-separated path, or the whole
+// string when it carries no slash. It is the @-mention counterpart to filepath.Base
+// for the workspace-relative, always-slash paths the picker works in.
+func baseName(path string) string {
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		return path[i+1:]
+	}
+	return path
+}
+
 // matchSpan measures how tightly token matched path: the number of runes from
 // the first matched rune through the last, inclusive, as reported by
 // matchPositions. A contiguous match spans exactly len(token); a subsequence
@@ -470,7 +514,13 @@ func (m *model) renderMentionHint(width int) string {
 		// just be noise. The note is dropped when it would not fit one row, so the
 		// layout height is never exceeded.
 		if token, ok := activeMention(buffer); ok && token != "" {
-			const note = "no matching files"
+			note := "no matching files"
+			// When a close file exists, append a "did you mean" pointer reusing the
+			// slash menu's nearest-name suggester, so a mistyped @file is steered
+			// toward its likely target rather than left at a bare empty search.
+			if s := mentionSuggestion(token, m.workspaceRoot); s != "" {
+				note += " — did you mean " + s + "?"
+			}
 			if len([]rune(indent))+len([]rune(note)) <= width {
 				return indent + m.theme.Muted.Render(note)
 			}

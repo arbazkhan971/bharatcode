@@ -488,6 +488,12 @@ var contextWindowRules = []struct {
 	{"reka", 128_000},
 	// Google Gemma open-weight line — Gemma 3 lifted the window to 128k while
 	// Gemma 1/2 shipped 8k, so the specific "gemma-3" marker precedes the family.
+	// Gemma 3n, the on-device variant (gemma-3n-e2b, gemma-3n-e4b), is the
+	// exception to the line above: it ships only a 32k window. Its id carries the
+	// "gemma-3" marker, so its specific rule must precede the "gemma-3" family rule
+	// to avoid resolving to 128k — a 4x overcount that would let the agent grow
+	// context well past the model's real limit before the request is rejected.
+	{"gemma-3n", 32_768},
 	{"gemma-3", 128_000},
 	{"gemma", 8_192},
 	// Cohere Command — Command A exposes a 256k window, the Command R/R+ tier

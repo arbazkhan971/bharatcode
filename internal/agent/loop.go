@@ -243,6 +243,14 @@ type Config struct {
 	// and model the prompt was sent to, alongside the local tool calls and
 	// permission decisions already recorded.
 	LLMAuditor LLMAuditor
+	// AutoCompactThreshold, when positive, enables automatic context
+	// compaction. After each provider turn the loop checks whether the
+	// input-token count divided by the model's context window exceeds this
+	// fraction. When it does, the loop compacts the in-memory history so the
+	// next turn sees a smaller, summarised conversation instead of silently
+	// overflowing. A value of 0 (the default) disables auto-compaction.
+	// Typical values are 0.85–0.95. Values ≥ 1.0 are treated as disabled.
+	AutoCompactThreshold float64
 }
 
 // Loop runs a single named agent for one session at a time.
@@ -544,6 +552,45 @@ func (l *Loop) applyCompaction(history []message.Message) []message.Message {
 	return out
 }
 
+// maybeAutoCompact triggers background compaction when the session has filled
+// the model's context window beyond the configured threshold. It stores the
+// compacted snapshot in memory so the next provider call sends a smaller
+// history, and publishes EventAutoCompacted so the TUI can surface an inline
+// notice. A zero or negative threshold disables auto-compaction entirely.
+func (l *Loop) maybeAutoCompact(ctx context.Context, sessionID string, history []message.Message, inputTokens int) {
+	threshold := l.cfg.AutoCompactThreshold
+	if threshold <= 0 || threshold >= 1.0 {
+		return
+	}
+	window := l.contextWindow()
+	if window <= 0 || inputTokens <= 0 {
+		return
+	}
+	fillPct := float64(inputTokens) / float64(window)
+	if fillPct < threshold {
+		return
+	}
+	condensed, err := l.compactHistory(ctx, history)
+	if err != nil {
+		slog.Warn("auto-compact failed",
+			slog.String("session", sessionID),
+			slog.Float64("fill_pct", fillPct),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	l.compactMu.Lock()
+	l.compacted = condensed
+	l.compactedLen = len(history)
+	l.compactMu.Unlock()
+	slog.Info("auto-compact triggered",
+		slog.String("session", sessionID),
+		slog.Float64("fill_pct", fillPct),
+		slog.Float64("threshold", threshold),
+	)
+	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventAutoCompacted})
+}
+
 // fitHistory ensures history fits the model's usable context window before it
 // is sent to the provider. When the window is unknown (zero), it preserves the
 // historical behavior of leaving history untouched. When history already fits,
@@ -785,6 +832,15 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 		}
 		l.publish(runCtx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventLLMResponse, Message: &assistant})
 		history = append(history, assistant)
+
+		// Auto-compact when the context fill percentage meets the configured
+		// threshold. This primes the in-memory compaction snapshot so the NEXT
+		// provider call sends a smaller history, preventing the turn from
+		// silently overflowing the context window. The compact is best-effort:
+		// a failure is logged and does not abort the current turn.
+		if usage != nil {
+			l.maybeAutoCompact(runCtx, sessionID, history, usage.InputTokens)
+		}
 
 		if finalStep {
 			// The handoff turn ran with no tools, so the model's plain-text summary

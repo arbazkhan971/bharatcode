@@ -242,6 +242,19 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 	}, nil
 }
 
+// diagnosticItem is one diagnostic in the structured metadata list — a
+// machine-readable complement to the human-readable Content so the TUI and
+// agent loop can react to individual items without re-parsing text. Mirrors
+// navigateLocation in the navigate tool.
+type diagnosticItem struct {
+	Path     string `json:"path"`
+	Line     int    `json:"line"`
+	Column   int    `json:"column"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+	Code     string `json:"code,omitempty"`
+}
+
 // Metadata keys the diagnostics tool sets so downstream consumers (the agent
 // loop, the TUI) can react to severity tallies without re-parsing the rendered
 // list.
@@ -257,6 +270,10 @@ const (
 	// diagnostic, sorted for determinism. Absent when no error diagnostics were
 	// found, so callers can test for nil/missing rather than an empty slice.
 	MetadataDiagnosticErrorFiles = "error_files"
+	// MetadataDiagnosticItems holds a []diagnosticItem for the reported diagnostics
+	// (capped to the same diagnosticMatchCap as the rendered Content so the two are
+	// always consistent). Absent when no diagnostics were found.
+	MetadataDiagnosticItems = "items"
 )
 
 // parseSeverityFilter maps the optional severity argument to the minimum
@@ -331,10 +348,11 @@ func diagnosticsSummary(diags []lsp.Diagnostic, counts [5]int) string {
 	return header + ":"
 }
 
-// diagnosticsMetadata exposes the total, error/warning tallies, and the sorted
-// list of files that carry at least one error-level diagnostic so the TUI and
-// agent loop can react to individual problem sites without re-parsing text.
-// root is used to relativize paths; pass "" to keep them absolute.
+// diagnosticsMetadata exposes the total, error/warning tallies, the sorted
+// list of files that carry at least one error-level diagnostic, and a
+// structured items list so the TUI and agent loop can react to individual
+// problem sites without re-parsing text. root is used to relativize paths;
+// pass "" to keep them absolute.
 func diagnosticsMetadata(root string, diags []lsp.Diagnostic, counts [5]int) map[string]any {
 	m := map[string]any{
 		MetadataDiagnosticCount:    len(diags),
@@ -361,6 +379,33 @@ func diagnosticsMetadata(root string, diags []lsp.Diagnostic, counts [5]int) map
 		}
 		sort.Strings(files)
 		m[MetadataDiagnosticErrorFiles] = files
+	}
+	// Build a structured item list capped at diagnosticMatchCap so the metadata
+	// is always consistent with the rendered Content (both truncate at the same
+	// boundary). Mirrors MetadataLocations in the navigate tool.
+	shown := diags
+	if len(shown) > diagnosticMatchCap {
+		shown = shown[:diagnosticMatchCap]
+	}
+	items := make([]diagnosticItem, 0, len(shown))
+	for _, d := range shown {
+		p := d.Path
+		if root != "" {
+			if rel, err := filepath.Rel(root, d.Path); err == nil && !strings.HasPrefix(rel, "..") {
+				p = filepath.ToSlash(rel)
+			}
+		}
+		items = append(items, diagnosticItem{
+			Path:     p,
+			Line:     d.Range.Start.Line + 1,
+			Column:   d.Range.Start.Character + 1,
+			Severity: severityString(d.Severity),
+			Message:  d.Message,
+			Code:     d.Code,
+		})
+	}
+	if len(items) > 0 {
+		m[MetadataDiagnosticItems] = items
 	}
 	return m
 }

@@ -391,6 +391,17 @@ func classifyTestRunner(command string) testRunner {
 		// (the headless command that emits this report) matches; "cypress open"
 		// launches the interactive GUI and prints no such summary.
 		return runnerMocha
+	case strings.Contains(c, "hardhat test"):
+		// `hardhat test`/`npx hardhat test` runs Hardhat's test task, which drives
+		// Mocha with the spec reporter underneath, so its failures close with the
+		// same "N failing" block of numbered "  N) <title>" entries — each title
+		// ending in a colon — that the Mocha parser handles, followed by the
+		// assertion message. Routed to that parser rather than duplicating it.
+		// Checked before the jest runners since a hardhat invocation carries none of
+		// their substrings, but kept explicit to guard against future overlap. (The
+		// other Solidity runner, Foundry's `forge test`, has its own case and shares
+		// no command substring with hardhat.)
+		return runnerMocha
 	case ctestRe.MatchString(c):
 		// `ctest` drives CMake's test runner, whose run summary closes with a
 		// "The following tests FAILED:" block listing each failure as

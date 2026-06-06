@@ -499,6 +499,12 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// While Ctrl+R reverse-history search is active, most keystrokes refine
+	// the search query instead of editing the buffer directly.
+	if m.inputHistory.histSearchActive {
+		return m.handleHistSearchKey(msg)
+	}
+
 	switch msg.String() {
 	case "ctrl+c":
 		// While a turn is in flight, Ctrl+C interrupts it rather than quitting, so a
@@ -516,6 +522,15 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.deps.Agent.Interrupt()
+		return m, nil
+	case "ctrl+r":
+		// Enter (or re-enter) reverse history search, the classic readline
+		// "bck-i-search:" mode. Subsequent keystrokes narrow the query; another
+		// Ctrl+R steps to the next older match. Enter accepts; Esc/Ctrl+G cancels
+		// and restores the buffer that was in place before the search began.
+		if m.focus == focusInput {
+			m.inputHistory.startHistSearch(m.input.String())
+		}
 		return m, nil
 	case "tab":
 		// On the input line, Tab completes/cycles a slash command when the
@@ -748,6 +763,36 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+}
+
+// handleHistSearchKey handles a keystroke while Ctrl+R reverse-history search
+// is active. Printable characters refine the query; Backspace shrinks it;
+// Ctrl+R steps to the next older match; Enter accepts the match; Esc/Ctrl+G
+// cancel and restore the saved buffer.
+func (m *model) handleHistSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+r":
+		if match, ok := m.inputHistory.histSearchNext(); ok {
+			m.setInput(match)
+		}
+	case "enter":
+		m.inputHistory.commitHistSearch()
+		return m.submitInput()
+	case "esc", "ctrl+g":
+		restored := m.inputHistory.cancelHistSearch()
+		m.setInput(restored)
+	case "backspace":
+		if match, ok := m.inputHistory.histSearchBackspace(); ok {
+			m.setInput(match)
+		}
+	default:
+		if msg.Key().Text != "" {
+			if match, ok := m.inputHistory.histSearchAcceptChar(msg.Key().Text); ok {
+				m.setInput(match)
+			}
+		}
+	}
+	return m, nil
 }
 
 // renderInputArea renders the prompt input with "> " on the first line and
@@ -1148,9 +1193,12 @@ func (m *model) renderMain() string {
 	// Surface the slash-completion menu beneath the prompt so the commands Tab
 	// would cycle through are discoverable without pressing it. It occupies one
 	// of the input region's spare rows, so the layout height is unchanged, and
-	// renders nothing for a non-slash buffer.
+	// renders nothing for a non-slash buffer. The reverse history search hint
+	// takes priority when Ctrl+R search is active, hiding the other menus.
 	if m.focus == focusInput {
-		if hint := m.renderSlashHint(m.width); hint != "" {
+		if hint := m.inputHistory.histSearchHint(); hint != "" {
+			input += "\n" + m.theme.Muted.Render(hint)
+		} else if hint := m.renderSlashHint(m.width); hint != "" {
 			input += "\n" + hint
 		} else if hint := m.renderMentionHint(m.width); hint != "" {
 			input += "\n" + hint
@@ -1719,6 +1767,7 @@ var keybindingGroups = []keyGroup{
 		{"Tab", "switch focus, or complete a /command or @file"},
 		{"Shift+Tab", "cycle the /command or @file menu backward"},
 		{"Up/Down", "recall previous prompts"},
+		{"Ctrl+R", "search prompt history backward (bck-i-search)"},
 		{"Shift+Up/Down", "scroll the chat one line at a time"},
 		{"PgUp/PgDn", "scroll the chat a page at a time"},
 		{"Home/End", "jump to the oldest/newest message"},

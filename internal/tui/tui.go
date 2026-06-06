@@ -624,9 +624,33 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		return m.submitInput()
+	case "ctrl+z":
+		// Undo the most recent input edit, walking the buffer back one step at a
+		// time. Ctrl+Z is the universal undo key in editors and CLIs (readline,
+		// vim insert-mode, VS Code terminal), so it is the expected way to recover
+		// from an accidental Ctrl+U, stray backspace, or mistyped burst. It is a
+		// no-op when nothing has been edited yet and, like other edits, ends any
+		// active recall walk and completion cycle.
+		if restored, ok := m.inputHistory.undoInput(m.input.String()); ok {
+			m.setInput(restored)
+			m.inputHistory.resetRecall()
+			m.inputHistory.resetCompletion()
+		}
+		return m, nil
+	case "ctrl+y":
+		// Redo reinstates the most recently undone edit, the standard counterpart
+		// to Ctrl+Z. It is a no-op when there is nothing to redo (no prior undo,
+		// or a new edit has already cleared the redo history).
+		if restored, ok := m.inputHistory.redoInput(m.input.String()); ok {
+			m.setInput(restored)
+			m.inputHistory.resetRecall()
+			m.inputHistory.resetCompletion()
+		}
+		return m, nil
 	case "backspace":
 		s := m.input.String()
 		if s != "" {
+			m.inputHistory.pushUndo(s)
 			r := []rune(s)
 			m.input.Reset()
 			m.input.WriteString(string(r[:len(r)-1]))
@@ -645,6 +669,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.input.Len() == 0 {
 			return m, nil
 		}
+		m.inputHistory.pushUndo(m.input.String())
 		m.input.Reset()
 		m.inputHistory.resetRecall()
 		m.inputHistory.resetCompletion()
@@ -661,6 +686,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s == "" {
 			return m, nil
 		}
+		m.inputHistory.pushUndo(s)
 		m.input.Reset()
 		m.input.WriteString(deleteLastWord(s))
 		m.inputHistory.resetRecall()
@@ -668,6 +694,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	default:
 		if msg.Key().Text != "" {
+			m.inputHistory.pushUndo(m.input.String())
 			m.input.WriteString(msg.Key().Text)
 			// Typing cancels any recall walk and completion cycle.
 			m.inputHistory.resetRecall()
@@ -1508,6 +1535,8 @@ var keybindingGroups = []keyGroup{
 		{"Backspace", "delete the character before the cursor"},
 		{"Alt+Backspace", "delete the last word (also Ctrl+Backspace)"},
 		{"Ctrl+U", "clear the whole prompt line"},
+		{"Ctrl+Z", "undo the last input edit"},
+		{"Ctrl+Y", "redo the last undone edit"},
 	}},
 	{title: "Tabs", bindings: []keyBinding{
 		{"Ctrl+T", "new tab"},

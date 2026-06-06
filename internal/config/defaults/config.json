@@ -269,7 +269,7 @@
     {
       "id": "kimi-k2-0905-preview",
       "provider": "moonshot",
-      "context_window": 200000,
+      "context_window": 262144,
       "input_price_per_mtok_usd": 0.60,
       "output_price_per_mtok_usd": 2.50,
       "supports_images": false,

@@ -352,6 +352,18 @@ func TestNormalizeOpenAIReasoningEffort(t *testing.T) {
 		{"Minimal", "gpt-5.1-codex", "none"},
 		{"minimal", "openai/gpt-5.1", "none"},
 		{"minimal", "o3-mini", "minimal"},
+		// Later gpt-5 point releases (gpt-5.2, gpt-5.5 — the shipped codex
+		// default) inherit the gpt-5.1 vocabulary: they accept "none" and 400 on
+		// "minimal", so "minimal" maps onto "none" rather than passing through
+		// verbatim and being rejected.
+		{"none", "gpt-5.5", "none"},
+		{"minimal", "gpt-5.5", "none"},
+		{"minimal", "gpt-5.2", "none"},
+		{"none", "openai/gpt-5.5", "none"},
+		// A bare gpt-5 with no dotted minor stays on the original family's
+		// vocabulary: "minimal" passes through, "none" is dropped.
+		{"minimal", "gpt-5-mini", "minimal"},
+		{"none", "gpt-5-mini", ""},
 	}
 	for _, tc := range cases {
 		require.Equal(t, tc.want, normalizeOpenAIReasoningEffort(tc.in, tc.model),

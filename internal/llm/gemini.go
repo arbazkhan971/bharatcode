@@ -670,13 +670,17 @@ func resolveGeminiSchemaRefs(root any) any {
 	if len(defs) == 0 {
 		return root
 	}
-	resolved := inlineGeminiSchemaRefs(obj, defs, nil)
-	if m, ok := resolved.(map[string]any); ok {
-		// The containers are fully inlined now; Gemini rejects them, so remove them.
-		delete(m, "$defs")
-		delete(m, "definitions")
-	}
-	return resolved
+	// Drop the definition containers before walking the tree. defs still holds
+	// references to the original definition objects, so each $ref site can inline a
+	// fresh deep copy of its target; if the walk instead recursed into the live
+	// containers it would mutate those shared objects in place, and because Go
+	// randomizes map iteration order a consumer reached after the container would
+	// then deep-copy an already-expanded (corrupted) definition. Gemini rejects the
+	// containers anyway, so removing them up front both fixes the aliasing and
+	// satisfies the API.
+	delete(obj, "$defs")
+	delete(obj, "definitions")
+	return inlineGeminiSchemaRefs(obj, defs, nil)
 }
 
 // collectGeminiSchemaDefs indexes the root schema's "$defs" and "definitions"

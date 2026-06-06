@@ -777,6 +777,80 @@ func TestDefaultConfigOpenAIPreset(t *testing.T) {
 	require.False(t, isReasoningModel("gpt-4.1"), "gpt-4.1 must not be classified as a reasoning model")
 }
 
+// TestDefaultConfigXAIPreset asserts the embedded default config ships an xAI
+// provider wired to xAI's v1 endpoint and that the Grok-4 flagship and
+// Grok-4-fast long-context model surface in the registry catalog with the
+// correct context windows and capabilities. Grok-4 serves a 256k window and
+// Grok-4-fast lifts the window to 2M — the headline spec of the fast tier. The
+// context windows are cross-checked against the family heuristic so a stale
+// catalog entry is caught before it undercounts compaction/overflow budgets.
+// Fully offline.
+func TestDefaultConfigXAIPreset(t *testing.T) {
+	cfg := config.Default()
+
+	var prov *config.Provider
+	for i := range cfg.Providers {
+		if cfg.Providers[i].Name == "xai" {
+			prov = &cfg.Providers[i]
+			break
+		}
+	}
+	require.NotNil(t, prov, "default config should define an xai provider")
+	require.Equal(t, config.ProviderOpenAICompatible, prov.Type)
+	require.Equal(t, "https://api.x.ai/v1", prov.BaseURL,
+		"xai preset should target xAI's v1 endpoint")
+	require.Equal(t, "XAI_API_KEY", prov.APIKeyEnv)
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	provider, err := reg.Get("xai")
+	require.NoError(t, err)
+	_, ok := provider.(*openAICompatibleProvider)
+	require.True(t, ok, "xai should resolve to the openai_compatible client")
+
+	catalog := make(map[string]Model)
+	for _, m := range reg.ListModels() {
+		catalog[m.ID] = m
+	}
+
+	cases := []struct {
+		id            string
+		contextWindow int
+		supportsImg   bool
+		supportsTools bool
+	}{
+		// grok-4: flagship 256k-context model with vision and tool support.
+		{"grok-4", 256_000, true, true},
+		// grok-4-fast: 2M-context long-context tier; the large window is the
+		// primary reason to choose it, so the catalog must not undercount it.
+		{"grok-4-fast", 2_000_000, true, true},
+		// grok-3: prior flagship, text-only, 131k context.
+		{"grok-3", 131_072, false, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			m, found := catalog[tc.id]
+			require.Truef(t, found, "model %q should appear in the registry catalog", tc.id)
+			require.Equal(t, "xai", m.Provider)
+			require.Equal(t, tc.contextWindow, m.ContextWindow,
+				"model %q context window mismatch", tc.id)
+			require.Equal(t, tc.supportsImg, m.SupportsImages,
+				"model %q supports_images mismatch", tc.id)
+			require.Equal(t, tc.supportsTools, m.SupportsTools,
+				"model %q supports_tools mismatch", tc.id)
+			// The catalog window must not undercount the family heuristic for the
+			// same id: a lower catalog value is the signature of a stale entry.
+			inferred := inferContextWindow(tc.id)
+			if inferred > 0 {
+				require.GreaterOrEqual(t, m.ContextWindow, inferred,
+					"catalog window for %q should not undercount the inferred family window", tc.id)
+			}
+		})
+	}
+}
+
 func collectEvents(events <-chan Event) []Event {
 	var out []Event
 	for event := range events {

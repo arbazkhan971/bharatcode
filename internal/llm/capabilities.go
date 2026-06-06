@@ -349,6 +349,14 @@ var contextWindowRules = []struct {
 	{"gemini-flash-latest", 1_048_576},
 	{"gemini-flash-lite-latest", 1_048_576},
 	{"gemini-pro-latest", 1_048_576},
+	// A bare "gemini" fallback catches unlisted Google models — experimental
+	// variants (gemini-exp-MMDD, gemini-2.0-flash-thinking-exp, …) and future
+	// releases that share no numbered version marker above — and prevents them
+	// from falling through to "unknown" (0). Every current Gemini model exposes
+	// at least a 1M-token context window, so this is a safe default. It must
+	// follow all numbered and alias Gemini rules so those more specific windows
+	// still win over this fallback.
+	{"gemini", 1_048_576},
 	// xAI Grok — Grok 4 and the grok-code coding line lifted the window to 256k,
 	// while the grok-2/3 line stays at 131k. Both ids carry the "grok" marker, so
 	// the specific "grok-4"/"grok-code" rules must precede the family one to avoid

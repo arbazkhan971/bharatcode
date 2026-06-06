@@ -332,6 +332,14 @@ func classifyAnthropicStreamError(errType, message string) error {
 	case "rate_limit_error":
 		return fmt.Errorf("provider stream error: %s: %w", message, ErrRateLimit)
 	default:
+		// An over-budget prompt is reported as a (terminal, non-retryable)
+		// invalid_request_error whose message reads "prompt is too long: N
+		// tokens > M maximum". Tag it as ErrContextLimit so the agent's
+		// compaction path can recover the turn instead of failing it outright,
+		// mirroring how the HTTP 400 path classifies the same wording.
+		if mentionsContextLimit(message) {
+			return fmt.Errorf("provider stream error: %s: %w", message, ErrContextLimit)
+		}
 		return fmt.Errorf("provider stream error: %s", message)
 	}
 }

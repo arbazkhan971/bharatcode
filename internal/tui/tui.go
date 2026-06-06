@@ -583,6 +583,23 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.inputHistory.resetRecall()
 		m.inputHistory.resetCompletion()
 		return m, nil
+	case "alt+backspace", "ctrl+backspace":
+		// Delete the trailing word, the readline "unix-word-rubout" edit that sits
+		// between Backspace (one character) and Ctrl+U (the whole line) — so a user
+		// can discard a single mistyped word without holding Backspace, matching the
+		// word-delete editing Claude Code and opencode support at the prompt. The
+		// append-only buffer has no cursor, so "word" means the last one. It is a
+		// no-op on an empty buffer and, like the other edits, cancels any recall walk
+		// and completion cycle.
+		s := m.input.String()
+		if s == "" {
+			return m, nil
+		}
+		m.input.Reset()
+		m.input.WriteString(deleteLastWord(s))
+		m.inputHistory.resetRecall()
+		m.inputHistory.resetCompletion()
+		return m, nil
 	default:
 		if msg.Key().Text != "" {
 			m.input.WriteString(msg.Key().Text)
@@ -592,6 +609,21 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+}
+
+// deleteLastWord removes the trailing word from an append-only prompt buffer:
+// first any trailing whitespace, then the run of non-whitespace before it,
+// leaving the whitespace that precedes that word in place (so "go test ./..."
+// becomes "go test "). This is the readline "unix-word-rubout" edit bound to
+// Ctrl+W / Alt+Backspace in a shell, the same word-at-a-time delete Claude Code
+// and opencode offer at the prompt. A buffer with no word before the trailing
+// whitespace — empty, or all spaces — deletes down to "".
+func deleteLastWord(s string) string {
+	trimmed := strings.TrimRight(s, " \t")
+	if i := strings.LastIndexAny(trimmed, " \t"); i >= 0 {
+		return trimmed[:i+1]
+	}
+	return ""
 }
 
 // setInput replaces the input buffer with s. It is used by Tab completion,
@@ -1337,6 +1369,7 @@ var keybindingGroups = []keyGroup{
 	{title: "Prompt", bindings: []keyBinding{
 		{"Enter", "send the prompt"},
 		{"Backspace", "delete the character before the cursor"},
+		{"Alt+Backspace", "delete the last word (also Ctrl+Backspace)"},
 		{"Ctrl+U", "clear the whole prompt line"},
 	}},
 	{title: "Tabs", bindings: []keyBinding{

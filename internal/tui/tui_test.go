@@ -575,6 +575,90 @@ func TestCtrlU_ResetsRecallWalk(t *testing.T) {
 	require.Equal(t, "beta", m.input.String(), "recall restarts at the newest entry after Ctrl+U")
 }
 
+// keyAltBackspace and keyCtrlBackspace are the two key encodings a terminal may
+// send for the word-delete edit, so a test can prove the prompt handles both.
+func keyAltBackspace() tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace, Mod: tea.ModAlt})
+}
+
+func keyCtrlBackspace() tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace, Mod: tea.ModCtrl})
+}
+
+// TestDeleteLastWord covers the unix-word-rubout helper: a trailing word (with
+// any whitespace after it) is removed while the whitespace before that word is
+// kept, and a buffer with no preceding word deletes down to "".
+func TestDeleteLastWord(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct{ in, want string }{
+		{"go test ./...", "go test "},
+		{"go test ./... ", "go test "},
+		{"one", ""},
+		{"one   ", ""},
+		{"", ""},
+		{"   ", ""},
+		{"a b", "a "},
+		{"hello\tworld", "hello\t"},
+	}
+	for _, c := range cases {
+		require.Equalf(t, c.want, deleteLastWord(c.in), "deleteLastWord(%q)", c.in)
+	}
+}
+
+// TestAltBackspace_DeletesLastWord proves Alt+Backspace removes only the trailing
+// word from the prompt, the readline word-delete that sits between Backspace (one
+// character) and Ctrl+U (the whole line), and that Ctrl+Backspace does the same so
+// either terminal encoding works.
+func TestAltBackspace_DeletesLastWord(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "fix the parser")
+
+	_, _ = m.Update(keyAltBackspace())
+	require.Equal(t, "fix the ", m.input.String(), "Alt+Backspace deletes only the last word")
+
+	_, _ = m.Update(keyCtrlBackspace())
+	require.Equal(t, "fix ", m.input.String(), "Ctrl+Backspace deletes the next word")
+}
+
+// TestAltBackspace_EmptyBufferIsNoop proves the word-delete edit leaves an
+// already-empty prompt untouched, so it never disturbs an idle input line.
+func TestAltBackspace_EmptyBufferIsNoop(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	require.Equal(t, 0, m.input.Len())
+
+	_, _ = m.Update(keyAltBackspace())
+	require.Equal(t, 0, m.input.Len())
+}
+
+// TestAltBackspace_ResetsRecallWalk proves deleting a word ends an active history
+// recall, mirroring how Backspace and Ctrl+U reseed recall rather than leaving a
+// stale cursor mid-walk.
+func TestAltBackspace_ResetsRecallWalk(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(2))
+	m := h.model
+
+	submitPrompt(t, h, "alpha beta")
+	submitPrompt(t, h, "gamma delta")
+
+	_, _ = m.Update(keyUp())
+	require.Equal(t, "gamma delta", m.input.String(), "Up recalls the newest entry")
+
+	_, _ = m.Update(keyAltBackspace())
+	require.Equal(t, "gamma ", m.input.String(), "Alt+Backspace edits the recalled entry")
+
+	// With recall reset, the next Up restarts the walk from the newest entry
+	// rather than stepping past it to an older one.
+	_, _ = m.Update(keyUp())
+	require.Equal(t, "gamma delta", m.input.String(), "recall restarts at the newest entry after a word delete")
+}
+
 func TestStatusbar_UptimeTickMonotonic(t *testing.T) {
 	t.Parallel()
 

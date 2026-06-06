@@ -36,6 +36,18 @@ func TestIsAzureOpenAI(t *testing.T) {
 			want:    true,
 		},
 		{
+			// AI Foundry resources default to a Cognitive Services host that serves
+			// the OpenAI route with the same api-key auth scheme.
+			name:    "azure ai foundry cognitive services host",
+			baseURL: "https://my-resource.cognitiveservices.azure.com/openai/deployments/gpt-4o?api-version=2024-06-01",
+			want:    true,
+		},
+		{
+			name:    "cognitive services host is case-insensitive",
+			baseURL: "https://My-Resource.CognitiveServices.Azure.Com/openai/deployments/gpt-4o",
+			want:    true,
+		},
+		{
 			name:    "openai public api is not azure",
 			baseURL: "https://api.openai.com/v1",
 			want:    false,
@@ -78,6 +90,34 @@ func TestPostOpenAIJSONAzureUsesAPIKeyHeader(t *testing.T) {
 		context.Background(),
 		server.Client(),
 		"https://res.openai.azure.com/openai/deployments/gpt-4o?api-version=2024-06-01",
+		server.URL,
+		"azure-secret",
+		map[string]string{"hello": "world"},
+	)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	require.Equal(t, "azure-secret", gotAPIKey)
+	require.Empty(t, gotAuth, "Azure must not receive a Bearer Authorization header")
+}
+
+// TestPostOpenAIJSONAzureCognitiveServicesUsesAPIKeyHeader asserts an AI Foundry
+// resource served on the ".cognitiveservices.azure.com" host authenticates with
+// the "api-key" header too, so a deployment configured only with api_key_env works
+// regardless of which of the two Azure host families it lives on.
+func TestPostOpenAIJSONAzureCognitiveServicesUsesAPIKeyHeader(t *testing.T) {
+	var gotAuth, gotAPIKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("api-key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	resp, err := postOpenAIJSON(
+		context.Background(),
+		server.Client(),
+		"https://res.cognitiveservices.azure.com/openai/deployments/gpt-4o?api-version=2024-06-01",
 		server.URL,
 		"azure-secret",
 		map[string]string{"hello": "world"},

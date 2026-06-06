@@ -257,3 +257,52 @@ func TestTurnTokensSegment_Priority(t *testing.T) {
 	require.Contains(t, narrow, "⠙ working 3s", "the working segment must outlast the token counts")
 	require.NotContains(t, narrow, " in · ", "the token segment must be shed before the working indicator")
 }
+
+// TestInputTokensSegment asserts the input-token-count segment appears only when
+// set, so the bar is byte-identical to its no-input form until the user starts
+// typing — and surfaces as the supplied string once set.
+func TestInputTokensSegment(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+	require.NotContains(t, bar.Render(160), "tok", "an empty InputTokens must add no segment")
+
+	bar.InputTokens = "~128 tok"
+	require.Contains(t, bar.Render(160), "~128 tok", "a set InputTokens must surface its segment")
+
+	bar.InputTokens = "~1 tok"
+	require.Contains(t, bar.Render(160), "~1 tok", "updating InputTokens must reflect the new value")
+
+	bar.InputTokens = ""
+	require.NotContains(t, bar.Render(160), "tok", "clearing InputTokens must remove the segment")
+}
+
+// TestInputTokensSegment_Priority asserts the input-token segment outranks turn
+// tokens (which show idle stats), so on a narrow terminal the user's in-progress
+// message length outlasts the stale counts from the last completed turn.
+func TestInputTokensSegment_Priority(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := Bar{
+		Theme:       styles.Default(),
+		Model:       "m",
+		Agent:       "a",
+		SessionID:   "id",
+		StartedAt:   start,
+		Now:         start,
+		InputTokens: "~128 tok",
+		TurnTokens:  "1.2k in · 234 out",
+	}
+
+	// Wide enough for both: both must appear.
+	full := bar.Render(160)
+	require.Contains(t, full, "~128 tok", "input tokens must appear on a wide bar")
+	require.Contains(t, full, "1.2k in · 234 out", "turn tokens must appear on a wide bar")
+
+	// Narrow: the lower-priority turn tokens are shed before the input count.
+	narrow := bar.Render(len([]rune("m · ~128 tok")))
+	require.Contains(t, narrow, "~128 tok", "input tokens must outlast turn tokens on a narrow bar")
+	require.NotContains(t, narrow, " in · ", "turn tokens must be shed before input tokens")
+}

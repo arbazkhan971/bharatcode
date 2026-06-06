@@ -18,4 +18,6 @@ Wide-line capping: independent of the line-count cap, any single output line lon
 
 Truncation: each of stdout and stderr is captured up to roughly 10 MB; output beyond that is dropped and a `[truncated, N bytes]` marker is appended. To stay well under that limit and keep results focused, narrow your commands with `head`, `tail`, `grep`, or `sed -n "<start>,<end>p"` rather than dumping whole files.
 
-Failure cases include malformed arguments, a missing command argument, permission denial, unavailable shell support, timeout, a non-zero exit status, or context cancellation.
+Offline mode: when BharatCode runs in offline mode (the `--offline` flag or `BHARATCODE_OFFLINE`), commands that invoke a known network-egress client — `curl`, `wget`, `scp`, `sftp`, `rsync`, `ssh`, `nc`/`netcat`, `socat`, `git push`/`pull`/`fetch`/`clone`, and similar — are refused before they run, because offline mode guarantees code does not leave the machine. Accomplish the task without reaching the network, or tell the user to disable offline mode if network access is genuinely required.
+
+Failure cases include malformed arguments, a missing command argument, permission denial, a blocked network command in offline mode, unavailable shell support, timeout, a non-zero exit status, or context cancellation.

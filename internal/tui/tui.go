@@ -1086,6 +1086,35 @@ func formatTurnTokens(inputTokens, outputTokens int) string {
 	return compactTokenCount(inputTokens) + " in · " + compactTokenCount(outputTokens) + " out"
 }
 
+// formatTurnCostUSD returns a compact dollar-cost string for the status bar
+// (e.g. "$0.0045", "$0.032", "$1.23"). An empty string is returned when cost
+// is zero so the segment is absent when no pricing is configured for the model.
+func formatTurnCostUSD(usd float64) string {
+	if usd <= 0 {
+		return ""
+	}
+	switch {
+	case usd < 0.01:
+		return fmt.Sprintf("$%.4f", usd)
+	case usd < 1:
+		return fmt.Sprintf("$%.3f", usd)
+	default:
+		return fmt.Sprintf("$%.2f", usd)
+	}
+}
+
+// turnCostUSD computes the USD cost for one turn using the per-model pricing in
+// the config. It returns 0 when the model is not found (no pricing configured).
+func turnCostUSD(models []config.Model, modelID string, inputTokens, outputTokens int) float64 {
+	for _, m := range models {
+		if m.ID == modelID {
+			return (float64(inputTokens)*m.InputPricePerMTokUSD +
+				float64(outputTokens)*m.OutputPricePerMTokUSD) / 1_000_000
+		}
+	}
+	return 0
+}
+
 // compactTokenCount formats n as a short string: the raw number when it fits
 // in three digits, and a one-decimal "Nk" abbreviation for thousands, matching
 // how Claude Code and opencode keep token counts compact in their status areas.

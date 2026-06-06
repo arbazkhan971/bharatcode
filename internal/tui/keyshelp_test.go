@@ -286,3 +286,60 @@ func TestKeybindingHelp_NoCountHeaderWhenUnfiltered(t *testing.T) {
 	require.NotContains(t, keybindingHelpBody(), "shortcuts match")
 	require.NotContains(t, keybindingHelpBodyFiltered("   "), "shortcuts match")
 }
+
+// TestKeybindingHelp_FuzzyFallbackSurfacesAbbreviation proves a run-together
+// query that matches no binding by substring still surfaces its shortcut through
+// the subsequence fallback: "swtab" has no contiguous home in the keymap, but its
+// letters appear in order within "switch to the previous/next tab", so the tab
+// switcher is found rather than the overlay going blank. This keeps fuzzy
+// discovery in the /keys filter consistent with the slash-command menu.
+func TestKeybindingHelp_FuzzyFallbackSurfacesAbbreviation(t *testing.T) {
+	// No binding contains "swtab" as a substring, so the precise pass finds
+	// nothing and the fuzzy fallback takes over.
+	for _, g := range keybindingGroups {
+		for _, b := range g.bindings {
+			hay := strings.ToLower(g.title + " " + b.key + " " + b.desc)
+			require.NotContains(t, hay, "swtab", "the query must not match any binding by substring")
+		}
+	}
+
+	groups := filterKeybindingGroups("swtab")
+	require.NotEmpty(t, groups, "the fuzzy fallback should surface a binding for 'swtab'")
+
+	var found bool
+	for _, g := range groups {
+		for _, b := range g.bindings {
+			if strings.Contains(b.desc, "switch to the previous/next tab") {
+				found = true
+			}
+		}
+	}
+	require.True(t, found, "the tab switcher should surface through the subsequence fallback")
+}
+
+// TestKeybindingHelp_FuzzyFallbackCollapsesWhitespace proves the fuzzy fallback
+// joins a multi-word query into one run before matching, so a spaced query and
+// its run-together form match the same bindings as a subsequence. It exercises
+// the fallback directly because a spaced query may find real substring matches
+// (e.g. "sw" lives inside "switch") that pre-empt the fallback entirely.
+func TestKeybindingHelp_FuzzyFallbackCollapsesWhitespace(t *testing.T) {
+	require.Equal(t, fuzzyFilterKeybindingGroups("swtab"), fuzzyFilterKeybindingGroups("sw tab"))
+}
+
+// TestKeybindingHelp_SubstringMatchesAreNotBroadened proves the fuzzy fallback
+// fires only when the substring pass finds nothing: a query with real substring
+// matches keeps exactly those rows rather than being widened by the looser
+// subsequence rule, so a precise filter stays precise.
+func TestKeybindingHelp_SubstringMatchesAreNotBroadened(t *testing.T) {
+	// "scroll" matches the two scroll bindings by substring; the fuzzy fallback,
+	// which would also accept any row whose letters spell "scroll" in order, must
+	// not add to that set.
+	require.Equal(t, 2, countBindings(filterKeybindingGroups("scroll")))
+}
+
+// TestKeybindingHelp_FuzzyNoMatchStillEmpty proves a query that matches nothing
+// even as a subsequence yields no groups, so the overlay still falls through to
+// its "no shortcuts match" note rather than the fallback inventing rows.
+func TestKeybindingHelp_FuzzyNoMatchStillEmpty(t *testing.T) {
+	require.Empty(t, filterKeybindingGroups("zzzqqqx"))
+}

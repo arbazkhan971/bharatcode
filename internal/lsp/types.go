@@ -59,6 +59,12 @@ type Diagnostic struct {
 	// such as "E0425" (rustc), "2304" (tsserver), or "unused-import". The LSP
 	// wire value may be a string or an integer; both are normalized to a string.
 	Code string
+	// CodeHref is the URL of the documentation for the diagnostic's rule, taken
+	// from the LSP codeDescription.href field, when the server supplies one (e.g.
+	// an ESLint rule page or a rustc --explain link). It lets a consumer point the
+	// model at the canonical explanation of the rule rather than only its code. It
+	// is empty when the server attaches none.
+	CodeHref string
 	// Tags carries the diagnostic's classification tags (Unnecessary, Deprecated)
 	// when the server supplies them, so consumers can tell dead code and
 	// deprecated usages apart from ordinary warnings. It is empty when the server

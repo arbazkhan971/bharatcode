@@ -40,6 +40,53 @@ func TestParsePullDiagnosticsCodeStringAndInteger(t *testing.T) {
 	}
 }
 
+func TestParsePullDiagnosticsCodeDescriptionHref(t *testing.T) {
+	raw := json.RawMessage(`{
+	  "items": [
+	    {
+	      "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+	      "severity": 2,
+	      "message": "Unexpected console statement.",
+	      "source": "eslint",
+	      "code": "no-console",
+	      "codeDescription": {"href": "https://eslint.org/docs/latest/rules/no-console "}
+	    },
+	    {
+	      "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+	      "severity": 2,
+	      "message": "no link here",
+	      "source": "eslint",
+	      "code": "other"
+	    }
+	  ]
+	}`)
+
+	diags, err := parsePullDiagnostics("main.js", raw)
+	if err != nil {
+		t.Fatalf("parsePullDiagnostics: %v", err)
+	}
+	if len(diags) != 2 {
+		t.Fatalf("got %d diagnostics, want 2", len(diags))
+	}
+	// The href is captured and surrounding whitespace trimmed.
+	if diags[0].CodeHref != "https://eslint.org/docs/latest/rules/no-console" {
+		t.Errorf("CodeHref = %q, want trimmed eslint docs URL", diags[0].CodeHref)
+	}
+	// A diagnostic without codeDescription leaves CodeHref empty.
+	if diags[1].CodeHref != "" {
+		t.Errorf("CodeHref = %q, want empty", diags[1].CodeHref)
+	}
+}
+
+func TestHrefFromWire(t *testing.T) {
+	if got := hrefFromWire(nil); got != "" {
+		t.Errorf("hrefFromWire(nil) = %q, want empty", got)
+	}
+	if got := hrefFromWire(&wireCodeDescription{Href: "  https://example.com/r  "}); got != "https://example.com/r" {
+		t.Errorf("hrefFromWire trimmed = %q, want https://example.com/r", got)
+	}
+}
+
 func TestParsePullDiagnosticsRelatedInformation(t *testing.T) {
 	raw := json.RawMessage(`{
 	  "items": [

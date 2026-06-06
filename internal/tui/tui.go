@@ -775,6 +775,22 @@ func renderInputArea(s, cursor string) string {
 	return b.String()
 }
 
+// approxTokens returns a rough token estimate for s using the common
+// 4-chars-per-token heuristic for mixed prose and code. The estimate is
+// intentionally coarse — it helps the user gauge prompt size at a glance,
+// not measure it precisely. A non-empty string always returns at least 1.
+func approxTokens(s string) int {
+	r := len([]rune(s))
+	if r == 0 {
+		return 0
+	}
+	t := r / 4
+	if t == 0 {
+		return 1
+	}
+	return t
+}
+
 // deleteLastWord removes the trailing word from an append-only prompt buffer:
 // first any trailing whitespace, then the run of non-whitespace before it,
 // leaving the whitespace that precedes that word in place (so "go test ./..."
@@ -1146,6 +1162,11 @@ func (m *model) renderMain() string {
 	m.status.TurnTokens = m.lastTurnTokens
 	m.status.ContextPct = m.lastContextPct
 	m.status.Search = m.search.statusSegment()
+	if n := approxTokens(m.input.String()); n > 0 {
+		m.status.InputTokens = fmt.Sprintf("~%d tok", n)
+	} else {
+		m.status.InputTokens = ""
+	}
 	// clampChat finalizes m.chatScroll (clamping it to the scrollable range), so
 	// the scroll indicator is computed from it afterwards to reflect the window
 	// actually shown.

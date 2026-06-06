@@ -48,6 +48,12 @@ type Bar struct {
 	// window fills completely — matching how Claude Code and opencode surface
 	// context-window headroom.
 	ContextPct int
+	// InputTokens shows the estimated token count of the current input buffer
+	// (e.g. "~128 tok"). Empty hides the segment; it is set while the user
+	// is composing a prompt and cleared once the turn is submitted, so a
+	// user writing a long message can see their approximate token footprint
+	// before sending — without opening a dialog.
+	InputTokens string
 }
 
 // segment is one " · "-joined field of the status line paired with the priority
@@ -66,18 +72,19 @@ type segment struct {
 // the tail of the line. The model is the anchor: it is never dropped, only
 // ellipsis-clipped as a last resort.
 const (
-	prioModel      = 1000 // anchor: never dropped
-	prioWorking    = 100
-	prioSearch     = 90
-	prioScroll     = 80
-	prioGoal       = 70
-	prioMode       = 60
-	prioYolo       = 50
-	prioTurnTokens = 35
-	prioContextPct = 45 // outranks turn tokens so context headroom is shed last
-	prioAgent      = 30
-	prioSession    = 25
-	prioUptime     = 20
+	prioModel       = 1000 // anchor: never dropped
+	prioWorking     = 100
+	prioSearch      = 90
+	prioScroll      = 80
+	prioGoal        = 70
+	prioMode        = 60
+	prioYolo        = 50
+	prioContextPct  = 45 // outranks turn tokens so context headroom is shed last
+	prioInputTokens = 40 // input-length estimate: outranks idle turn stats while typing
+	prioTurnTokens  = 35
+	prioAgent       = 30
+	prioSession     = 25
+	prioUptime      = 20
 )
 
 // Render returns one status line.
@@ -123,6 +130,9 @@ func (b Bar) Render(width int) string {
 	}
 	if b.ContextPct > 0 {
 		segs = append(segs, segment{"ctx " + strconv.Itoa(b.ContextPct) + "%", prioContextPct})
+	}
+	if b.InputTokens != "" {
+		segs = append(segs, segment{b.InputTokens, prioInputTokens})
 	}
 
 	line := fitSegments(segs, width)

@@ -2,14 +2,26 @@
 
 > **OpenCode for India** — a Go-native, MIT-licensed, open-weight-first CLI coding agent. Your code stays in India.
 
+**🌐 Website: [bharatcode.dev](https://bharatcode.dev)** · [Docs](https://bharatcode.dev/docs) · [Install](https://bharatcode.dev/docs/installation)
+
 <p>
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white">
+  <a href="https://bharatcode.dev"><img alt="Website" src="https://img.shields.io/badge/website-bharatcode.dev-saffron?color=FF9933"></a>
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white">
   <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg">
   <img alt="CGO-free" src="https://img.shields.io/badge/CGO-free-success">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-350%2B-blue">
   <img alt="Status" src="https://img.shields.io/badge/status-active%20development-orange">
   <img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
 </p>
+
+## Install
+
+```sh
+brew install arbazkhan971/tap/bharatcode      # Homebrew (macOS / Linux)
+npm install -g bharatcode-cli                 # npm
+curl -fsSL https://raw.githubusercontent.com/arbazkhan971/bharatcode/main/install.sh | sh   # script
+```
+
+See [all install methods](https://bharatcode.dev/docs/installation) (Windows, go install, source).
 
 BharatCode is a terminal-based AI pair programmer in the same class as Claude Code, OpenCode, and Codex CLI — but built open-weight-first and data-sovereign. It runs locally, talks to whatever model you choose (fully local Ollama / LM Studio, India- and Asia-hosted inference, or frontier APIs), and keeps an INR-aware cost ledger so spend is a number you can see, not a surprise at month-end. Built for teams who need their source code to never leave the country.
 

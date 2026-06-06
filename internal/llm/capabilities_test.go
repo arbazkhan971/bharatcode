@@ -446,6 +446,7 @@ func TestModelSupportsGeminiThinking(t *testing.T) {
 		{ID: "gemini-2.0-flash"},
 		{ID: "gemini-flash-latest"},
 		{ID: "gemini-pro-latest"},
+		{ID: "gemini-flash-lite-latest"},
 	}
 
 	cases := []struct {
@@ -455,9 +456,10 @@ func TestModelSupportsGeminiThinking(t *testing.T) {
 		{"gemini-2.5-flash", true},
 		{"gemini-3-pro-preview", true},
 		// Rolling "-latest" aliases resolve to the thinking-capable Gemini 2.5
-		// generation.
+		// generation — all three aliases support thinkingConfig.
 		{"gemini-flash-latest", true},
 		{"gemini-pro-latest", true},
+		{"gemini-flash-lite-latest", true},
 		// Pre-2.5 models do not support the native thinkingConfig.
 		{"gemini-2.0-flash", false},
 		// An id absent from the catalog is never thinking-capable, even if its
@@ -595,5 +597,64 @@ func TestDefaultsCatalogAnthropicTiers(t *testing.T) {
 		require.Truef(t, ok, "defaults catalog must include anthropic model %q", tier.id)
 		require.Equalf(t, tier.wantProvider, m.Provider, "model %q has wrong provider", tier.id)
 		require.Equalf(t, tier.wantCtxWindow, m.ContextWindow, "model %q has wrong context_window", tier.id)
+	}
+}
+
+// TestDefaultsCatalogGeminiRollingAliases verifies the embedded defaults include
+// the three Gemini rolling "-latest" aliases in the native gemini provider so
+// users who set GEMINI_API_KEY can use the always-current model IDs without
+// knowing a specific version string.
+func TestDefaultsCatalogGeminiRollingAliases(t *testing.T) {
+	cfg := config.Default()
+
+	byID := make(map[string]config.Model, len(cfg.Models))
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+
+	aliases := []struct {
+		id                 string
+		wantProvider       string
+		wantMinCtxWindow   int
+		wantSupportsImages bool
+		wantSupportsTools  bool
+	}{
+		// gemini-flash-latest tracks the current Flash generation (2.5-flash tier).
+		{"gemini-flash-latest", "gemini", 1_000_000, true, true},
+		// gemini-pro-latest tracks the current Pro generation (2.5-pro tier).
+		{"gemini-pro-latest", "gemini", 1_000_000, true, true},
+		// gemini-flash-lite-latest tracks the current Flash Lite generation.
+		{"gemini-flash-lite-latest", "gemini", 1_000_000, true, true},
+	}
+	for _, a := range aliases {
+		m, ok := byID[a.id]
+		require.Truef(t, ok, "defaults catalog must include gemini rolling alias %q", a.id)
+		require.Equalf(t, a.wantProvider, m.Provider, "alias %q has wrong provider", a.id)
+		require.GreaterOrEqualf(t, m.ContextWindow, a.wantMinCtxWindow,
+			"alias %q context_window must be >= %d", a.id, a.wantMinCtxWindow)
+		require.Equalf(t, a.wantSupportsImages, m.SupportsImages,
+			"alias %q SupportsImages mismatch", a.id)
+		require.Equalf(t, a.wantSupportsTools, m.SupportsTools,
+			"alias %q SupportsTools mismatch", a.id)
+	}
+
+	// All three aliases must be listed in the native gemini provider's model list.
+	geminiProvider := func() *config.Provider {
+		for i := range cfg.Providers {
+			if cfg.Providers[i].Name == "gemini" {
+				return &cfg.Providers[i]
+			}
+		}
+		return nil
+	}()
+	require.NotNil(t, geminiProvider, "defaults must include a provider named 'gemini'")
+
+	providerModels := make(map[string]bool, len(geminiProvider.Models))
+	for _, id := range geminiProvider.Models {
+		providerModels[id] = true
+	}
+	for _, a := range aliases {
+		require.Truef(t, providerModels[a.id],
+			"gemini provider must list rolling alias %q in its models", a.id)
 	}
 }

@@ -375,6 +375,12 @@ var (
 	// "crystal build && go test" chain. A Crystal invocation carries none of the
 	// other runners' substrings (and the bare "spec" never matches \brspec\b).
 	crystalSpecRe = regexp.MustCompile(`\bcrystal\b[^&|;]*\bspec\b`)
+	// \bnpm t\b matches "npm t" with a trailing word boundary, covering both the
+	// bare "npm t" invocation (npm's built-in alias for "npm test") and "npm t
+	// --watch" (with arguments), while excluding "npm typescript" or "npm ta*"
+	// where the "t" is followed by another word character. "npm test" is checked
+	// first in the jest case so this only needs to catch the short alias.
+	npmShortRe = regexp.MustCompile(`\bnpm t\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -675,7 +681,7 @@ func classifyTestRunner(command string) testRunner {
 	// test` — bun's own runner, which uses a "✗" glyph distinct from jest's "✕" —
 	// is already claimed above and never reaches this case.
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
-		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
+		strings.Contains(c, "npm test"), npmShortRe.MatchString(c),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
 		strings.Contains(c, "yarn run test"), strings.Contains(c, "pnpm test"),
 		strings.Contains(c, "pnpm run test"), strings.Contains(c, "bun run test"):

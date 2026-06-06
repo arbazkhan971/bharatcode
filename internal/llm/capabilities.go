@@ -505,6 +505,13 @@ var contextWindowRules = []struct {
 	// Baidu ERNIE — the ERNIE 4.5 family exposes a 128k window. Its id carries no
 	// broader marker above, so this rule keeps it from falling through to 0.
 	{"ernie", 131_072},
+	// Tencent Hunyuan — the modern Hunyuan line (Hunyuan-A13B, Hunyuan-Large, and
+	// the Hunyuan-TurboS/T1 reasoning models) ships a 256k native context window,
+	// its headline long-context feature. The id carries no broader family marker
+	// above, so without this rule it falls through to "unknown" (0) when a user
+	// adds it (commonly via OpenRouter or the Tencent API) without an explicit
+	// context_window.
+	{"hunyuan", 262_144},
 	// Amazon Nova (commonly served via Bedrock) — Nova Pro and Nova Lite both
 	// expose a 300k window while Nova Micro is 128k, and Nova Premier lifted the
 	// window to 1M. The "nova-premier" and "nova-micro" ids both carry the "nova"

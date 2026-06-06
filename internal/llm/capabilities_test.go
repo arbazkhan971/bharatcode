@@ -184,6 +184,10 @@ func TestInferContextWindow(t *testing.T) {
 		// Baidu ERNIE 4.5 exposes a 128k window via its own rule.
 		{"ernie-4.5-300b-a47b", 131_072},
 		{"baidu/ernie-4.5-21b-a3b", 131_072},
+		// Tencent Hunyuan exposes a 256k window via its own rule; the id carries no
+		// broader family marker, so without it these fall through to 0.
+		{"hunyuan-a13b-instruct", 262_144},
+		{"tencent/hunyuan-large", 262_144},
 		// Amazon Nova (Bedrock): Premier is 1M, Pro/Lite are 300k, Micro is 128k.
 		// Premier and Micro carry the "nova" marker, so their specific rules must
 		// win over the 300k family default.

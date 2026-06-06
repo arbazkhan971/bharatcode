@@ -249,6 +249,32 @@ func TestCompleteMention_CyclesMatches(t *testing.T) {
 	require.Equal(t, "see @main.go", out3)
 }
 
+// TestCompleteMentionPrev_StepsBackwardAndWraps asserts Shift+Tab reverses the
+// @-file cycle: the first backward step seeds on the last match, and stepping
+// back past the first match wraps to the last, mirroring the slash menu.
+func TestCompleteMentionPrev_StepsBackwardAndWraps(t *testing.T) {
+	t.Parallel()
+
+	root := mentionWorkspace(t, "main.go", "internal/mainframe.go")
+	var st inputState
+
+	// The first Shift+Tab seeds the cycle on the last match.
+	out, ok := st.completeMentionPrev("see @main", root)
+	require.True(t, ok)
+	require.Equal(t, "see @internal/mainframe.go", out,
+		"a backward step seeds on the last match")
+
+	// Stepping back again reaches the first match...
+	out2, ok := st.completeMentionPrev(out, root)
+	require.True(t, ok)
+	require.Equal(t, "see @main.go", out2)
+
+	// ...and once more wraps to the last.
+	out3, ok := st.completeMentionPrev(out2, root)
+	require.True(t, ok)
+	require.Equal(t, "see @internal/mainframe.go", out3)
+}
+
 // TestCompleteMention_NoMatchLeavesBuffer asserts an unmatched token applies no
 // completion and leaves the buffer unchanged.
 func TestCompleteMention_NoMatchLeavesBuffer(t *testing.T) {

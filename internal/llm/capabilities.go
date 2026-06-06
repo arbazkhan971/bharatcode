@@ -259,11 +259,11 @@ var contextWindowRules = []struct {
 	{"gpt-35", 16_385},
 	// The reasoning gpt-5 family (gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-codex,
 	// and point releases such as gpt-5.1) exposes a 400k window. The chat-tuned
-	// variant gpt-5-chat-latest is the exception: it ships only a 128k window.
-	// Its id carries the "gpt-5" marker, so this specific rule must precede the
-	// family one to avoid resolving the chat model to more than 3x its real
-	// window — the same carve-out pattern as gpt-4.5 before gpt-4.
-	{"gpt-5-chat", 128_000},
+	// variants ship only a 128k window, but they are carved out by the gpt-5 chat
+	// pre-scan in inferContextWindow rather than a substring rule here: a versioned
+	// id like "gpt-5.1-chat-latest" never contains the literal "gpt-5-chat", so a
+	// substring rule would miss it and the family rule below would resolve it to
+	// more than 3x its real window.
 	{"gpt-5", 400_000},
 	// OpenAI o-series. The released o1 (and o3/o4-mini) expose a 200k window, but
 	// the earlier o1-preview and o1-mini shipped only 128k. Both carry the "o1"
@@ -432,6 +432,20 @@ var contextWindowRules = []struct {
 // unrecognized id returns 0, preserving the prior "unknown" behavior.
 func inferContextWindow(id string) int {
 	lid := strings.ToLower(strings.TrimSpace(id))
+	// Aggregators (OpenRouter, ...) namespace ids as "vendor/model"; strip the
+	// vendor prefix so the gpt-5 chat carve-out below keys on the bare id, mirroring
+	// isReasoningModel.
+	if idx := strings.LastIndex(lid, "/"); idx >= 0 {
+		lid = lid[idx+1:]
+	}
+	// The gpt-5 chat-tuned variants ship a 128k window while the rest of the
+	// reasoning gpt-5 family exposes 400k. Detect them the same way isReasoningModel
+	// does — the gpt-5 family prefix plus the "chat" marker — so versioned ids such
+	// as "gpt-5.1-chat-latest", which no "gpt-5-chat" substring rule would match,
+	// resolve to their real window instead of the family's 400k.
+	if strings.HasPrefix(lid, "gpt-5") && strings.Contains(lid, gpt5ChatMarker) {
+		return 128_000
+	}
 	for _, rule := range contextWindowRules {
 		if strings.Contains(lid, rule.substring) {
 			return rule.window

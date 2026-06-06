@@ -23,10 +23,15 @@ func newRunCmd() *cobra.Command {
 	var jsonStream bool
 	var outputLastMessage string
 	var quiet bool
+	var continueSession bool
+	var resumeSessionID string
 	cmd := &cobra.Command{
-		Use:     "run [prompt]",
-		Short:   "Run one prompt without opening the TUI",
-		Example: "  bharatcode run \"summarize this repository\"\n  echo \"hello\" | bharatcode run",
+		Use:   "run [prompt]",
+		Short: "Run one prompt without opening the TUI",
+		Example: "  bharatcode run \"summarize this repository\"\n" +
+			"  echo \"hello\" | bharatcode run\n" +
+			"  bharatcode run --continue \"what's next?\"\n" +
+			"  bharatcode run --session <id> \"follow up question\"",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prompt, err := readPrompt(cmd, args)
 			if err != nil {
@@ -39,25 +44,30 @@ func newRunCmd() *cobra.Command {
 			}
 			defer closeApp(cmd.Context(), application)
 
-			if agentName == "" {
-				agentName = "coder"
-			}
-			loop, err := application.Agent.Agent(agentName)
-			if err != nil {
-				return fmt.Errorf("resolving agent: %w", err)
-			}
 			projectPath := opts.projectDir
 			if projectPath == "" {
 				projectPath = "."
 			}
-			s := &session.Session{
-				ProjectPath: projectPath,
-				Title:       session.TitleFromFirstMessage(userMessage(prompt)),
-				Model:       modelName,
-				Agent:       agentName,
+
+			s, err := resolveRunSession(cmd.Context(), application, projectPath,
+				resumeSessionID, modelName, agentName, prompt, continueSession)
+			if err != nil {
+				return err
 			}
-			if err := application.Sessions.Create(cmd.Context(), s); err != nil {
-				return fmt.Errorf("creating session: %w", err)
+
+			// Prefer an explicit --agent flag; fall back to the session's stored
+			// agent (useful when --continue or --session resumes a prior run);
+			// ultimately default to "coder".
+			effectiveAgent := agentName
+			if effectiveAgent == "" && s.Agent != "" {
+				effectiveAgent = s.Agent
+			}
+			if effectiveAgent == "" {
+				effectiveAgent = "coder"
+			}
+			loop, err := application.Agent.Agent(effectiveAgent)
+			if err != nil {
+				return fmt.Errorf("resolving agent: %w", err)
 			}
 
 			if jsonStream {
@@ -90,11 +100,53 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&modelName, "model", "", "model id to use")
-	cmd.Flags().StringVar(&agentName, "agent", "coder", "agent name to use")
+	cmd.Flags().StringVar(&agentName, "agent", "", "agent name to use (default: coder, or the resumed session's agent)")
 	cmd.Flags().BoolVar(&jsonStream, "json", false, "stream agent events as newline-delimited JSON")
 	cmd.Flags().StringVar(&outputLastMessage, "output-last-message", "", "write the final assistant message to this file")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress the token/cost summary printed to stderr after each run")
+	cmd.Flags().BoolVarP(&continueSession, "continue", "c", false, "continue the most recent session for this project")
+	cmd.Flags().StringVar(&resumeSessionID, "session", "", "continue a specific session by ID")
+	cmd.MarkFlagsMutuallyExclusive("continue", "session")
 	return cmd
+}
+
+// resolveRunSession returns the session for the run subcommand. When sessionID
+// is non-empty the named session is loaded (error if absent). When
+// continueRecent is true the most recent session for projectPath is reused; if
+// none exists a fresh session is created instead. Otherwise a new session is
+// always created.
+func resolveRunSession(ctx context.Context, application *app.App, projectPath,
+	sessionID, modelName, agentName, prompt string, continueRecent bool) (*session.Session, error) {
+
+	if sessionID != "" {
+		s, err := application.Sessions.Get(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("loading session %q: %w", sessionID, err)
+		}
+		return s, nil
+	}
+
+	if continueRecent {
+		sessions, err := application.Sessions.List(ctx, session.ListFilter{
+			ProjectPath: projectPath,
+			Limit:       1,
+		})
+		if err == nil && len(sessions) > 0 {
+			return &sessions[0], nil
+		}
+		// No prior session: fall through and create a new one.
+	}
+
+	s := &session.Session{
+		ProjectPath: projectPath,
+		Title:       session.TitleFromFirstMessage(userMessage(prompt)),
+		Model:       modelName,
+		Agent:       agentName,
+	}
+	if err := application.Sessions.Create(ctx, s); err != nil {
+		return nil, fmt.Errorf("creating session: %w", err)
+	}
+	return s, nil
 }
 
 // printRunSummary queries the ledger for the session's token and cost totals and

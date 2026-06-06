@@ -173,7 +173,6 @@ type model struct {
 	// snapshotTab/loadTab); it is empty until the tab's first turn.
 	tabFirstPrompt string
 	goal           string
-	helpVisible    bool
 	quitting       bool
 
 	// Agent run state.
@@ -652,14 +651,11 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// Clear an active scrollback search so the viewport is unpinned and the
 		// "search N/M" status segment disappears, the way an editor or pager
-		// cancels its search on Esc. This only fires when a search is live, so an
-		// otherwise-idle Esc still falls through to closing the help listing.
+		// cancels its search on Esc.
 		if m.search.active() {
 			m.search.reset()
 			m.status.Search = m.search.statusSegment()
-			return m, nil
 		}
-		m.helpVisible = false
 		return m, nil
 	case "enter":
 		return m.submitInput()
@@ -883,6 +879,9 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	if text == "/keys" || strings.HasPrefix(text, "/keys ") {
 		return m.handleKeys(text), nil
 	}
+	if text == "/help" || strings.HasPrefix(text, "/help ") {
+		return m.handleHelp(text), nil
+	}
 	if text == "/tab" || strings.HasPrefix(text, "/tab ") {
 		return m.handleTabCommand(text)
 	}
@@ -893,13 +892,10 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	switch text {
 	case "/tabs":
 		return m.handleTabsList()
-	case "/help":
-		m.helpVisible = true
 	case "/clear":
 		m.chat.Clear()
 		m.search.reset()
 		m.chatScroll = 0
-		m.helpVisible = false
 	case "/sessions":
 		return m.openSessionPicker()
 	case "/compact":
@@ -955,6 +951,30 @@ func (m *model) handleKeys(text string) tea.Model {
 		DialogID: "keybindings",
 		Title:    title,
 		Body:     keybindingHelpBodyFiltered(filter),
+		Theme:    m.theme,
+		Height:   m.height,
+	})
+	return m
+}
+
+// handleHelp runs the /help slash command, opening the command-listing overlay
+// as a scrollable dialog. A bare "/help" lists every command; "/help <filter>"
+// narrows the overlay to the commands whose name or description contains the
+// filter, so a user hunting for one command ("/help tab", "/help diff") sees
+// just the relevant lines instead of scrolling the whole list — matching how
+// "/keys [filter]" narrows the keyboard-shortcut overlay. The active filter is
+// echoed in the dialog title so it is clear the listing is a subset, and a
+// filter matching nothing shows a quiet "no commands match" note.
+func (m *model) handleHelp(text string) tea.Model {
+	_, filter := splitSlash(text)
+	title := "Commands"
+	if filter != "" {
+		title += " · " + filter
+	}
+	m.dialogs.Push(&dialog.ScrollableText{
+		DialogID: "help",
+		Title:    title,
+		Body:     m.slashHelpBodyFiltered(filter),
 		Theme:    m.theme,
 		Height:   m.height,
 	})
@@ -1105,15 +1125,9 @@ func (m *model) renderMain() string {
 	chatBody := m.chat.Render(max(1, chatW))
 	// Mark every search hit, the current one emphasized, so the reader sees what
 	// matched. This addresses the same line space as the rendered body above
-	// (chatW matches renderedChatBody), so it must run before the help dump and
-	// file-tree join shift or wrap the lines.
+	// (chatW matches renderedChatBody), so it must run before the file-tree join
+	// which shifts or wraps lines.
 	chatBody = m.highlightMatches(chatBody)
-	if m.helpVisible {
-		if chatBody != "" {
-			chatBody += "\n\n"
-		}
-		chatBody += strings.Join(m.slashHelpLines(), "\n")
-	}
 	if m.filetree.visible {
 		panel := m.renderFiletree(filetreeWidth, m.layout.chat.H)
 		chatBody = joinPanels(panel, chatBody, filetreeWidth, m.layout.chat.H)
@@ -1613,6 +1627,74 @@ func (m *model) slashHelpLines() []string {
 		}
 	}
 	return lines
+}
+
+// slashHelpBodyFiltered returns the /help overlay body, optionally narrowed to
+// lines whose text (command name and description taken together) contains filter.
+// An empty or whitespace-only filter returns the full listing unchanged. A
+// filter matching nothing returns a quiet "no commands match" note. A successful
+// filter leads with an "M of N commands match …" count so the user can see how
+// much of the listing the filter kept, mirroring keybindingHelpBodyFiltered.
+//
+// The filter is split on whitespace into terms that must ALL appear (case-
+// insensitive) in a line, so a two-word query like "tab next" narrows to only
+// the commands that mention both words. When no line matches by substring, the
+// filter falls back to subsequence matching so run-together abbreviations
+// ("diffrevert") still find their command rather than returning an empty note.
+func (m *model) slashHelpBodyFiltered(filter string) string {
+	all := m.slashHelpLines()
+	if strings.TrimSpace(filter) == "" {
+		return strings.Join(all, "\n")
+	}
+	matched := filterHelpLines(all, filter)
+	if len(matched) == 0 {
+		return fmt.Sprintf("No commands match %q.", strings.TrimSpace(filter))
+	}
+	noun := "commands"
+	if len(matched) == 1 {
+		noun = "command"
+	}
+	header := fmt.Sprintf("%d of %d %s match %q", len(matched), len(all), noun, strings.TrimSpace(filter))
+	return header + "\n\n" + strings.Join(matched, "\n")
+}
+
+// filterHelpLines returns the lines from lines whose lower-cased text contains
+// every term in filter (split on whitespace, AND logic, case-insensitive). When
+// no lines match by substring, the filter falls back to isSubsequence on the
+// collapsed (no-space) query, matching how filterKeybindingGroups degrades to a
+// fuzzy pass rather than returning nothing.
+func filterHelpLines(lines []string, filter string) []string {
+	q := strings.ToLower(strings.TrimSpace(filter))
+	if q == "" {
+		return lines
+	}
+	terms := strings.Fields(q)
+	var out []string
+	for _, line := range lines {
+		low := strings.ToLower(line)
+		ok := true
+		for _, t := range terms {
+			if !strings.Contains(low, t) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			out = append(out, line)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	// Subsequence fallback: join the query terms into one run so a compact
+	// abbreviation ("diffrevert") matches the same lines as spaced words would.
+	token := strings.Join(terms, "")
+	for _, line := range lines {
+		if isSubsequence(token, strings.ToLower(line)) {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // keyBinding is one row in the /keys overlay: a key (or key combo) and what it

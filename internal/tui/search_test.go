@@ -245,18 +245,17 @@ func TestSearchEscClears(t *testing.T) {
 		"Esc must also clear the status bar's search segment")
 }
 
-// TestSearchEsc_InertWhenNoSearch asserts that Esc does not disturb an
-// un-searched view: with no active search it falls through to its other roles
-// (hiding the help listing) rather than consuming the keypress for the search.
+// TestSearchEsc_InertWhenNoSearch asserts that Esc does not consume the
+// keypress for the search when no search is active — it is a no-op for the
+// search subsystem and leaves searchState empty.
 func TestSearchEsc_InertWhenNoSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
-	m.helpVisible = true
 
 	_, _ = m.Update(keySpecial("esc", tea.KeyEsc))
-	require.False(t, m.helpVisible, "Esc with no active search must hide the help listing")
+	require.False(t, m.search.active(), "Esc with no active search must leave search inactive")
 }
 
 // TestSlashSearch_RepeatedSameTermAdvances asserts re-running /search with the

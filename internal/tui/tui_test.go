@@ -1038,3 +1038,126 @@ func TestInitialSessionID_InvalidID_StartsBlank(t *testing.T) {
 	require.Equal(t, "new", m.sessionID, "unknown session ID must start a fresh session")
 	require.False(t, m.sessionPersisted, "sessionPersisted must be false for a fresh session")
 }
+
+// keyAltEnter returns the Alt+Enter key press used to insert a newline.
+func keyAltEnter() tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter, Mod: tea.ModAlt})
+}
+
+// TestAltEnter_InsertsNewlineIntoInput verifies that Alt+Enter appends \n to
+// the prompt buffer instead of submitting it, enabling multi-line prompts. This
+// mirrors Shift+Enter in Claude Code and goose.
+func TestAltEnter_InsertsNewlineIntoInput(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "first line")
+	_, _ = m.Update(keyAltEnter())
+	typeString(t, m, "second line")
+
+	require.Equal(t, "first line\nsecond line", m.input.String(),
+		"Alt+Enter must embed a newline without submitting")
+}
+
+// TestAltEnter_EmptyBuffer_InsertsNewline proves Alt+Enter works even on an
+// empty input (prepends a blank line) without panicking or triggering a submit.
+func TestAltEnter_EmptyBuffer_InsertsNewline(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	require.Equal(t, 0, m.input.Len())
+
+	_, _ = m.Update(keyAltEnter())
+	require.Equal(t, "\n", m.input.String(), "Alt+Enter on empty buffer must insert a single newline")
+}
+
+// TestAltEnter_ResetsRecallWalk proves inserting a newline ends any active
+// history recall, matching how other edits (Backspace, Ctrl+U) cancel the walk.
+func TestAltEnter_ResetsRecallWalk(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(2))
+	m := h.model
+
+	submitPrompt(t, h, "alpha")
+	submitPrompt(t, h, "beta")
+
+	_, _ = m.Update(keyUp())
+	require.Equal(t, "beta", m.input.String(), "Up recalls the newest entry")
+
+	_, _ = m.Update(keyAltEnter())
+	// After an edit the recall cursor must be reset, so the next Up replays
+	// from the newest entry rather than advancing past it.
+	_, _ = m.Update(keyUp())
+	require.Equal(t, "beta", m.input.String(), "recall must restart at newest after Alt+Enter edit")
+}
+
+// TestPasteMsg_SingleLine verifies that a single-line PasteMsg appends its
+// text to the input, just like typing each character individually.
+func TestPasteMsg_SingleLine(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "prefix ")
+
+	_, _ = m.Update(tea.PasteMsg("pasted text"))
+	require.Equal(t, "prefix pasted text", m.input.String())
+}
+
+// TestPasteMsg_MultiLine verifies that a multi-line PasteMsg (as produced by
+// bracketed-paste in terminals) preserves embedded newlines in the buffer.
+func TestPasteMsg_MultiLine(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.Update(tea.PasteMsg("line one\nline two\nline three"))
+
+	require.Equal(t, "line one\nline two\nline three", m.input.String(),
+		"pasted newlines must be preserved verbatim")
+}
+
+// TestPasteMsg_WhenNotFocused_IsNoop verifies that a paste event while the
+// chat (not the input) is focused does not modify the input buffer.
+func TestPasteMsg_WhenNotFocused_IsNoop(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.focus = focusChat
+
+	_, _ = m.Update(tea.PasteMsg("should not appear"))
+	require.Equal(t, 0, m.input.Len(), "paste must be ignored when input is not focused")
+}
+
+// TestRenderInputArea_SingleLine verifies that a single-line buffer renders
+// identically to the previous "> text" format.
+func TestRenderInputArea_SingleLine(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "> hello▌", renderInputArea("hello", "▌"))
+	require.Equal(t, "> hello", renderInputArea("hello", ""))
+	require.Equal(t, "> ▌", renderInputArea("", "▌"))
+	require.Equal(t, "> ", renderInputArea("", ""))
+}
+
+// TestRenderInputArea_MultiLine verifies that each line after the first is
+// indented with two spaces so the text aligns under the first line's content.
+func TestRenderInputArea_MultiLine(t *testing.T) {
+	t.Parallel()
+
+	got := renderInputArea("line one\nline two", "▌")
+	require.Equal(t, "> line one\n  line two▌", got,
+		"continuation lines must be indented with two spaces")
+
+	got3 := renderInputArea("a\nb\nc", "")
+	require.Equal(t, "> a\n  b\n  c", got3,
+		"three lines must all be indented correctly")
+}
+
+// TestKeybindings_AltEnterDocumented asserts that the /keys overlay lists
+// Alt+Enter so users can discover the multi-line shortcut.
+func TestKeybindings_AltEnterDocumented(t *testing.T) {
+	t.Parallel()
+
+	full := keybindingHelpBodyFiltered("")
+	require.Contains(t, full, "Alt+Enter", "/keys must document Alt+Enter")
+}

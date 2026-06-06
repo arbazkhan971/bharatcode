@@ -111,6 +111,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseHaskellFailures(output)
 	case runnerBazel:
 		return parseBazelFailures(output)
+	case runnerCrystal:
+		return parseCrystalFailures(output)
 	default:
 		return nil
 	}
@@ -158,6 +160,7 @@ const (
 	runnerBusted
 	runnerHaskell
 	runnerBazel
+	runnerCrystal
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -360,6 +363,18 @@ var (
 	// spanning a "bazel build && go test" chain. A Bazel invocation carries none
 	// of the other runners' substrings.
 	bazelRe = regexp.MustCompile(`\bbazel(?:isk)?\b[^&|;]*\b(?:test|coverage)\b`)
+	// `crystal spec`/`crystal spec spec/` drives Crystal's stdlib spec framework,
+	// whose default formatter closes a failing run with a "Failed examples:" block
+	// listing each failure as a re-runnable "crystal spec <file>.cr:<line> #
+	// <description>" line (the same shape RSpec uses, but with the "crystal spec"
+	// prefix). Both "crystal" and a following "spec" token are required at word
+	// boundaries, so "crystal spec", "crystal spec spec/foo_spec.cr", and "crystal
+	// spec --verbose" match while "crystal build" / "crystal run" and prose like
+	// "the crystal specimen" — where "spec" runs into the next word — do not. The
+	// "[^&|;]*" keeps the match within a single command rather than spanning a
+	// "crystal build && go test" chain. A Crystal invocation carries none of the
+	// other runners' substrings (and the bare "spec" never matches \brspec\b).
+	crystalSpecRe = regexp.MustCompile(`\bcrystal\b[^&|;]*\bspec\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -644,6 +659,16 @@ func classifyTestRunner(command string) testRunner {
 		// summary is reliably present, so it gets its own parser keyed on the "//"
 		// target rows.)
 		return runnerBazel
+	case crystalSpecRe.MatchString(c):
+		// `crystal spec` drives Crystal's stdlib spec framework, whose default
+		// formatter closes a failing run with a "Failed examples:" block listing
+		// each failure as a re-runnable "crystal spec <file>.cr:<line> #
+		// <description>" line — the same summary shape RSpec uses. Checked before
+		// the JS runners since a Crystal invocation carries none of their
+		// substrings, but kept explicit to guard against future overlap. (The bare
+		// "spec" token never matches the \brspec\b RSpec runner, so the earlier
+		// RSpec case does not claim it.)
+		return runnerCrystal
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -3075,6 +3100,68 @@ func parseBazelFailures(output string) []testFailure {
 			}
 		}
 		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "crystal spec spec/foo_spec.cr:5 # Foo does something" — a line from the
+	// "Failed examples:" block Crystal's default spec formatter prints at the end
+	// of a failing run, one per failure, as a copy-pasteable re-run command. Group
+	// 1 is the re-runnable "<file>.cr:<line>" location; group 2 is the example's
+	// description. Requiring ".cr:<line>" keeps ordinary log lines that merely
+	// begin with "crystal spec" from matching.
+	crystalFailedExampleRe = regexp.MustCompile(`^\s*crystal spec (\S+\.cr:\d+) # (.+)$`)
+	// "  1) Foo does something" — the numbered header of an entry in Crystal's
+	// "Failures:" block, used as a fallback (and to recover the assertion detail)
+	// when the "Failed examples:" summary is absent.
+	crystalFailureHeaderRe = regexp.MustCompile(`^\s*\d+\) (.+)$`)
+	// "       Expected: 4" / "       Unhandled exception: ..." — the first
+	// indented body line beneath a numbered failure header, the closest thing
+	// Crystal prints to a one-line assertion/error message.
+	crystalFailureDetailRe = regexp.MustCompile(`^\s+(Expected:.*|Unhandled exception:.*)$`)
+)
+
+// parseCrystalFailures extracts failures from Crystal spec output (`crystal
+// spec`). The "Failed examples:" summary gives a clean, single-line "crystal
+// spec <location> # <description>" per failure (Name is the description, Detail
+// the re-runnable location), mirroring RSpec's format. When that summary is
+// absent — e.g. a suite that errored before printing it — it falls back to the
+// numbered "Failures:" block, pairing each "N) <description>" header with its
+// following "Expected:"/"Unhandled exception:" line as the detail. Failures are
+// deduplicated by name.
+func parseCrystalFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		if m := crystalFailedExampleRe.FindStringSubmatch(ln); m != nil {
+			desc := strings.TrimSpace(m[2])
+			if !seen[desc] {
+				seen[desc] = true
+				failures = append(failures, testFailure{Name: desc, Detail: strings.TrimSpace(m[1])})
+			}
+		}
+	}
+	if len(failures) > 0 {
+		return failures
+	}
+	for i := 0; i < len(lines); i++ {
+		m := crystalFailureHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		f := testFailure{Name: strings.TrimSpace(m[1])}
+		for j := i + 1; j < len(lines) && j <= i+6; j++ {
+			if e := crystalFailureDetailRe.FindStringSubmatch(lines[j]); e != nil {
+				f.Detail = strings.TrimSpace(e[1])
+				break
+			}
+		}
+		if !seen[f.Name] {
+			seen[f.Name] = true
+			failures = append(failures, f)
+		}
 	}
 	return failures
 }

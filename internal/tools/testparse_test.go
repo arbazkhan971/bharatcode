@@ -139,6 +139,10 @@ func TestClassifyTestRunner(t *testing.T) {
 		"cabal v2-test":                              runnerHaskell,
 		"cabal new-test all":                         runnerHaskell,
 		"echo cabal build only":                      runnerNone,
+		"crystal spec":                               runnerCrystal,
+		"crystal spec spec/calc_spec.cr":             runnerCrystal,
+		"crystal spec --verbose spec/":               runnerCrystal,
+		"echo crystal build only":                    runnerNone,
 		"echo the adjusted plan":                     runnerNone,
 		"echo running test data":                     runnerNone,
 		"echo about cucumbers":                       runnerNone,
@@ -1748,6 +1752,70 @@ Executed 2 out of 2 tests: 2 tests pass.`
 	}
 	if got := parseTestFailures("bazel build //...", out); got != nil {
 		t.Errorf("bazel build is not a test runner, got %v", got)
+	}
+}
+
+func TestParseCrystalFailures(t *testing.T) {
+	out := `..F.F
+
+Failures:
+
+  1) Calculator adds two numbers
+       Expected: 4
+            got: 3
+
+     # spec/calc_spec.cr:7
+
+  2) Array#index_of returns -1 when absent
+       Expected: -1
+            got: nil
+
+     # spec/array_spec.cr:10
+
+Finished in 1.2 milliseconds
+4 examples, 2 failures, 0 errors, 0 pending
+
+Failed examples:
+
+crystal spec spec/calc_spec.cr:7 # Calculator adds two numbers
+crystal spec spec/array_spec.cr:10 # Array#index_of returns -1 when absent`
+	got := parseTestFailures("crystal spec", out)
+	want := []testFailure{
+		{Name: "Calculator adds two numbers", Detail: "spec/calc_spec.cr:7"},
+		{Name: "Array#index_of returns -1 when absent", Detail: "spec/array_spec.cr:10"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseCrystalFailures_NoSummaryFallback(t *testing.T) {
+	// No "Failed examples:" section (e.g. an aborted run): fall back to the
+	// numbered "Failures:" block, pairing each header with its first
+	// Expected:/Unhandled exception: body line as the detail.
+	out := `Failures:
+
+  1) Calculator adds two numbers
+       Expected: 4
+            got: 3
+
+  2) Service raises on bad input
+       Unhandled exception: boom (RuntimeError)`
+	got := parseTestFailures("crystal spec spec/", out)
+	want := []testFailure{
+		{Name: "Calculator adds two numbers", Detail: "Expected: 4"},
+		{Name: "Service raises on bad input", Detail: "Unhandled exception: boom (RuntimeError)"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseCrystalFailures_NoFailures(t *testing.T) {
+	// An all-passing run prints no "Failed examples:" block and no numbered
+	// "Failures:" entries, so nothing must be reported.
+	out := `....
+
+Finished in 0.8 milliseconds
+4 examples, 0 failures, 0 errors, 0 pending`
+	if got := parseTestFailures("crystal spec", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
 	}
 }
 

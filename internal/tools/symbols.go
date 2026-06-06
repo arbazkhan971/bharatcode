@@ -224,7 +224,30 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 		fmt.Fprintf(&b, "... and %d more (%d total) not shown\n", total-shown, total)
 	}
 
-	return Result{Content: strings.TrimRight(b.String(), "\n")}, nil
+	return Result{
+		Content:  strings.TrimRight(b.String(), "\n"),
+		Metadata: symbolsMetadata(shown, total),
+	}, nil
+}
+
+// Metadata keys the symbols tool sets so downstream consumers (the agent loop,
+// the TUI) can react to result counts without re-parsing the rendered list.
+const (
+	// MetadataSymbolCount holds the int count of symbols shown in the result
+	// (may be less than MetadataSymbolTotal when the cap was reached).
+	MetadataSymbolCount = "count"
+	// MetadataSymbolTotal holds the true total of matched symbols before any
+	// symbolMatchCap truncation, so callers know whether the list is complete.
+	MetadataSymbolTotal = "total"
+)
+
+// symbolsMetadata returns the count/total metadata pair for a completed symbols
+// query, mirroring codeActionsListMetadata and diagnosticsMetadata.
+func symbolsMetadata(shown, total int) map[string]any {
+	return map[string]any{
+		MetadataSymbolCount: shown,
+		MetadataSymbolTotal: total,
+	}
 }
 
 // symbolKindString renders an LSP symbol kind as a lowercase label. Unknown

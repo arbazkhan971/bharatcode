@@ -1131,14 +1131,7 @@ func TestSlashHelp_ListsRegisteredRecipes(t *testing.T) {
 	require.NoError(t, err)
 	m.deps.Recipes = reg
 
-	// The help listing is rendered inside the chat viewport, which clamps from
-	// the top when the content overflows. Give it a window tall enough to hold
-	// the full built-in list plus the recipe so this test exercises the listing's
-	// content rather than where the viewport happens to cut it.
-	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 60})
-
-	m.helpVisible = true
-	out := plainText(m.renderMain())
+	out := m.slashHelpBodyFiltered("")
 
 	require.Contains(t, out, "/help", "built-in commands must still appear in /help")
 	require.Contains(t, out, "/daily-standup", "registered recipe name must appear in /help output")
@@ -1185,8 +1178,7 @@ func TestSlashHelp_ListsCustomPromptsWithFrontmatter(t *testing.T) {
 	require.NoError(t, err)
 	m.deps.Prompts = reg
 
-	m.helpVisible = true
-	out := plainText(m.renderMain())
+	out := m.slashHelpBodyFiltered("")
 
 	require.Contains(t, out, "/triage", "registered prompt name must appear in /help output")
 	require.Contains(t, out, "<test-name>", "prompt argument hint must appear in /help output")

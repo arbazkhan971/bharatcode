@@ -84,6 +84,13 @@ func keyCode(code rune) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Code: code})
 }
 
+// keyChar constructs a KeyPressMsg for a regular printable character key such
+// as 'j', 'k', 'g', 'G'. Both Code and Text are set to match the encoding
+// Bubble Tea uses for printable keys, so msg.String() returns the character.
+func keyChar(c rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: c, Text: string(c)})
+}
+
 // TestScrollableText_RendersFirstWindowOnFirstRender asserts that the first
 // Render call shows the top of the body and hides lines beyond visibleRows.
 func TestScrollableText_RendersFirstWindowOnFirstRender(t *testing.T) {
@@ -262,5 +269,101 @@ func TestScrollableText_ZeroHeightFallback(t *testing.T) {
 	out := d.Render(200)
 	if !strings.Contains(out, "line1") {
 		t.Fatalf("line1 must appear even with Height=0 fallback, got:\n%s", out)
+	}
+}
+
+// TestScrollableText_VimJ_ScrollsDownOneLine asserts that pressing 'j' advances
+// the visible window by one line, mirroring the Down-arrow binding. The vim
+// alias lets power users navigate the diff and /keys overlays without reaching
+// for arrow keys, matching the navigation style of Claude Code and opencode.
+func TestScrollableText_VimJ_ScrollsDownOneLine(t *testing.T) {
+	// Height 13 → visibleRows 6; body 9 lines.
+	d := &ScrollableText{DialogID: "x", Title: "T", Body: makeBody(9), Theme: styles.Theme{}, Height: 13}
+	d.Render(200)
+
+	handled, pop := d.HandleKey(keyChar('j'))
+	if !handled {
+		t.Fatal("j must be handled")
+	}
+	if pop {
+		t.Fatal("j must not pop the dialog")
+	}
+
+	out := d.Render(200)
+	if strings.Contains(out, "line1") {
+		t.Fatalf("line1 must scroll off the top after j, got:\n%s", out)
+	}
+	if !strings.Contains(out, "line7") {
+		t.Fatalf("line7 must appear after j, got:\n%s", out)
+	}
+}
+
+// TestScrollableText_VimK_ScrollsUpOneLine asserts that pressing 'k' steps the
+// view back by one line, mirroring the Up-arrow binding.
+func TestScrollableText_VimK_ScrollsUpOneLine(t *testing.T) {
+	d := &ScrollableText{DialogID: "x", Title: "T", Body: makeBody(9), Theme: styles.Theme{}, Height: 13}
+	d.Render(200)
+	d.HandleKey(keyChar('j')) // scroll down first
+	d.HandleKey(keyChar('k')) // then back up
+
+	out := d.Render(200)
+	if !strings.Contains(out, "line1") {
+		t.Fatalf("line1 must reappear after j+k, got:\n%s", out)
+	}
+}
+
+// TestScrollableText_VimK_AtTopIsNoop asserts that pressing 'k' when already
+// at the top does not change the view or pop the dialog.
+func TestScrollableText_VimK_AtTopIsNoop(t *testing.T) {
+	d := &ScrollableText{DialogID: "x", Title: "T", Body: makeBody(9), Theme: styles.Theme{}, Height: 13}
+	d.Render(200)
+
+	handled, pop := d.HandleKey(keyChar('k'))
+	if !handled || pop {
+		t.Fatalf("k at top must be handled without popping; handled=%v pop=%v", handled, pop)
+	}
+	out := d.Render(200)
+	if !strings.Contains(out, "line1") {
+		t.Fatalf("line1 must still be visible after k at top, got:\n%s", out)
+	}
+}
+
+// TestScrollableText_VimG_JumpsToTop asserts that pressing 'g' resets scroll to
+// zero, mirroring the Home-key binding and the vim convention for going to the
+// start of a buffer.
+func TestScrollableText_VimG_JumpsToTop(t *testing.T) {
+	// Height 13 → visibleRows 6; body 9 lines → maxScroll 3.
+	d := &ScrollableText{DialogID: "x", Title: "T", Body: makeBody(9), Theme: styles.Theme{}, Height: 13}
+	d.Render(200)
+	d.HandleKey(keyCode(tea.KeyEnd)) // jump to bottom first
+
+	handled, pop := d.HandleKey(keyChar('g'))
+	if !handled || pop {
+		t.Fatalf("g must be handled without popping; handled=%v pop=%v", handled, pop)
+	}
+	out := d.Render(200)
+	if !strings.Contains(out, "line1") {
+		t.Fatalf("line1 must reappear after g (jump to top), got:\n%s", out)
+	}
+}
+
+// TestScrollableText_VimG_Upper_JumpsToBottom asserts that pressing 'G' jumps
+// to the maximum scroll offset, mirroring the End-key binding and the vim
+// convention for going to the end of a buffer.
+func TestScrollableText_VimG_Upper_JumpsToBottom(t *testing.T) {
+	// Height 13 → visibleRows 6; body 9 lines → maxScroll 3 (lines 4–9 visible).
+	d := &ScrollableText{DialogID: "x", Title: "T", Body: makeBody(9), Theme: styles.Theme{}, Height: 13}
+	d.Render(200)
+
+	handled, pop := d.HandleKey(keyChar('G'))
+	if !handled || pop {
+		t.Fatalf("G must be handled without popping; handled=%v pop=%v", handled, pop)
+	}
+	out := d.Render(200)
+	if !strings.Contains(out, "line9") {
+		t.Fatalf("line9 must appear after G (jump to bottom), got:\n%s", out)
+	}
+	if strings.Contains(out, "line1") {
+		t.Fatalf("line1 must not be visible after G, got:\n%s", out)
 	}
 }

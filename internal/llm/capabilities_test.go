@@ -121,6 +121,12 @@ func TestInferContextWindow(t *testing.T) {
 		// Qwen3-Max (Alibaba's flagship) ships a 256k native window, above the 128k
 		// Qwen3 instruct default; its id carries "qwen3", so its rule must win.
 		{"qwen3-max", 262_144},
+		// Qwen3-Next (hybrid attention) and Qwen3-VL (vision-language) both ship a
+		// 256k native window; their ids carry only the bare "qwen3" marker, so their
+		// specific rules must win over the 131k instruct default rather than
+		// undercounting their window by half.
+		{"qwen3-next-80b-a3b-instruct", 262_144},
+		{"qwen3-vl-235b-a22b-instruct", 262_144},
 		{"qwen3-235b-a22b-instruct-2507", 131_072},
 		{"qwen3-32b", 131_072},
 		// Qwen2.x ids still resolve to the conservative 32k family default.

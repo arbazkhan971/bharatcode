@@ -582,6 +582,10 @@ func TestDefaultsCatalogAnthropicTiers(t *testing.T) {
 		wantProvider  string
 		wantCtxWindow int
 	}{
+		// Current generation (4.6/4.8) — must ship alongside the 4.5 models.
+		{"claude-opus-4-8", "anthropic", 200_000},
+		{"claude-sonnet-4-6", "anthropic", 200_000},
+		// Previous generation (4.5) — retained for continuity.
 		{"claude-opus-4-5", "anthropic", 200_000},
 		{"claude-sonnet-4-5", "anthropic", 200_000},
 		{"claude-haiku-4-5", "anthropic", 200_000},

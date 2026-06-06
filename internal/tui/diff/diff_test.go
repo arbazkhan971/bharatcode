@@ -624,6 +624,71 @@ func TestStatLines_DeletedFileNamedByPreImage(t *testing.T) {
 	require.NotContains(t, got, "/dev/null")
 }
 
+// TestFileStats_FlagsCreatedAndDeleted proves a whole-file add (pre-image
+// "/dev/null") is parsed Created and a whole-file remove (post-image "/dev/null")
+// is parsed Deleted, while an in-place edit in the same patch is flagged neither —
+// so the diffstat can tell a new or removed file from an ordinary change.
+func TestFileStats_FlagsCreatedAndDeleted(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/added.go b/added.go\nnew file mode 100644\nindex 0000000..abc1234\n--- /dev/null\n+++ b/added.go\n@@ -0,0 +1,2 @@\n+one\n+two\n" +
+		"diff --git a/gone.go b/gone.go\ndeleted file mode 100644\nindex abc1234..0000000\n--- a/gone.go\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-bye\n" +
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+
+	files := fileStats(patch)
+	require.Len(t, files, 3)
+
+	require.Equal(t, "added.go", files[0].Path)
+	require.True(t, files[0].Created)
+	require.False(t, files[0].Deleted)
+
+	require.Equal(t, "gone.go", files[1].Path)
+	require.True(t, files[1].Deleted)
+	require.False(t, files[1].Created)
+
+	require.Equal(t, "main.go", files[2].Path)
+	require.False(t, files[2].Created)
+	require.False(t, files[2].Deleted)
+}
+
+// TestStatLines_TagsCreatedAndDeleted proves the per-file diffstat rows tag a new
+// file "(new)" and a removed file "(gone)" so a reviewer sees file status at a
+// glance, while an in-place edit carries no such marker. The removed file is still
+// named by its real pre-image path rather than "/dev/null".
+func TestStatLines_TagsCreatedAndDeleted(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/added.go b/added.go\nnew file mode 100644\n--- /dev/null\n+++ b/added.go\n@@ -0,0 +1,1 @@\n+hi\n" +
+		"diff --git a/gone.go b/gone.go\ndeleted file mode 100644\n--- a/gone.go\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-bye\n" +
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+
+	got := New(styles.Theme{}).StatLines(patch, 0)
+	require.Contains(t, got, "added.go (new)")
+	require.Contains(t, got, "gone.go (gone)")
+	require.NotContains(t, got, "/dev/null")
+	// The in-place edit keeps a plain name with no status tag.
+	require.NotContains(t, got, "main.go (")
+}
+
+// TestStatLines_BinaryNewFileTaggedNew proves a newly-added binary blob — which
+// carries no "/dev/null" content header, only a "new file mode" extended header —
+// is still tagged "(new)" while keeping git's "Bin" count marker.
+func TestStatLines_BinaryNewFileTaggedNew(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/logo.png b/logo.png\nnew file mode 100644\nindex 0000000..d95f3ad\nBinary files /dev/null and b/logo.png differ\n" +
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+
+	files := fileStats(patch)
+	require.Len(t, files, 2)
+	require.True(t, files[0].Binary)
+	require.True(t, files[0].Created)
+
+	got := New(styles.Theme{}).StatLines(patch, 0)
+	require.Contains(t, got, "logo.png (new)")
+	require.Contains(t, got, "Bin")
+}
+
 // TestUnified_TruncatesWithEllipsis checks that a line wider than the render
 // width is clipped with a trailing ellipsis (not silently cut) and that the
 // result still fits within the width, so a reviewer can tell content was

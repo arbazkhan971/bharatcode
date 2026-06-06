@@ -461,12 +461,23 @@ func displayPath(p string) string {
 // statName returns the path label shown in a per-file diffstat row: "old => new"
 // for a pure rename, so the source name a reviewer needs to locate the moved file
 // stays visible the way git's "--stat" shows it, and the plain destination path
-// otherwise.
+// otherwise. A whole-file creation or deletion is tagged with a muted "(new)" or
+// "(gone)" marker so a reviewer can tell at a glance that the file appeared or was
+// removed rather than edited in place — the way Claude Code and opencode flag file
+// status in a reviewed diff. A rename takes precedence, since its "old => new"
+// already conveys the move.
 func statName(f FileStat) string {
 	if f.renamed() {
 		return displayPath(f.OldPath) + " => " + displayPath(f.Path)
 	}
-	return displayPath(f.Path)
+	name := displayPath(f.Path)
+	switch {
+	case f.Created:
+		name += " (new)"
+	case f.Deleted:
+		name += " (gone)"
+	}
+	return name
 }
 
 // elidePath shortens p to at most width runes by dropping leading path segments
@@ -493,13 +504,17 @@ func elidePath(p string, width int) string {
 // as an empty change). OldPath holds the pre-rename name of a pure rename (one
 // that edits no content, so it carries no "+++" header); it lets the diffstat
 // show "old => new" the way git's "--stat" does rather than dropping the source
-// name and listing a bare "+0 -0".
+// name and listing a bare "+0 -0". Created and Deleted mark a file added or
+// removed whole — its pre- or post-image is "/dev/null" — so the diffstat can tag
+// it "(new)"/"(gone)" rather than reading as an ordinary in-place edit.
 type FileStat struct {
 	Path    string
 	OldPath string
 	Added   int
 	Removed int
 	Binary  bool
+	Created bool
+	Deleted bool
 }
 
 // renamed reports whether f is a pure rename — one named through "rename
@@ -552,9 +567,12 @@ func fileStats(patch string) []FileStat {
 	}
 
 	// Metadata pending for the current "diff --git" block: a rename source and
-	// target and/or a binary marker, none of which emits a "+++" header.
+	// target and/or a binary marker, none of which emits a "+++" header. The
+	// created/deleted flags come from git's "new file mode"/"deleted file mode"
+	// extended headers, which name a whole-file add or remove even when the change
+	// is binary (and so carries no "/dev/null" content header).
 	var pendingPath, pendingOld string
-	var pendingBinary, sawContent bool
+	var pendingBinary, sawContent, pendingCreated, pendingDeleted bool
 	// oldPath holds the most recent "---" (pre-image) path, used to name a
 	// deletion whose "+++" header is "/dev/null" — that side carries no real
 	// name, so the diffstat would otherwise label a deleted file "/dev/null"
@@ -569,15 +587,20 @@ func fileStats(patch string) []FileStat {
 			if pendingBinary {
 				old = ""
 			}
-			files = append(files, FileStat{Path: pendingPath, OldPath: old, Binary: pendingBinary})
+			files = append(files, FileStat{Path: pendingPath, OldPath: old, Binary: pendingBinary, Created: pendingCreated, Deleted: pendingDeleted})
 		}
 		pendingPath, pendingOld, pendingBinary, sawContent, oldPath = "", "", false, false, ""
+		pendingCreated, pendingDeleted = false, false
 	}
 
 	for _, line := range strings.Split(patch, "\n") {
 		switch {
 		case strings.HasPrefix(line, "diff --git"):
 			flushMeta()
+		case strings.HasPrefix(line, "new file mode "):
+			pendingCreated = true
+		case strings.HasPrefix(line, "deleted file mode "):
+			pendingDeleted = true
 		case strings.HasPrefix(line, "rename from "):
 			pendingOld = cleanDiffPath(line[len("rename from "):])
 		case strings.HasPrefix(line, "rename to "):
@@ -593,10 +616,16 @@ func fileStats(patch string) []FileStat {
 			oldPath = cleanDiffPath(line[len("---"):])
 		case strings.HasPrefix(line, "+++"):
 			p := cleanDiffPath(line[len("+++"):])
+			// A "/dev/null" post-image marks a deletion; a "/dev/null" pre-image
+			// (the most recent "---") marks a creation. Fold in any extended-header
+			// signal so a creation/deletion is still tagged when the path headers
+			// are absent.
+			created := pendingCreated || oldPath == "/dev/null"
+			deleted := pendingDeleted || p == "/dev/null"
 			if p == "/dev/null" && oldPath != "" {
 				p = oldPath
 			}
-			files = append(files, FileStat{Path: p})
+			files = append(files, FileStat{Path: p, Created: created, Deleted: deleted})
 			cur = len(files) - 1
 			sawContent = true
 		case strings.HasPrefix(line, "index "), strings.HasPrefix(line, "@@"):

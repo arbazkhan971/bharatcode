@@ -20,6 +20,12 @@ type searchState struct {
 	term    string
 	matches []int
 	current int
+	// wrapped records whether the most recent next/previous-match jump rolled
+	// past the end of the buffer back to the other side, so the status segment
+	// can announce the wrap the way vim and less do ("search hit BOTTOM,
+	// continuing at TOP"). It is set by searchNext/searchPrev on each step and is
+	// false for a fresh search, so it always reflects the last navigation.
+	wrapped bool
 }
 
 // active reports whether a search currently has matches to navigate.
@@ -30,12 +36,20 @@ func (s *searchState) active() bool {
 // statusSegment returns the status-bar segment describing search progress, e.g.
 // "search 2/7". It is empty when no search is active, so the status bar is
 // unchanged until the user starts navigating matches. The 1-based current index
-// mirrors the dialog count ("Match 1 of N") the user first sees.
+// mirrors the dialog count ("Match 1 of N") the user first sees. When the last
+// navigation wrapped past either end of the buffer the segment gains a
+// "(wrapped)" note, so a Ctrl+/ that jumped from the final hit back to the first
+// is visibly a wrap rather than a silent reset — the cue vim and less print when
+// a search rolls over the end of the buffer.
 func (s *searchState) statusSegment() string {
 	if !s.active() {
 		return ""
 	}
-	return fmt.Sprintf("search %d/%d", s.current+1, len(s.matches))
+	seg := fmt.Sprintf("search %d/%d", s.current+1, len(s.matches))
+	if s.wrapped {
+		seg += " (wrapped)"
+	}
+	return seg
 }
 
 // reset clears the search so the viewport is no longer pinned to a match.
@@ -43,6 +57,7 @@ func (s *searchState) reset() {
 	s.term = ""
 	s.matches = nil
 	s.current = 0
+	s.wrapped = false
 }
 
 // handleSearch runs the /search slash command. With an argument it searches the
@@ -104,23 +119,29 @@ func (m *model) startSearch(term string) tea.Model {
 }
 
 // searchNext advances to the next match, wrapping past the last back to the
-// first, and repositions the viewport. It is a no-op when no search is active.
+// first, and repositions the viewport. The wrap is recorded so the status
+// segment can announce it. It is a no-op when no search is active.
 func (m *model) searchNext() tea.Model {
 	if !m.search.active() {
 		return m
 	}
-	m.search.current = (m.search.current + 1) % len(m.search.matches)
+	next := m.search.current + 1
+	m.search.wrapped = next >= len(m.search.matches)
+	m.search.current = next % len(m.search.matches)
 	m.scrollToMatch()
 	return m
 }
 
 // searchPrev steps to the previous match, wrapping past the first back to the
-// last, and repositions the viewport. It is a no-op when no search is active.
+// last, and repositions the viewport. The wrap is recorded so the status
+// segment can announce it. It is a no-op when no search is active.
 func (m *model) searchPrev() tea.Model {
 	if !m.search.active() {
 		return m
 	}
-	m.search.current = (m.search.current - 1 + len(m.search.matches)) % len(m.search.matches)
+	prev := m.search.current - 1
+	m.search.wrapped = prev < 0
+	m.search.current = (prev + len(m.search.matches)) % len(m.search.matches)
 	m.scrollToMatch()
 	return m
 }

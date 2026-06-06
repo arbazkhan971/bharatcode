@@ -62,3 +62,25 @@ func TestClassifyAnthropicStreamErrorPromptTooLong(t *testing.T) {
 	other := classifyAnthropicStreamError("invalid_request_error", "messages: at least one message is required")
 	require.NotErrorIs(t, other, ErrContextLimit, "an unrelated invalid_request_error must not be classified as a context overflow")
 }
+
+// TestParseProviderErrorClassifiesGroqTokensLimitExceeded asserts that Groq's
+// over-budget rejection — an error whose code is "tokens_limit_exceeded" rather
+// than the OpenAI-standard "context_length_exceeded" — is mapped to
+// ErrContextLimit so the agent's compaction path can recover the turn.
+func TestParseProviderErrorClassifiesGroqTokensLimitExceeded(t *testing.T) {
+	body := []byte(`{"error":{"message":"Request too large for model llama-3.3-70b-versatile: token count (300000) exceeds model's context limit (131072)","type":"tokens","code":"tokens_limit_exceeded"}}`)
+	err := parseProviderError(body)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContextLimit)
+}
+
+// TestMentionsContextLimitMatchesGroqWording asserts that the "context limit"
+// substring scan covers Groq's "exceeds model's context limit" phrasing so the
+// 400-body fallback path in classifyHTTPError also classifies Groq overflow
+// errors even when the error code is not recognised by parseProviderError.
+func TestMentionsContextLimitMatchesGroqWording(t *testing.T) {
+	require.True(t, mentionsContextLimit("token count (300000) exceeds model's context limit (131072)"))
+	require.True(t, mentionsContextLimit("CONTEXT LIMIT EXCEEDED"), "match must be case-insensitive")
+	require.False(t, mentionsContextLimit("rate limit exceeded"), "rate limit must not be confused with context limit")
+	require.False(t, mentionsContextLimit("invalid request: unknown field"))
+}

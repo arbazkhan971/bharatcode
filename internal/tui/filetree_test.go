@@ -406,6 +406,65 @@ func TestFiletreeFilter_NoMatchShowsNote(t *testing.T) {
 	require.Contains(t, m.renderMain(), "(no matches)")
 }
 
+func TestFiletreeFilterSummary(t *testing.T) {
+	t.Parallel()
+
+	// A narrowing filter reports survivors against the full workspace.
+	require.Equal(t, "  3 of 200", filetreeFilterSummary(3, 200))
+	// A filter that matched nothing still reports the excluded total so the empty
+	// panel reads as "the query hid everything" rather than an empty workspace.
+	require.Equal(t, "  0 of 12", filetreeFilterSummary(0, 12))
+
+	// A filter that matched the whole listing adds no count — it would only
+	// restate the visible rows.
+	require.Empty(t, filetreeFilterSummary(5, 5))
+	// An empty workspace has nothing to count.
+	require.Empty(t, filetreeFilterSummary(0, 0))
+}
+
+func TestFiletreeFilter_RowShowsMatchCount(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "beta.go", "")
+	writeFile(t, root, "pkg/gamma.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("al"))
+	require.Equal(t, []string{"alpha.go"}, m.filetree.files)
+
+	// The filter row reports how many of the workspace's files survived, so a
+	// narrowed panel shows what it hid rather than only the survivor.
+	require.Contains(t, stripANSI(m.renderMain()), "1 of 3")
+}
+
+func TestFiletreeFilter_FullMatchOmitsCount(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFile(t, root, "alpha.go", "")
+	writeFile(t, root, "album.go", "")
+
+	m := newSizedModel(t)
+	m.workspaceRoot = root
+	_, _ = m.Update(ctrlKey('f'))
+
+	_, _ = m.Update(keyText("/"))
+	_, _ = m.Update(keyText("al"))
+	require.Equal(t, []string{"album.go", "alpha.go"}, m.filetree.files)
+
+	// "al" still matches every file, so the count would only restate the rows and
+	// is omitted; the filter row itself is still shown.
+	stripped := stripANSI(m.renderMain())
+	require.Contains(t, stripped, "/al")
+	require.NotContains(t, stripped, "2 of 2")
+}
+
 func TestFiletreeFilter_ReopeningClearsStaleFilter(t *testing.T) {
 	t.Parallel()
 

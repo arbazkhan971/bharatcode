@@ -312,6 +312,12 @@ var contextWindowRules = []struct {
 	{"o1", 200_000},
 	{"o3", 200_000},
 	{"o4", 200_000},
+	// OpenAI's codex-mini (codex-mini-latest) is the Codex-CLI model, a fine-tune of
+	// o4-mini that inherits its 200k window. Its id carries neither an o-series marker
+	// nor the "gpt-5" prefix, so without this rule it falls through to "unknown" (0).
+	// It is ordered after the gpt-5 family above so a "gpt-5-codex" id still resolves
+	// to the 400k gpt-5 window rather than matching here.
+	{"codex-mini", 200_000},
 	// OpenAI open-weight gpt-oss models ship a 128k window. None of the broader
 	// "gpt" markers is a prefix of "gpt-oss", so placement here is for grouping.
 	{"gpt-oss", 128_000},

@@ -309,3 +309,61 @@ func TestSymbolsNoMatches(t *testing.T) {
 	require.False(t, result.IsError)
 	require.Equal(t, "No symbols found.", result.Content)
 }
+
+func TestSymbolsMetadataCountAndTotal(t *testing.T) {
+	// A workspace search with fewer results than the cap: count == total.
+	dir := t.TempDir()
+	src := &fakeSymbols{workspace: []lsp.Symbol{
+		{Name: "Foo", Kind: lsp.Function, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 0}}},
+		{Name: "Bar", Kind: lsp.Function, Path: filepath.Join(dir, "a.go"), Range: lsp.Range{Start: lsp.Position{Line: 4}}},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "o"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, 2, result.Metadata[MetadataSymbolCount])
+	require.Equal(t, 2, result.Metadata[MetadataSymbolTotal])
+}
+
+func TestSymbolsMetadataCountLessThanTotalWhenCapped(t *testing.T) {
+	// When the result set exceeds symbolMatchCap, count reflects what was shown
+	// and total reflects the full set — callers can see the list was truncated.
+	dir := t.TempDir()
+	const n = symbolMatchCap + 10
+	syms := make([]lsp.Symbol, 0, n)
+	for i := 0; i < n; i++ {
+		syms = append(syms, lsp.Symbol{
+			Name:  fmt.Sprintf("Sym%04d", i),
+			Kind:  lsp.Function,
+			Path:  filepath.Join(dir, "a.go"),
+			Range: lsp.Range{Start: lsp.Position{Line: i}},
+		})
+	}
+	tool := &symbolsTool{source: &fakeSymbols{workspace: syms}, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"query": "Sym"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, symbolMatchCap, result.Metadata[MetadataSymbolCount])
+	require.Equal(t, n, result.Metadata[MetadataSymbolTotal])
+}
+
+func TestSymbolsMetadataDocumentOutline(t *testing.T) {
+	// Document outlines (path, no query) also carry count/total metadata.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	src := &fakeSymbols{document: []lsp.Symbol{
+		{Name: "Server", Kind: lsp.Struct, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2}}},
+		{Name: "Run", Kind: lsp.Method, Path: path, Range: lsp.Range{Start: lsp.Position{Line: 8}}, ContainerName: "Server", Depth: 1},
+	}}
+	tool := &symbolsTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, 2, result.Metadata[MetadataSymbolCount])
+	require.Equal(t, 2, result.Metadata[MetadataSymbolTotal])
+}

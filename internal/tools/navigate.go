@@ -19,7 +19,7 @@ type NavigateSource interface {
 	Definition(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	TypeDefinition(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	Implementation(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
-	References(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
+	References(ctx context.Context, path string, line, col int, includeDeclaration bool) ([]lsp.Location, error)
 	IncomingCalls(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	OutgoingCalls(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	Hover(ctx context.Context, path string, line, col int) (string, error)
@@ -36,6 +36,10 @@ type navigateArgs struct {
 	Line   int    `json:"line"`
 	Column int    `json:"column,omitempty"`
 	Action string `json:"action,omitempty"`
+	// IncludeDeclaration is a *bool so its absence is distinguishable from an
+	// explicit false: references defaults to including the declaration, so a
+	// missing value must mean "include" rather than the zero value's "exclude".
+	IncludeDeclaration *bool `json:"include_declaration,omitempty"`
 }
 
 var schemaNavigate = json.RawMessage(`{
@@ -62,6 +66,10 @@ var schemaNavigate = json.RawMessage(`{
       "type": "string",
       "enum": ["definition", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls", "hover", "signature"],
       "description": "definition: jump to where the symbol is declared. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. incoming_calls: list the functions that call this one (callers). outgoing_calls: list the functions this one calls (callees). hover: the language server's type/signature/doc for the symbol. signature: the call signature(s) at the position, marking which argument the cursor is on (point at a call's arguments). Defaults to definition."
+    },
+    "include_declaration": {
+      "type": "boolean",
+      "description": "Only meaningful for the references action. When true (the default) the symbol's own declaration is listed among the references; set it to false to list only the use sites, excluding the declaration itself."
     }
   }
 }`)
@@ -152,7 +160,8 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		}
 		return locationsResult(root, locs, "No implementations found."), nil
 	case "references":
-		locs, err := t.source.References(ctx, path, line0, col0)
+		includeDecl := args.IncludeDeclaration == nil || *args.IncludeDeclaration
+		locs, err := t.source.References(ctx, path, line0, col0, includeDecl)
 		if err != nil {
 			return Result{}, fmt.Errorf("finding references at %s:%d:%d: %w", args.Path, args.Line, col, err)
 		}

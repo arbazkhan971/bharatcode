@@ -323,7 +323,7 @@ func TestReferencesReturnsLocations(t *testing.T) {
 	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
 	defer done()
 
-	locations, err := manager.References(ctx, source, 0, 0)
+	locations, err := manager.References(ctx, source, 0, 0, true)
 	require.NoError(t, err)
 	require.Equal(t, []Location{
 		{

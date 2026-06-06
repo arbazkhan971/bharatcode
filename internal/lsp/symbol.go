@@ -92,16 +92,17 @@ func (c *client) implementation(ctx context.Context, path string, line, col int)
 }
 
 // references issues a textDocument/references request for the position and
-// returns every location the server reports referencing the symbol, including
-// its declaration.
-func (c *client) references(ctx context.Context, path string, line, col int) ([]Location, error) {
+// returns every location the server reports referencing the symbol. When
+// includeDeclaration is true the symbol's own declaration is included among the
+// results; when false only the use sites are returned.
+func (c *client) references(ctx context.Context, path string, line, col int, includeDeclaration bool) ([]Location, error) {
 	if err := c.open(ctx, path); err != nil {
 		return nil, err
 	}
 	result, err := c.request(ctx, "textDocument/references", map[string]any{
 		"textDocument": map[string]any{"uri": pathToURI(path)},
 		"position":     map[string]any{"line": line, "character": col},
-		"context":      map[string]any{"includeDeclaration": true},
+		"context":      map[string]any{"includeDeclaration": includeDeclaration},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("requesting references: %w", err)

@@ -114,6 +114,37 @@ func TestPostWriteDiagnostics_CapsOutput(t *testing.T) {
 	require.Contains(t, note, "… and 5 more")
 }
 
+// TestPostWriteDiagnostics_ShowsSourceLine proves the offending source line is
+// rendered indented beneath each diagnostic so the model sees the code at fault.
+func TestPostWriteDiagnostics_ShowsSourceLine(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n\nvar unusedThing = 1\n"), 0o644))
+	src := &fakeDiagnoser{diags: []lsp.Diagnostic{
+		diag(path, 2, 4, lsp.Error, "unusedThing declared and not used"),
+	}}
+
+	note := postWriteDiagnostics(context.Background(), src, workDir, path)
+	require.Contains(t, note, "main.go:3:5: error: unusedThing declared and not used")
+	// The source line at line 3 appears indented beneath the diagnostic.
+	require.Contains(t, note, "\n    var unusedThing = 1")
+	// The snippet follows its diagnostic, not the other way round.
+	require.Less(t, indexOf(note, "declared and not used"), indexOf(note, "var unusedThing = 1"))
+}
+
+// TestPostWriteDiagnostics_NoSourceLineWhenUnreadable proves a diagnostic whose
+// file/line cannot be read still renders, just without a snippet.
+func TestPostWriteDiagnostics_NoSourceLineWhenUnreadable(t *testing.T) {
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "gone.go") // never created on disk
+	src := &fakeDiagnoser{diags: []lsp.Diagnostic{
+		diag(path, 0, 0, lsp.Error, "boom"),
+	}}
+	note := postWriteDiagnostics(context.Background(), src, workDir, path)
+	require.Contains(t, note, "gone.go:1:1: error: boom")
+	require.NotContains(t, note, "\n    ")
+}
+
 // TestEditToolSurfacesDiagnostics proves the wiring: a successful edit appends
 // the language server's findings to the tool result and metadata.
 func TestEditToolSurfacesDiagnostics(t *testing.T) {

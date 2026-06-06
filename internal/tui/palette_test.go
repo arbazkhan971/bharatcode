@@ -445,3 +445,166 @@ func TestKeybindingGroups_IncludesPalette(t *testing.T) {
 	}
 	require.True(t, found, "keybindingGroups must list Ctrl+K for the command palette")
 }
+
+// --- Recent commands section tests ---
+
+// TestRecordPaletteRecent_PrependAndDedup verifies that recording a command
+// puts it at the front of the recent list and removes any earlier occurrence
+// so it is never listed twice.
+func TestRecordPaletteRecent_PrependAndDedup(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	m.recordPaletteRecent("/help")
+	m.recordPaletteRecent("/clear")
+	m.recordPaletteRecent("/diff")
+
+	require.Equal(t, "/diff", m.paletteRecent[0], "most-recently-recorded command must be first")
+	require.Len(t, m.paletteRecent, 3, "three distinct commands must produce three entries")
+
+	// Re-recording an existing command must move it to front, not duplicate it.
+	m.recordPaletteRecent("/help")
+	require.Equal(t, "/help", m.paletteRecent[0], "re-recorded command must move to front")
+	require.Len(t, m.paletteRecent, 3, "re-recording must not create a duplicate entry")
+}
+
+// TestRecordPaletteRecent_Cap verifies that the recent list never exceeds
+// paletteMaxRecent entries, dropping the oldest when necessary.
+func TestRecordPaletteRecent_Cap(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	cmds := []string{"/help", "/clear", "/diff", "/export", "/fork", "/revert", "/search"}
+	for _, c := range cmds {
+		m.recordPaletteRecent(c)
+	}
+
+	require.LessOrEqual(t, len(m.paletteRecent), paletteMaxRecent,
+		"paletteRecent must be capped at paletteMaxRecent")
+	require.Equal(t, "/search", m.paletteRecent[0],
+		"most-recently-recorded command must remain at front after cap")
+}
+
+// TestVisiblePaletteEntries_RecentFirst verifies that when no filter is active
+// and there are recent commands, the visible list begins with those commands
+// (most-recent first) followed by the remaining commands without duplication.
+func TestVisiblePaletteEntries_RecentFirst(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	m.recordPaletteRecent("/help")
+	m.recordPaletteRecent("/diff")
+
+	visible := m.visiblePaletteEntries()
+	require.NotEmpty(t, visible)
+	require.Equal(t, "/diff", visible[0].name, "most-recent command must be first visible entry")
+	require.Equal(t, "/help", visible[1].name, "second-most-recent command must be second visible entry")
+
+	// Recent commands must NOT appear again later in the list.
+	for i := 2; i < len(visible); i++ {
+		require.NotEqual(t, "/diff", visible[i].name,
+			"visible[%d] must not duplicate recent /diff", i)
+		require.NotEqual(t, "/help", visible[i].name,
+			"visible[%d] must not duplicate recent /help", i)
+	}
+}
+
+// TestVisiblePaletteEntries_NoRecentWhenEmpty verifies that an empty recent list
+// returns the canonical full entry list unchanged.
+func TestVisiblePaletteEntries_NoRecentWhenEmpty(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	// paletteRecent is nil by default — no recordings.
+	visible := m.visiblePaletteEntries()
+	all := m.allPaletteEntries()
+	require.Equal(t, len(all), len(visible), "empty recent list must return canonical entry count")
+	if len(visible) > 0 {
+		require.Equal(t, all[0].name, visible[0].name,
+			"empty recent list must preserve canonical order")
+	}
+}
+
+// TestVisiblePaletteEntries_FilterIgnoresRecent verifies that when a filter is
+// active the three-tier ranked search is used regardless of recent state.
+func TestVisiblePaletteEntries_FilterIgnoresRecent(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	m.recordPaletteRecent("/help")
+	m.recordPaletteRecent("/diff")
+	m.paletteFilter = "clear"
+
+	visible := m.visiblePaletteEntries()
+	require.NotEmpty(t, visible, "filter 'clear' must match at least one command")
+	require.Equal(t, "/clear", visible[0].name, "prefix match /clear must rank first for filter 'clear'")
+}
+
+// TestPaletteRecentLen_ValidatesAgainstEntries verifies that paletteRecentLen
+// only counts commands that actually appear in allPaletteEntries so stale
+// dynamic-recipe names do not inflate the count.
+func TestPaletteRecentLen_ValidatesAgainstEntries(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	// Inject a stale name that is not in the built-in palette.
+	m.paletteRecent = []string{"/nonexistent-recipe", "/help", "/diff"}
+
+	got := m.paletteRecentLen()
+	require.Equal(t, 2, got, "stale recent entry must be excluded from paletteRecentLen count")
+}
+
+// TestPaletteBody_ShowsRecentHeader verifies that paletteBody includes a
+// "Recent" label when there are valid recent commands and no filter is active.
+func TestPaletteBody_ShowsRecentHeader(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	m.recordPaletteRecent("/diff")
+	m.recordPaletteRecent("/clear")
+	m.paletteFilter = ""
+	m.paletteCursor = 0
+
+	body := plainText(m.paletteBody())
+	require.Contains(t, body, "Recent",
+		"paletteBody must include 'Recent' section header when recent list is non-empty")
+}
+
+// TestPaletteBody_NoRecentHeaderWhenEmpty verifies that the "Recent" label is
+// absent when no commands have been recorded yet.
+func TestPaletteBody_NoRecentHeaderWhenEmpty(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	m.paletteFilter = ""
+	m.paletteCursor = 0
+
+	body := plainText(m.paletteBody())
+	require.NotContains(t, body, "Recent",
+		"paletteBody must not show 'Recent' header when recent list is empty")
+}
+
+// TestPaletteBody_NoRecentHeaderWhenFiltering verifies that the "Recent" label
+// is suppressed during an active filter search.
+func TestPaletteBody_NoRecentHeaderWhenFiltering(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	m.recordPaletteRecent("/diff")
+	m.paletteFilter = "diff"
+	m.paletteCursor = 0
+
+	body := plainText(m.paletteBody())
+	require.NotContains(t, body, "Recent",
+		"paletteBody must not show 'Recent' section header during filter search")
+}
+
+// TestHandlePaletteKey_EnterRecordsRecent verifies that executing a command via
+// the palette Enter key adds it to paletteRecent.
+func TestHandlePaletteKey_EnterRecordsRecent(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	m.openCommandPalette()
+	m.paletteCursor = 0
+	m.refreshCommandPalette()
+
+	before := len(m.paletteRecent)
+	consumed, _ := m.handlePaletteKey(keySpecial("enter", tea.KeyEnter))
+	require.True(t, consumed, "enter key must be consumed by palette handler")
+	require.Equal(t, before+1, len(m.paletteRecent),
+		"paletteRecent must grow by one after executing a palette command")
+	// The first entry in paletteBuiltinOrder is /help.
+	require.Equal(t, paletteBuiltinOrder[0], m.paletteRecent[0],
+		"most-recently-executed command must be at front of paletteRecent")
+}

@@ -463,3 +463,89 @@ func TestDiagnosticsFilePathStillScopesToOneFile(t *testing.T) {
 	require.NotContains(t, result.Content, "only b")
 	require.Equal(t, []string{target}, queried)
 }
+
+// TestDiagnosticsMetadataErrorFilesListsErrorPaths asserts that the error_files
+// metadata key holds a sorted, workspace-relative list of files that carry at
+// least one error-level diagnostic, omitting files that have only warnings.
+// Files outside the workspace are kept as absolute paths.
+func TestDiagnosticsMetadataErrorFilesListsErrorPaths(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	b := filepath.Join(dir, "b.go")
+	c := filepath.Join(dir, "sub", "c.go")
+	for _, p := range []string{a, b, c} {
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte("package main\n"), 0o644))
+	}
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{Path: a, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "boom in a"},
+			{Path: a, Range: lsp.Range{Start: lsp.Position{Line: 1}}, Severity: lsp.Error, Message: "bang in a"},   // duplicate file — counted once
+			{Path: b, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Warning, Message: "warn in b"}, // warning only — excluded
+			{Path: c, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Error, Message: "boom in c"},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	// error_files must list a.go and sub/c.go (workspace-relative, sorted),
+	// but not b.go (warnings only).
+	errorFiles, ok := result.Metadata[MetadataDiagnosticErrorFiles].([]string)
+	require.True(t, ok, "error_files should be []string")
+	require.Equal(t, []string{"a.go", "sub/c.go"}, errorFiles)
+}
+
+// TestDiagnosticsMetadataErrorFilesAbsentWhenNoErrors asserts the error_files
+// key is absent (nil) when no error-level diagnostics are reported, so callers
+// can test for nil rather than an empty slice.
+func TestDiagnosticsMetadataErrorFilesAbsentWhenNoErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0}}, Severity: lsp.Warning, Message: "warn"},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Nil(t, result.Metadata[MetadataDiagnosticErrorFiles], "error_files must be absent when no errors exist")
+}
+
+// TestDiagnosticsMetadataErrorFilesMultipleErrors asserts that a multi-file
+// scan produces a sorted, deduplicated error_files list when several files each
+// contribute at least one error-level diagnostic.
+func TestDiagnosticsMetadataErrorFilesMultipleErrors(t *testing.T) {
+	dir := t.TempDir()
+	// Three files each with an error; verify the list is sorted and deduplicated.
+	paths := []string{
+		filepath.Join(dir, "z.go"),
+		filepath.Join(dir, "a.go"),
+		filepath.Join(dir, "m.go"),
+	}
+	for _, p := range paths {
+		require.NoError(t, os.WriteFile(p, []byte("package main\n"), 0o644))
+	}
+
+	items := make([]lsp.Diagnostic, len(paths))
+	for i, p := range paths {
+		items[i] = lsp.Diagnostic{
+			Path: p, Range: lsp.Range{Start: lsp.Position{Line: 0}},
+			Severity: lsp.Error, Message: "err",
+		}
+	}
+	tool := &diagnosticsTool{source: fakeDiagnostics{items: items}, workDir: dir}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	errorFiles, ok := result.Metadata[MetadataDiagnosticErrorFiles].([]string)
+	require.True(t, ok)
+	require.Equal(t, []string{"a.go", "m.go", "z.go"}, errorFiles)
+}

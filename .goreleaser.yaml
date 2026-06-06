@@ -27,9 +27,8 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
-      - -X main.commit={{ .Commit }}
-      - -X main.date={{ .Date }}
+      - -X github.com/arbazkhan971/bharatcode/internal/cmd.version={{ .Version }}
+      - -X github.com/arbazkhan971/bharatcode/internal/cmd.commit={{ .Commit }}
 
 archives:
   - id: bharatcode
@@ -50,6 +49,23 @@ archives:
     files:
       - README.md
       - LICENSE
+
+brews:
+  - name: bharatcode
+    ids:
+      - bharatcode
+    repository:
+      owner: arbazkhan971
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/arbazkhan971/bharatcode"
+    description: "BharatCode — an open, sovereign terminal coding agent"
+    license: "MIT"
+    install: |
+      bin.install "bharatcode"
+    test: |
+      system "#{bin}/bharatcode", "version"
 
 checksum:
   name_template: "checksums.txt"

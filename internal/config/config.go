@@ -177,6 +177,9 @@ const (
 	HookPreToolUse HookEvent = "PreToolUse"
 	// HookPostToolUse fires after a tool executes.
 	HookPostToolUse HookEvent = "PostToolUse"
+	// HookUserPromptSubmit fires when the user submits a prompt, before the
+	// turn runs. The hook may block the prompt or inject additional context.
+	HookUserPromptSubmit HookEvent = "UserPromptSubmit"
 	// HookOnError fires when an error occurs in the agent loop.
 	HookOnError HookEvent = "OnError"
 	// HookOnSession fires when a session is created/started.

@@ -978,6 +978,15 @@ func scrollStatus(scroll int) string {
 // indicator visibly animates while a turn is in flight.
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
+// interruptHintAfter is how long a turn must run before runningStatus appends
+// the "ctrl+c to interrupt" hint. A short turn finishes before the reader could
+// act on it, so the bar stays uncluttered; only a turn long enough that the user
+// might actually want to stop it surfaces the key, the way Claude Code reveals
+// its interrupt hint once a run is clearly in progress. Ten seconds keeps the
+// hint off the bulk of quick tool calls while still appearing well before a
+// stuck-looking turn would tempt the user to kill the whole session.
+const interruptHintAfter = 10 * time.Second
+
 // runningStatus returns the status-bar segment shown while a turn is in flight:
 // a cycling spinner, a label for what the agent is doing, and how long the turn
 // has run, e.g. "⠙ working 3s" or "⠙ Bash 3s". The label is the name of the tool
@@ -990,6 +999,11 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 // count, so the glyph advances in step with the one-second tick that drives the
 // duration. A negative elapsed (clock skew) is treated as zero so the frame
 // index never goes out of range.
+//
+// Once the turn has run past interruptHintAfter the segment gains a
+// "(ctrl+c to interrupt)" hint, so a user watching a long run learns how to stop
+// it without quitting the session — Ctrl+C interrupts a turn in flight rather
+// than quitting (see the key handler) but nothing else advertises that.
 func runningStatus(started, now time.Time, activity string) string {
 	if started.IsZero() {
 		return ""
@@ -1003,7 +1017,11 @@ func runningStatus(started, now time.Time, activity string) string {
 		label = "working"
 	}
 	frame := spinnerFrames[int(elapsed/time.Second)%len(spinnerFrames)]
-	return frame + " " + label + " " + util.HumanDuration(elapsed)
+	seg := frame + " " + label + " " + util.HumanDuration(elapsed)
+	if elapsed >= interruptHintAfter {
+		seg += " (ctrl+c to interrupt)"
+	}
+	return seg
 }
 
 func (m *model) pushModelPicker() {

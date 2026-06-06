@@ -123,6 +123,24 @@ const (
 	StateFailed
 )
 
+// String returns a lowercase human-readable label for the state, used by the
+// TUI's /mcp listing and diagnostics. An unrecognized value renders as
+// "unknown" rather than the bare integer.
+func (s State) String() string {
+	switch s {
+	case StateDisconnected:
+		return "disconnected"
+	case StateConnecting:
+		return "connecting"
+	case StateConnected:
+		return "connected"
+	case StateFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
 // Event is published whenever a server state or tool list changes.
 type Event struct {
 	Server    string

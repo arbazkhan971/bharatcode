@@ -76,6 +76,10 @@ type Dependencies struct {
 	// listing. It may be nil (no MCP servers configured), in which case /mcp
 	// reports that none are connected.
 	MCP *mcp.Client
+	// InitialSessionID, when non-empty, causes the TUI to restore this session
+	// at startup instead of beginning a fresh one. Wired by --continue / -c to
+	// resume the most recently updated session for the current project.
+	InitialSessionID string
 }
 
 // Run launches the TUI and blocks until the program exits.
@@ -279,6 +283,32 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	// Render assistant markdown with syntax-highlighted code blocks. The glamour
 	// style follows the active theme so light/dark stay consistent.
 	chatList.EnableMarkdown(theme.Markdown)
+
+	// When --continue is used, pre-load the requested session so the TUI opens
+	// with its history intact instead of starting blank. The load happens here
+	// (before the tea program starts) to keep Init() pure and to surface any
+	// load error via the chat pane rather than a startup failure.
+	var (
+		continueMsgs    []message.Message
+		continueSession *session.Session
+	)
+	if deps.InitialSessionID != "" && deps.Sessions != nil {
+		if sess, err := deps.Sessions.Get(ctx, deps.InitialSessionID); err == nil {
+			if msgs, err := deps.Sessions.Messages(ctx, sess.ID); err == nil {
+				continueSession = sess
+				continueMsgs = msgs
+				sessionID = sess.ID
+				footer.SessionID = sess.ID
+				if sess.Model != "" {
+					modelName = sess.Model
+				}
+				if sess.Agent != "" {
+					agentName = sess.Agent
+				}
+			}
+		}
+	}
+
 	m := &model{
 		ctx:             ctx,
 		deps:            deps,
@@ -296,6 +326,12 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 		sessionID:       sessionID,
 		workspaceRoot:   workingDir(),
 		copyToClipboard: systemClipboardCopy,
+	}
+	if continueSession != nil {
+		m.sessionPersisted = true
+		for _, msg := range continueMsgs {
+			m.chat.Append(msg)
+		}
 	}
 	if deps.Permission != nil {
 		m.applyApprovalMode(deps.Permission.GetApprovalMode())

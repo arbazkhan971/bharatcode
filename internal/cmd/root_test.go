@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/app"
+	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -30,9 +31,10 @@ func TestRootNoArgsStartsTUI(t *testing.T) {
 		require.True(t, opts.YOLO)
 		return nil, nil
 	}
-	runTUI = func(ctx context.Context, application *app.App) error {
+	runTUI = func(ctx context.Context, application *app.App, initialSessionID string) error {
 		_ = ctx
 		_ = application
+		_ = initialSessionID
 		called = true
 		return nil
 	}
@@ -256,6 +258,55 @@ func (k failingKeyring) Delete(service, account string) error {
 	_ = service
 	_ = account
 	return k.err
+}
+
+func TestContinueFlagPassesSessionID(t *testing.T) {
+	oldRunTUI := runTUI
+	defer func() { runTUI = oldRunTUI }()
+
+	// Use a real on-disk DB so sessions survive across app.New calls.
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	configPath := writeConfig(t, defaultTestConfig())
+	projDir := t.TempDir()
+
+	// Seed one session via a short-lived app.New / Close pair.
+	seedApp, err := app.New(context.Background(), app.Options{ConfigPath: configPath, ProjectDir: projDir})
+	require.NoError(t, err)
+	sess := &session.Session{ID: "abc123", Title: "Test", ProjectPath: projDir}
+	require.NoError(t, seedApp.Sessions.Create(context.Background(), sess))
+	require.NoError(t, seedApp.Close(context.Background()))
+
+	// Replace only runTUI — let buildApp call newApp for real so resolveInitialSession
+	// reads from the same DB where we seeded the session above.
+	var gotID string
+	runTUI = func(ctx context.Context, a *app.App, initialSessionID string) error {
+		gotID = initialSessionID
+		return nil
+	}
+
+	_, _, err = executeRoot(t, "--config", configPath, "--project-dir", projDir, "--continue")
+	require.NoError(t, err)
+	require.Equal(t, "abc123", gotID, "--continue should pass the latest session ID to the TUI")
+}
+
+func TestContinueFlagNoSessions(t *testing.T) {
+	oldRunTUI := runTUI
+	defer func() { runTUI = oldRunTUI }()
+
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	configPath := writeConfig(t, defaultTestConfig())
+
+	var gotID string
+	runTUI = func(ctx context.Context, a *app.App, initialSessionID string) error {
+		gotID = initialSessionID
+		return nil
+	}
+
+	_, _, err := executeRoot(t, "--config", configPath, "--project-dir", t.TempDir(), "--continue")
+	require.NoError(t, err)
+	require.Empty(t, gotID, "--continue with no sessions should pass empty string (start fresh)")
 }
 
 var _ = cobra.Command{}

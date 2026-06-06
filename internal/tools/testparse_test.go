@@ -279,6 +279,72 @@ exit status 2`
 	}
 }
 
+func TestParseGoTestFailures_TimeoutRunningTests(t *testing.T) {
+	// When -timeout fires with parallel tests, Go prints a "running tests:" block
+	// before the goroutine dump. A test blocked on a syscall may not have a Test*
+	// frame in any goroutine stack, so it must be attributed from the list instead.
+	out := `panic: test timed out after 30s
+running tests:
+	TestSlowA (29.9s)
+	TestSlowB (28.1s)
+
+goroutine 1 [running]:
+testing.(*M).startAlarm.func1()
+	/usr/local/go/src/testing/testing.go:2138 +0x73
+goroutine 6 [syscall]:
+github.com/x/y.TestSlowA(0xc000102000)
+	/home/x/y/slow_test.go:12 +0x18
+testing.tRunner(0xc000102000, 0x5f1234)
+	/usr/local/go/src/testing/testing.go:1576 +0x10b
+exit status 2
+FAIL	github.com/x/y	30.005s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestSlowA", Detail: "panic: test timed out after 30s"},
+		{Name: "TestSlowB", Detail: "panic: test timed out after 30s"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_TimeoutNoStackFrame(t *testing.T) {
+	// When the timed-out test has no goroutine stack frame (it is stuck in a
+	// syscall and the runtime cannot unwind it), the "running tests:" list is the
+	// only signal and must produce the failure.
+	out := `panic: test timed out after 10s
+running tests:
+	TestHangs (9.8s)
+
+goroutine 1 [running]:
+testing.(*M).startAlarm.func1()
+	/usr/local/go/src/testing/testing.go:2138 +0x73
+exit status 2
+FAIL	github.com/x/y	10.001s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestHangs", Detail: "panic: test timed out after 10s"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGoTestFailures_TimeoutDeduplicates(t *testing.T) {
+	// A test found in both the goroutine stack (by parseGoTestPanics) and the
+	// "running tests:" list must appear exactly once in the result.
+	out := `panic: test timed out after 5s
+running tests:
+	TestSingle (4.9s)
+
+goroutine 6 [syscall]:
+github.com/x/y.TestSingle(0xc000102000)
+	/home/x/y/slow_test.go:8 +0x18
+exit status 2
+FAIL	github.com/x/y	5.001s`
+	got := parseTestFailures("go test ./...", out)
+	want := []testFailure{
+		{Name: "TestSingle", Detail: "panic: test timed out after 5s"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseGoTestFailures_JSON(t *testing.T) {
 	// `go test -json` wraps every line in an event object, so the text "--- FAIL:"
 	// matcher never fires; the JSON parser keys on "fail" events instead and pulls

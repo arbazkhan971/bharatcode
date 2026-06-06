@@ -281,6 +281,13 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 		m.stopGoal()
 		return m, nil
 	}
+
+	// Fire a desktop notification when the terminal is out of focus so the user
+	// learns the turn finished while they were away — matching the behaviour of
+	// Claude Code and opencode. FocusAware suppresses the call when the window
+	// still has focus, so this is a no-op for interactive sessions.
+	_ = m.notifications.Notify("BharatCode", turnNotifyBody(done.last))
+
 	if cmd := m.advanceGoal(done.last); cmd != nil {
 		return m, cmd
 	}
@@ -290,6 +297,24 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 		return m, m.continueRun(strings.Join(pending, "\n"))
 	}
 	return m, nil
+}
+
+// turnNotifyBody returns a short one-line summary of the last assistant message
+// for the desktop notification body. When the message is empty or nil a generic
+// "Turn complete" string is used so the notification is never blank.
+func turnNotifyBody(last *message.Message) string {
+	text := strings.TrimSpace(assistantText(last))
+	if text == "" {
+		return "Turn complete"
+	}
+	if nl := strings.IndexByte(text, '\n'); nl >= 0 {
+		text = strings.TrimSpace(text[:nl])
+	}
+	const maxLen = 100
+	if len(text) > maxLen {
+		return text[:maxLen-3] + "..."
+	}
+	return text
 }
 
 // assistantText extracts the plain-text content of an assistant message.

@@ -167,6 +167,41 @@ func TestEstimateTokens_BeatsNaiveOnMixedString(t *testing.T) {
 	t.Logf("mixed=%q estimate=%d naive_bytes4=%d L=%d", mixed, estimate, naive, trueFloorL)
 }
 
+func TestEstimateTokens_CJKPunctuationCostsFullToken(t *testing.T) {
+	// CJK symbols and punctuation (the ideographic space and full-width marks
+	// 、。「」) each cost a whole token in real tokenizers, so they must classify
+	// as CJK (weight 1.0) rather than the multi-byte "other" weight (0.5). A
+	// pure run of N such runes therefore estimates N tokens, not N/2.
+	const puncts = "、。「」　〜" // 6 CJK symbols/punctuation runes.
+	require.Equal(t, 6, EstimateTokens(puncts),
+		"each CJK punctuation rune should weigh a full token")
+
+	// Each rune is individually classified as CJK.
+	for _, r := range puncts {
+		require.True(t, isCJK(r), "rune %#U should classify as CJK", r)
+	}
+}
+
+func TestEstimateTokens_SupplementaryHanCostsFullToken(t *testing.T) {
+	// Extension B–F ideographs live in the supplementary plane (>= U+20000) and
+	// each cost a whole token like the BMP ideographs, despite being four UTF-8
+	// bytes (which bytes/4 and the 0.5 "other" weight both undercount). A run of
+	// N such runes should estimate N tokens.
+	const extB = "𠀀𠀁𠀂𪜀" // 4 Extension B/C ideographs, all in [U+20000, U+2FA1F].
+	require.Equal(t, 4, EstimateTokens(extB),
+		"each supplementary-plane Han ideograph should weigh a full token")
+
+	for _, r := range extB {
+		require.True(t, isCJK(r), "rune %#U should classify as CJK", r)
+		require.Greater(t, r, rune(0xFFFF), "test rune %#U should be supplementary-plane", r)
+	}
+
+	// The structural win over bytes/4: each ideograph is 4 UTF-8 bytes, so
+	// bytes/4 charges exactly one token each and matches here, but the estimate
+	// must never drop below that floor.
+	require.GreaterOrEqual(t, EstimateTokens(extB), naiveBytes4(extB))
+}
+
 func TestEstimateMessageTokens_SumsBlocksPlusOverhead(t *testing.T) {
 	input := json.RawMessage(`{"path":"/etc/hosts"}`)
 	msg := message.Message{

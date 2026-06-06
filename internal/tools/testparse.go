@@ -91,6 +91,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseFoundryTestFailures(output)
 	case runnerJasmine:
 		return parseJasmineFailures(output)
+	case runnerPester:
+		return parsePesterFailures(output)
 	default:
 		return nil
 	}
@@ -128,6 +130,7 @@ const (
 	runnerGinkgo
 	runnerTox
 	runnerJasmine
+	runnerPester
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -245,6 +248,14 @@ var (
 	// word boundary, so it is classified before the jest runner claims it (jest's
 	// embedded jasmine2 engine is unrelated to the standalone CLI's report shape).
 	jasmineRe = regexp.MustCompile(`\bjasmine\b`)
+	// `Invoke-Pester`/`pester`/`pwsh -c Invoke-Pester` drive Pester, PowerShell's
+	// dominant test framework, whose detailed console output marks each failing
+	// test with an indented "[-] <name> <duration>" line and prints the assertion
+	// on the indented line(s) beneath. \bpester\b admits "invoke-pester" (the "-"
+	// is a word boundary) and the bare "pester" wrapper while keeping prose like
+	// "trumpeters tune up" — which contains no "pester" at a word boundary — from
+	// matching. A Pester invocation carries none of the other runners' substrings.
+	pesterRe = regexp.MustCompile(`\bpester\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -428,6 +439,14 @@ func classifyTestRunner(command string) testRunner {
 		// "jasmine" invocation carries none of their substrings, but kept explicit
 		// to guard against future overlap.
 		return runnerJasmine
+	case pesterRe.MatchString(c):
+		// `Invoke-Pester`/`pester` drives PowerShell's Pester framework, whose
+		// detailed output marks each failing test with an indented "[-] <name>
+		// <duration>" line ("[+]" passed, "[!]" skipped) and prints the assertion on
+		// the indented line beneath. Checked before the JS runners since a Pester
+		// invocation carries none of their substrings, but kept explicit to guard
+		// against future overlap.
+		return runnerPester
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -2208,6 +2227,63 @@ func parseJasmineFailures(output string) []testFailure {
 				}
 			}
 			break
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "  [-] Returns Mars 8ms (7ms|1ms)" — Pester's per-test failure line in its
+	// detailed console output. "[+]" marks a passing test and "[!]" a skipped one,
+	// so only "[-]" is a failure. The captured group is everything after the marker
+	// up to the trailing duration, which pesterTimeRe strips.
+	pesterFailRe = regexp.MustCompile(`^\s*\[-\]\s+(\S.*?)\s*$`)
+	// The trailing " 8ms (7ms|1ms)" / " 1.2s" / " 523ms" duration marker on a
+	// Pester result line. The optional "(user|framework)" breakdown follows the
+	// total when Pester is configured to show it.
+	pesterTimeRe = regexp.MustCompile(`\s+\d+(?:\.\d+)?\s*m?s(?:\s+\([^)]*\))?$`)
+	// Any Pester result marker ("[+]" pass, "[-]" fail, "[!]" skip, "[?]"
+	// inconclusive). Used to bound a failure's detail scan so it stops at the next
+	// test's line rather than borrowing it.
+	pesterMarkerRe = regexp.MustCompile(`^\s*\[[-+!?]\]`)
+)
+
+// parsePesterFailures extracts failing tests from Pester's detailed console
+// output (`Invoke-Pester`). Each failure opens with an indented "[-] <name>
+// <duration>" line; the detail is the first non-empty line beneath it (the
+// assertion message, e.g. "Expected 'Mars', but got 'Earth'."), located before
+// the next result marker or "Describing"/"Context" block header so an entry
+// without a message body does not borrow the following one's. The trailing
+// "at <expr>, <file>:<line>" location line is skipped in favor of the message
+// above it.
+func parsePesterFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := 0; i < len(lines); i++ {
+		m := pesterFailRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(pesterTimeRe.ReplaceAllString(m[1], ""))
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		for j := i + 1; j < len(lines); j++ {
+			if pesterMarkerRe.MatchString(lines[j]) {
+				break
+			}
+			t := strings.TrimSpace(lines[j])
+			if strings.HasPrefix(t, "Describing ") || strings.HasPrefix(t, "Context ") {
+				break
+			}
+			if t != "" {
+				f.Detail = t
+				break
+			}
 		}
 		failures = append(failures, f)
 	}

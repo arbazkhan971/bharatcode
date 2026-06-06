@@ -222,6 +222,12 @@ type CodeAction struct {
 	// action unavailable in the current context. A disabled action is still listed
 	// (so the reason is visible) but cannot be applied.
 	Disabled string
+	// Diagnostics holds the messages of the diagnostics this action resolves, taken
+	// from the LSP CodeAction.diagnostics field. A quick fix keyed on a diagnostic
+	// carries the offending problem(s) here (e.g. "undefined: foo"), letting a
+	// consumer show which error each fix addresses. It is empty for refactors and
+	// source actions, which fix no specific diagnostic.
+	Diagnostics []string
 	// Data is the raw JSON of the original action object as the server sent it.
 	// Servers that advertise resolveProvider often return an action with an empty
 	// Edit and rely on a follow-up codeAction/resolve request — which echoes this

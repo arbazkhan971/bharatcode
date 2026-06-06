@@ -374,3 +374,25 @@ func TestFilterFiles_RanksAndPreservesOrder(t *testing.T) {
 	// No match yields an empty slice.
 	require.Empty(t, filterFiles("zzz", files))
 }
+
+// TestFilterFiles_AppliesPickerTieBreaks proves the quick-filter shares the
+// @-file picker's full ordering, not just its coarse score band: within one
+// score band a tighter matched span and a shallower path win, so filterFiles and
+// rankedMentions agree on a query rather than diverging on ties.
+func TestFilterFiles_AppliesPickerTieBreaks(t *testing.T) {
+	t.Parallel()
+
+	// All three match "ae" only as a scattered base-name subsequence (score band
+	// 5), so the coarse score alone cannot separate them — the old score-only sort
+	// would keep them in input order. The shared ordering instead breaks the tie by
+	// span tightness, then shallower path: "cake.go" and "abe.go" (span 3) come
+	// before the looser "apple.go" (span 5), and within the span-3 pair the
+	// top-level "cake.go" outranks the nested "dir/abe.go".
+	files := []string{"apple.go", "dir/abe.go", "cake.go"}
+	got := filterFiles("ae", files)
+	require.Equal(t, []string{"cake.go", "dir/abe.go", "apple.go"}, got)
+
+	// The shared helper means the quick-filter and the @-file picker rank the same
+	// candidate set identically.
+	require.Equal(t, rankFilesByToken("ae", files), got)
+}

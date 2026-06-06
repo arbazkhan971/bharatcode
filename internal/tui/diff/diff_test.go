@@ -484,8 +484,9 @@ func TestStat_CountsBinaryAndRename(t *testing.T) {
 
 // TestStatLines_BinaryShowsBinMarker proves a binary file row shows git's "Bin"
 // marker (with no histogram bar) instead of a "+0 -0" that would read as an empty
-// change, a pure rename keeps its accurate zero counts, and a text file in the
-// same patch keeps its counts and bar.
+// change, a pure rename shows its "old => new" name with a "rename" marker, and a
+// text file in the same patch keeps its counts and bar. The path column is sized
+// to the widest name — the rename's "old => new" — so every label aligns.
 func TestStatLines_BinaryShowsBinMarker(t *testing.T) {
 	t.Parallel()
 
@@ -496,10 +497,54 @@ func TestStatLines_BinaryShowsBinMarker(t *testing.T) {
 	lines := strings.Split(got, "\n")
 
 	require.Equal(t, "3 files changed, +1 -1", lines[0])
-	require.Equal(t, "  logo.png  Bin", lines[1])
-	require.Equal(t, "  new.go    +0 -0", lines[2])
-	require.Equal(t, "  main.go   +1 -1  +-", lines[3])
+	require.Equal(t, "  logo.png          Bin", lines[1])
+	require.Equal(t, "  old.go => new.go  rename", lines[2])
+	require.Equal(t, "  main.go           +1 -1   +-", lines[3])
 	require.Len(t, lines, 4)
+}
+
+// TestFileStats_PureRenameRecordsOldPath proves a pure rename (one carrying no
+// "+++" content header) is parsed into a FileStat whose OldPath holds the source
+// name and whose renamed() reports true, so the diffstat can show "old => new".
+func TestFileStats_PureRenameRecordsOldPath(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/old.go b/sub/new.go\nsimilarity index 100%\nrename from old.go\nrename to sub/new.go\n"
+	files := fileStats(patch)
+	require.Len(t, files, 1)
+	require.Equal(t, "sub/new.go", files[0].Path)
+	require.Equal(t, "old.go", files[0].OldPath)
+	require.True(t, files[0].renamed())
+	require.False(t, files[0].Binary)
+}
+
+// TestStatLines_PureRenameShowsArrow proves a lone pure rename renders its
+// "old => new" path with the "rename" marker rather than dropping the source name
+// and reading as an empty "+0 -0" change.
+func TestStatLines_PureRenameShowsArrow(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/old.go b/new.go\nrename from old.go\nrename to new.go\n" +
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+	got := New(styles.Theme{}).StatLines(patch, 0)
+	require.Contains(t, got, "old.go => new.go")
+	require.Contains(t, got, "rename")
+	require.NotContains(t, got, "+0 -0")
+}
+
+// TestFileStats_BinaryRenameStaysBin proves a binary file that is also renamed
+// keeps the "Bin" marker — the source name being irrelevant for a blob — rather
+// than being shown as a text "old => new" rename.
+func TestFileStats_BinaryRenameStaysBin(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/old.png b/new.png\nrename from old.png\nrename to new.png\n" +
+		"Binary files a/old.png and b/new.png differ\n"
+	files := fileStats(patch)
+	require.Len(t, files, 1)
+	require.True(t, files[0].Binary)
+	require.False(t, files[0].renamed())
+	require.Equal(t, "Bin", countLabel(files[0]))
 }
 
 // TestStat_RenameWithContentCountedOnce proves a rename that also edits the file

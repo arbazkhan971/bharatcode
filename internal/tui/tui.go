@@ -979,7 +979,12 @@ func runningStatus(started, now time.Time, activity string) string {
 func (m *model) pushModelPicker() {
 	var lines []string
 	for _, model := range m.deps.Cfg.Models {
-		lines = append(lines, model.Provider+"/"+model.ID)
+		label := model.Provider + "/" + model.ID
+		// The status bar tracks the active model by its bare ID; accept the
+		// "provider/id" label too so a config that records the full name still
+		// marks the right row.
+		active := m.status.Model == model.ID || m.status.Model == label
+		lines = append(lines, activeMarker(active)+label)
 	}
 	if len(lines) == 0 {
 		lines = append(lines, "No configured models")
@@ -990,12 +995,25 @@ func (m *model) pushModelPicker() {
 func (m *model) agentList() string {
 	var lines []string
 	for _, agent := range m.deps.Cfg.Agents {
-		lines = append(lines, agent.Name)
+		lines = append(lines, activeMarker(m.status.Agent == agent.Name)+agent.Name)
 	}
 	if len(lines) == 0 {
 		return "No configured agents"
 	}
 	return strings.Join(lines, "\n")
+}
+
+// activeMarker prefixes a model- or agent-picker row: a filled dot for the entry
+// matching the session's active selection so the open picker shows which model
+// or agent is currently in use, and an aligning two-space blank for the rest so
+// every row's name still starts at the same column. It mirrors how Claude Code
+// and opencode flag the current choice in their pickers, turning the otherwise
+// flat list into one the reader can orient in at a glance.
+func activeMarker(active bool) string {
+	if active {
+		return "● "
+	}
+	return "  "
 }
 
 func (m *model) waitLedger() tea.Cmd {

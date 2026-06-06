@@ -71,7 +71,9 @@ const environmentTemplate = environmentHeader + `
 - Working directory: {{.Workdir}}
 - Platform: {{.OS}}/{{.Arch}}
 - Git branch: {{.GitBranch}}{{if .GitStatus}}
-- Git status: {{.GitStatus}}{{end}}
+- Git status: {{.GitStatus}}{{end}}{{if .GitRecentCommits}}
+- Recent commits:
+{{.GitRecentCommits}}{{end}}
 - File tracker: {{.FileTrackerSummary}}
 - Current date: {{now}}`
 
@@ -115,6 +117,7 @@ type PromptData struct {
 	Arch               string
 	GitBranch          string
 	GitStatus          string
+	GitRecentCommits   string
 	AgentName          string
 	Tools              []ToolInfo
 	FileTrackerSummary string
@@ -151,6 +154,7 @@ func renderPrompt(ctx context.Context, agentName, promptOverride string, registr
 		Arch:               runtime.GOARCH,
 		GitBranch:          gitBranch(ctx, workdir),
 		GitStatus:          gitStatus(ctx, workdir),
+		GitRecentCommits:   gitRecentCommits(ctx, workdir),
 		AgentName:          agentName,
 		Tools:              promptTools(registry.List()),
 		FileTrackerSummary: fileSummary(tracker),
@@ -494,6 +498,49 @@ func gitStatus(ctx context.Context, workdir string) string {
 		summary += fmt.Sprintf(", and %d more", len(entries)-gitStatusFileCap)
 	}
 	return summary
+}
+
+// gitRecentCommitsCap bounds how many recent commits the environment block
+// lists so a busy history cannot flood the system prompt.
+const gitRecentCommitsCap = 5
+
+// gitRecentCommitLineCap bounds the rendered width of a single commit line
+// (short hash + subject) so an unusually long subject stays compact.
+const gitRecentCommitLineCap = 100
+
+// gitRecentCommits summarizes the tip of the current branch's history for the
+// environment block so the model starts each session aware of recent work and
+// the repository's commit-message conventions instead of having to run a bash
+// command to discover them. Each commit renders as an indented "  <short-hash>
+// <subject>" line; the whole block is empty when workdir is not a git
+// repository or has no commits yet (the caller then omits the section). Like
+// the rest of the environment block this is a snapshot taken when the prompt is
+// built, not a live view.
+func gitRecentCommits(ctx context.Context, workdir string) string {
+	cmd := exec.CommandContext(ctx, "git", "log", "--format=%h %s", "-n", fmt.Sprint(gitRecentCommitsCap))
+	cmd.Dir = workdir
+	out, err := cmd.Output()
+	if err != nil {
+		// Not a git repository, git is unavailable, or the branch has no
+		// commits yet: omit the section.
+		return ""
+	}
+
+	var lines []string
+	for _, line := range strings.Split(string(out), "\n") {
+		entry := strings.TrimSpace(line)
+		if entry == "" {
+			continue
+		}
+		if len(entry) > gitRecentCommitLineCap {
+			entry = entry[:gitRecentCommitLineCap-1] + "…"
+		}
+		lines = append(lines, "  "+entry)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 func fileSummary(tracker *filetracker.Tracker) string {

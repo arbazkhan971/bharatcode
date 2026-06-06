@@ -201,7 +201,12 @@ func parseProviderError(body []byte) error {
 	switch {
 	case code == "rate_limit_exceeded" || typ == "rate_limit_error":
 		return fmt.Errorf("provider rate limited request: %w", ErrRateLimit)
-	case code == "context_length_exceeded" || strings.Contains(msg, "context length") || strings.Contains(msg, "maximum context"):
+	case code == "context_length_exceeded" || strings.Contains(msg, "context length") || strings.Contains(msg, "maximum context") || strings.Contains(msg, "prompt is too long"):
+		// Anthropic rejects an over-budget prompt with an invalid_request_error
+		// whose message reads "prompt is too long: N tokens > M maximum" rather
+		// than the OpenAI "context length" wording, so match its marker too;
+		// otherwise the request falls through to a generic 400 and the agent's
+		// compaction path never triggers.
 		return fmt.Errorf("provider context limit: %w", ErrContextLimit)
 	case code == "model_not_found" || typ == "not_found_error":
 		return fmt.Errorf("provider model lookup: %w", ErrModelNotFound)
@@ -217,6 +222,9 @@ func mentionsContextLimit(s string) bool {
 	return strings.Contains(s, "context length") ||
 		strings.Contains(s, "maximum context") ||
 		strings.Contains(s, "too many tokens") ||
+		// Anthropic's over-budget wording is "prompt is too long: N tokens > M
+		// maximum", which shares none of the markers above.
+		strings.Contains(s, "prompt is too long") ||
 		// Gemini phrases an over-budget prompt as "The input token count (X)
 		// exceeds the maximum number of tokens allowed (Y)." rather than using the
 		// OpenAI/Anthropic wording above, so match its marker too.

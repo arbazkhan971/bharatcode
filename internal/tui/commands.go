@@ -310,6 +310,197 @@ func (m *model) refreshSessionPicker() {
 	})
 }
 
+// modelWindow caps how many model rows the interactive picker draws at once.
+// The model list is typically short, but a user with many configured models
+// would otherwise get a dialog taller than the terminal; the window scrolls to
+// follow the cursor exactly as the session picker's sessionWindow does.
+const modelWindow = 10
+
+// modelWindowBounds mirrors sessionWindowBounds but for the model picker list.
+func modelWindowBounds(cursor, total int) (start, end int) {
+	if total <= modelWindow {
+		return 0, total
+	}
+	start = cursor - modelWindow/2
+	if start < 0 {
+		start = 0
+	}
+	end = start + modelWindow
+	if end > total {
+		end = total
+		start = end - modelWindow
+	}
+	return start, end
+}
+
+// visibleModels returns the picker rows that match the live filter query.
+// An empty query returns every candidate in config order. A non-empty query is
+// matched case-insensitively against the model ID and provider name in three
+// ranked tiers: rows whose ID begins with the query come first, then rows
+// whose "provider/ID" label contains the query as a substring, then rows it
+// matches only as a scattered subsequence — the same three-tier ranking the
+// session and @-file pickers use.
+func (m *model) visibleModels() []config.Model {
+	if m.modelFilter == "" {
+		return m.modelCandidates
+	}
+	q := strings.ToLower(m.modelFilter)
+	var prefix, substr, subseq []config.Model
+	for _, mod := range m.modelCandidates {
+		id := strings.ToLower(mod.ID)
+		hay := strings.ToLower(mod.Provider) + "/" + id
+		switch {
+		case strings.HasPrefix(id, q):
+			prefix = append(prefix, mod)
+		case strings.Contains(hay, q):
+			substr = append(substr, mod)
+		case isSubsequence(q, hay):
+			subseq = append(subseq, mod)
+		}
+	}
+	out := make([]config.Model, 0, len(prefix)+len(substr)+len(subseq))
+	out = append(out, prefix...)
+	out = append(out, substr...)
+	return append(out, subseq...)
+}
+
+// modelPickerBody renders the interactive model list with a cursor marker, an
+// optional filter echo, and a keybinding hint footer. It mirrors the session
+// picker's layout so both pickers feel like the same pattern.
+func (m *model) modelPickerBody() string {
+	visible := m.visibleModels()
+	lines := make([]string, 0, len(visible)+4)
+	if m.modelFilter != "" {
+		count := m.theme.Muted.Render(fmt.Sprintf("· %d of %d", len(visible), len(m.modelCandidates)))
+		lines = append(lines, "Filter: "+m.modelFilter+" "+count, "")
+	}
+	if len(visible) == 0 {
+		lines = append(lines, "(no models match)")
+	}
+	start, end := modelWindowBounds(m.modelCursor, len(visible))
+	if start > 0 {
+		lines = append(lines, m.theme.Muted.Render(fmt.Sprintf("⋯ %d more above", start)))
+	}
+	for i := start; i < end; i++ {
+		mod := visible[i]
+		label := mod.Provider + "/" + mod.ID
+		active := m.status.Model == mod.ID || m.status.Model == label
+		marker := "  "
+		if i == m.modelCursor {
+			marker = "> "
+		}
+		row := marker + activeMarker(active) + label
+		if mod.ContextWindow > 0 {
+			row += m.theme.Muted.Render(fmt.Sprintf("  %dk ctx", mod.ContextWindow/1000))
+		}
+		lines = append(lines, row)
+	}
+	if end < len(visible) {
+		lines = append(lines, m.theme.Muted.Render(fmt.Sprintf("⋯ %d more below", len(visible)-end)))
+	}
+	lines = append(lines, "", "type to filter · ↑/↓ to move · enter to select · esc to cancel")
+	return strings.Join(lines, "\n")
+}
+
+// handleModelPickerKey processes navigation and selection while the model
+// picker is open. It mirrors handleSessionPickerKey exactly, returning whether
+// the key was consumed so an unconsumed key falls through to the dialog's own
+// handler (esc to dismiss).
+func (m *model) handleModelPickerKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.Cmd) {
+	switch msg.String() {
+	case "up":
+		if m.modelCursor > 0 {
+			m.modelCursor--
+			m.refreshModelPicker()
+		}
+		return true, nil
+	case "down":
+		if m.modelCursor < len(m.visibleModels())-1 {
+			m.modelCursor++
+			m.refreshModelPicker()
+		}
+		return true, nil
+	case "home":
+		if m.modelCursor != 0 {
+			m.modelCursor = 0
+			m.refreshModelPicker()
+		}
+		return true, nil
+	case "end":
+		if last := len(m.visibleModels()) - 1; last >= 0 && m.modelCursor != last {
+			m.modelCursor = last
+			m.refreshModelPicker()
+		}
+		return true, nil
+	case "pgup":
+		if m.modelCursor > 0 {
+			m.modelCursor -= modelWindow
+			if m.modelCursor < 0 {
+				m.modelCursor = 0
+			}
+			m.refreshModelPicker()
+		}
+		return true, nil
+	case "pgdown":
+		if last := len(m.visibleModels()) - 1; last >= 0 && m.modelCursor < last {
+			m.modelCursor += modelWindow
+			if m.modelCursor > last {
+				m.modelCursor = last
+			}
+			m.refreshModelPicker()
+		}
+		return true, nil
+	case "backspace":
+		if m.modelFilter != "" {
+			r := []rune(m.modelFilter)
+			m.modelFilter = string(r[:len(r)-1])
+			m.modelCursor = 0
+			m.refreshModelPicker()
+		}
+		return true, nil
+	case "enter":
+		visible := m.visibleModels()
+		if len(visible) == 0 {
+			return true, nil
+		}
+		chosen := visible[m.modelCursor]
+		m.dialogs.Pop()
+		m.modelCandidates = nil
+		m.modelFilter = ""
+		m.applyModel(chosen)
+		return true, nil
+	default:
+		if text := msg.Key().Text; text != "" {
+			m.modelFilter += text
+			m.modelCursor = 0
+			m.refreshModelPicker()
+			return true, nil
+		}
+		return false, nil
+	}
+}
+
+// refreshModelPicker re-renders the open model picker dialog so the moved
+// cursor or updated filter is reflected. It replaces the top dialog in place,
+// mirroring refreshSessionPicker.
+func (m *model) refreshModelPicker() {
+	m.dialogs.Pop()
+	m.dialogs.Push(&dialog.Text{
+		DialogID: "model_picker",
+		Title:    "Models",
+		Body:     m.modelPickerBody(),
+		Theme:    m.theme,
+	})
+}
+
+// applyModel updates the active model display to the selected model. The
+// status bar model field is updated immediately so the UI reflects the choice
+// on the next render. This mirrors how the session picker updates status.Model
+// when restoring a session.
+func (m *model) applyModel(mod config.Model) {
+	m.status.Model = mod.ID
+}
+
 // restoreSession switches the active session to id and loads its persisted
 // transcript into the chat view. It updates the session identity shown in the
 // status bar and footer and refreshes the ledger summary for the new session.

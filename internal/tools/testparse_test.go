@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestClassifyTestRunner(t *testing.T) {
@@ -1220,6 +1221,49 @@ func TestSummarizeTestFailures(t *testing.T) {
 	want := "[test failures: 2]\n  TestFoo — foo_test.go:42: boom\n  TestBar"
 	if s != want {
 		t.Errorf("summary mismatch:\n got %q\nwant %q", s, want)
+	}
+}
+
+func TestSummarizeTestFailuresClipsLongDetail(t *testing.T) {
+	// A single assertion can print a multi-hundred-character expected-vs-actual
+	// line; the inline summary clips it to maxFailureDetailWidth runes plus an
+	// ellipsis, while the caller keeps the untruncated detail in metadata.
+	long := strings.Repeat("x", maxFailureDetailWidth+50)
+	s := summarizeTestFailures([]testFailure{{Name: "TestBig", Detail: long}})
+
+	clipped := strings.Repeat("x", maxFailureDetailWidth) + "…"
+	want := "[test failures: 1]\n  TestBig — " + clipped
+	if s != want {
+		t.Errorf("summary mismatch:\n got %q\nwant %q", s, want)
+	}
+	if strings.Contains(s, long) {
+		t.Error("summary should not contain the untruncated detail")
+	}
+}
+
+func TestSummarizeTestFailuresKeepsShortDetail(t *testing.T) {
+	// A detail at exactly the width limit is emitted verbatim, with no ellipsis.
+	exact := strings.Repeat("y", maxFailureDetailWidth)
+	s := summarizeTestFailures([]testFailure{{Name: "TestEdge", Detail: exact}})
+	if strings.Contains(s, "…") {
+		t.Errorf("detail at the width limit should not be clipped:\n%s", s)
+	}
+	if !strings.HasSuffix(s, exact) {
+		t.Errorf("detail at the width limit should be emitted verbatim:\n%s", s)
+	}
+}
+
+func TestTruncateDetailRuneSafe(t *testing.T) {
+	// Truncation must land on a rune boundary so multi-byte content is never
+	// split mid-character. A string of N+10 multi-byte runes clips to exactly
+	// maxFailureDetailWidth runes plus the ellipsis, all valid UTF-8.
+	detail := strings.Repeat("é", maxFailureDetailWidth+10)
+	got := truncateDetail(detail)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated detail is not valid UTF-8: %q", got)
+	}
+	if want := maxFailureDetailWidth + utf8.RuneCountInString("…"); utf8.RuneCountInString(got) != want {
+		t.Errorf("rune count = %d, want %d", utf8.RuneCountInString(got), want)
 	}
 }
 

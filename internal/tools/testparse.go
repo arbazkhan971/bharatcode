@@ -105,6 +105,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseKarmaFailures(output)
 	case runnerGotestsum:
 		return parseGotestsumFailures(output)
+	case runnerBusted:
+		return parseBustedFailures(output)
 	default:
 		return nil
 	}
@@ -149,6 +151,7 @@ const (
 	runnerBehave
 	runnerKarma
 	runnerGotestsum
+	runnerBusted
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -316,6 +319,16 @@ var (
 	// where "ng" sits mid-word — from matching. A Karma invocation carries none of
 	// the other JS runners' substrings, so it is classified before them.
 	karmaRe = regexp.MustCompile(`\bkarma\b|\bng test\b`)
+	// `busted`/`busted spec/` drives Busted, the dominant Lua test framework,
+	// whose default (utfTerminal) reporter closes a failing run with a block per
+	// failure: a "Failure → <file> @ <line>" / "Error → <file> @ <line>" header
+	// (the plainTerminal handler spells the arrow "->"), the full test description
+	// on the next line, and the "<file>:<line>: <message>" assertion beneath.
+	// \bbusted\b admits "busted", "busted spec/", and "busted --output=TAP foo"
+	// while keeping prose like "the adjusted plan" — where "busted" sits at no
+	// word boundary — from matching. A busted invocation carries none of the other
+	// runners' substrings.
+	bustedRe = regexp.MustCompile(`\bbusted\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -573,6 +586,14 @@ func classifyTestRunner(command string) testRunner {
 		// reporter output differs from the standalone jasmine CLI's "Failures:" block,
 		// so it needs its own parser.)
 		return runnerKarma
+	case bustedRe.MatchString(c):
+		// `busted` drives Lua's Busted framework, whose reporter closes a failing
+		// run with a "Failure → <file> @ <line>" / "Error → <file> @ <line>" block
+		// naming each failed example, the full description on the next line, and the
+		// "<file>:<line>: <message>" assertion beneath. Checked before the JS runners
+		// since a busted invocation carries none of their substrings, but kept
+		// explicit to guard against future overlap.
+		return runnerBusted
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -2763,6 +2784,63 @@ func parseRobotFailures(output string) []testFailure {
 		}
 		seen[name] = true
 		failures = append(failures, testFailure{Name: name, Detail: detail})
+	}
+	return failures
+}
+
+var (
+	// "Failure → spec/example_spec.lua @ 4" — Busted's per-failure block header.
+	// "Error → ..." marks an uncaught Lua error (rather than a failed assertion);
+	// both are actionable failures. The plainTerminal handler renders the arrow as
+	// "->", so the separator between the keyword and "<file> @ <line>" is matched
+	// loosely. Anchoring on the trailing "@ <line>" keeps the following
+	// description and "<file>:<line>:" detail lines from matching the header.
+	bustedHeaderRe = regexp.MustCompile(`^(?:Failure|Error)\b.*@ \d+$`)
+	// "spec/example_spec.lua:5: Expected objects to be equal." — the assertion or
+	// error detail Busted prints beneath the test description. The leading
+	// "<file>:<line>: " locates it; the description line above never matches.
+	bustedDetailRe = regexp.MustCompile(`^\S+:\d+: .+`)
+)
+
+// parseBustedFailures extracts failing examples from Busted (Lua) output. Each
+// failure renders as a "Failure → <file> @ <line>" (or "Error → ...") header,
+// the full test description on the line beneath — used as the name so it reads
+// like the other runners' human-readable identifiers — and a
+// "<file>:<line>: <message>" assertion line as the detail when present. Blocks
+// are bounded by the next header so one failure's trailing output is not read as
+// the next one's detail.
+func parseBustedFailures(output string) []testFailure {
+	lines := splitLines(output)
+	var failures []testFailure
+	for i := 0; i < len(lines); i++ {
+		if !bustedHeaderRe.MatchString(strings.TrimSpace(lines[i])) {
+			continue
+		}
+		// The test description is the first non-empty line beneath the header.
+		j := i + 1
+		for j < len(lines) && strings.TrimSpace(lines[j]) == "" {
+			j++
+		}
+		if j >= len(lines) {
+			break
+		}
+		f := testFailure{Name: strings.TrimSpace(lines[j])}
+		// The detail is the first "<file>:<line>: <message>" line after the
+		// description, before the next failure block begins.
+		for k := j + 1; k < len(lines); k++ {
+			t := strings.TrimSpace(lines[k])
+			if bustedHeaderRe.MatchString(t) {
+				break
+			}
+			if bustedDetailRe.MatchString(t) {
+				f.Detail = t
+				break
+			}
+		}
+		if f.Name != "" {
+			failures = append(failures, f)
+		}
+		i = j
 	}
 	return failures
 }

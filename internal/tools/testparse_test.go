@@ -130,6 +130,10 @@ func TestClassifyTestRunner(t *testing.T) {
 		"gotestsum":                                  runnerGotestsum,
 		"gotestsum --format pkgname -- ./...":        runnerGotestsum,
 		"gotestsum -- -run TestFoo ./pkg":            runnerGotestsum,
+		"busted":                                     runnerBusted,
+		"busted spec/":                               runnerBusted,
+		"busted --output=TAP spec/foo_spec.lua":      runnerBusted,
+		"echo the adjusted plan":                     runnerNone,
 		"echo running test data":                     runnerNone,
 		"echo about cucumbers":                       runnerNone,
 		"echo the robotics demo":                     runnerNone,
@@ -1463,6 +1467,59 @@ func TestParseMochaFailures_NoFailures(t *testing.T) {
   1 passing (3ms)
 `
 	if got := parseTestFailures("mocha", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseBustedFailures(t *testing.T) {
+	// Busted's utfTerminal reporter closes a failing run with a block per failure:
+	// a "Failure → <file> @ <line>" header, the full description, then the
+	// "<file>:<line>: <message>" assertion. An "Error → ..." block (an uncaught Lua
+	// error) is recognized the same way.
+	out := `◼●◼
+1 success / 1 failure / 1 error / 0 pending : 0.001 seconds
+
+Failure → spec/example_spec.lua @ 4
+Calculator adds two numbers
+spec/example_spec.lua:5: Expected objects to be equal.
+Passed in:
+(number) 2
+Expected:
+(number) 3
+
+Error → spec/example_spec.lua @ 10
+Calculator divides safely
+spec/example_spec.lua:11: attempt to perform arithmetic on a nil value`
+	got := parseTestFailures("busted spec/", out)
+	want := []testFailure{
+		{Name: "Calculator adds two numbers", Detail: "spec/example_spec.lua:5: Expected objects to be equal."},
+		{Name: "Calculator divides safely", Detail: "spec/example_spec.lua:11: attempt to perform arithmetic on a nil value"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseBustedFailures_PlainArrowAndNoDetail(t *testing.T) {
+	// The plainTerminal handler spells the arrow "->", and a failure whose block
+	// carries no "<file>:<line>:" line surfaces with the description but no detail
+	// rather than borrowing the next block's.
+	out := `Failure -> spec/foo_spec.lua @ 7
+a thing without a located assertion
+
+Failure -> spec/foo_spec.lua @ 12
+another thing
+spec/foo_spec.lua:13: boom`
+	got := parseTestFailures("busted", out)
+	want := []testFailure{
+		{Name: "a thing without a located assertion"},
+		{Name: "another thing", Detail: "spec/foo_spec.lua:13: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseBustedFailures_NoFailures(t *testing.T) {
+	out := `●●●
+3 successes / 0 failures / 0 errors / 0 pending : 0.002 seconds`
+	if got := parseTestFailures("busted spec/", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

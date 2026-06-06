@@ -717,6 +717,66 @@ func TestResponsesProviderStreamsToolCall(t *testing.T) {
 	require.True(t, hasEnd, "EndEvent terminates the stream after the tool call")
 }
 
+// TestResponsesProviderStreamCompletesOnMaxOutputTokens asserts a terminal
+// response.incomplete whose reason is "max_output_tokens" completes the turn:
+// the partial text already streamed is preserved, a normal EndEvent carrying the
+// usage follows, and no ErrorEvent is raised. Hitting the output cap is a
+// truncated-but-valid completion (matching the chat path's finish_reason
+// "length"), so retrying it would only discard the partial answer.
+func TestResponsesProviderStreamCompletesOnMaxOutputTokens(t *testing.T) {
+	sse := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial answer\"}\n\n" +
+		"data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":20,\"output_tokens\":16,\"total_tokens\":36}}}\n\n" +
+		"data: [DONE]\n\n"
+	provider := streamingResponsesProvider(t, "gpt-4o", sse)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "gpt-4o",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	_, hasErr := findEvent[ErrorEvent](got)
+	require.False(t, hasErr, "hitting the output cap is a completed turn, not an error")
+
+	var text string
+	for _, ev := range got {
+		if d, ok := ev.(DeltaTextEvent); ok {
+			text += d.Text
+		}
+	}
+	require.Equal(t, "partial answer", text, "the partial text must be preserved")
+
+	end, ok := findEvent[EndEvent](got)
+	require.True(t, ok, "an incomplete-by-length stream still ends with an EndEvent")
+	require.Equal(t, 20, end.Usage.InputTokens)
+	require.Equal(t, 16, end.Usage.OutputTokens)
+}
+
+// TestResponsesProviderStreamSurfacesOtherIncomplete asserts an incomplete
+// response for a reason other than the output cap (here content_filter) stays a
+// surfaced ErrorEvent wrapping ErrServer, and that no EndEvent follows it — only
+// the max_output_tokens reason is treated as a normal completion.
+func TestResponsesProviderStreamSurfacesOtherIncomplete(t *testing.T) {
+	sse := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n" +
+		"data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n\n"
+	provider := streamingResponsesProvider(t, "gpt-4o", sse)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "gpt-4o",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+	})
+	require.NoError(t, err)
+	got := collectEvents(events)
+
+	errEv, ok := findEvent[ErrorEvent](got)
+	require.True(t, ok, "a non-length incomplete must surface an ErrorEvent")
+	require.ErrorIs(t, errEv.Err, ErrServer)
+
+	_, hasEnd := findEvent[EndEvent](got)
+	require.False(t, hasEnd, "no EndEvent after a surfaced incomplete failure")
+}
+
 // TestResponsesProviderStreamSurfacesFailure asserts a terminal
 // response.failed event is surfaced as an ErrorEvent (wrapping ErrServer for the
 // retry layer) carrying the reported message, and that no EndEvent follows it.

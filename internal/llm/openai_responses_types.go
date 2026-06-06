@@ -90,6 +90,25 @@ type responsesResponse struct {
 	Output []responsesOutputItem  `json:"output"`
 	Usage  responsesUsage         `json:"usage"`
 	Error  *responsesErrorPayload `json:"error"`
+	// IncompleteDetails explains why a response carries status "incomplete". The
+	// most common reason is "max_output_tokens" — the model hit the output cap
+	// mid-generation — which is a completed (truncated) turn rather than a
+	// failure; see emitResponsesStream.
+	IncompleteDetails *responsesIncompleteDetails `json:"incomplete_details"`
+}
+
+// responsesIncompleteDetails carries the reason an incomplete response stopped
+// short. "max_output_tokens" means the output-token cap was reached;
+// "content_filter" means generation was filtered.
+type responsesIncompleteDetails struct {
+	Reason string `json:"reason"`
+}
+
+// hitMaxOutputTokens reports whether an incomplete response stopped because it
+// reached the output-token cap, the one incomplete reason that completes a
+// (truncated) turn rather than failing it.
+func (r *responsesResponse) hitMaxOutputTokens() bool {
+	return r != nil && r.IncompleteDetails != nil && r.IncompleteDetails.Reason == "max_output_tokens"
 }
 
 // responsesOutputItem is one element of the output[] array. A "message" item

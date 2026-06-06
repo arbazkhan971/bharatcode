@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/util"
@@ -169,23 +170,49 @@ func (l *List) TranscriptText() string {
 }
 
 // SearchLines reports the indices of lines in text that contain term, matched
-// case-insensitively. text is split on "\n", so the returned indices address
-// lines of that same split (line 0 is the first line). An empty term, or text
-// with no match, returns nil. It is a pure helper so both the transcript line
-// space and the rendered chat line space can be searched with one implementation
-// and the caller positions the viewport against whichever it scrolls.
+// with smart case: a term typed in all lower case matches case-insensitively,
+// while a term carrying any upper-case letter matches case-sensitively, the way
+// ripgrep, fzf, and opencode's search disambiguate intent without a separate
+// toggle. text is split on "\n", so the returned indices address lines of that
+// same split (line 0 is the first line). An empty term, or text with no match,
+// returns nil. It is a pure helper so both the transcript line space and the
+// rendered chat line space can be searched with one implementation and the
+// caller positions the viewport against whichever it scrolls.
 func SearchLines(text string, term string) []int {
 	if term == "" {
 		return nil
 	}
-	needle := strings.ToLower(term)
+	fold := SearchFold(term)
+	needle := term
+	if fold {
+		needle = strings.ToLower(term)
+	}
 	var matches []int
 	for i, line := range strings.Split(text, "\n") {
-		if strings.Contains(strings.ToLower(line), needle) {
+		hay := line
+		if fold {
+			hay = strings.ToLower(line)
+		}
+		if strings.Contains(hay, needle) {
 			matches = append(matches, i)
 		}
 	}
 	return matches
+}
+
+// SearchFold reports whether term should be matched case-insensitively under the
+// smart-case rule SearchLines applies: a term with no upper-case letter folds
+// case (matches insensitively), while one carrying any upper-case letter is
+// matched exactly. Exposed so the highlighter can mark exactly the occurrences
+// SearchLines counted, keeping the visible emphasis aligned with the navigated
+// matches.
+func SearchFold(term string) bool {
+	for _, r := range term {
+		if unicode.IsUpper(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // Render returns the rendered message list for width.

@@ -273,6 +273,17 @@ func emitResponsesResponse(ctx context.Context, data []byte, events chan<- Event
 					send(ctx, events, DeltaTextEvent{Text: part.Text})
 				}
 			}
+		case "reasoning":
+			// The buffered reply carries the model's reasoning summary as
+			// summary_text parts on a reasoning item, ahead of the message item in
+			// output order. Surface each as a ThinkingEvent so a server that ignores
+			// stream=true does not silently drop the reasoning the streaming path
+			// emits via response.reasoning_summary_text.delta.
+			for _, part := range item.Summary {
+				if part.Type == "summary_text" && part.Text != "" {
+					send(ctx, events, ThinkingEvent{Text: part.Text})
+				}
+			}
 		case "function_call":
 			// The Responses output carries the complete call in one item; replay
 			// it through the shared tool-call state so the emitted events (and the

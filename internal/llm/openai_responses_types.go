@@ -93,14 +93,20 @@ type responsesResponse struct {
 }
 
 // responsesOutputItem is one element of the output[] array. A "message" item
-// holds assistant content; a "function_call" item holds a model tool call
-// (CallID, Name, Arguments); other types (for example reasoning) are skipped.
+// holds assistant content; a "reasoning" item holds the model's reasoning
+// summary parts (Summary); a "function_call" item holds a model tool call
+// (CallID, Name, Arguments).
 type responsesOutputItem struct {
-	Type      string                 `json:"type"`
-	ID        string                 `json:"id"`
-	Role      string                 `json:"role"`
-	Status    string                 `json:"status"`
-	Content   []responsesContentPart `json:"content"`
+	Type    string                 `json:"type"`
+	ID      string                 `json:"id"`
+	Role    string                 `json:"role"`
+	Status  string                 `json:"status"`
+	Content []responsesContentPart `json:"content"`
+	// Summary carries the reasoning summary parts of a "reasoning" output item
+	// (each a {"type":"summary_text","text":...}). It is the buffered analogue of
+	// the response.reasoning_summary_text.delta stream events; the streaming path
+	// emits those as ThinkingEvents, so the buffered path mirrors it from here.
+	Summary   []responsesContentPart `json:"summary"`
 	CallID    string                 `json:"call_id"`
 	Name      string                 `json:"name"`
 	Arguments string                 `json:"arguments"`

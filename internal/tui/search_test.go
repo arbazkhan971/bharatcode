@@ -329,6 +329,13 @@ func TestHighlightTerm(t *testing.T) {
 	want := "x" + style.Render("i") + "x" + style.Render("I") + "x"
 	require.Equal(t, want, got,
 		"each occurrence must be wrapped, case-insensitively")
+
+	// Smart case: a term carrying an upper-case letter highlights only the
+	// exact-case run, matching what SearchLines navigated, so a capital in the
+	// query no longer lights up the lower-case occurrence the search skips.
+	got = highlightTerm("Foo and foo", "Foo", style)
+	require.Equal(t, style.Render("Foo")+" and foo", got,
+		"an upper-case term must highlight only the exact-case occurrence")
 }
 
 // TestHighlightMatches_PlainLine asserts highlightMatches emphasizes the active

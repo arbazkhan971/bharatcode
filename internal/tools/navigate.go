@@ -49,6 +49,7 @@ type NavigateSource interface {
 	OutgoingCalls(ctx context.Context, path string, line, col int) ([]lsp.Location, error)
 	Hover(ctx context.Context, path string, line, col int) (string, error)
 	SignatureHelp(ctx context.Context, path string, line, col int) (string, error)
+	PrepareRename(ctx context.Context, path string, line, col int) (*lsp.PrepareRenameResult, error)
 }
 
 type navigateTool struct {
@@ -89,8 +90,8 @@ var schemaNavigate = json.RawMessage(`{
     },
     "action": {
       "type": "string",
-      "enum": ["definition", "declaration", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls", "hover", "signature"],
-      "description": "definition: jump to where the symbol is defined (its implementation). declaration: jump to where the symbol is declared, which differs from its definition in languages that separate the two (a C/C++ header vs source file, a TypeScript ambient declaration); falls back to the definition for languages that do not. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. incoming_calls: list the functions that call this one (callers). outgoing_calls: list the functions this one calls (callees). hover: the language server's type/signature/doc for the symbol. signature: the call signature(s) at the position, marking which argument the cursor is on (point at a call's arguments). Defaults to definition."
+      "enum": ["definition", "declaration", "type_definition", "implementation", "references", "incoming_calls", "outgoing_calls", "hover", "signature", "prepare_rename"],
+      "description": "definition: jump to where the symbol is defined (its implementation). declaration: jump to where the symbol is declared, which differs from its definition in languages that separate the two (a C/C++ header vs source file, a TypeScript ambient declaration); falls back to the definition for languages that do not. type_definition: jump to the declaration of the symbol's type. implementation: list the concrete implementations of an interface/abstract method. references: list every use site, including the declaration. incoming_calls: list the functions that call this one (callers). outgoing_calls: list the functions this one calls (callees). hover: the language server's type/signature/doc for the symbol. signature: the call signature(s) at the position, marking which argument the cursor is on (point at a call's arguments). prepare_rename: check whether the symbol at this position can be renamed and return its current name and the range that would be edited — a lightweight read-only preflight before calling the rename tool. Defaults to definition."
     },
     "include_declaration": {
       "type": "boolean",
@@ -262,8 +263,14 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 			Content:  boundHoverText(strings.TrimRight(text, "\n")),
 			Metadata: map[string]any{"path": args.Path, "line": args.Line, "column": col},
 		}, nil
+	case "prepare_rename":
+		pr, err := t.source.PrepareRename(ctx, path, line0, col0)
+		if err != nil {
+			return Result{}, fmt.Errorf("checking rename at %s:%d:%d: %w", args.Path, args.Line, col, err)
+		}
+		return prepareRenameResult(root, args.Path, pr), nil
 	default:
-		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, declaration, type_definition, implementation, references, incoming_calls, outgoing_calls, hover, or signature)", action)), nil
+		return errorResult(fmt.Sprintf("unknown navigate action %q (want definition, declaration, type_definition, implementation, references, incoming_calls, outgoing_calls, hover, signature, or prepare_rename)", action)), nil
 	}
 }
 
@@ -485,6 +492,47 @@ func renderLocations(root string, locs []lsp.Location) (string, int, int) {
 	}
 
 	return strings.TrimRight(b.String(), "\n"), len(entries), len(files)
+}
+
+// prepareRenameResult formats the outcome of a prepare_rename action. A nil
+// result means the server reported the position is not renamable. Otherwise it
+// renders the symbol name and range so the agent can confirm before calling
+// rename.
+func prepareRenameResult(root, relPath string, pr *lsp.PrepareRenameResult) Result {
+	if pr == nil {
+		return Result{Content: "Symbol at this position cannot be renamed."}
+	}
+	if pr.DefaultBehavior {
+		return Result{
+			Content:  fmt.Sprintf("Symbol at %s:%d:%d can be renamed (server uses word under cursor).", relPath, pr.Range.Start.Line+1, pr.Range.Start.Character+1),
+			Metadata: map[string]any{"renamable": true, "default_behavior": true},
+		}
+	}
+	// Build a display name: Placeholder if the server provided it, otherwise
+	// the coordinates of the range so the agent can look it up.
+	name := pr.Placeholder
+	startLine := pr.Range.Start.Line + 1
+	startCol := pr.Range.Start.Character + 1
+	endLine := pr.Range.End.Line + 1
+	endCol := pr.Range.End.Character + 1
+	var content string
+	if name != "" {
+		content = fmt.Sprintf("Symbol %q at %s:%d:%d-%d:%d can be renamed.", name, relPath, startLine, startCol, endLine, endCol)
+	} else {
+		content = fmt.Sprintf("Symbol at %s:%d:%d-%d:%d can be renamed.", relPath, startLine, startCol, endLine, endCol)
+	}
+	meta := map[string]any{
+		"renamable":          true,
+		"range_start_line":   startLine,
+		"range_start_column": startCol,
+		"range_end_line":     endLine,
+		"range_end_column":   endCol,
+	}
+	if name != "" {
+		meta["placeholder"] = name
+	}
+	_ = root // kept for interface consistency with other result helpers
+	return Result{Content: content, Metadata: meta}
 }
 
 // sourceLine returns the trimmed text of the zero-based line in path, reading

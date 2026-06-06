@@ -669,6 +669,9 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	if text == "/tab" || strings.HasPrefix(text, "/tab ") {
 		return m.handleTabCommand(text)
 	}
+	if text == "/revert" || strings.HasPrefix(text, "/revert ") {
+		return m.handleRevert(text)
+	}
 
 	switch text {
 	case "/tabs":
@@ -1246,6 +1249,7 @@ func (m *model) slashHelpLines() []string {
 		"/compact - summarize older turns to shrink context",
 		"/fork - branch the current session",
 		"/diff - show the latest edit diff",
+		"/revert [apply|force] - undo this session's file changes (preview first, then apply)",
 		"/export [md|html] - write the session transcript to a file",
 		"/copy [last|all] - copy the last assistant reply or the whole chat to the clipboard",
 		"/search <term> - find a term in the chat; Ctrl+/ next match, Ctrl+\\ previous",

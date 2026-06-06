@@ -8,6 +8,7 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/recipe"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -273,6 +274,89 @@ func (m *model) restoreSession(id string) tea.Cmd {
 	// unavailable ledger never blocks the switch; live ledger-bus events keep
 	// the footer current thereafter.
 	return m.waitLedger()
+}
+
+// handleRevert undoes the file changes the active session made, restoring each
+// file to the state it had before the session began via the file tracker's
+// content snapshots. Because reverting overwrites or deletes files on disk, a
+// bare "/revert" performs a dry run and lists what would change, asking the
+// user to confirm with "/revert apply"; "/revert force" additionally reverts
+// files that were modified out of band since the session last wrote them. This
+// brings opencode's /undo and Claude Code's rewind to the TUI — the underlying
+// RevertSession already backs the `bharatcode revert` CLI command — while
+// keeping the destructive step behind an explicit confirmation.
+func (m *model) handleRevert(text string) (tea.Model, tea.Cmd) {
+	_, args := splitSlash(text)
+	arg := strings.ToLower(strings.TrimSpace(args))
+
+	if !m.sessionPersisted {
+		m.dialogs.Push(&dialog.Text{DialogID: "revert", Title: "Revert", Body: "No active session to revert yet. Send a prompt first.", Theme: m.theme})
+		return m, nil
+	}
+
+	var apply, force bool
+	switch arg {
+	case "":
+		// A bare /revert is a dry run: show what would change first.
+	case "apply":
+		apply = true
+	case "force":
+		apply, force = true, true
+	default:
+		m.dialogs.Push(&dialog.Text{DialogID: "revert", Title: "Revert", Body: "Usage: /revert [apply|force]\n\n/revert previews the changes, /revert apply undoes them, /revert force also reverts files modified outside the session.", Theme: m.theme})
+		return m, nil
+	}
+
+	outcomes, err := m.deps.FileTracker.RevertSession(m.ctx, m.sessionID, filetracker.RevertOptions{
+		Force:  force,
+		DryRun: !apply,
+	})
+	if err != nil {
+		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Revert failed", Body: err.Error(), Theme: m.theme})
+		return m, nil
+	}
+
+	m.dialogs.Push(&dialog.Text{DialogID: "revert", Title: "Revert", Body: revertSummary(outcomes, apply), Theme: m.theme})
+	return m, nil
+}
+
+// revertSummary renders the outcome of a /revert run. For a dry run it lists
+// what would change and how to confirm; for an applied run it reports what was
+// restored, deleted, or skipped. Each row leads with the action so the columns
+// align, mirroring the table the CLI prints.
+func revertSummary(outcomes []filetracker.RevertOutcome, applied bool) string {
+	if len(outcomes) == 0 {
+		return "This session changed no files."
+	}
+	var changed, skipped int
+	lines := make([]string, 0, len(outcomes))
+	for _, o := range outcomes {
+		if o.Action == filetracker.RevertSkipped {
+			skipped++
+		} else {
+			changed++
+		}
+		line := fmt.Sprintf("%-9s %s", string(o.Action), o.Path)
+		if o.Reason != "" {
+			line += " — " + o.Reason
+		}
+		lines = append(lines, line)
+	}
+
+	var header string
+	if applied {
+		header = fmt.Sprintf("Reverted %d file(s), %d skipped.", changed, skipped)
+	} else {
+		header = fmt.Sprintf("Dry run — %d file(s) would be reverted, %d skipped.", changed, skipped)
+	}
+	body := header + "\n\n" + strings.Join(lines, "\n")
+	if !applied {
+		body += "\n\nRun /revert apply to undo these changes."
+		if skipped > 0 {
+			body += "\n/revert force also reverts files changed outside the session."
+		}
+	}
+	return body
 }
 
 // handleFork branches the current session and switches to the new fork,

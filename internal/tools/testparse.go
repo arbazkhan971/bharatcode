@@ -89,6 +89,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseGinkgoFailures(output)
 	case runnerFoundry:
 		return parseFoundryTestFailures(output)
+	case runnerJasmine:
+		return parseJasmineFailures(output)
 	default:
 		return nil
 	}
@@ -125,6 +127,7 @@ const (
 	runnerFoundry
 	runnerGinkgo
 	runnerTox
+	runnerJasmine
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -232,6 +235,16 @@ var (
 	// or "python -m unittest" invocation is classified by its own (earlier) case,
 	// so this only claims bare tox/nox driver commands.
 	toxRe = regexp.MustCompile(`\b(?:tox|nox)\b`)
+	// `jasmine`/`npx jasmine`/`node_modules/.bin/jasmine` drive Jasmine's
+	// standalone CLI, whose default ConsoleReporter closes with a "Failures:"
+	// block numbering each failed spec ("1) <full spec name>") and printing the
+	// assertion under an indented "Message:" line. \bjasmine\b admits the wrapper
+	// invocations while matching only at a word boundary — accepting the same
+	// command-as-prose risk the other command-name runners accept. A "jasmine"
+	// invocation never contains "jest"/"vitest" at a
+	// word boundary, so it is classified before the jest runner claims it (jest's
+	// embedded jasmine2 engine is unrelated to the standalone CLI's report shape).
+	jasmineRe = regexp.MustCompile(`\bjasmine\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -407,6 +420,14 @@ func classifyTestRunner(command string) testRunner {
 		// runners since a forge invocation carries none of their substrings, but
 		// kept explicit to guard against future overlap.
 		return runnerFoundry
+	case jasmineRe.MatchString(c):
+		// `jasmine`/`npx jasmine` drives Jasmine's standalone CLI, whose default
+		// ConsoleReporter closes with a "Failures:" block of numbered
+		// "N) <full spec name>" entries, each followed by an indented "Message:"
+		// line carrying the assertion. Checked before the jest runners since a
+		// "jasmine" invocation carries none of their substrings, but kept explicit
+		// to guard against future overlap.
+		return runnerJasmine
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -2109,6 +2130,84 @@ func parseGinkgoFailures(output string) []testFailure {
 			if loc := ginkgoLocRe.FindStringSubmatch(lines[i+1]); loc != nil {
 				f.Detail = strings.TrimSpace(loc[1])
 			}
+		}
+		failures = append(failures, f)
+	}
+	return failures
+}
+
+var (
+	// "Failures:" — the header Jasmine's ConsoleReporter prints before listing each
+	// failed spec. Anchoring the scan on it keeps the inline progress output (the
+	// "F"/"." dots and any "Pending:" section) from being mistaken for entries.
+	jasmineFailuresRe = regexp.MustCompile(`^Failures:\s*$`)
+	// "1) A calculator adds numbers" — the numbered header of an entry in the
+	// "Failures:" block. The captured group is the full spec name (suite
+	// descriptions joined with the spec description), which is what Jasmine prints.
+	jasmineHeaderRe = regexp.MustCompile(`^\s*\d+\) (.+)$`)
+	// "  Message:" — the label Jasmine prints immediately above a failure's
+	// assertion message. The message itself is the first non-empty line beneath it.
+	jasmineMessageRe = regexp.MustCompile(`^\s*Message:\s*$`)
+	// "1 spec, 1 failure" / "3 specs, 2 failures, 1 pending spec" — the run-summary
+	// line Jasmine prints after the failure block. It ends the scan so a trailing
+	// numbered list outside the block is never mistaken for more entries.
+	jasmineSummaryRe = regexp.MustCompile(`^\d+ specs?, \d+ failures?\b`)
+)
+
+// parseJasmineFailures extracts failing specs from Jasmine's default
+// ConsoleReporter output (`jasmine`/`npx jasmine`). A failing run closes with a
+// "Failures:" block, each entry opening with a "N) <full spec name>" header
+// followed by an indented "Message:" line whose first non-empty body line is the
+// assertion. The block is parsed from the "Failures:" header onward and ends at
+// the "N specs, N failures" run summary (or a following "Pending:" section), so
+// the inline progress dots and pending specs are never mistaken for failures.
+func parseJasmineFailures(output string) []testFailure {
+	lines := splitLines(output)
+	start := -1
+	for i, ln := range lines {
+		if jasmineFailuresRe.MatchString(ln) {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	var failures []testFailure
+	seen := map[string]bool{}
+	for i := start; i < len(lines); i++ {
+		// The block ends at the run summary or a following section header (e.g.
+		// "Pending:"); stop so entries from outside it are not collected.
+		if jasmineSummaryRe.MatchString(lines[i]) || strings.TrimSpace(lines[i]) == "Pending:" {
+			break
+		}
+		m := jasmineHeaderRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		f := testFailure{Name: name}
+		// The assertion sits on the first non-empty line after the "Message:" label,
+		// before the next numbered header so an entry without a message body does not
+		// borrow the following one's.
+		for j := i + 1; j < len(lines); j++ {
+			if jasmineHeaderRe.MatchString(lines[j]) {
+				break
+			}
+			if !jasmineMessageRe.MatchString(lines[j]) {
+				continue
+			}
+			for k := j + 1; k < len(lines); k++ {
+				if t := strings.TrimSpace(lines[k]); t != "" {
+					f.Detail = t
+					break
+				}
+			}
+			break
 		}
 		failures = append(failures, f)
 	}

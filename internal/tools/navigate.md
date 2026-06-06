@@ -4,8 +4,13 @@ Use `navigate` to follow code the way an IDE does, using the language server.
 Given a symbol's position (file, line, and column), it answers several
 questions:
 
-- `definition`: where is this symbol declared? Jump from a call site to the
+- `definition`: where is this symbol defined? Jump from a call site to the
   function/type/variable it resolves to. More precise than grepping a name.
+- `declaration`: where is this symbol declared? In languages that separate the
+  declaration from the definition (a C/C++ header vs its source file, a
+  TypeScript ambient `declare`) this lands on the declaration site rather than
+  the implementation `definition` jumps to. For languages that do not separate
+  them, the server returns the same location as `definition`.
 - `type_definition`: where is the *type* of this symbol declared? From a
   variable or expression, jump to the declaration of its type rather than its
   own definition.
@@ -35,16 +40,16 @@ Arguments:
 - `line` integer, required: 1-based line of the symbol.
 - `column` integer, optional: 1-based column of the symbol on that line.
   Defaults to 1 (start of line); point it at the symbol's name for accuracy.
-- `action` string, optional: `definition` (default), `type_definition`,
-  `implementation`, `references`, `incoming_calls`, `outgoing_calls`, `hover`,
-  or `signature`.
+- `action` string, optional: `definition` (default), `declaration`,
+  `type_definition`, `implementation`, `references`, `incoming_calls`,
+  `outgoing_calls`, `hover`, or `signature`.
 - `include_declaration` boolean, optional: only meaningful for `references`.
   Defaults to `true` (the declaration is listed among the references); set it to
   `false` to list only the use sites.
 
 What success looks like:
 
-For `definition`, `type_definition`, `implementation`, `references`,
+For `definition`, `declaration`, `type_definition`, `implementation`, `references`,
 `incoming_calls`, and `outgoing_calls`, a sorted list of
 `path:line:column: <source line>` entries, workspace-relative where possible;
 the trailing source line is the trimmed code at that site (omitted when the

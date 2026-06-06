@@ -413,6 +413,15 @@ var contextWindowRules = []struct {
 	// "qwen3" rules must precede the family one to avoid falling through to 32k.
 	{"qwen3-max", 262_144},
 	{"qwen3-coder", 262_144},
+	// The Qwen3-Next hybrid-attention line (qwen3-next-80b-a3b) and the Qwen3-VL
+	// vision-language line (qwen3-vl-235b-a22b) both ship a 256k native window,
+	// twice the 128k of the Qwen3 2507 instruct refresh. Their ids carry only the
+	// bare "qwen3" marker, so without these specific rules they fall through to the
+	// 131k rule below — a 2x undercount that would compact long context far sooner
+	// than the model requires. They must precede "qwen3" for the same reason
+	// "qwen3-max"/"qwen3-coder" do.
+	{"qwen3-next", 262_144},
+	{"qwen3-vl", 262_144},
 	{"qwen3", 131_072},
 	{"qwen", 32_768},
 	// Qwen's QwQ reasoning line and QVQ vision-reasoning line both ship a 128k

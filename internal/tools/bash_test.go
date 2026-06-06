@@ -31,6 +31,7 @@ func TestRegistryListsShellTools(t *testing.T) {
 		"glob",
 		"grep",
 		"job_kill",
+		"job_list",
 		"job_output",
 		"ls",
 		"multiedit",

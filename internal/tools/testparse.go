@@ -3511,6 +3511,30 @@ var (
 	// The "tests" token uses a word boundary so "3 tests completed" matches but
 	// "latest tests completed" (prose) does not fire on the count group.
 	gradleCountsRe = regexp.MustCompile(`\b(\d+) tests? completed(?:, (\d+) failed)?`)
+
+	// Python stdlib unittest: "Ran N tests in 0.001s"
+	unittestRanCountRe = regexp.MustCompile(`^Ran (\d+) tests? in `)
+	// "FAILED (failures=F)" and optional ",errors=E" — both optional so the regex
+	// handles "FAILED (errors=E)" runs (no assertion failures, only exceptions).
+	unittestFailCountRe  = regexp.MustCompile(`\bfailures?=(\d+)`)
+	unittestErrorCountRe = regexp.MustCompile(`\berrors?=(\d+)`)
+
+	// Swift XCTest: "Executed N tests, with M failures (0 unexpected) in ..."
+	// Both M and N are always present when the runner completes normally.
+	swiftExecutedCountRe = regexp.MustCompile(`Executed (\d+) tests?, with (\d+) failures?`)
+
+	// GoogleTest: "[ PASSED ] N tests." and "[ FAILED ] N tests, listed below:"
+	// — emitted in the closing summary, one line each; PASSED is always present,
+	// FAILED only appears when there are failures.
+	gtestPassedCountRe = regexp.MustCompile(`\[ PASSED \] (\d+) tests?\.`)
+	gtestFailedCountRe = regexp.MustCompile(`\[ FAILED \] (\d+) tests?`)
+
+	// Deno: "ok | N passed | M failed" (compact summary, Deno ≥ 1.32).
+	// The final summary line always starts with "ok" (all-pass) or "FAILED".
+	// On failure runs: "FAILED | N passed | M failed".
+	denoPassedCountRe = regexp.MustCompile(`(\d+) passed`)
+	denoFailedCountRe = regexp.MustCompile(`(\d+) failed`)
+	denoSummaryRe     = regexp.MustCompile(`^(?:ok|FAILED)\s*\|`)
 )
 
 // parseTestCounts extracts aggregate pass and total counts from the output of
@@ -3542,6 +3566,14 @@ func parseTestCounts(command, output string) *testCounts {
 		return parsePHPUnitCounts(output)
 	case runnerGradle:
 		return parseGradleCounts(output)
+	case runnerUnittest:
+		return parseUnittestCounts(output)
+	case runnerSwift:
+		return parseSwiftTestCounts(output)
+	case runnerGTest:
+		return parseGTestCounts(output)
+	case runnerDeno:
+		return parseDenoTestCounts(output)
 	default:
 		return nil
 	}
@@ -3773,6 +3805,113 @@ func parsePHPUnitCounts(output string) *testCounts {
 			if total > 0 {
 				return &testCounts{passed: total - failures - errors, total: total}
 			}
+		}
+	}
+	return nil
+}
+
+// parseUnittestCounts reads Python stdlib unittest's "Ran N tests in ..." footer.
+// The total is the N on that line. Failures are summed from the optional
+// "FAILED (failures=F,errors=E)" line on the next non-blank line — either token
+// may be absent (e.g. only errors, or only failures). Passed = total − failed.
+func parseUnittestCounts(output string) *testCounts {
+	lines := splitLines(output)
+	for i, ln := range lines {
+		m := unittestRanCountRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		total, _ := strconv.Atoi(m[1])
+		if total == 0 {
+			continue
+		}
+		// Scan the next few lines for the FAILED summary (may be separated by a
+		// blank line). Stop at the first non-blank non-separator line.
+		failed := 0
+		for j := i + 1; j < len(lines) && j < i+4; j++ {
+			rest := lines[j]
+			if strings.TrimSpace(rest) == "" || strings.HasPrefix(rest, "-") {
+				continue
+			}
+			if mF := unittestFailCountRe.FindStringSubmatch(rest); mF != nil {
+				n, _ := strconv.Atoi(mF[1])
+				failed += n
+			}
+			if mE := unittestErrorCountRe.FindStringSubmatch(rest); mE != nil {
+				n, _ := strconv.Atoi(mE[1])
+				failed += n
+			}
+			break
+		}
+		return &testCounts{passed: total - failed, total: total}
+	}
+	return nil
+}
+
+// parseSwiftTestCounts reads Swift XCTest's "Executed N tests, with M failures"
+// summary line. Both counts are always present when the runner completes normally.
+func parseSwiftTestCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if m := swiftExecutedCountRe.FindStringSubmatch(ln); m != nil {
+			total, _ := strconv.Atoi(m[1])
+			failures, _ := strconv.Atoi(m[2])
+			if total > 0 {
+				return &testCounts{passed: total - failures, total: total}
+			}
+		}
+	}
+	return nil
+}
+
+// parseGTestCounts reads GoogleTest's closing "[ PASSED ] N tests." and
+// "[ FAILED ] N tests." summary lines. PASSED is always present; FAILED only
+// appears when there are failures, so a missing FAILED line means zero failures.
+func parseGTestCounts(output string) *testCounts {
+	passed, failed := 0, 0
+	found := false
+	for _, ln := range splitLines(output) {
+		if m := gtestPassedCountRe.FindStringSubmatch(ln); m != nil {
+			passed, _ = strconv.Atoi(m[1])
+			found = true
+		}
+		if m := gtestFailedCountRe.FindStringSubmatch(ln); m != nil {
+			failed, _ = strconv.Atoi(m[1])
+		}
+	}
+	if !found {
+		return nil
+	}
+	total := passed + failed
+	if total == 0 {
+		return nil
+	}
+	return &testCounts{passed: passed, total: total}
+}
+
+// parseDenoTestCounts reads Deno's compact "ok | N passed | M failed" (all-pass:
+// "ok | N passed") summary line emitted by `deno test` (Deno ≥ 1.32). The line
+// always begins with "ok" or "FAILED", so only that line is inspected to avoid
+// matching per-test "N passed" tokens in earlier verbose output.
+func parseDenoTestCounts(output string) *testCounts {
+	for _, ln := range splitLines(output) {
+		if !denoSummaryRe.MatchString(ln) {
+			continue
+		}
+		passM := denoPassedCountRe.FindStringSubmatch(ln)
+		failM := denoFailedCountRe.FindStringSubmatch(ln)
+		if passM == nil && failM == nil {
+			continue
+		}
+		passed, failed := 0, 0
+		if passM != nil {
+			passed, _ = strconv.Atoi(passM[1])
+		}
+		if failM != nil {
+			failed, _ = strconv.Atoi(failM[1])
+		}
+		total := passed + failed
+		if total > 0 {
+			return &testCounts{passed: passed, total: total}
 		}
 	}
 	return nil

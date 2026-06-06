@@ -26,10 +26,11 @@ type fakeCodeActions struct {
 
 	lastPath  string
 	lastRange lsp.Range
+	lastOnly  []string
 }
 
-func (f *fakeCodeActions) CodeActions(_ context.Context, file string, rng lsp.Range) ([]lsp.CodeAction, error) {
-	f.lastPath, f.lastRange = file, rng
+func (f *fakeCodeActions) CodeActions(_ context.Context, file string, rng lsp.Range, only []string) ([]lsp.CodeAction, error) {
+	f.lastPath, f.lastRange, f.lastOnly = file, rng, only
 	return f.actions, f.err
 }
 
@@ -650,6 +651,41 @@ func TestCodeActionsKindFilterListsMatchingSubkinds(t *testing.T) {
 			"2. Organize Imports [source.organizeImports]",
 		result.Content,
 	)
+}
+
+func TestCodeActionsKindFilterForwardedAsOnly(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Organize Imports", Kind: "source.organizeImports"},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	// A kind filter is passed through to the server as the request's "only"
+	// restriction so it computes whole-file source.* actions it would otherwise
+	// gate behind an explicit request.
+	_, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "kind": "source",
+	}))
+	require.NoError(t, err)
+	require.Equal(t, []string{"source"}, src.lastOnly)
+}
+
+func TestCodeActionsNoKindRequestsEveryAction(t *testing.T) {
+	dir := t.TempDir()
+	writeCodeActionsFile(t, dir)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{
+		{Title: "Remove unused", Kind: "quickfix"},
+	}}
+	tool := &codeActionsTool{source: src, workDir: dir}
+
+	// Without a kind filter no "only" restriction is sent, so the server offers
+	// every available action.
+	_, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1,
+	}))
+	require.NoError(t, err)
+	require.Nil(t, src.lastOnly)
 }
 
 func TestCodeActionsKindFilterIsCaseInsensitive(t *testing.T) {

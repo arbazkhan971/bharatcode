@@ -765,10 +765,17 @@ func goCompileErrFromOutput(out string) string {
 // "FAILED tests/test_x.py::test_y - AssertionError: ..." (pytest short summary).
 // "ERROR" lines appear here too, for collection/fixture/teardown errors that
 // never reach an assertion; both are actionable failures the agent must see.
-var pytestFailRe = regexp.MustCompile(`^(?:FAILED|ERROR) (\S+)(?: - (.*))?$`)
+// The node id is a non-space token optionally followed by a "[...]" parameter
+// section: parametrized ids carry the param values in brackets, and those values
+// routinely contain spaces ("test_x[a b]") or even the " - " detail separator
+// ("test_x[1 - 2]"), so the bracket span is matched with [^\]]* rather than \S+
+// to keep the whole id together before the optional " - <message>" detail.
+var pytestFailRe = regexp.MustCompile(`^(?:FAILED|ERROR) (\S+?(?:\[[^\]]*\])?)(?: - (.*))?$`)
 
-// "tests/test_x.py::test_y FAILED" (pytest verbose, no summary).
-var pytestVerboseRe = regexp.MustCompile(`^(\S+::\S+) (?:FAILED|ERROR)\b`)
+// "tests/test_x.py::test_y FAILED" (pytest verbose, no summary). The id may end
+// in a "[...]" parameter section whose values contain spaces, so the bracket
+// span is matched separately from the space-terminated "<file>::<test>" head.
+var pytestVerboseRe = regexp.MustCompile(`^(\S+::\S+?(?:\[[^\]]*\])?) (?:FAILED|ERROR)\b`)
 
 // parsePytestFailures prefers the short-summary "FAILED/ERROR <id> - <msg>"
 // lines and falls back to verbose "<id> FAILED" lines when no summary is present.

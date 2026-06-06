@@ -8,96 +8,101 @@ import (
 
 func TestClassifyTestRunner(t *testing.T) {
 	cases := map[string]testRunner{
-		"go test ./...":                         runnerGo,
-		"GOFLAGS=-count=1 go test -run X ./p":   runnerGo,
-		"pytest -q tests/":                      runnerPytest,
-		"python -m py.test":                     runnerPytest,
-		"python -m unittest test_mod":           runnerUnittest,
-		"python -m unittest discover":           runnerUnittest,
-		"nose2":                                 runnerUnittest,
-		"nose2 -v tests":                        runnerUnittest,
-		"python -m nose2":                       runnerUnittest,
-		"nosetests tests/":                      runnerUnittest,
-		"echo a diagnosis2 of the problem":      runnerNone,
-		"npm test":                              runnerJest,
-		"npm run test -- --ci":                  runnerJest,
-		"yarn test":                             runnerJest,
-		"pnpm test":                             runnerJest,
-		"npx vitest run":                        runnerJest,
-		"npx jest src/":                         runnerJest,
-		"cargo test":                            runnerCargo,
-		"cargo test --release foo":              runnerCargo,
-		"cargo nextest run":                     runnerNextest,
-		"cargo nextest run --no-fail-fast":      runnerNextest,
-		"rspec":                                 runnerRSpec,
-		"bundle exec rspec spec/foo_spec.rb":    runnerRSpec,
-		"bin/rspec":                             runnerRSpec,
-		"vendor/bin/phpunit":                    runnerPHPUnit,
-		"phpunit --filter testFoo":              runnerPHPUnit,
-		"dotnet test":                           runnerDotnet,
-		"dotnet test ./MyApp.sln -v normal":     runnerDotnet,
-		"mvn test":                              runnerMaven,
-		"mvn -q verify -Dtest=FooTest":          runnerMaven,
-		"./mvnw test":                           runnerMaven,
-		"gradle test":                           runnerGradle,
-		"./gradlew test --tests FooTest":        runnerGradle,
-		"gradlew check":                         runnerGradle,
-		"mix test":                              runnerExUnit,
-		"mix test test/foo_test.exs:12":         runnerExUnit,
-		"node --test":                           runnerTAP,
-		"node --test test/*.js":                 runnerTAP,
-		"npx tape test/*.js":                    runnerTAP,
-		"bats test/":                            runnerTAP,
-		"bats test.bats":                        runnerTAP,
-		"npx bats tests/":                       runnerTAP,
-		"echo acrobats perform":                 runnerNone,
-		"deno test":                             runnerDeno,
-		"deno test --allow-read mod_test.ts":    runnerDeno,
-		"swift test":                            runnerSwift,
-		"swift test --filter CalculatorTests":   runnerSwift,
-		"bun test":                              runnerBun,
-		"bun test ./math.test.ts":               runnerBun,
-		"bun run test":                          runnerNone,
-		"mocha":                                 runnerMocha,
-		"npx mocha test/*.js":                   runnerMocha,
-		"ctest":                                 runnerCTest,
-		"ctest -R '^Foo$' --output-on-failure":  runnerCTest,
-		"cmake --build . && ctest":              runnerCTest,
-		"playwright test":                       runnerPlaywright,
-		"npx playwright test e2e/login.spec.ts": runnerPlaywright,
-		"rails test":                            runnerMinitest,
-		"rails test test/models/user_test.rb":   runnerMinitest,
-		"rake test":                             runnerMinitest,
-		"bundle exec rake test TEST=test/x.rb":  runnerMinitest,
-		"ruby -Itest test/calculator_test.rb":   runnerMinitest,
-		"dart test":                             runnerDart,
-		"dart test test/calc_test.dart":         runnerDart,
-		"flutter test":                          runnerDart,
-		"flutter test test/widget_test.dart":    runnerDart,
-		"julia test/runtests.jl":                runnerJulia,
-		"julia --project=. test/runtests.jl":    runnerJulia,
-		"julia -e 'using Pkg; Pkg.test()'":      runnerJulia,
-		"julia script.jl":                       runnerNone,
-		"sbt test":                              runnerScala,
-		"sbt 'testOnly *CalculatorSpec'":        runnerScala,
-		"./sbt test":                            runnerScala,
-		"lein test":                             runnerClojure,
-		"lein test :only myapp.core-test":       runnerClojure,
-		"clojure -M:test":                       runnerClojure,
-		"clj -X:test":                           runnerClojure,
-		"kaocha":                                runnerClojure,
-		"lein kaocha --focus foo":               runnerClojure,
-		"clojure script.clj":                    runnerNone,
-		"forge test":                            runnerFoundry,
-		"forge test --match-test test_Inc -vvv": runnerFoundry,
-		"echo forge testbed":                    runnerNone,
-		"echo subtle differences":               runnerNone,
-		"echo rake testing notes":               runnerNone,
-		"ls -la":                                runnerNone,
-		"echo go testing the waters":            runnerNone,
-		"echo rspecs are great":                 runnerNone,
-		"echo plan the upgrade":                 runnerNone,
-		"echo swift testing guide":              runnerNone,
+		"go test ./...":                              runnerGo,
+		"GOFLAGS=-count=1 go test -run X ./p":        runnerGo,
+		"pytest -q tests/":                           runnerPytest,
+		"python -m py.test":                          runnerPytest,
+		"python -m unittest test_mod":                runnerUnittest,
+		"python -m unittest discover":                runnerUnittest,
+		"nose2":                                      runnerUnittest,
+		"nose2 -v tests":                             runnerUnittest,
+		"python -m nose2":                            runnerUnittest,
+		"nosetests tests/":                           runnerUnittest,
+		"echo a diagnosis2 of the problem":           runnerNone,
+		"npm test":                                   runnerJest,
+		"npm run test -- --ci":                       runnerJest,
+		"yarn test":                                  runnerJest,
+		"pnpm test":                                  runnerJest,
+		"npx vitest run":                             runnerJest,
+		"npx jest src/":                              runnerJest,
+		"cargo test":                                 runnerCargo,
+		"cargo test --release foo":                   runnerCargo,
+		"cargo nextest run":                          runnerNextest,
+		"cargo nextest run --no-fail-fast":           runnerNextest,
+		"rspec":                                      runnerRSpec,
+		"bundle exec rspec spec/foo_spec.rb":         runnerRSpec,
+		"bin/rspec":                                  runnerRSpec,
+		"vendor/bin/phpunit":                         runnerPHPUnit,
+		"phpunit --filter testFoo":                   runnerPHPUnit,
+		"dotnet test":                                runnerDotnet,
+		"dotnet test ./MyApp.sln -v normal":          runnerDotnet,
+		"mvn test":                                   runnerMaven,
+		"mvn -q verify -Dtest=FooTest":               runnerMaven,
+		"./mvnw test":                                runnerMaven,
+		"gradle test":                                runnerGradle,
+		"./gradlew test --tests FooTest":             runnerGradle,
+		"gradlew check":                              runnerGradle,
+		"mix test":                                   runnerExUnit,
+		"mix test test/foo_test.exs:12":              runnerExUnit,
+		"node --test":                                runnerTAP,
+		"node --test test/*.js":                      runnerTAP,
+		"npx tape test/*.js":                         runnerTAP,
+		"bats test/":                                 runnerTAP,
+		"bats test.bats":                             runnerTAP,
+		"npx bats tests/":                            runnerTAP,
+		"echo acrobats perform":                      runnerNone,
+		"deno test":                                  runnerDeno,
+		"deno test --allow-read mod_test.ts":         runnerDeno,
+		"swift test":                                 runnerSwift,
+		"swift test --filter CalculatorTests":        runnerSwift,
+		"bun test":                                   runnerBun,
+		"bun test ./math.test.ts":                    runnerBun,
+		"bun run test":                               runnerNone,
+		"mocha":                                      runnerMocha,
+		"npx mocha test/*.js":                        runnerMocha,
+		"ctest":                                      runnerCTest,
+		"ctest -R '^Foo$' --output-on-failure":       runnerCTest,
+		"cmake --build . && ctest":                   runnerCTest,
+		"playwright test":                            runnerPlaywright,
+		"npx playwright test e2e/login.spec.ts":      runnerPlaywright,
+		"rails test":                                 runnerMinitest,
+		"rails test test/models/user_test.rb":        runnerMinitest,
+		"rake test":                                  runnerMinitest,
+		"bundle exec rake test TEST=test/x.rb":       runnerMinitest,
+		"ruby -Itest test/calculator_test.rb":        runnerMinitest,
+		"dart test":                                  runnerDart,
+		"dart test test/calc_test.dart":              runnerDart,
+		"flutter test":                               runnerDart,
+		"flutter test test/widget_test.dart":         runnerDart,
+		"julia test/runtests.jl":                     runnerJulia,
+		"julia --project=. test/runtests.jl":         runnerJulia,
+		"julia -e 'using Pkg; Pkg.test()'":           runnerJulia,
+		"julia script.jl":                            runnerNone,
+		"sbt test":                                   runnerScala,
+		"sbt 'testOnly *CalculatorSpec'":             runnerScala,
+		"./sbt test":                                 runnerScala,
+		"lein test":                                  runnerClojure,
+		"lein test :only myapp.core-test":            runnerClojure,
+		"clojure -M:test":                            runnerClojure,
+		"clj -X:test":                                runnerClojure,
+		"kaocha":                                     runnerClojure,
+		"lein kaocha --focus foo":                    runnerClojure,
+		"clojure script.clj":                         runnerNone,
+		"forge test":                                 runnerFoundry,
+		"forge test --match-test test_Inc -vvv":      runnerFoundry,
+		"ginkgo":                                     runnerGinkgo,
+		"ginkgo run -r":                              runnerGinkgo,
+		"ginkgo --focus 'Book'":                      runnerGinkgo,
+		"go run github.com/onsi/ginkgo/v2/ginkgo -r": runnerGinkgo,
+		"echo the ginkgoes sway":                     runnerNone,
+		"echo forge testbed":                         runnerNone,
+		"echo subtle differences":                    runnerNone,
+		"echo rake testing notes":                    runnerNone,
+		"ls -la":                                     runnerNone,
+		"echo go testing the waters":                 runnerNone,
+		"echo rspecs are great":                      runnerNone,
+		"echo plan the upgrade":                      runnerNone,
+		"echo swift testing guide":                   runnerNone,
 	}
 	for cmd, want := range cases {
 		if got := classifyTestRunner(cmd); got != want {
@@ -1489,6 +1494,66 @@ Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 1.20ms`
 	if got := parseTestFailures("forge test", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
+}
+
+func TestParseGinkgoFailures(t *testing.T) {
+	out := `Running Suite: Books Suite
+=========================
+
+• [FAILED] [0.001 seconds]
+Book Categorizing book length
+  [It] should be a short book
+
+  Expected
+      <int>: 5
+  to equal
+      <int>: 6
+
+------------------------------
+
+Summarizing 2 Failures:
+
+  [FAIL] Book Categorizing book length [It] should be a short book
+  /home/me/books/book_test.go:54
+  [PANIC!] Book Loading from disk [It] reads the file
+  /home/me/books/loader_test.go:20
+
+Ran 4 of 4 Specs in 0.003 seconds
+FAIL! -- 2 Passed | 2 Failed | 0 Pending | 0 Skipped`
+	got := parseTestFailures("ginkgo -r", out)
+	want := []testFailure{
+		{Name: "Book Categorizing book length [It] should be a short book", Detail: "/home/me/books/book_test.go:54"},
+		{Name: "Book Loading from disk [It] reads the file", Detail: "/home/me/books/loader_test.go:20"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGinkgoFailures_NoSummaryBlock(t *testing.T) {
+	// Without the "Summarizing N Failures" block (e.g. a passing run or
+	// non-Ginkgo output), nothing is extracted — the inline "• [FAILED]" markers
+	// alone are not parsed.
+	out := `Running Suite: Books Suite
+Ran 4 of 4 Specs in 0.003 seconds
+SUCCESS! -- 4 Passed | 0 Failed | 0 Pending | 0 Skipped`
+	if got := parseTestFailures("ginkgo", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseGinkgoFailures_Deduplicates(t *testing.T) {
+	// A flaky spec retried under --flake-attempts can appear twice in the summary;
+	// the same spec text must not yield duplicate entries.
+	out := `Summarizing 1 Failure:
+
+  [FAIL] Widget renders [It] draws a border
+  /app/widget_test.go:12
+  [FAIL] Widget renders [It] draws a border
+  /app/widget_test.go:12`
+	got := parseTestFailures("ginkgo run", out)
+	want := []testFailure{
+		{Name: "Widget renders [It] draws a border", Detail: "/app/widget_test.go:12"},
+	}
+	assertFailures(t, got, want)
 }
 
 func assertFailures(t *testing.T, got, want []testFailure) {

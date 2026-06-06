@@ -230,6 +230,12 @@ type Config struct {
 	// inject a deterministic fake to control verify outcomes without forking
 	// real subprocesses.
 	VerifyRunner verifyRunner
+	// ToolAuditor, when set, records every tool invocation in the append-only
+	// audit log. It is nil by default, leaving tool auditing off — the
+	// non-breaking default. The app wires an audit-backed logger here so the
+	// sovereignty proof layer captures the tool calls the agent ran, not just
+	// the permission decisions it was granted.
+	ToolAuditor ToolAuditor
 }
 
 // Loop runs a single named agent for one session at a time.
@@ -1073,6 +1079,9 @@ func messageText(m message.Message) string {
 }
 
 func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCall) (result tools.Result) {
+	// Record the invocation on every return path — unknown tool, error result,
+	// recovered panic, or success — so the audit log proves exactly what ran.
+	defer func() { l.auditTool(ctx, sessionID, call.Name, result) }()
 	tool, ok := l.cfg.Tools.Get(call.Name)
 	if !ok {
 		return tools.Result{Content: "unknown tool: " + call.Name, IsError: true}

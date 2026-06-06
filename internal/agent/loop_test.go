@@ -742,11 +742,12 @@ func textOf(msg message.Message) string {
 }
 
 type recordingTool struct {
-	name   string
-	desc   string
-	result string
-	mu     sync.Mutex
-	calls  []string
+	name    string
+	desc    string
+	result  string
+	isError bool
+	mu      sync.Mutex
+	calls   []string
 }
 
 func (t *recordingTool) Name() string {
@@ -769,7 +770,7 @@ func (t *recordingTool) Run(ctx context.Context, args json.RawMessage) (tools.Re
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.calls = append(t.calls, string(args))
-	return tools.Result{Content: t.result}, nil
+	return tools.Result{Content: t.result, IsError: t.isError}, nil
 }
 
 type panickingTool struct {

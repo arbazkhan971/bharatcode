@@ -466,6 +466,14 @@ func TestIsReasoningModel(t *testing.T) {
 		{"gpt-4o-mini", false},
 		{"deepseek-chat", false},
 		{"o1mini", false},
+		// codex-mini-latest is an o4-mini fine-tune (the Codex-CLI model): a
+		// reasoning model whose id carries neither an o-series nor a gpt-5 prefix,
+		// so it must be matched by the "codex-mini" marker. The "codex" substring
+		// alone must NOT promote gpt-5-codex via this path (the gpt-5 prefix
+		// already claims it) or, more importantly, a plain chat model.
+		{"codex-mini-latest", true},
+		{"codex-mini", true},
+		{"openai/codex-mini-latest", true},
 		{"", false},
 		// OpenRouter and other aggregators namespace ids as "vendor/model"; the
 		// vendor prefix must be stripped before classifying so prefixed reasoning

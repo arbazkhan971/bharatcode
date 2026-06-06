@@ -54,6 +54,18 @@ var schemaDiagnostics = json.RawMessage(`{
 //go:embed diagnostics.md
 var diagnosticsDescription string
 
+// diagnosticMatchCap bounds how many diagnostics the tool renders in full. A
+// workspace-wide scan of a project mid-refactor (or one with a noisy linter) can
+// surface thousands of diagnostics; rendering them all — each with its source
+// line and related locations — floods the context with little marginal value.
+// Capping mirrors the navigate tool's navigateLocationCap and the symbols tool's
+// symbolMatchCap bounded-output philosophy: the diagnostics are already sorted
+// deterministically, the summary header still reports the true total and
+// per-severity breakdown, and a trailing "... and N more not shown" notice
+// records what was elided so the model knows the list was truncated rather than
+// complete. Narrow the scope with the path or severity argument to see the rest.
+const diagnosticMatchCap = 200
+
 func newDiagnosticsTool(deps Dependencies) Tool {
 	t := &diagnosticsTool{workDir: deps.WorkDir}
 	// A nil *lsp.Manager assigned to the DiagnosticSource interface would
@@ -173,7 +185,11 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 	// Cache file contents so the offending source line can be shown beneath each
 	// diagnostic without re-reading a file once per diagnostic it carries.
 	lineCache := map[string][]string{}
-	for _, d := range all {
+	shown := all
+	if len(shown) > diagnosticMatchCap {
+		shown = shown[:diagnosticMatchCap]
+	}
+	for _, d := range shown {
 		path := d.Path
 		if rel, err := filepath.Rel(root, d.Path); err == nil && !strings.HasPrefix(rel, "..") {
 			path = filepath.ToSlash(rel)
@@ -213,6 +229,9 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 				rel.Message,
 			)
 		}
+	}
+	if len(all) > diagnosticMatchCap {
+		fmt.Fprintf(&b, "... and %d more not shown (%d total)\n", len(all)-diagnosticMatchCap, len(all))
 	}
 
 	return Result{

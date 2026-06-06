@@ -710,6 +710,44 @@ func TestUnifiedHeader_StyledDistinctly(t *testing.T) {
 	require.Contains(t, lines, theme.DiffRemove.Render("-old"))
 }
 
+// TestUnifiedHeader_StylesExtendedHeaders proves git's extended header lines —
+// the mode, rename, copy, and similarity metadata that sits between the "diff
+// --git" banner and the first hunk — are styled as file headers rather than
+// left as plain unstyled text, matching how delta and opencode present them.
+func TestUnifiedHeader_StylesExtendedHeaders(t *testing.T) {
+	t.Parallel()
+
+	patch := "diff --git a/old.go b/new.go\n" +
+		"old mode 100644\n" +
+		"new mode 100755\n" +
+		"similarity index 92%\n" +
+		"rename from old.go\n" +
+		"rename to new.go\n" +
+		"--- a/old.go\n+++ b/new.go\n" +
+		"@@ -1,2 +1,2 @@\n-old\n+new\n"
+	theme := styles.Default()
+	out := New(theme).RenderUnified(patch, 120)
+	lines := strings.Split(out, "\n")
+
+	for _, raw := range []string{
+		"old mode 100644",
+		"new mode 100755",
+		"similarity index 92%",
+		"rename from old.go",
+		"rename to new.go",
+	} {
+		want := theme.DiffHeader.Render(raw)
+		require.Containsf(t, lines, want, "extended header %q must render with DiffHeader style", raw)
+		// It must never be mistaken for added/removed content.
+		require.NotContains(t, lines, theme.DiffAdd.Render(raw))
+		require.NotContains(t, lines, theme.DiffRemove.Render(raw))
+	}
+
+	// Real content keeps its add/remove styling.
+	require.Contains(t, lines, theme.DiffAdd.Render("+new"))
+	require.Contains(t, lines, theme.DiffRemove.Render("-old"))
+}
+
 // TestUnifiedNumbered_NoNewlineMarkerNotNumbered checks that git's "\ No newline
 // at end of file" annotation gets a blank gutter and does not advance the
 // line-number counters, so the lines following it keep their correct numbers

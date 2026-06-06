@@ -95,6 +95,8 @@ func (t *diagnosticsTool) Name() string {
 	return "diagnostics"
 }
 
+func (t *diagnosticsTool) IsReadOnly() bool { return true }
+
 func (t *diagnosticsTool) Description() string {
 	return diagnosticsDescription
 }

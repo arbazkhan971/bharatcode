@@ -36,6 +36,27 @@ type Tool interface {
 	Run(ctx context.Context, args json.RawMessage) (Result, error)
 }
 
+// ReadOnlyTool is an optional interface that tools implement to declare they
+// are safe to run concurrently within a batch. A read-only tool must never
+// write files, kill processes, or modify any shared state — only read data
+// from the workspace, the language server, or the network. The agent loop
+// fans out a batch of calls concurrently when every call in the batch
+// resolves to a read-only tool.
+type ReadOnlyTool interface {
+	Tool
+	// IsReadOnly returns true for tools that are safe to run concurrently.
+	IsReadOnly() bool
+}
+
+// IsReadOnly returns true when t implements ReadOnlyTool and reports true.
+// It is a package-level helper used by the agent loop to check call batches.
+func IsReadOnly(t Tool) bool {
+	if ro, ok := t.(ReadOnlyTool); ok {
+		return ro.IsReadOnly()
+	}
+	return false
+}
+
 // Result is the value returned to the agent loop after a tool runs.
 type Result struct {
 	Content  string         `json:"content"`

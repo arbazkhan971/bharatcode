@@ -76,6 +76,8 @@ func (t *webFetchTool) Name() string {
 	return "web_fetch"
 }
 
+func (t *webFetchTool) IsReadOnly() bool { return true }
+
 func (t *webFetchTool) Description() string {
 	return webFetchDescription
 }

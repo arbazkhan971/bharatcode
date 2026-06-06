@@ -118,6 +118,7 @@ func (t *navigateTool) Name() string {
 	return "navigate"
 }
 
+func (t *navigateTool) IsReadOnly() bool { return true }
 func (t *navigateTool) Description() string {
 	return navigateDescription
 }

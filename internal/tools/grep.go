@@ -158,6 +158,8 @@ func (t *grepTool) Name() string {
 	return "grep"
 }
 
+func (t *grepTool) IsReadOnly() bool { return true }
+
 func (t *grepTool) Description() string {
 	return grepDescription
 }

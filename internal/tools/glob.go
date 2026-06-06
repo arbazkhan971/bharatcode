@@ -54,6 +54,8 @@ func (t *globTool) Name() string {
 	return "glob"
 }
 
+func (t *globTool) IsReadOnly() bool { return true }
+
 func (t *globTool) Description() string {
 	return globDescription
 }

@@ -90,6 +90,7 @@ func (t *ViewTool) Name() string { return "view" }
 
 // Description returns the model-facing tool description.
 func (t *ViewTool) Description() string { return viewDescription }
+func (t *ViewTool) IsReadOnly() bool    { return true }
 
 // Schema returns the JSON argument schema.
 func (t *ViewTool) Schema() json.RawMessage { return viewSchema }

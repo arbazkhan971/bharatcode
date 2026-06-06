@@ -542,25 +542,33 @@ func (m *model) handleRegistryRecipe(name string, args string) (handled bool, mo
 // relativeTime renders how long ago then was, relative to now, as a compact
 // "just now" / "5m ago" / "3h ago" / "2d ago" label for the session switcher,
 // matching the last-active column Claude Code and opencode show beside each
-// session. Granularity coarsens as the gap widens (minutes, then hours, then
-// days, then weeks); a zero or future timestamp reads as "just now" so a
-// freshly-created session never shows a negative or empty age.
+// session. Granularity coarsens as the gap widens (minutes, then hours, days,
+// weeks, months, then years), so an aging session reads as "2mo ago" or "1y ago"
+// rather than an unwieldy "60w ago"; a zero or future timestamp reads as "just
+// now" so a freshly-created session never shows a negative or empty age. Months
+// and years use the conventional 30- and 365-day approximations, which is ample
+// precision for a last-active glance.
 func relativeTime(then, now time.Time) string {
 	if then.IsZero() {
 		return "just now"
 	}
+	const day = 24 * time.Hour
 	d := now.Sub(then)
 	switch {
 	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:
 		return fmt.Sprintf("%dm ago", int(d/time.Minute))
-	case d < 24*time.Hour:
+	case d < day:
 		return fmt.Sprintf("%dh ago", int(d/time.Hour))
-	case d < 7*24*time.Hour:
-		return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
+	case d < 7*day:
+		return fmt.Sprintf("%dd ago", int(d/day))
+	case d < 30*day:
+		return fmt.Sprintf("%dw ago", int(d/(7*day)))
+	case d < 365*day:
+		return fmt.Sprintf("%dmo ago", int(d/(30*day)))
 	default:
-		return fmt.Sprintf("%dw ago", int(d/(7*24*time.Hour)))
+		return fmt.Sprintf("%dy ago", int(d/(365*day)))
 	}
 }
 

@@ -111,6 +111,9 @@ func TestClassifyTestRunner(t *testing.T) {
 		"Invoke-Pester -Path ./tests":                runnerPester,
 		"pwsh -Command Invoke-Pester":                runnerPester,
 		"pester":                                     runnerPester,
+		"./build/calc_test --gtest_filter=Calc.*":    runnerGTest,
+		"./mytest --gtest_color=no":                  runnerGTest,
+		"build/run_tests --gtest_output=xml:r.xml":   runnerGTest,
 		"echo the trumpeters tune up":                runnerNone,
 		"echo forge testbed":                         runnerNone,
 		"echo subtle differences":                    runnerNone,
@@ -1412,6 +1415,72 @@ func TestParseCTestFailures_NoFailures(t *testing.T) {
 
 100% tests passed, 0 tests failed out of 1`
 	if got := parseTestFailures("ctest", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseGTestFailures(t *testing.T) {
+	out := `[==========] Running 3 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 3 tests from CalcTest
+[ RUN      ] CalcTest.Adds
+[       OK ] CalcTest.Adds (0 ms)
+[ RUN      ] CalcTest.Subtracts
+../calc_test.cc:18: Failure
+Expected equality of these values:
+  Subtract(5, 3)
+    Which is: 1
+  2
+[  FAILED  ] CalcTest.Subtracts (1 ms)
+[ RUN      ] CalcTest.Divides
+unknown file: Failure
+C++ exception with description "divide by zero" thrown in the test body.
+[  FAILED  ] CalcTest.Divides (0 ms)
+[----------] 3 tests from CalcTest (2 ms total)
+
+[==========] 3 tests from 1 test suite ran. (2 ms total)
+[  PASSED  ] 1 test.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] CalcTest.Subtracts
+[  FAILED  ] CalcTest.Divides
+
+ 2 FAILED TESTS`
+	got := parseTestFailures("./build/calc_test --gtest_color=no", out)
+	want := []testFailure{
+		{Name: "CalcTest.Subtracts", Detail: "../calc_test.cc:18: Failure"},
+		// The "Divides" body opens with an "unknown file: Failure" header (a thrown
+		// exception, not a located assertion); it has no "<file>:<line>:" prefix, so
+		// no detail is attached — the failure is still reported.
+		{Name: "CalcTest.Divides"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGTestFailures_Parameterized(t *testing.T) {
+	// Value/type-parameterized test names carry slashes; they must survive intact,
+	// and the summary block's "[  FAILED  ] N tests, listed below:" header (whose
+	// first token is a bare number, no dot) must not be mistaken for a failure.
+	out := `[ RUN      ] Inst/CalcTest.Adds/0
+../calc_test.cc:7: Failure
+[  FAILED  ] Inst/CalcTest.Adds/0, where GetParam() = 4 (0 ms)
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] Inst/CalcTest.Adds/0, where GetParam() = 4
+
+ 1 FAILED TEST`
+	got := parseTestFailures("mytest --gtest_filter=Inst/*", out)
+	want := []testFailure{
+		{Name: "Inst/CalcTest.Adds/0", Detail: "../calc_test.cc:7: Failure"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseGTestFailures_NoFailures(t *testing.T) {
+	out := `[==========] Running 1 test from 1 test suite.
+[ RUN      ] CalcTest.Adds
+[       OK ] CalcTest.Adds (0 ms)
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.`
+	if got := parseTestFailures("./calc_test --gtest_filter=*", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

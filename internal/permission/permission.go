@@ -46,6 +46,7 @@ var readClassTools = map[string]bool{
 	"web_fetch":     true,
 	"web_search":    true,
 	"job_output":    true,
+	"job_list":      true,
 }
 
 // Decision represents the permission level of a check.

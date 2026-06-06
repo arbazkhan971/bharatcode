@@ -101,6 +101,7 @@
         "google/gemini-2.5-flash",
         "google/gemini-2.5-pro",
         "x-ai/grok-4",
+        "x-ai/grok-4-fast",
         "mistralai/devstral-small-2507",
         "qwen/qwen3-coder-480b-a35b-instruct",
         "qwen/qwen3-235b-a22b-instruct-2507"
@@ -525,6 +526,15 @@
       "id": "x-ai/grok-4",
       "provider": "openrouter",
       "context_window": 256000,
+      "input_price_per_mtok_usd": 3.00,
+      "output_price_per_mtok_usd": 15.00,
+      "supports_images": true,
+      "supports_tools": true
+    },
+    {
+      "id": "x-ai/grok-4-fast",
+      "provider": "openrouter",
+      "context_window": 2000000,
       "input_price_per_mtok_usd": 3.00,
       "output_price_per_mtok_usd": 15.00,
       "supports_images": true,

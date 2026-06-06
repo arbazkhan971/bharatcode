@@ -638,6 +638,20 @@ var contextWindowRules = []struct {
 	// adds it (commonly via OpenRouter or the Tencent API) without an explicit
 	// context_window.
 	{"hunyuan", 262_144},
+	// 01-AI Yi — the Yi-Coder coding line (9B/34B) ships a 128k window, making
+	// it the largest of the Yi family; Yi-Lightning (the commercial flagship API
+	// model) ships 16k; and Yi-Large (the commercial large-tier) ships 32k. The
+	// original open-weight line (Yi-34B-Chat, Yi-6B) caps at 4k. All ids carry
+	// the bare "yi" marker, so the more specific "yi-coder"/"yi-lightning"/
+	// "yi-large" rules must precede the family one to avoid resolving these
+	// variants to a fraction (or multiple) of their real window. Yi ids carry no
+	// broader family marker above, so without these rules they fall through to
+	// "unknown" (0) when a user adds them (commonly via OpenRouter as
+	// "01-ai/yi-...") without an explicit context_window.
+	{"yi-coder", 131_072},
+	{"yi-lightning", 16_384},
+	{"yi-large", 32_768},
+	{"yi", 4_096},
 	// ByteDance Doubao (served via the Volcengine Ark API). The classic Doubao-pro
 	// and Doubao-lite endpoints — and the Doubao-1.5 generation — encode the window
 	// directly in the id as a trailing "-<n>k" token (doubao-pro-256k,

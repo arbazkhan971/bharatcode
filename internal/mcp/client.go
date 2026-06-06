@@ -158,6 +158,16 @@ func (s *Server) State() State {
 	return s.state
 }
 
+// Counts returns the number of tools, resources, and prompts the server
+// currently exposes. The values are zero until the server connects and
+// advertises its capabilities, so they double as a quick liveness signal for
+// the /mcp listing.
+func (s *Server) Counts() (toolCount, resourceCount, promptCount int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.tools), len(s.resources), len(s.prompts)
+}
+
 func (s *Server) setState(state State, conn remoteClient) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

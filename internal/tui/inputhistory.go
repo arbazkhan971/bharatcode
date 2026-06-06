@@ -25,6 +25,7 @@ var slashCommands = []string{
 	"/diff",
 	"/revert",
 	"/status",
+	"/mcp",
 	"/plan",
 	"/approve",
 	"/goal",

@@ -16,6 +16,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
+	"github.com/arbazkhan971/bharatcode/internal/mcp"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
@@ -71,6 +72,10 @@ type Dependencies struct {
 	// commands. It may be nil; the TUI loads a registry from the configured
 	// recipe directories at startup when one is not supplied.
 	Recipes *recipe.Registry
+	// MCP is the optional Model Context Protocol client backing the /mcp
+	// listing. It may be nil (no MCP servers configured), in which case /mcp
+	// reports that none are connected.
+	MCP *mcp.Client
 }
 
 // Run launches the TUI and blocks until the program exits.
@@ -693,6 +698,8 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.handleDiff()
 	case "/status":
 		return m.handleStatus()
+	case "/mcp":
+		return m.handleMCP()
 	case "/plan":
 		return m.handlePlan()
 	case "/approve":
@@ -1254,6 +1261,7 @@ func (m *model) slashHelpLines() []string {
 		"/copy [last|all] - copy the last assistant reply or the whole chat to the clipboard",
 		"/search <term> - find a term in the chat; Ctrl+/ next match, Ctrl+\\ previous",
 		"/status - show model, session, and spend",
+		"/mcp - list MCP servers with their connection state and capability counts",
 		"/plan - restrict the agent to read-only tools and propose a plan",
 		"/approve - exit plan mode and re-enable execution tools",
 		"/model - open model picker",

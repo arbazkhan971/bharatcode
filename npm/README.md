@@ -9,13 +9,13 @@ This is the npm distribution of [BharatCode](https://github.com/arbazkhan971/bha
 Global install (adds `bharatcode` to your PATH):
 
 ```bash
-npm install -g @arbazkhan971/bharatcode
+npm install -g bharatcode-cli
 ```
 
 Or run it once without installing:
 
 ```bash
-npx @arbazkhan971/bharatcode
+npx bharatcode-cli
 ```
 
 Then:

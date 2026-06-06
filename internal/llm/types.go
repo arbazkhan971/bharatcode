@@ -103,6 +103,12 @@ type Usage struct {
 	OutputTokens     int `json:"output_tokens"`
 	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	// ReasoningTokens counts tokens the model spent on its hidden reasoning or
+	// thinking pass (OpenAI o-series completion_tokens_details.reasoning_tokens,
+	// Gemini 2.5/3 thoughtsTokenCount). These are already included in
+	// OutputTokens for billing — they are surfaced here as a breakdown so callers
+	// can show reasoning depth without re-computing it from the raw response.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // Event is emitted by Provider.Stream.

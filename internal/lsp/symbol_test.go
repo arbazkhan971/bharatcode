@@ -465,6 +465,26 @@ func TestParseCodeActionPreferredAndDisabled(t *testing.T) {
 	})
 }
 
+func TestParseCodeActionDiagnostics(t *testing.T) {
+	t.Run("captures_fixed_diagnostic_messages", func(t *testing.T) {
+		// A quick fix keyed on diagnostics carries them in CodeAction.diagnostics;
+		// the parser extracts each message so a consumer can name what the fix
+		// resolves. A blank message is dropped rather than contributing an empty
+		// entry.
+		raw := `{"title":"Import \"fmt\"","kind":"quickfix","diagnostics":[{"message":"undefined: fmt"},{"message":""},{"message":"  declared and not used: x  "}]}`
+		action, err := parseCodeAction(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Equal(t, []string{"undefined: fmt", "declared and not used: x"}, action.Diagnostics)
+	})
+
+	t.Run("absent_diagnostics_default_empty", func(t *testing.T) {
+		raw := `{"title":"Extract function","kind":"refactor.extract"}`
+		action, err := parseCodeAction(json.RawMessage(raw))
+		require.NoError(t, err)
+		require.Empty(t, action.Diagnostics)
+	})
+}
+
 func TestResolveCodeActionRequiresData(t *testing.T) {
 	// Resolving an action with no round-trip data is rejected before any request
 	// is issued, so a nil client never gets dereferenced.

@@ -6,8 +6,11 @@ workspace tooling what is currently broken.
 
 Arguments:
 
-- `path` string, optional: workspace-relative file to inspect. Omit it to scan
-  supported source files in the workspace.
+- `path` string, optional: workspace-relative path to inspect. A file inspects
+  just that file; a directory scans every supported source file in that subtree —
+  use it to re-check one package after editing it, without the cost of a
+  workspace-wide scan. Omit it to scan supported source files across the whole
+  workspace.
 - `severity` string, optional: minimum severity to report — one of `error`,
   `warning`, `info`, or `hint`. Only diagnostics at that level or more severe are
   returned (`error` is most severe). Use `error` to focus on what blocks a build

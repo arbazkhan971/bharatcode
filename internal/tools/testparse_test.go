@@ -107,6 +107,11 @@ func TestClassifyTestRunner(t *testing.T) {
 		"jasmine":                                    runnerJasmine,
 		"npx jasmine":                                runnerJasmine,
 		"node_modules/.bin/jasmine spec/foo_spec.js": runnerJasmine,
+		"Invoke-Pester":                              runnerPester,
+		"Invoke-Pester -Path ./tests":                runnerPester,
+		"pwsh -Command Invoke-Pester":                runnerPester,
+		"pester":                                     runnerPester,
+		"echo the trumpeters tune up":                runnerNone,
 		"echo forge testbed":                         runnerNone,
 		"echo subtle differences":                    runnerNone,
 		"echo rake testing notes":                    runnerNone,
@@ -1766,6 +1771,53 @@ func TestParseJasmineFailures_NoFailures(t *testing.T) {
 3 specs, 0 failures
 Finished in 0.004 seconds`
 	if got := parseTestFailures("jasmine", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParsePesterFailures(t *testing.T) {
+	out := `Describing Get-Planet
+  [+] Returns Earth 12ms (10ms|2ms)
+  [-] Returns Mars 8ms (7ms|1ms)
+   Expected 'Mars', but got 'Earth'.
+   at $expected | Should -Be $actual, /tests/Get-Planet.Tests.ps1:18
+  [-] Throws on bad input 5ms
+   Expected an exception to be thrown, but none was.
+   at /tests/Get-Planet.Tests.ps1:24
+Tests completed in 1.2s
+Tests Passed: 1, Failed: 2, Skipped: 0`
+	got := parseTestFailures("Invoke-Pester", out)
+	want := []testFailure{
+		{Name: "Returns Mars", Detail: "Expected 'Mars', but got 'Earth'."},
+		{Name: "Throws on bad input", Detail: "Expected an exception to be thrown, but none was."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParsePesterFailures_StopsAtNextBlock(t *testing.T) {
+	// A failure whose body is empty must not borrow the next test's message: the
+	// detail scan stops at the next result marker or a "Describing"/"Context"
+	// header.
+	out := `Describing Math
+  [-] adds 3ms
+Describing Strings
+  [-] upcases 2ms
+   Expected 'FOO', but got 'foo'.`
+	got := parseTestFailures("pester", out)
+	want := []testFailure{
+		{Name: "adds"},
+		{Name: "upcases", Detail: "Expected 'FOO', but got 'foo'."},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParsePesterFailures_NoFailures(t *testing.T) {
+	// An all-passing run prints only "[+]" markers, so nothing is extracted.
+	out := `Describing Get-Planet
+  [+] Returns Earth 12ms
+  [!] Pending case 0ms
+Tests Passed: 1, Failed: 0, Skipped: 1`
+	if got := parseTestFailures("Invoke-Pester", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

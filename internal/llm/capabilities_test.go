@@ -152,6 +152,13 @@ func TestInferContextWindow(t *testing.T) {
 		// Databricks DBRX (32k) and IBM Granite 3.x (128k).
 		{"dbrx-instruct", 32_768},
 		{"granite-3.3-8b-instruct", 128_000},
+		// ByteDance Seed-OSS-36B ships a 512k native window. Its id shares no
+		// substring with any broader family rule (notably "gpt-oss" is not a
+		// substring of "seed-oss"), so the dedicated rule keeps it off the
+		// "unknown" (0) fallback.
+		{"seed-oss-36b-instruct", 524_288},
+		{"ByteDance-Seed/Seed-OSS-36B-Instruct", 524_288},
+		{"bytedance/seed-oss-36b", 524_288},
 		// LG EXAONE 4.0/3.5 hosted flagship (32B) exposes a 128k window; the
 		// "exaone" marker keeps it off the "unknown" (0) fallback.
 		{"LGAI-EXAONE/EXAONE-4.0-32B", 128_000},

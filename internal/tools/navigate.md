@@ -30,6 +30,11 @@ questions:
 - `signature`: what does this call expect? Point at a call's arguments to get
   the function's signature(s), with the argument the cursor is currently on
   marked, plus parameter documentation when the server provides it.
+- `prepare_rename`: is this symbol renamable? A lightweight read-only preflight
+  before calling the `rename` tool. Returns the symbol's current name and the
+  exact range the server would edit, or reports that the position cannot be
+  renamed. Use this to confirm the server recognises the symbol and to show the
+  user what will change before committing.
 
 Position comes from other tools: the `symbols`, `grep`, and `view` tools all
 report 1-based `path:line:column`, which you pass straight in here.
@@ -42,7 +47,7 @@ Arguments:
   Defaults to 1 (start of line); point it at the symbol's name for accuracy.
 - `action` string, optional: `definition` (default), `declaration`,
   `type_definition`, `implementation`, `references`, `incoming_calls`,
-  `outgoing_calls`, `hover`, or `signature`.
+  `outgoing_calls`, `hover`, `signature`, or `prepare_rename`.
 - `include_declaration` boolean, optional: only meaningful for `references`.
   Defaults to `true` (the declaration is listed among the references); set it to
   `false` to list only the use sites.
@@ -60,7 +65,10 @@ gauge a symbol's blast radius or call-hierarchy fan-out at a glance. For
 `hover` and `signature`, the language server's text, with `signature` marking
 the active overload (`→`) and the parameter the cursor is on. A very long hover
 or signature is capped on a line boundary with a `... [N more lines truncated]`
-notice; re-read the source directly if you need the rest.
+notice; re-read the source directly if you need the rest. For `prepare_rename`,
+a one-line message stating whether the symbol can be renamed, its current name,
+and the range (start line:col − end line:col) that would be edited; or a
+message stating the position cannot be renamed.
 
 Failure cases:
 

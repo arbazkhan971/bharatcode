@@ -268,7 +268,7 @@ func TestFiletreePanel_EnterInsertsSelectedFileAsMention(t *testing.T) {
 
 	// The inserted reference is a real, recognised mention: it resolves to the file
 	// the picker selected.
-	_, refs := expandFileMentions(m.input.String(), root)
+	_, refs, _ := expandFileMentions(m.input.String(), root)
 	require.Equal(t, []string{"beta.go"}, refs)
 }
 
@@ -287,7 +287,7 @@ func TestFiletreePanel_EnterAppendsAfterExistingPromptText(t *testing.T) {
 	// A separating space is inserted before the "@" so the mention sits at a
 	// boundary the parser recognises and never fuses onto the preceding word.
 	require.Equal(t, "review @alpha.go ", m.input.String())
-	_, refs := expandFileMentions(m.input.String(), root)
+	_, refs, _ := expandFileMentions(m.input.String(), root)
 	require.Equal(t, []string{"alpha.go"}, refs)
 }
 

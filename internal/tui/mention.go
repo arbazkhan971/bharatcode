@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/arbazkhan971/bharatcode/internal/message"
+	"github.com/arbazkhan971/bharatcode/internal/util"
 )
 
 // mentionPattern matches an @-file reference: an "@" at the start of the input
@@ -23,6 +26,9 @@ const (
 	// maxMentionTotalBytes caps the combined size of all inlined files in a
 	// single prompt, so a message full of @mentions stays bounded.
 	maxMentionTotalBytes = 256 * 1024
+	// maxMentionImageBytes caps each image attached via an @-mention so a single
+	// large screenshot cannot exhaust the context window or exceed vision-API limits.
+	maxMentionImageBytes = 4 * 1024 * 1024
 )
 
 // mentionTrailingPunct is stripped from the end of a candidate path so prose
@@ -35,22 +41,28 @@ const mentionTrailingPunct = ".,:;!?)]}"
 // user's @mention stays visible; the model additionally receives the file
 // bodies as context, matching the @-file behavior of goose, opencode, and pi.
 //
-// It returns the prompt to send and the workspace-relative paths that were
-// inlined (first-mention order, de-duplicated). When nothing resolves, the
-// original text and a nil slice are returned unchanged.
-func expandFileMentions(text, root string) (string, []string) {
+// Image files (PNG/JPEG/GIF/WebP) are returned as ImageBlocks rather than
+// fenced text so vision-capable models can inspect them directly. A compact
+// annotation like "@shot.png [image/png, 45KB]" is added in the text section
+// to keep the reference visible in the conversation.
+//
+// It returns the expanded prompt, the workspace-relative paths that were
+// resolved (first-mention order, de-duplicated), and any image blocks. When
+// nothing resolves, the original text, a nil slice, and a nil slice are returned.
+func expandFileMentions(text, root string) (string, []string, []message.ImageBlock) {
 	if root == "" || !strings.Contains(text, "@") {
-		return text, nil
+		return text, nil, nil
 	}
 
 	matches := mentionPattern.FindAllStringSubmatch(text, -1)
 	if len(matches) == 0 {
-		return text, nil
+		return text, nil, nil
 	}
 
 	var (
 		refs   []string
 		blocks []string
+		images []message.ImageBlock
 		seen   = make(map[string]bool)
 		total  int
 	)
@@ -60,6 +72,22 @@ func expandFileMentions(text, root string) (string, []string) {
 			continue
 		}
 		seen[rel] = true
+
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(rel), "."))
+		if mime := mentionImageMIME(ext); mime != "" {
+			data, err := os.ReadFile(abs)
+			if err != nil || len(data) == 0 {
+				continue
+			}
+			refs = append(refs, rel)
+			if len(data) > maxMentionImageBytes {
+				blocks = append(blocks, fmt.Sprintf("@%s [image too large to attach: %s]\n", rel, util.HumanBytes(int64(len(data)))))
+			} else {
+				images = append(images, message.ImageBlock{MimeType: mime, Data: data})
+				blocks = append(blocks, fmt.Sprintf("@%s [attached image: %s, %s]\n", rel, mime, util.HumanBytes(int64(len(data)))))
+			}
+			continue
+		}
 
 		data, err := os.ReadFile(abs)
 		if err != nil {
@@ -76,7 +104,7 @@ func expandFileMentions(text, root string) (string, []string) {
 	}
 
 	if len(blocks) == 0 {
-		return text, nil
+		return text, nil, nil
 	}
 
 	var b strings.Builder
@@ -85,7 +113,25 @@ func expandFileMentions(text, root string) (string, []string) {
 	for _, blk := range blocks {
 		b.WriteString(blk)
 	}
-	return b.String(), refs
+	return b.String(), refs, images
+}
+
+// mentionImageMIME returns the MIME type for recognised image file extensions,
+// or "" for non-image files. Only formats with broad vision-API support are
+// treated as images; unrecognised extensions fall back to text inlining.
+func mentionImageMIME(ext string) string {
+	switch ext {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "webp":
+		return "image/webp"
+	default:
+		return ""
+	}
 }
 
 // resolveMention turns a raw @mention token into a clean workspace-relative

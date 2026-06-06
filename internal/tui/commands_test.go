@@ -229,6 +229,35 @@ func TestSlashSessions_FilterHighlightsMatchInBody(t *testing.T) {
 	require.Contains(t, body, m.theme.Accent.Render("Par"), "the matched runes must be accent-styled in the picker body")
 }
 
+// TestSlashSessions_FilterShowsMatchCount asserts the picker echoes a "N of M"
+// tally beside an active filter so the user can see how far the query narrowed
+// the list, the way the completion menus report their match counts.
+func TestSlashSessions_FilterShowsMatchCount(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	_ = seedSession(t, h.repo, "Parser refactor", "fix the parser")
+	_ = seedSession(t, h.repo, "Bump version", "release prep")
+	_ = seedSession(t, h.repo, "Parser cleanup", "tidy the parser")
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+	require.Len(t, m.sessionCandidates, 3, "all seeded sessions must be listed")
+
+	// No tally before a filter is typed — the bare list needs no count.
+	require.NotContains(t, plainText(m.dialogs.Render(200)), "of 3",
+		"the match tally must appear only once a filter is active")
+
+	// "par" matches the two Parser sessions out of three candidates.
+	for _, ch := range "par" {
+		_, _ = m.Update(keyText(string(ch)))
+	}
+	require.Len(t, m.visibleSessions(), 2, "filter must narrow to the two Parser sessions")
+	require.Contains(t, plainText(m.dialogs.Render(200)), "2 of 3",
+		"the filter line must report matched-of-total counts")
+}
+
 // TestSlashSessions_HomeEndJumpToEnds asserts the session picker's Home/End
 // bindings jump the cursor to the first and last visible rows, mirroring the
 // chat's Home/End (oldest/newest) navigation, and that they are bounded so a

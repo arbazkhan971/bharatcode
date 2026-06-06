@@ -77,9 +77,48 @@ func TestGeminiStreamsTextAndUsage(t *testing.T) {
 		}
 	}
 	require.Equal(t, "Hello world", text.String())
-	require.Equal(t, 7, usage.InputTokens)
+	// Gemini's promptTokenCount (7) includes the 2 cached tokens, but the ledger
+	// prices InputTokens and CacheReadTokens additively, so InputTokens must carry
+	// only the non-cached portion (7 - 2 = 5) to avoid billing the cached tokens
+	// twice.
+	require.Equal(t, 5, usage.InputTokens)
 	require.Equal(t, 3, usage.OutputTokens)
 	require.Equal(t, 2, usage.CacheReadTokens)
+}
+
+func TestGeminiUsageExcludesCachedTokensFromInput(t *testing.T) {
+	cases := []struct {
+		name      string
+		meta      geminiUsageMetadata
+		wantInput int
+		wantCache int
+	}{
+		{
+			name:      "subtracts cached portion from prompt total",
+			meta:      geminiUsageMetadata{PromptTokenCount: 100, CachedContentTokenCount: 30, CandidatesTokenCount: 12},
+			wantInput: 70,
+			wantCache: 30,
+		},
+		{
+			name:      "no cache leaves input untouched",
+			meta:      geminiUsageMetadata{PromptTokenCount: 40, CandidatesTokenCount: 9},
+			wantInput: 40,
+			wantCache: 0,
+		},
+		{
+			name:      "clamps at zero when cached exceeds prompt total",
+			meta:      geminiUsageMetadata{PromptTokenCount: 5, CachedContentTokenCount: 9},
+			wantInput: 0,
+			wantCache: 9,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			usage := tc.meta.toUsage()
+			require.Equal(t, tc.wantInput, usage.InputTokens)
+			require.Equal(t, tc.wantCache, usage.CacheReadTokens)
+		})
+	}
 }
 
 func TestGeminiFoldsThoughtTokensIntoOutput(t *testing.T) {

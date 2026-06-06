@@ -949,6 +949,31 @@ func TestUnifiedNumbered_FoldsLongContext(t *testing.T) {
 	}
 }
 
+// TestUnifiedNumbered_FoldMarkerShowsRange checks that the collapsed-context
+// marker names the new-file line range it hides, so a reviewer can locate the
+// elided run rather than only learning how many lines vanished. In foldedPatch(10)
+// the change at new line 1 is followed by context c1..c10 (new lines 2..11); the
+// fold keeps c1..c3 and c8..c10, hiding c4..c7, which occupy new lines 5..8.
+func TestUnifiedNumbered_FoldMarkerShowsRange(t *testing.T) {
+	t.Parallel()
+
+	got := New(styles.Theme{}).RenderUnifiedNumbered(foldedPatch(10), 120)
+
+	require.Contains(t, got, "⋯ 4 unchanged lines (5–8)", "the marker names the hidden new-file line range")
+}
+
+// TestFoldMarker_SingularRangeAndNoNumbering guards the marker helper directly: a
+// single hidden line reports a one-line range and the singular noun, and a
+// non-positive start line drops the range entirely so a caller without numbering
+// still gets the bare count.
+func TestFoldMarker_SingularRangeAndNoNumbering(t *testing.T) {
+	t.Parallel()
+
+	v := New(styles.Theme{})
+	require.Equal(t, "⋯ 1 unchanged line (7–7)", v.foldMarker(1, 7, 120))
+	require.Equal(t, "⋯ 3 unchanged lines", v.foldMarker(3, 0, 120))
+}
+
 // TestUnifiedNumbered_FoldKeepsNumbering checks that the line numbers on the far
 // side of a fold still account for the hidden lines, so the gutter stays accurate
 // rather than resuming as if the folded lines never existed.

@@ -80,7 +80,10 @@ func (v *Viewer) RenderUnifiedNumbered(patch string, width int) string {
 	out := make([]string, 0, len(lines))
 	for i, line := range lines {
 		if n, ok := markers[i]; ok {
-			out = append(out, blankGutter+v.foldMarker(n, contentWidth))
+			// At this point newLn holds the new-file number of the first hidden
+			// line (the run begins at index i), so the marker can name the range
+			// it collapses to orient the reviewer.
+			out = append(out, blankGutter+v.foldMarker(n, newLn, contentWidth))
 		}
 		// A folded context line keeps its place in the line numbering — it is
 		// still a real source line — but is not drawn; the marker above stands in
@@ -207,15 +210,22 @@ func isChangeLine(line string) bool {
 }
 
 // foldMarker renders the placeholder shown in place of a collapsed run of
-// unchanged context: a muted "⋯ N unchanged line(s)" note telling the reviewer
-// how many lines were hidden, so a fold reads as a deliberate elision rather than
-// missing content. The text is clamped to width so it never widens the diff body.
-func (v *Viewer) foldMarker(n, width int) string {
+// unchanged context: a muted "⋯ N unchanged line(s) (a–b)" note telling the
+// reviewer how many lines were hidden and which new-file line numbers they span,
+// so a fold reads as a deliberate elision the reviewer can locate rather than
+// missing content. startLine is the new-file number of the first hidden line; a
+// non-positive value drops the range, so a caller without numbering still gets
+// the count. The text is clamped to width so it never widens the diff body.
+func (v *Viewer) foldMarker(n, startLine, width int) string {
 	noun := "lines"
 	if n == 1 {
 		noun = "line"
 	}
-	return v.theme.Muted.Render(clampWidth(fmt.Sprintf("⋯ %d unchanged %s", n, noun), width))
+	label := fmt.Sprintf("⋯ %d unchanged %s", n, noun)
+	if startLine > 0 {
+		label += fmt.Sprintf(" (%d–%d)", startLine, startLine+n-1)
+	}
+	return v.theme.Muted.Render(clampWidth(label, width))
 }
 
 // Stat summarizes a unified diff as a one-line "N file(s) changed, +A -R"

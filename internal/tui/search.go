@@ -188,24 +188,29 @@ func (m *model) highlightMatches(body string) string {
 	return strings.Join(lines, "\n")
 }
 
-// highlightTerm wraps every case-insensitive occurrence of term in line with
-// style, leaving the rest untouched. Matching is rune-wise (via unicode
-// case-folding) so multi-byte content is never split mid-rune and a fold that
-// changes a string's byte length never misaligns the offsets. An empty term, or
-// a line with no occurrence, is returned unchanged so the common case allocates
-// nothing beyond the scan.
+// highlightTerm wraps every occurrence of term in line with style, leaving the
+// rest untouched. Matching follows the same smart-case rule as the search that
+// produced the matches (chat.SearchFold): a term with no upper-case letter folds
+// case, one carrying an upper-case letter is matched exactly — so the emphasis
+// marks precisely the occurrences the search navigates rather than lighting up
+// stray case-folded text the search would not stop on. Matching is rune-wise so
+// multi-byte content is never split mid-rune and a fold that changes a string's
+// byte length never misaligns the offsets. An empty term, or a line with no
+// occurrence, is returned unchanged so the common case allocates nothing beyond
+// the scan.
 func highlightTerm(line, term string, style lipgloss.Style) string {
 	tr := []rune(term)
 	if len(tr) == 0 {
 		return line
 	}
+	fold := chat.SearchFold(term)
 	lr := []rune(line)
-	if !containsFold(lr, tr) {
+	if !containsTerm(lr, tr, fold) {
 		return line
 	}
 	var b strings.Builder
 	for i := 0; i < len(lr); {
-		if matchesFold(lr[i:], tr) {
+		if matchesTerm(lr[i:], tr, fold) {
 			b.WriteString(style.Render(string(lr[i : i+len(tr)])))
 			i += len(tr)
 			continue
@@ -216,25 +221,30 @@ func highlightTerm(line, term string, style lipgloss.Style) string {
 	return b.String()
 }
 
-// matchesFold reports whether the leading runes of s equal sub under Unicode
-// case folding.
-func matchesFold(s, sub []rune) bool {
+// matchesTerm reports whether the leading runes of s equal sub, comparing under
+// Unicode case folding when fold is set and exactly otherwise.
+func matchesTerm(s, sub []rune, fold bool) bool {
 	if len(s) < len(sub) {
 		return false
 	}
 	for k := range sub {
-		if unicode.ToLower(s[k]) != unicode.ToLower(sub[k]) {
+		a, b := s[k], sub[k]
+		if fold {
+			a, b = unicode.ToLower(a), unicode.ToLower(b)
+		}
+		if a != b {
 			return false
 		}
 	}
 	return true
 }
 
-// containsFold reports whether sub occurs anywhere in s under case folding, so
-// highlightTerm can skip the allocating rewrite when there is nothing to mark.
-func containsFold(s, sub []rune) bool {
+// containsTerm reports whether sub occurs anywhere in s under the given case
+// rule, so highlightTerm can skip the allocating rewrite when there is nothing
+// to mark.
+func containsTerm(s, sub []rune, fold bool) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
-		if matchesFold(s[i:], sub) {
+		if matchesTerm(s[i:], sub, fold) {
 			return true
 		}
 	}

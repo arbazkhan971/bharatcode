@@ -211,7 +211,16 @@ func TestInferContextWindow(t *testing.T) {
 		{"sonar", 128_000},
 		{"sonar-pro", 200_000},
 		{"codestral-latest", 256_000},
-		{"kimi-k2-0905-preview", 200_000},
+		// Moonshot Kimi: the K2-0905 refresh, K2-Thinking, and K2.6 (spelled with
+		// both a dot and a dash across providers) serve a 256k window, so their
+		// specific rules must win over the 128k "kimi" family default that covers
+		// the original K2 (0711) and the kimi-k1.5 line.
+		{"kimi-k2-0905-preview", 262_144},
+		{"kimi-k2-thinking", 262_144},
+		{"kimi-k2.6", 262_144},
+		{"kimi-k2-6-instruct", 262_144},
+		{"kimi-k2-instruct", 128_000},
+		{"kimi-k1.5", 128_000},
 		{"gpt-oss-120b", 128_000},
 		// Pixtral, Gemma, Cohere Command, GLM and Nemotron open-weight families.
 		{"pixtral-large-latest", 128_000},

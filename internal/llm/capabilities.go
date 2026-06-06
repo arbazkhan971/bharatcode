@@ -463,8 +463,21 @@ var contextWindowRules = []struct {
 	{"glm-4.6", 200_000},
 	{"glm", 128_000},
 	{"nemotron", 128_000},
-	// Moonshot Kimi K2 exposes a 200k window.
-	{"kimi", 200_000},
+	// Moonshot Kimi — the modern K2 line serves a 256k window. The K2-Instruct
+	// "0905" refresh doubled the original K2's 128k window to 256k, and both the
+	// K2-Thinking reasoning model and the K2.6 release hold there. Every such id
+	// carries the bare "kimi" marker, so these specific rules must precede the
+	// family one to avoid falling through to the 128k default — an undercount that
+	// would let the agent compact long context far sooner than the model requires.
+	// The K2.6 id is spelled both with a dot ("kimi-k2.6") and a dash
+	// ("kimi-k2-6") across providers, so both forms get a rule. The original kimi-k2
+	// (the "0711" release) and the kimi-k1.5 line stayed at 128k, which the family
+	// rule covers.
+	{"kimi-k2-0905", 262_144},
+	{"kimi-k2-thinking", 262_144},
+	{"kimi-k2.6", 262_144},
+	{"kimi-k2-6", 262_144},
+	{"kimi", 128_000},
 	// DeepSeek — the deepseek-chat (V3 non-thinking) and deepseek-reasoner
 	// (thinking) models served by the official API both expose a 128k window,
 	// up from the 64k the earlier releases shipped.

@@ -81,6 +81,16 @@ func TestClassifyTestRunner(t *testing.T) {
 		"bun test ./math.test.ts":                    runnerBun,
 		"bun run test":                               runnerJest,
 		"bun run test -- --watch":                    runnerJest,
+		"nx test myapp":                              runnerJest,
+		"nx test":                                    runnerJest,
+		"npx nx test myapp":                          runnerJest,
+		"pnpm exec nx test myapp":                    runnerJest,
+		"nx test myapp --watchAll=false":             runnerJest,
+		"nx run myapp:test":                          runnerJest,
+		"nx run myapp:test --watchAll=false":         runnerJest,
+		"nx run myapp:test --coverage":               runnerJest,
+		"nx run myapp:build":                         runnerNone,
+		"nx run-many --target=build":                 runnerNone,
 		"mocha":                                      runnerMocha,
 		"npx mocha test/*.js":                        runnerMocha,
 		"ctest":                                      runnerCTest,
@@ -1060,6 +1070,53 @@ func TestParseBunRunTestFailures(t *testing.T) {
 		{Name: "subtracts correctly", Detail: "expect(received).toBe(expected)"},
 	}
 	assertFailures(t, got, want)
+}
+
+func TestParseNxTestFailures(t *testing.T) {
+	// `nx test <app>` drives NX's Jest executor (@nx/jest:jest), the default for
+	// Angular, NestJS, and React projects. The Jest parser must extract failures.
+	out := `  ✓ adds correctly (2 ms)
+  ✕ subtracts correctly (3 ms)
+
+  ● Calculator › subtracts correctly
+
+    expect(received).toBe(expected)
+
+    Expected: 5
+    Received: 4
+`
+	got := parseTestFailures("nx test myapp", out)
+	want := []testFailure{
+		{Name: "subtracts correctly", Detail: "expect(received).toBe(expected)"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseNxRunTestFailures(t *testing.T) {
+	// `nx run <app>:test` is the explicit project:target form that NX also accepts.
+	// It must route to the same jest parser as `nx test <app>`.
+	out := `  ✕ renders correctly (5 ms)
+
+  ● App › renders correctly
+
+    expect(received).toMatchSnapshot()
+`
+	got := parseTestFailures("nx run myapp:test", out)
+	want := []testFailure{
+		{Name: "renders correctly", Detail: "expect(received).toMatchSnapshot()"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestNxRunBuildNotClassified(t *testing.T) {
+	// `nx run <app>:build` is NOT a test invocation — it must not be classified,
+	// so no structured failures are extracted even if the output contains text
+	// that would match a test-failure pattern by coincidence.
+	out := `  ✕ build step failed (1 ms)`
+	got := parseTestFailures("nx run myapp:build", out)
+	if len(got) != 0 {
+		t.Errorf("expected no failures for nx run <app>:build, got %v", got)
+	}
 }
 
 func TestParseCargoTestFailures(t *testing.T) {

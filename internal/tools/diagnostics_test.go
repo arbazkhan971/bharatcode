@@ -549,3 +549,101 @@ func TestDiagnosticsMetadataErrorFilesMultipleErrors(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []string{"a.go", "m.go", "z.go"}, errorFiles)
 }
+
+// TestDiagnosticsMetadataItemsStructured asserts the items metadata key holds a
+// structured slice of diagnosticItem values matching the rendered Content, so
+// downstream consumers can react to individual diagnostics without re-parsing text.
+func TestDiagnosticsMetadataItemsStructured(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source: fakeDiagnostics{items: []lsp.Diagnostic{
+			{
+				Path:     path,
+				Range:    lsp.Range{Start: lsp.Position{Line: 2, Character: 5}},
+				Severity: lsp.Error,
+				Message:  "undefined: foo",
+				Code:     "E0425",
+			},
+			{
+				Path:     path,
+				Range:    lsp.Range{Start: lsp.Position{Line: 7, Character: 0}},
+				Severity: lsp.Warning,
+				Message:  "unused variable",
+			},
+		}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	items, ok := result.Metadata[MetadataDiagnosticItems].([]diagnosticItem)
+	require.True(t, ok, "items should be []diagnosticItem")
+	require.Len(t, items, 2)
+
+	// Items are workspace-relative paths with 1-based coordinates.
+	require.Equal(t, "main.go", items[0].Path)
+	require.Equal(t, 3, items[0].Line)
+	require.Equal(t, 6, items[0].Column)
+	require.Equal(t, "error", items[0].Severity)
+	require.Equal(t, "undefined: foo", items[0].Message)
+	require.Equal(t, "E0425", items[0].Code)
+
+	require.Equal(t, "main.go", items[1].Path)
+	require.Equal(t, 8, items[1].Line)
+	require.Equal(t, 1, items[1].Column)
+	require.Equal(t, "warning", items[1].Severity)
+	require.Equal(t, "unused variable", items[1].Message)
+	require.Equal(t, "", items[1].Code)
+}
+
+// TestDiagnosticsMetadataItemsAbsentWhenEmpty asserts the items key is absent
+// when no diagnostics are reported, matching the error_files key's nil-guard.
+func TestDiagnosticsMetadataItemsAbsentWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tool := &diagnosticsTool{
+		source:  fakeDiagnostics{items: []lsp.Diagnostic{}},
+		workDir: dir,
+	}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.Nil(t, result.Metadata[MetadataDiagnosticItems], "items must be absent when no diagnostics exist")
+}
+
+// TestDiagnosticsMetadataItemsCappedAtMatchCap asserts that items in the metadata
+// is capped at diagnosticMatchCap to stay consistent with the rendered Content.
+func TestDiagnosticsMetadataItemsCappedAtMatchCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	total := diagnosticMatchCap + 10
+	raw := make([]lsp.Diagnostic, total)
+	for i := range raw {
+		raw[i] = lsp.Diagnostic{
+			Path:     path,
+			Range:    lsp.Range{Start: lsp.Position{Line: i}},
+			Severity: lsp.Error,
+			Message:  fmt.Sprintf("err %d", i),
+		}
+	}
+	tool := &diagnosticsTool{source: fakeDiagnostics{items: raw}, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]string{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	items, ok := result.Metadata[MetadataDiagnosticItems].([]diagnosticItem)
+	require.True(t, ok)
+	// Metadata items must not exceed the rendered cap.
+	require.LessOrEqual(t, len(items), diagnosticMatchCap)
+	require.Equal(t, diagnosticMatchCap, len(items))
+	// The true total is still in the count metadata.
+	require.Equal(t, total, result.Metadata[MetadataDiagnosticCount])
+}

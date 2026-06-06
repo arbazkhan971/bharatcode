@@ -97,6 +97,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseGTestFailures(output)
 	case runnerRobot:
 		return parseRobotFailures(output)
+	case runnerCucumber:
+		return parseCucumberFailures(output)
 	default:
 		return nil
 	}
@@ -137,6 +139,7 @@ const (
 	runnerPester
 	runnerGTest
 	runnerRobot
+	runnerCucumber
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -276,6 +279,15 @@ var (
 	// while keeping prose like "the robotics demo" — and the unrelated runners,
 	// which never contain "robot"/"pabot" at a word boundary — from matching.
 	robotRe = regexp.MustCompile(`\b(?:robot|pabot)\b`)
+	// `cucumber`/`bundle exec cucumber` (Ruby) and `cucumber-js`/`npx cucumber-js`
+	// (JavaScript) drive Cucumber, the dominant Gherkin BDD runner. Both reporters
+	// close a failing run with a "Failing [Ss]cenarios:" block listing each failed
+	// scenario as a re-runnable "cucumber[-js] <file>.feature:<line>[ # Scenario:
+	// <name>]" line. \bcucumber\b admits both the Ruby and JS wrappers while keeping
+	// prose like "echo about cucumbers" — where "cucumber" runs into "s" and so sits
+	// at no trailing word boundary — from matching. A Cucumber invocation carries
+	// none of the other runners' substrings.
+	cucumberRe = regexp.MustCompile(`\bcucumber\b`)
 )
 
 // classifyTestRunner inspects the command string for a known test-runner
@@ -501,6 +513,13 @@ func classifyTestRunner(command string) testRunner {
 		// runners since a Robot invocation carries none of their substrings, but
 		// kept explicit to guard against future overlap.
 		return runnerRobot
+	case cucumberRe.MatchString(c):
+		// `cucumber`/`cucumber-js` drive Cucumber's Gherkin BDD runner, whose report
+		// closes with a "Failing [Ss]cenarios:" block of re-runnable
+		// "cucumber <file>.feature:<line> # Scenario: <name>" lines. Checked before
+		// the jest runners since a "cucumber" invocation carries none of their
+		// substrings, but kept explicit to guard against future overlap.
+		return runnerCucumber
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
@@ -1134,6 +1153,50 @@ func parseRSpecFailures(output string) []testFailure {
 			seen[f.Name] = true
 			failures = append(failures, f)
 		}
+	}
+	return failures
+}
+
+// "cucumber features/add.feature:3 # Scenario: Add two numbers" — a line from
+// Cucumber's "Failing [Ss]cenarios:" summary. The default formatter prints one
+// per failed scenario, as a copy-pasteable re-run command. Group 1 is the
+// re-runnable "<file>.feature:<line>" location; group 2 (optional) is the
+// scenario name, which the Ruby runner appends after " # " (stripping a leading
+// "Scenario:"/"Scenario Outline:" keyword) but the JS runner may omit. The
+// "cucumber-js" wrapper name is accepted alongside "cucumber". Requiring
+// ".feature:<line>" keeps ordinary log lines that merely begin with "cucumber"
+// from matching.
+var cucumberFailRe = regexp.MustCompile(`^\s*cucumber(?:-js)?\s+(\S+\.feature:\d+)(?:\s+#\s+(?:Scenario(?: Outline)?:\s*)?(.+?))?\s*$`)
+
+// parseCucumberFailures extracts failing scenarios from Cucumber output (Ruby
+// `cucumber` or `cucumber-js`). Each entry in the trailing "Failing [Ss]cenarios:"
+// block is a re-runnable "cucumber <file>.feature:<line> # Scenario: <name>" line;
+// Name is the scenario description (falling back to the location when the runner
+// omits it, as cucumber-js does) and Detail is the re-runnable location. Scenarios
+// are deduplicated by name so an outline whose examples each failed at the same
+// location does not produce duplicate entries.
+func parseCucumberFailures(output string) []testFailure {
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range splitLines(output) {
+		m := cucumberFailRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		loc := strings.TrimSpace(m[1])
+		name := strings.TrimSpace(m[2])
+		detail := loc
+		if name == "" {
+			// cucumber-js omits the "# Scenario: <name>" suffix, so the location is
+			// the only identifier; use it as the name and leave the detail empty.
+			name = loc
+			detail = ""
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: detail})
 	}
 	return failures
 }

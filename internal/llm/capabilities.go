@@ -122,10 +122,18 @@ var anthropicMaxOutputRules = []struct {
 	substring string
 	maxOutput int
 }{
-	// Claude 4 family. Opus 4 and 4.1 cap at 32k output; Opus 4.5 lifted that to
-	// 64k, so its specific marker must precede the broader "claude-opus-4" rule.
-	{"claude-opus-4-5", 64_000},
-	{"claude-opus-4", 32_000},
+	// Claude 4 family. The Opus line shipped a 32k output cap on 4.0 and 4.1, then
+	// lifted it to 64k on 4.5 and held there for every Opus release since (4.6,
+	// 4.7, 4.8, ...). Match the two legacy 32k models specifically so the broad
+	// "claude-opus-4" rule can default the rest of the line — including future
+	// point releases — to 64k, mirroring how the Sonnet 4 and Haiku 4 families
+	// default to 64k below. Without this, a newer Opus id (e.g. claude-opus-4-8)
+	// matches no specific rule, falls through to 32k, and silently truncates long
+	// answers at half the model's real output budget.
+	{"claude-opus-4-0", 32_000},        // Opus 4.0 alias
+	{"claude-opus-4-20250514", 32_000}, // Opus 4.0 dated id
+	{"claude-opus-4-1", 32_000},        // Opus 4.1 (alias and dated ids)
+	{"claude-opus-4", 64_000},          // Opus 4.5 and every release since
 	{"claude-sonnet-4", 64_000},
 	{"claude-haiku-4", 64_000},
 	// Claude 3.7 Sonnet serves up to 64k output tokens.

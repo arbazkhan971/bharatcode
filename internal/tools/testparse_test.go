@@ -555,6 +555,27 @@ thread 'tests::it_works' panicked at 'assertion failed: left == right', src/lib.
 	assertFailures(t, got, want)
 }
 
+func TestParseCargoTestFailures_Doctest(t *testing.T) {
+	// A failing doctest names the source file, item, and line — the name carries
+	// spaces, so the libtest "(\S+)" capture would miss it. The panic is reported
+	// under thread 'main', so no detail is paired, but the name must surface.
+	out := `running 1 test
+test src/lib.rs - add (line 5) ... FAILED
+
+failures:
+
+---- src/lib.rs - add (line 5) stdout ----
+Test executable failed (exit status: 101).
+
+thread 'main' panicked at src/lib.rs:6:1:
+assertion ` + "`left == right`" + ` failed`
+	got := parseTestFailures("cargo test --doc", out)
+	want := []testFailure{
+		{Name: "src/lib.rs - add (line 5)"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseCargoTestFailures_BuildFailed(t *testing.T) {
 	out := `   Compiling demo v0.1.0 (/tmp/demo)
 error[E0425]: cannot find value ` + "`x`" + ` in this scope

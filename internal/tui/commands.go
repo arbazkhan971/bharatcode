@@ -104,7 +104,14 @@ func (m *model) sessionPickerBody() string {
 		if m.sessionFilter != "" {
 			display = m.highlightSessionMatch(title, m.sessionFilter)
 		}
-		lines = append(lines, fmt.Sprintf("%s%s · %d msgs · %s · %s", marker, display, s.MessageCount, relativeTime(s.UpdatedAt, time.Now()), shortSessionID(s.ID)))
+		row := fmt.Sprintf("%s%s · %d msgs · %s · %s", marker, display, s.MessageCount, relativeTime(s.UpdatedAt, time.Now()), shortSessionID(s.ID))
+		// Flag the session the user is already in so restoring it reads as a no-op
+		// rather than a switch, the way Claude Code and opencode mark the active
+		// session in their switcher.
+		if m.sessionPersisted && s.ID == m.sessionID {
+			row += " · " + m.theme.Muted.Render("(current)")
+		}
+		lines = append(lines, row)
 	}
 	lines = append(lines, "", "type to fuzzy filter · ↑/↓ to move · home/end to jump · enter to restore · esc to cancel")
 	return strings.Join(lines, "\n")

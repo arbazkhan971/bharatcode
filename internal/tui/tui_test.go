@@ -120,10 +120,14 @@ func TestSlashCommand_Help_ListsAll(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
+	// The built-in command list is longer than a 30-row terminal's chat
+	// viewport, so grow the terminal enough that every help line renders at
+	// once rather than the top ones scrolling out of view.
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
 	m.input.WriteString("/help")
 	_, _ = m.Update(keySpecial("enter", tea.KeyEnter))
 	out := m.renderMain()
-	for _, cmd := range []string{"/help", "/clear", "/sessions", "/model", "/agent", "/goal", "/budget", "/yolo", "/save", "/quit"} {
+	for _, cmd := range []string{"/help", "/clear", "/sessions", "/model", "/agent", "/goal", "/budget", "/yolo", "/save", "/quit", "/revert"} {
 		require.Contains(t, out, cmd)
 	}
 }

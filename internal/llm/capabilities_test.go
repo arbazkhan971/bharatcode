@@ -363,6 +363,14 @@ func TestInferContextWindow(t *testing.T) {
 		{"writer/palmyra-x5", 1_000_000},
 		{"palmyra-x4", 128_000},
 		{"palmyra-med", 128_000},
+		// gpt-4.1-mini shares the "gpt-4.1" substring so it inherits the 1M window,
+		// not the narrower "gpt-4o"/"gpt-4" family defaults.
+		{"gpt-4.1-mini", 1_047_576},
+		{"gpt-4.1-nano", 1_047_576},
+		// grok-3-mini carries the bare "grok" marker and must resolve to the 131k
+		// family default rather than falling through to "unknown" (0).
+		{"grok-3-mini", 131_072},
+		{"x-ai/grok-3-mini", 131_072},
 		// Case-insensitive and whitespace-tolerant.
 		{"  GPT-4O  ", 128_000},
 		// Unknown ids stay "unknown" (zero).
@@ -556,4 +564,32 @@ func TestNewRegistryInfersContextWindow(t *testing.T) {
 		"missing context_window should be inferred from the model id")
 	require.Equal(t, 4096, byID["explicit-model"].ContextWindow,
 		"an explicit context_window must not be overridden")
+}
+
+// TestDefaultsCatalogAnthropicTiers verifies the embedded defaults include all
+// three current Anthropic tiers (opus, sonnet, haiku) so users who configure
+// ANTHROPIC_API_KEY get meaningful model choice out of the box.
+func TestDefaultsCatalogAnthropicTiers(t *testing.T) {
+	cfg := config.Default()
+
+	byID := make(map[string]config.Model, len(cfg.Models))
+	for _, m := range cfg.Models {
+		byID[m.ID] = m
+	}
+
+	tiers := []struct {
+		id            string
+		wantProvider  string
+		wantCtxWindow int
+	}{
+		{"claude-opus-4-5", "anthropic", 200_000},
+		{"claude-sonnet-4-5", "anthropic", 200_000},
+		{"claude-haiku-4-5", "anthropic", 200_000},
+	}
+	for _, tier := range tiers {
+		m, ok := byID[tier.id]
+		require.Truef(t, ok, "defaults catalog must include anthropic model %q", tier.id)
+		require.Equalf(t, tier.wantProvider, m.Provider, "model %q has wrong provider", tier.id)
+		require.Equalf(t, tier.wantCtxWindow, m.ContextWindow, "model %q has wrong context_window", tier.id)
+	}
 }

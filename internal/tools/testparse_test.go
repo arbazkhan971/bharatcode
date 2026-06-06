@@ -1661,6 +1661,61 @@ Finished in 0.0009 seconds
 	}
 }
 
+func TestParseBazelFailures(t *testing.T) {
+	// Bazel's run summary lists each test target with a right-padded status row;
+	// a FAILED row names the failing target and prints its log path on the
+	// indented line beneath, which becomes the detail.
+	out := `INFO: Analyzed 3 targets (0 packages loaded, 0 targets configured).
+INFO: Found 3 test targets...
+//pkg/math:add_test                                              PASSED in 0.1s
+//pkg/math:sub_test                                              FAILED in 0.3s
+  /home/user/.cache/bazel/_bazel_user/abc/execroot/ws/bazel-out/k8-fastbuild/testlogs/pkg/math/sub_test/test.log
+//pkg/str:join_test                                              FAILED in 2 out of 3 in 0.5s
+  /home/user/.cache/bazel/_bazel_user/abc/execroot/ws/bazel-out/k8-fastbuild/testlogs/pkg/str/join_test/test.log
+
+INFO: Build completed, 2 tests FAILED, 3 total actions
+Executed 3 out of 3 tests: 1 test passes and 2 fail locally.`
+	got := parseTestFailures("bazel test //...", out)
+	want := []testFailure{
+		{Name: "//pkg/math:sub_test", Detail: "/home/user/.cache/bazel/_bazel_user/abc/execroot/ws/bazel-out/k8-fastbuild/testlogs/pkg/math/sub_test/test.log"},
+		{Name: "//pkg/str:join_test", Detail: "/home/user/.cache/bazel/_bazel_user/abc/execroot/ws/bazel-out/k8-fastbuild/testlogs/pkg/str/join_test/test.log"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseBazelFailures_DedupAndNoLog(t *testing.T) {
+	// A target's FAILED row can be streamed during the run and repeated in the
+	// final summary; it is reported once. A row with no following log line still
+	// surfaces, with no detail. The bazelisk wrapper and "coverage" subcommand
+	// are recognized too.
+	out := `//app:e2e_test                                                   FAILED in 1.2s
+  /tmp/testlogs/app/e2e_test/test.log
+//app:e2e_test                                                   FAILED in 1.2s
+  /tmp/testlogs/app/e2e_test/test.log
+//app:smoke_test                                                 FAILED
+Executed 2 out of 2 tests: 2 fail locally.`
+	got := parseTestFailures("bazelisk coverage //app/...", out)
+	want := []testFailure{
+		{Name: "//app:e2e_test", Detail: "/tmp/testlogs/app/e2e_test/test.log"},
+		{Name: "//app:smoke_test"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseBazelFailures_NoFailures(t *testing.T) {
+	// An all-passing run prints only PASSED rows, which must not be reported, and
+	// a "bazel build" invocation is not a test run at all.
+	out := `//pkg:a_test                                                     PASSED in 0.1s
+//pkg:b_test                                                     PASSED in 0.2s
+Executed 2 out of 2 tests: 2 tests pass.`
+	if got := parseTestFailures("bazel test //...", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+	if got := parseTestFailures("bazel build //...", out); got != nil {
+		t.Errorf("bazel build is not a test runner, got %v", got)
+	}
+}
+
 func TestSummarizeTestFailures(t *testing.T) {
 	if s := summarizeTestFailures(nil); s != "" {
 		t.Errorf("empty summary want \"\", got %q", s)

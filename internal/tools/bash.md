@@ -6,6 +6,7 @@ Arguments:
 - `cwd` string, optional: working directory for the command; defaults to the workspace.
 - `background` boolean, optional: start the process and return a `job_id` immediately.
 - `env` object (string→string), optional: extra environment variables merged over the inherited environment for this command only. Prefer this to inline `VAR=val command` prefixes, which break across pipes (`VAR=val a | b` sets `VAR` only for `a`) and subshells.
+- `stdin` string, optional: text written to the command's standard input. Use this to feed content to a command that reads stdin (e.g. `patch -p1`, `git apply`, `python3 -`, `tee FILE`, `jq`) instead of embedding it as a heredoc or quoted string in `command`, which avoids shell-quoting bugs. When omitted, the command sees no input (immediate EOF).
 
 Output format: every result begins with a one-line header `[exit N | Status]` followed by the captured output. The header is always present — use it to read the exit code without scanning the text.
 

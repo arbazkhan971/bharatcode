@@ -273,6 +273,34 @@ func TestRunningStatus_OnlyWhileTurnInFlight(t *testing.T) {
 	require.True(t, strings.HasPrefix(tenth, spinnerFrames[0]), "the spinner must wrap around")
 }
 
+// TestRunningStatus_InterruptHint asserts the working segment advertises the
+// interrupt key only once a turn has run long enough that the user might want to
+// stop it: a short run stays uncluttered, while a long one gains the hint so the
+// reader learns Ctrl+C interrupts the turn rather than quitting the session.
+func TestRunningStatus_InterruptHint(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+
+	// A short run shows no interrupt hint — it would finish before the reader
+	// could act on it.
+	require.NotContains(t, runningStatus(start, start.Add(3*time.Second), ""), "interrupt",
+		"a short turn must not advertise the interrupt key")
+
+	// Just before the threshold the hint is still withheld.
+	require.NotContains(t, runningStatus(start, start.Add(interruptHintAfter-time.Second), ""), "interrupt",
+		"the hint must stay hidden until the turn passes the threshold")
+
+	// At and past the threshold the hint appears, naming the key that interrupts.
+	atThreshold := runningStatus(start, start.Add(interruptHintAfter), "")
+	require.Contains(t, atThreshold, "(ctrl+c to interrupt)",
+		"a turn at the threshold must advertise the interrupt key")
+	require.Contains(t, atThreshold, "working",
+		"the interrupt hint must not displace the activity label")
+	require.Contains(t, runningStatus(start, start.Add(interruptHintAfter+time.Minute), "Bash"), "(ctrl+c to interrupt)",
+		"a long-running tool must keep advertising the interrupt key")
+}
+
 // TestCurrentActivity_TracksToolLifecycle asserts that handling agent events
 // sets the status-bar activity to the running tool's name when a tool is called
 // and clears it once the tool returns or the model produces fresh text, so the

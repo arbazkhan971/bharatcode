@@ -1343,24 +1343,38 @@ func keybindingHelpBodyFiltered(filter string) string {
 }
 
 // filterKeybindingGroups returns the keyGroups whose bindings match filter, a
-// case-insensitive substring tested against each binding's key and description.
-// A group whose title itself matches keeps all of its bindings, so "/keys tabs"
-// surfaces the whole Tabs section; otherwise only the matching rows are kept and
-// a group with no surviving binding is dropped. An empty or whitespace-only
-// filter returns every group unchanged.
+// case-insensitive query split on whitespace into terms that must ALL match — a
+// binding is kept only when every term is a substring of its title, key, or
+// description. The AND-of-terms rule lets a query name a binding from two angles
+// at once ("tab switch" finds the tab-switching shortcut even though no single
+// run of text contains both words), the way Claude Code and opencode narrow a
+// shortcut search as you add words, while a single-term query behaves exactly as
+// a plain substring filter did. A group whose title matches a term satisfies
+// that term for all of its bindings, so "/keys tabs" still surfaces the whole
+// Tabs section; a group with no surviving binding is dropped. An empty or
+// whitespace-only filter returns every group unchanged.
 func filterKeybindingGroups(filter string) []keyGroup {
 	q := strings.ToLower(strings.TrimSpace(filter))
 	if q == "" {
 		return keybindingGroups
 	}
+	terms := strings.Fields(q)
 	var out []keyGroup
 	for _, g := range keybindingGroups {
-		titleHit := strings.Contains(strings.ToLower(g.title), q)
+		title := strings.ToLower(g.title)
 		var kept []keyBinding
 		for _, b := range g.bindings {
-			if titleHit ||
-				strings.Contains(strings.ToLower(b.key), q) ||
-				strings.Contains(strings.ToLower(b.desc), q) {
+			key, desc := strings.ToLower(b.key), strings.ToLower(b.desc)
+			matchesAll := true
+			for _, t := range terms {
+				if !strings.Contains(title, t) &&
+					!strings.Contains(key, t) &&
+					!strings.Contains(desc, t) {
+					matchesAll = false
+					break
+				}
+			}
+			if matchesAll {
 				kept = append(kept, b)
 			}
 		}

@@ -27,6 +27,7 @@ type FormatSource interface {
 type formatTool struct {
 	deps   Dependencies
 	source FormatSource
+	diag   editDiagnoser
 }
 
 type formatArgs struct {
@@ -74,6 +75,10 @@ func newFormatTool(deps Dependencies) Tool {
 	// when the manager is actually present.
 	if deps.LSP != nil {
 		t.source = deps.LSP
+		// The same manager re-checks the file afterwards so the model sees any
+		// problems the reformatting left (or that already lived in the file),
+		// matching the edit/rename/codeactions tools.
+		t.diag = deps.LSP
 	}
 	return t
 }
@@ -189,6 +194,15 @@ func (t *formatTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 	if d := diffutil.Unified(string(oldContent), newText); d != "" {
 		content += "\n\n" + d
 		metadata["diff"] = d
+	}
+	// Re-check the reformatted file and surface any errors/warnings, as the
+	// edit/rename/codeactions tools do. A preview wrote nothing, so there is
+	// nothing new to re-check.
+	if !args.Preview {
+		if note := postWriteDiagnostics(ctx, t.diag, t.deps.WorkDir, path); note != "" {
+			content += "\n\n" + note
+			metadata["diagnostics"] = note
+		}
 	}
 	return Result{
 		Content:  content,

@@ -102,6 +102,43 @@ func TestUnifiedPatch_HunkCountsMatchSides(t *testing.T) {
 	}
 }
 
+// A multiedit touches one file several times. The patch must carry a single
+// file header so the diffstat counts one changed file, not one per edit, and
+// emit one hunk per edit beneath it.
+func TestUnifiedPatch_MultieditGroupsOneFileHeader(t *testing.T) {
+	patch := unifiedPatch([]editDiff{
+		{Tool: "multiedit", Path: "a.go", Before: "x", After: "y"},
+		{Tool: "multiedit", Path: "a.go", Before: "p", After: "q"},
+	})
+	if n := strings.Count(patch, "+++ b/a.go"); n != 1 {
+		t.Fatalf("expected a single file header for a multiedit, got %d:\n%s", n, patch)
+	}
+	if n := strings.Count(patch, "--- a/a.go"); n != 1 {
+		t.Fatalf("expected a single old-path header for a multiedit, got %d:\n%s", n, patch)
+	}
+	if n := strings.Count(patch, "@@ "); n != 2 {
+		t.Fatalf("expected one hunk per edit (2), got %d:\n%s", n, patch)
+	}
+}
+
+// Each successive hunk in a grouped file continues the line numbering rather
+// than resetting to line 1, so the numbered diff's gutter climbs through the
+// file the way a real multi-hunk diff reads.
+func TestUnifiedPatch_MultieditHunksAdvanceLineNumbers(t *testing.T) {
+	patch := unifiedPatch([]editDiff{
+		{Tool: "multiedit", Path: "a.go", Before: "a\nb", After: "A\nb"},
+		{Tool: "multiedit", Path: "a.go", Before: "c", After: "C"},
+	})
+	if !strings.Contains(patch, "@@ -1,2 +1,2 @@") {
+		t.Fatalf("expected first hunk to start at line 1, got:\n%s", patch)
+	}
+	// The first edit spans two lines on each side, so the second hunk starts at
+	// line 3 on both sides.
+	if !strings.Contains(patch, "@@ -3,1 +3,1 @@") {
+		t.Fatalf("expected second hunk to continue at line 3, got:\n%s", patch)
+	}
+}
+
 // bodyLines returns the diff content lines of a single-file patch: everything
 // after the hunk header, which is where context/add/remove markers live.
 func bodyLines(patch string) []string {

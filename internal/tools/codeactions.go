@@ -19,7 +19,7 @@ import (
 // CodeActionSource is the LSP capability consumed by the codeactions tool. The
 // *lsp.Manager satisfies it; tests substitute a fake.
 type CodeActionSource interface {
-	CodeActions(ctx context.Context, file string, rng lsp.Range) ([]lsp.CodeAction, error)
+	CodeActions(ctx context.Context, file string, rng lsp.Range, only []string) ([]lsp.CodeAction, error)
 	ResolveCodeAction(ctx context.Context, file string, action lsp.CodeAction) (lsp.CodeAction, error)
 }
 
@@ -164,12 +164,21 @@ func (t *codeActionsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		End:   lsp.Position{Line: endLine - 1, Character: endCol - 1},
 	}
 
-	actions, err := t.source.CodeActions(ctx, path, rng)
+	// A kind filter is forwarded to the server as the request's "only" restriction
+	// so it computes the matching whole-file "source.*" actions some servers gate
+	// behind an explicit request; the response is still filtered client-side below
+	// to honour the kind hierarchy precisely (a server may ignore "only").
+	kind := strings.TrimSpace(args.Kind)
+	var only []string
+	if kind != "" {
+		only = []string{kind}
+	}
+
+	actions, err := t.source.CodeActions(ctx, path, rng, only)
 	if err != nil {
 		return Result{}, fmt.Errorf("getting code actions at %s:%d:%d: %w", args.Path, args.Line, col, err)
 	}
 
-	kind := strings.TrimSpace(args.Kind)
 	if kind != "" {
 		actions = filterCodeActionsByKind(actions, kind)
 	}

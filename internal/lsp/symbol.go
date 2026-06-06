@@ -247,9 +247,21 @@ func (c *client) rename(ctx context.Context, path string, line, col int, newName
 // context — an empty diagnostics array silently suppresses every "remove unused
 // import"/"add missing import" action. The diagnostics overlapping the range
 // are attached so those actions surface.
-func (c *client) codeAction(ctx context.Context, path string, rng Range) ([]CodeAction, error) {
+//
+// When only is non-empty it is sent as the context's "only" field, the LSP
+// mechanism for restricting which CodeActionKinds the server computes. This is
+// not merely a server-side optimization: several servers (gopls, for one) gate
+// whole-file "source.*" actions — source.organizeImports, source.fixAll —
+// behind an explicit "only" request and return nothing for them otherwise, so a
+// caller filtering the response client-side would never see them. Passing the
+// requested kind through lets those actions be produced in the first place.
+func (c *client) codeAction(ctx context.Context, path string, rng Range, only []string) ([]CodeAction, error) {
 	if err := c.open(ctx, path); err != nil {
 		return nil, err
+	}
+	actionContext := map[string]any{"diagnostics": c.codeActionDiagnostics(ctx, path, rng)}
+	if len(only) > 0 {
+		actionContext["only"] = only
 	}
 	result, err := c.request(ctx, "textDocument/codeAction", map[string]any{
 		"textDocument": map[string]any{"uri": pathToURI(path)},
@@ -257,7 +269,7 @@ func (c *client) codeAction(ctx context.Context, path string, rng Range) ([]Code
 			"start": map[string]any{"line": rng.Start.Line, "character": rng.Start.Character},
 			"end":   map[string]any{"line": rng.End.Line, "character": rng.End.Character},
 		},
-		"context": map[string]any{"diagnostics": c.codeActionDiagnostics(ctx, path, rng)},
+		"context": actionContext,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("requesting code actions: %w", err)

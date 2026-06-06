@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -62,20 +63,43 @@ func isReasoningModel(id string) bool {
 
 // modelSupportsNoneReasoningEffort reports whether the OpenAI model named by id
 // accepts the reasoning_effort value "none". OpenAI introduced "none" with the
-// gpt-5.1 generation (where it replaces the now-deprecated "minimal" as the
-// fastest, no-reasoning setting); the original gpt-5 family and the o-series
-// accept only minimal/low/medium/high and 400 on "none". The classification keys
-// on the bare model id, so an aggregator's "vendor/model" prefix (e.g.
-// "openai/gpt-5.1-codex") is stripped first, mirroring isReasoningModel. Future
-// numbered generations (gpt-5.2, ...) are intentionally not matched here: until
-// their effort vocabulary is confirmed, "none" is dropped for them rather than
-// risking a 400.
+// gpt-5.1 generation, where it replaced the now-deprecated "minimal" as the
+// fastest, no-reasoning setting, and every later point release of the family
+// (gpt-5.2, gpt-5.5, ...) carries the same vocabulary: they accept "none" and
+// 400 on "minimal". The original gpt-5 family ("gpt-5", "gpt-5-mini", with no
+// dotted minor version) and the o-series accept only minimal/low/medium/high and
+// 400 on "none", so they stay unmatched. The classification keys on the bare
+// model id, so an aggregator's "vendor/model" prefix (e.g. "openai/gpt-5.5") is
+// stripped first, mirroring isReasoningModel; the match is the "gpt-5." family
+// prefix plus a leading minor version of 1 or greater so a future generation is
+// covered without a per-release edit (the failure mode the prior gpt-5.1-only
+// match caused: gpt-5.5, the shipped codex default, fell through and had a
+// "minimal" config passed to it verbatim, which 400s).
 func modelSupportsNoneReasoningEffort(id string) bool {
 	lid := strings.ToLower(strings.TrimSpace(id))
 	if idx := strings.LastIndex(lid, "/"); idx >= 0 {
 		lid = lid[idx+1:]
 	}
-	return strings.HasPrefix(lid, "gpt-5.1")
+	const prefix = "gpt-5."
+	if !strings.HasPrefix(lid, prefix) {
+		return false
+	}
+	// Read the leading run of digits after "gpt-5." as the minor version. A
+	// dotted minor of 1 or more is a 5.1-or-later generation; anything else
+	// (no digits, or a 5.0 that never shipped) is not.
+	rest := lid[len(prefix):]
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return false
+	}
+	minor, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return false
+	}
+	return minor >= 1
 }
 
 // thinkingModelSubstrings lists case-insensitive markers in Anthropic model ids

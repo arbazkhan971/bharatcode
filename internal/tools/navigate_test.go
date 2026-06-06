@@ -15,6 +15,7 @@ import (
 
 type fakeNavigate struct {
 	definition     []lsp.Location
+	declaration    []lsp.Location
 	typeDefinition []lsp.Location
 	implementation []lsp.Location
 	references     []lsp.Location
@@ -24,6 +25,7 @@ type fakeNavigate struct {
 	signature      string
 
 	defErr  error
+	declErr error
 	typeErr error
 	implErr error
 	refErr  error
@@ -41,6 +43,11 @@ type fakeNavigate struct {
 func (f *fakeNavigate) Definition(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
 	f.lastPath, f.lastLine, f.lastCol = path, line, col
 	return f.definition, f.defErr
+}
+
+func (f *fakeNavigate) Declaration(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
+	f.lastPath, f.lastLine, f.lastCol = path, line, col
+	return f.declaration, f.declErr
 }
 
 func (f *fakeNavigate) TypeDefinition(_ context.Context, path string, line, col int) ([]lsp.Location, error) {
@@ -112,6 +119,54 @@ func TestNavigateDefinitionConvertsPositionAndFormats(t *testing.T) {
 	require.Equal(t, 2, src.lastCol)
 	// Output is workspace-relative and back to 1-based.
 	require.Equal(t, "main.go:42:8", result.Content)
+}
+
+func TestNavigateDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{declaration: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 2, Character: 6}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 10, "column": 3, "action": "declaration",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Position is converted 1-based -> 0-based and routed to Declaration, not
+	// Definition: the declaration action must not silently fall through to the
+	// definition lookup.
+	require.Equal(t, 9, src.lastLine)
+	require.Equal(t, 2, src.lastCol)
+	require.Equal(t, "main.go:3:7", result.Content)
+}
+
+func TestNavigateDeclarationEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "declaration",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Equal(t, "No declaration found.", result.Content)
+}
+
+func TestNavigateDeclarationError(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{declErr: errors.New("server down")}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	_, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "declaration",
+	}))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "resolving declaration")
 }
 
 func TestNavigateTypeDefinition(t *testing.T) {

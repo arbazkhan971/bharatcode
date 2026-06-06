@@ -73,6 +73,31 @@ func TestKeybindingHelp_AlignedDescriptions(t *testing.T) {
 	require.Greater(t, col, 0, "expected to find at least one aligned binding row")
 }
 
+// TestKeybindingHelp_DocumentsSubmitKey proves the overlay documents Enter as the
+// prompt-send key. handleKey maps "enter" to submitInput, and the overlay's
+// contract is to mirror the bindings handleKey services; without an Enter row a
+// reader scanning /keys would find every editing and navigation key but no way to
+// learn how the prompt is sent.
+func TestKeybindingHelp_DocumentsSubmitKey(t *testing.T) {
+	var send *keyBinding
+	for _, g := range keybindingGroups {
+		for i := range g.bindings {
+			if g.bindings[i].key == "Enter" {
+				send = &g.bindings[i]
+			}
+		}
+	}
+	require.NotNil(t, send, "the overlay must document the Enter key that sends the prompt")
+	require.Contains(t, strings.ToLower(send.desc), "send", "Enter's description should say it sends the prompt")
+
+	// The rendered body carries the row too, so a user reading the overlay sees it.
+	require.Contains(t, keybindingHelpBody(), "Enter")
+
+	// A user hunting for how to submit can filter to it the way they would any
+	// other binding.
+	require.Contains(t, keybindingHelpBodyFiltered("send"), "Enter")
+}
+
 // TestKeybindingHelp_FilterNarrowsToMatchingRows proves "/keys <filter>" keeps
 // only the bindings whose key or description matches the filter, dropping the
 // groups and rows that do not, so a user hunting for one binding sees just the

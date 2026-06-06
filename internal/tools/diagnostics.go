@@ -41,7 +41,7 @@ var schemaDiagnostics = json.RawMessage(`{
   "properties": {
     "path": {
       "type": "string",
-      "description": "Optional file path to inspect. Omit to scan supported files in the workspace."
+      "description": "Optional path to inspect: a file (just that file) or a directory (every supported source file in that subtree). Omit to scan supported files across the whole workspace."
     },
     "severity": {
       "type": "string",
@@ -118,7 +118,19 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		if err != nil {
 			return errorResult(err.Error()), nil
 		}
-		paths = []string{path}
+		// A directory argument scans the supported source files in that subtree —
+		// a middle ground between one file and the whole workspace. After editing
+		// several files in one package the model can re-check just that package
+		// without paying for a workspace-wide walk. A non-directory (a file, or a
+		// path that cannot be stat'd) keeps the prior single-path behaviour.
+		if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+			paths, err = diagnosticFiles(ctx, path, t.exts)
+			if err != nil {
+				return Result{}, err
+			}
+		} else {
+			paths = []string{path}
+		}
 	} else {
 		paths, err = diagnosticFiles(ctx, root, t.exts)
 		if err != nil {

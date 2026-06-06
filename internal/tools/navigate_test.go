@@ -217,8 +217,9 @@ func TestNavigateImplementation(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	require.False(t, result.IsError)
-	// Results are sorted by position, workspace-relative, and 1-based.
-	require.Equal(t, "main.go:3:1\nmain.go:9:5", result.Content)
+	// Multiple implementations get a scope summary header, then sorted 1-based
+	// coordinates, matching the references/calls output shape.
+	require.Equal(t, "2 implementations across 1 file:\nmain.go:3:1\nmain.go:9:5", result.Content)
 }
 
 func TestNavigateImplementationEmpty(t *testing.T) {
@@ -696,6 +697,103 @@ func TestNavigatePropagatesServerError(t *testing.T) {
 	_, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go", "line": 2}))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "server down")
+}
+
+func TestNavigateImplementationSingleNoHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{implementation: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 4, Character: 2}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "implementation",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// A single implementation result must not grow a summary header — it just
+	// shows the coordinate (and source snippet) so the output stays minimal,
+	// matching the single-result definition/declaration behaviour.
+	require.Equal(t, "main.go:5:3", result.Content)
+	require.NotContains(t, result.Content, "implementation")
+}
+
+func TestNavigateImplementationMultiFileHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	other := filepath.Join(dir, "other.go")
+	require.NoError(t, os.WriteFile(other, []byte("package main\n"), 0o644))
+	src := &fakeNavigate{implementation: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: other, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: other, Range: lsp.Range{Start: lsp.Position{Line: 5, Character: 1}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "implementation",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Three implementations across two files: both count nouns are plural.
+	require.True(t, strings.HasPrefix(result.Content, "3 implementations across 2 files:\n"), result.Content)
+}
+
+func TestNavigateDefinitionMultipleResultsShowsHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	other := filepath.Join(dir, "other.go")
+	require.NoError(t, os.WriteFile(other, []byte("package main\n"), 0o644))
+	src := &fakeNavigate{definition: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: other, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "definition",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// Multiple definitions (overloads / ambiguous symbol) produce the same
+	// count header as references and calls, so the model sees the scope first.
+	require.True(t, strings.HasPrefix(result.Content, "2 definitions across 2 files:\n"), result.Content)
+}
+
+func TestNavigateDeclarationMultipleResultsShowsHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{declaration: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 0, Character: 0}}},
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 5, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 3, "action": "declaration",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.True(t, strings.HasPrefix(result.Content, "2 declarations across 1 file:\n"), result.Content)
+}
+
+func TestNavigateTypeDefinitionMultipleResultsShowsHeader(t *testing.T) {
+	dir := t.TempDir()
+	path := writeNavFile(t, dir)
+	src := &fakeNavigate{typeDefinition: []lsp.Location{
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 1, Character: 0}}},
+		{Path: path, Range: lsp.Range{Start: lsp.Position{Line: 3, Character: 0}}},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 2, "action": "type_definition",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// "type definition" (two words) pluralises to "type definitions".
+	require.True(t, strings.HasPrefix(result.Content, "2 type definitions across 1 file:\n"), result.Content)
 }
 
 func TestNavigateRejectsMalformedJSON(t *testing.T) {

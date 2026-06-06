@@ -24,6 +24,94 @@ func initGitRepo(t *testing.T, dir string) {
 	require.NoError(t, cmd.Run())
 }
 
+// commitFile writes name with content in dir and creates a commit with the
+// given subject, configuring an identity so the commit succeeds in CI.
+func commitFile(t *testing.T, dir, name, content, subject string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
+	for _, args := range [][]string{
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"add", name},
+		{"commit", "-m", subject},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+}
+
+func TestGitRecentCommitsNotARepoReturnsEmpty(t *testing.T) {
+	require.Equal(t, "", gitRecentCommits(context.Background(), t.TempDir()))
+}
+
+func TestGitRecentCommitsNoCommitsYet(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	// A freshly initialized repo has no commits, so the section is omitted.
+	require.Equal(t, "", gitRecentCommits(context.Background(), dir))
+}
+
+func TestGitRecentCommitsListsTipFirst(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	commitFile(t, dir, "a.txt", "a", "first commit")
+	commitFile(t, dir, "b.txt", "b", "second commit")
+
+	got := gitRecentCommits(context.Background(), dir)
+	lines := strings.Split(got, "\n")
+	require.Len(t, lines, 2)
+	// Newest commit is listed first; each line is indented and carries its
+	// short hash plus subject.
+	require.True(t, strings.HasPrefix(lines[0], "  "), got)
+	require.Contains(t, lines[0], "second commit")
+	require.Contains(t, lines[1], "first commit")
+}
+
+func TestGitRecentCommitsCapsHistory(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	total := gitRecentCommitsCap + 3
+	for i := 0; i < total; i++ {
+		commitFile(t, dir, fmt.Sprintf("f%02d.txt", i), "x", fmt.Sprintf("commit %02d", i))
+	}
+
+	got := gitRecentCommits(context.Background(), dir)
+	require.Equal(t, gitRecentCommitsCap, strings.Count(got, "\n")+1)
+}
+
+func TestGitRecentCommitsTruncatesLongSubject(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	long := strings.Repeat("x", gitRecentCommitLineCap*2)
+	commitFile(t, dir, "a.txt", "a", long)
+
+	got := gitRecentCommits(context.Background(), dir)
+	// Each rendered line stays within the cap (plus the two-space indent),
+	// and overflow collapses into an ellipsis.
+	for _, line := range strings.Split(got, "\n") {
+		require.LessOrEqual(t, len([]rune(strings.TrimPrefix(line, "  "))), gitRecentCommitLineCap)
+	}
+	require.Contains(t, got, "…")
+}
+
+func TestRenderPromptIncludesRecentCommits(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	commitFile(t, dir, "a.txt", "a", "seed the repo")
+
+	restoreSkills := skillSearchDirs
+	skillSearchDirs = func(string) []string { return []string{filepath.Join(dir, "no-such-dir")} }
+	t.Cleanup(func() { skillSearchDirs = restoreSkills })
+	restoreRecipes := recipeSearchDirs
+	recipeSearchDirs = func(string) []string { return []string{filepath.Join(dir, "no-such-dir")} }
+	t.Cleanup(func() { recipeSearchDirs = restoreRecipes })
+
+	out := renderInWorkdir(t, dir)
+	require.Contains(t, out, "- Recent commits:")
+	require.Contains(t, out, "seed the repo")
+}
+
 func TestGitStatusNotARepoReturnsEmpty(t *testing.T) {
 	// A bare temp dir is not a git repository: the helper returns "" so the
 	// caller omits the status line entirely.

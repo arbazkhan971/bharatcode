@@ -510,6 +510,18 @@ var contextWindowRules = []struct {
 	// "unknown" (0) when a user adds it (commonly via OpenRouter) without an
 	// explicit context_window.
 	{"reka", 128_000},
+	// Upstage Solar (commonly served via OpenRouter as "upstage/solar-...") grew
+	// its window per generation: Solar Pro 3 ships a 128k window, Solar Pro 2
+	// doubled the original line's 32k to 64k, and the first Solar Pro and the
+	// Solar Mini line stay at 32k. Every id carries the bare "solar" marker, so
+	// the specific "solar-pro-3"/"solar-pro-2" rules must precede the family one
+	// to avoid resolving the newer tiers to a fraction of their real window. The
+	// "solar" marker shares no substring with any rule above (it is distinct from
+	// "sonar"), so without it these ids fall through to "unknown" (0) when a user
+	// adds them without an explicit context_window.
+	{"solar-pro-3", 131_072},
+	{"solar-pro-2", 65_536},
+	{"solar", 32_768},
 	// Google Gemma open-weight line — Gemma 3 lifted the window to 128k while
 	// Gemma 1/2 shipped 8k, so the specific "gemma-3" marker precedes the family.
 	// Gemma 3n, the on-device variant (gemma-3n-e2b, gemma-3n-e4b), is the

@@ -24,16 +24,18 @@ type fakeNavigate struct {
 	outgoingCalls  []lsp.Location
 	hover          string
 	signature      string
+	prepareRename  *lsp.PrepareRenameResult
 
-	defErr  error
-	declErr error
-	typeErr error
-	implErr error
-	refErr  error
-	inErr   error
-	outErr  error
-	hovErr  error
-	sigErr  error
+	defErr     error
+	declErr    error
+	typeErr    error
+	implErr    error
+	refErr     error
+	inErr      error
+	outErr     error
+	hovErr     error
+	sigErr     error
+	prepRenErr error
 
 	lastPath        string
 	lastLine        int
@@ -85,6 +87,11 @@ func (f *fakeNavigate) Hover(_ context.Context, path string, line, col int) (str
 func (f *fakeNavigate) SignatureHelp(_ context.Context, path string, line, col int) (string, error) {
 	f.lastPath, f.lastLine, f.lastCol = path, line, col
 	return f.signature, f.sigErr
+}
+
+func (f *fakeNavigate) PrepareRename(_ context.Context, path string, line, col int) (*lsp.PrepareRenameResult, error) {
+	f.lastPath, f.lastLine, f.lastCol = path, line, col
+	return f.prepareRename, f.prepRenErr
 }
 
 func writeNavFile(t *testing.T, dir string) string {
@@ -928,6 +935,111 @@ func TestNavigateEmptyResultHasNoMetadata(t *testing.T) {
 		require.False(t, result.IsError, "action %s", action)
 		require.Nil(t, result.Metadata, "action %s should have no metadata on empty result", action)
 	}
+}
+
+func TestNavigatePrepareRenameRenamable(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{prepareRename: &lsp.PrepareRenameResult{
+		Range: lsp.Range{
+			Start: lsp.Position{Line: 4, Character: 5},
+			End:   lsp.Position{Line: 4, Character: 11},
+		},
+		Placeholder: "myFunc",
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 5, "column": 6, "action": "prepare_rename",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// 1-based input is converted to 0-based for the LSP call.
+	require.Equal(t, 4, src.lastLine)
+	require.Equal(t, 5, src.lastCol)
+	// Result names the symbol and range in 1-based coordinates.
+	require.Contains(t, result.Content, `"myFunc"`)
+	require.Contains(t, result.Content, "main.go:5:6-5:12")
+	require.Contains(t, result.Content, "can be renamed")
+	// Metadata carries structured fields for downstream consumers.
+	require.Equal(t, true, result.Metadata["renamable"])
+	require.Equal(t, "myFunc", result.Metadata["placeholder"])
+	require.Equal(t, 5, result.Metadata["range_start_line"])
+	require.Equal(t, 6, result.Metadata["range_start_column"])
+	require.Equal(t, 5, result.Metadata["range_end_line"])
+	require.Equal(t, 12, result.Metadata["range_end_column"])
+}
+
+func TestNavigatePrepareRenameNotRenamable(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	// A nil PrepareRenameResult means the server says this position is not renamable.
+	src := &fakeNavigate{prepareRename: nil}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 3, "action": "prepare_rename",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "cannot be renamed")
+}
+
+func TestNavigatePrepareRenameDefaultBehavior(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	// Server returns {defaultBehavior: true}: rename is possible but the server
+	// will use the word under the cursor with no explicit range.
+	src := &fakeNavigate{prepareRename: &lsp.PrepareRenameResult{DefaultBehavior: true}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 2, "column": 4, "action": "prepare_rename",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "can be renamed")
+	require.Contains(t, result.Content, "word under cursor")
+	require.Equal(t, true, result.Metadata["renamable"])
+	require.Equal(t, true, result.Metadata["default_behavior"])
+}
+
+func TestNavigatePrepareRenameNoPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	// Server returns only a range (no placeholder): symbol is renamable, but the
+	// name is implied by the text at the returned range.
+	src := &fakeNavigate{prepareRename: &lsp.PrepareRenameResult{
+		Range: lsp.Range{
+			Start: lsp.Position{Line: 0, Character: 8},
+			End:   lsp.Position{Line: 0, Character: 12},
+		},
+	}}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "column": 9, "action": "prepare_rename",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "can be renamed")
+	// No placeholder text in the message (server sent bare range only).
+	require.NotContains(t, result.Content, `"`)
+	require.Equal(t, true, result.Metadata["renamable"])
+	require.Nil(t, result.Metadata["placeholder"])
+}
+
+func TestNavigatePrepareRenamePropagatesError(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{prepRenErr: errors.New("server unavailable")}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	_, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "prepare_rename",
+	}))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "checking rename")
 }
 
 func TestNavigateLocationsMetadataDeduplicates(t *testing.T) {

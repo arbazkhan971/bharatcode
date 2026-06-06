@@ -224,6 +224,72 @@ func (c *client) workspaceSymbol(ctx context.Context, query string) ([]Symbol, e
 	return parseWorkspaceSymbols(result)
 }
 
+// prepareRename issues a textDocument/prepareRename request for the position
+// and returns whether the symbol at that position can be renamed. A nil result
+// with a nil error means the server reports the position is not renamable. When
+// the server responds, the returned Range is what would be selected for editing
+// and Placeholder is the current symbol name; Placeholder is empty when the
+// server returned only a range or the defaultBehavior form.
+func (c *client) prepareRename(ctx context.Context, path string, line, col int) (*PrepareRenameResult, error) {
+	if err := c.open(ctx, path); err != nil {
+		return nil, err
+	}
+	result, err := c.request(ctx, "textDocument/prepareRename", map[string]any{
+		"textDocument": map[string]any{"uri": pathToURI(path)},
+		"position":     map[string]any{"line": line, "character": col},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("requesting prepare rename: %w", err)
+	}
+	return parsePrepareRename(result)
+}
+
+// parsePrepareRename extracts the result of a textDocument/prepareRename
+// response. The server may return three shapes:
+//   - null: rename is not possible at this position
+//   - Range: a bare {start, end} range; the current name is implied by the
+//     text at that range
+//   - {range: Range, placeholder: string}: explicit range and current name
+//   - {defaultBehavior: bool}: server uses the word under the cursor
+//
+// All non-null forms are normalised into a PrepareRenameResult.
+func parsePrepareRename(raw json.RawMessage) (*PrepareRenameResult, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	// Try the {range, placeholder} / {defaultBehavior} object forms first.
+	var obj struct {
+		Range           *wireRange `json:"range"`
+		Placeholder     string     `json:"placeholder"`
+		DefaultBehavior bool       `json:"defaultBehavior"`
+		// A bare Range object also has Start/End; we detect it by checking
+		// whether the top-level object carries a "start" field directly.
+		Start *struct{} `json:"start"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("parsing prepareRename response: %w", err)
+	}
+	if obj.DefaultBehavior {
+		// Server will rename the word under the cursor; no range is available.
+		return &PrepareRenameResult{DefaultBehavior: true}, nil
+	}
+	if obj.Range != nil {
+		return &PrepareRenameResult{
+			Range:       convertRange(*obj.Range),
+			Placeholder: obj.Placeholder,
+		}, nil
+	}
+	// Bare Range: the top-level object IS the range (has a "start" field).
+	if obj.Start != nil {
+		var rng wireRange
+		if err := json.Unmarshal(raw, &rng); err != nil {
+			return nil, fmt.Errorf("parsing prepareRename bare range: %w", err)
+		}
+		return &PrepareRenameResult{Range: convertRange(rng)}, nil
+	}
+	return nil, nil
+}
+
 // rename issues a textDocument/rename request for the position and returns the
 // edits the server would apply to rename the symbol to newName.
 func (c *client) rename(ctx context.Context, path string, line, col int, newName string) (WorkspaceEdit, error) {

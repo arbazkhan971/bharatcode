@@ -373,6 +373,34 @@ func (m *Manager) OutgoingCalls(ctx context.Context, path string, line, col int)
 	return c.outgoingCalls(ctx, abs, line, col)
 }
 
+// PrepareRename checks whether the symbol at the position in path can be
+// renamed, starting a server if needed. A nil result with a nil error means no
+// server is configured for the file or the server reports the position is not
+// renamable. On success the Range is what would be selected for editing and
+// Placeholder is the current symbol name (empty when the server returned only
+// a range or the defaultBehavior form).
+func (m *Manager) PrepareRename(ctx context.Context, path string, line, col int) (*PrepareRenameResult, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving prepare rename path: %w", err)
+	}
+
+	spec, ok := m.specForPath(ctx, abs)
+	if !ok {
+		return nil, nil
+	}
+
+	c, ok, err := m.client(ctx, spec, abs)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	return c.prepareRename(ctx, abs, line, col)
+}
+
 // Rename returns the file edits the language server would apply to rename the
 // symbol at the position in path to newName, starting a server if needed. An
 // empty WorkspaceEdit with a nil error means no server is configured for the

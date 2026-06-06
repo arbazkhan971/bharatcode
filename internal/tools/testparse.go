@@ -93,6 +93,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseJasmineFailures(output)
 	case runnerPester:
 		return parsePesterFailures(output)
+	case runnerGTest:
+		return parseGTestFailures(output)
 	default:
 		return nil
 	}
@@ -131,6 +133,7 @@ const (
 	runnerTox
 	runnerJasmine
 	runnerPester
+	runnerGTest
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -385,6 +388,17 @@ func classifyTestRunner(command string) testRunner {
 		// invocation carries none of their substrings, but kept explicit to guard
 		// against future overlap.
 		return runnerCTest
+	case strings.Contains(c, "--gtest"):
+		// A "--gtest_*" flag (--gtest_filter, --gtest_output, --gtest_color, ...) is
+		// a definitive GoogleTest invocation: gtest binaries have no standard command
+		// name, so the flag is the only false-positive-free command signal. Its
+		// console output marks each failing test with a "[  FAILED  ] <suite>.<test>"
+		// line (repeated in a trailing "[  FAILED  ] N tests, listed below:" block).
+		// A bare gtest binary run with no flags is not auto-detected — guessing a
+		// runner from output alone risks false positives on ordinary logs. Checked
+		// before the JS runners since a gtest flag carries none of their substrings,
+		// but kept explicit to guard against future overlap.
+		return runnerGTest
 	case strings.Contains(c, "playwright test"):
 		// `playwright test`/`npx playwright test` drives Playwright's runner, whose
 		// list/line reporters close with numbered "  N) <file>:<line> › <title>"
@@ -1731,6 +1745,81 @@ func parseCTestFailures(output string) []testFailure {
 		}
 		seen[name] = true
 		failures = append(failures, testFailure{Name: name, Detail: strings.TrimSpace(m[2])})
+	}
+	return failures
+}
+
+var (
+	// "[  FAILED  ] MySuite.MyCase (0 ms)" — GoogleTest's per-test failure marker,
+	// printed once after the failing test's body and again (without the timing
+	// suffix) in the trailing "[  FAILED  ] N tests, listed below:" summary, so
+	// callers deduplicate by name. Group 1 is the "<suite>.<case>" id, which
+	// requires an embedded dot — that keeps the summary's own header line
+	// ("[  FAILED  ] 2 tests, listed below:", whose first token is a bare number)
+	// from matching. Value/type-parameterized names ("Inst/MySuite.MyCase/0") keep
+	// their slashes; gtest follows them with a ", where GetParam() = ..." descriptor
+	// and the "(<n> ms)" duration, both of which fall after the first space and so
+	// sit outside the captured token — leaving a trailing comma the caller strips.
+	gtestFailRe = regexp.MustCompile(`^\s*\[\s*FAILED\s*\]\s+(\S+\.\S+?)(?:\s+.*)?$`)
+	// "[ RUN      ] MySuite.MyCase" — the line opening a test's body, used to scope
+	// the search for that test's assertion detail.
+	gtestRunRe = regexp.MustCompile(`^\s*\[\s*RUN\s*\]\s+(\S+\.\S+)\s*$`)
+	// "[       OK ] ..." / "[  FAILED  ] ..." / "[  SKIPPED ] ..." — a test's
+	// closing marker, which ends the RUN..result block so a later assertion-shaped
+	// line is not misattributed to the test that just finished.
+	gtestEndRe = regexp.MustCompile(`^\s*\[\s*(?:OK|FAILED|SKIPPED)\s*\]`)
+	// "/path/foo_test.cc:42: Failure" / "../foo_test.cc:42: error: ..." — the
+	// assertion-location header GoogleTest prints at the start of a failing check's
+	// body, used as the failure's detail (file:line, like the Go parser).
+	gtestDetailRe = regexp.MustCompile(`^(.+:\d+: (?:Failure|error:).*)$`)
+)
+
+// parseGTestFailures extracts failing tests from GoogleTest (gtest) console
+// output. Each failure is marked "[  FAILED  ] <suite>.<case> (<t> ms)" after the
+// test's body and repeated (without timing) in the trailing "[  FAILED  ] N
+// tests, listed below:" summary, so failures are deduplicated by name. The detail
+// is the "<file>:<line>: Failure" assertion header gtest prints inside the test's
+// body, located between its "[ RUN      ]" line and its closing marker.
+func parseGTestFailures(output string) []testFailure {
+	lines := splitLines(output)
+	// First assertion header seen inside each test's RUN..result block.
+	detail := map[string]string{}
+	curr := ""
+	for _, ln := range lines {
+		if m := gtestRunRe.FindStringSubmatch(ln); m != nil {
+			curr = m[1]
+			continue
+		}
+		if gtestEndRe.MatchString(ln) {
+			curr = ""
+			continue
+		}
+		if curr == "" {
+			continue
+		}
+		if _, ok := detail[curr]; ok {
+			continue // keep the first detail line per test
+		}
+		if m := gtestDetailRe.FindStringSubmatch(ln); m != nil {
+			detail[curr] = strings.TrimSpace(m[1])
+		}
+	}
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		m := gtestFailRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		// A parameterized failure's token ends in a comma (the ", where GetParam()
+		// = ..." descriptor was split off after the first space); drop it so the
+		// per-test and summary lines yield the same key.
+		name := strings.TrimSuffix(m[1], ",")
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: detail[name]})
 	}
 	return failures
 }

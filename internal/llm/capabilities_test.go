@@ -392,6 +392,16 @@ func TestInferContextWindow(t *testing.T) {
 		// o3-pro is the high-compute o3 variant; its id carries the "o3-" prefix so
 		// the o3 family rule claims it at 200k — it must not fall through to 0.
 		{"o3-pro", 200_000},
+		// Gemini experimental and future variants without a numbered version
+		// marker must fall back to 1M via the bare "gemini" rule rather than
+		// returning "unknown" (0). All known Gemini models have at least 1M.
+		{"gemini-exp-1206", 1_048_576},
+		{"gemini-2.0-flash-thinking-exp-01-21", 1_048_576},
+		{"google/gemini-exp-1206", 1_048_576},
+		// The versioned gemini-2.5-flash-lite id matches "gemini-2" and must
+		// not be left to the bare "gemini" fallback — it resolves to 1M either
+		// way, but the specific rule is intentionally tested.
+		{"gemini-2.5-flash-lite", 1_048_576},
 		// Case-insensitive and whitespace-tolerant.
 		{"  GPT-4O  ", 128_000},
 		// Unknown ids stay "unknown" (zero).

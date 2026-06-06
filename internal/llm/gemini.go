@@ -1045,10 +1045,15 @@ func (u geminiUsageMetadata) toUsage() Usage {
 	if input < 0 {
 		input = 0
 	}
+	// ThoughtsTokenCount is billed as output by Gemini, so it is included in
+	// OutputTokens for cost accounting. It is also copied into ReasoningTokens as
+	// an informational breakdown so callers can surface reasoning depth without
+	// re-reading the raw response.
 	return Usage{
 		InputTokens:     input,
 		OutputTokens:    u.CandidatesTokenCount + u.ThoughtsTokenCount,
 		CacheReadTokens: u.CachedContentTokenCount,
+		ReasoningTokens: u.ThoughtsTokenCount,
 	}
 }
 

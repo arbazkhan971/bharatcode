@@ -121,6 +121,38 @@ func TestGeminiUsageExcludesCachedTokensFromInput(t *testing.T) {
 	}
 }
 
+// TestGeminiUsageReasoningTokensSurfaced checks that geminiUsageMetadata.toUsage
+// populates ReasoningTokens from ThoughtsTokenCount while keeping OutputTokens
+// equal to the billing total (candidates + thoughts).
+func TestGeminiUsageReasoningTokensSurfaced(t *testing.T) {
+	cases := []struct {
+		name          string
+		meta          geminiUsageMetadata
+		wantOutput    int
+		wantReasoning int
+	}{
+		{
+			name:          "thinking model: thoughts folded into output and surfaced as reasoning",
+			meta:          geminiUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 5, ThoughtsTokenCount: 30},
+			wantOutput:    35,
+			wantReasoning: 30,
+		},
+		{
+			name:          "non-thinking model: zero reasoning tokens",
+			meta:          geminiUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 8},
+			wantOutput:    8,
+			wantReasoning: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			usage := tc.meta.toUsage()
+			require.Equal(t, tc.wantOutput, usage.OutputTokens)
+			require.Equal(t, tc.wantReasoning, usage.ReasoningTokens)
+		})
+	}
+}
+
 func TestGeminiFoldsThoughtTokensIntoOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -152,6 +184,8 @@ func TestGeminiFoldsThoughtTokensIntoOutput(t *testing.T) {
 	// Reasoning tokens are billed as output, so OutputTokens folds in the 20
 	// thought tokens on top of the 4 visible candidate tokens.
 	require.Equal(t, 24, usage.OutputTokens)
+	// ReasoningTokens surfaces the thinking breakdown without double-billing.
+	require.Equal(t, 20, usage.ReasoningTokens)
 }
 
 func TestGeminiEmitsFunctionCall(t *testing.T) {

@@ -500,11 +500,22 @@ func (p *geminiProvider) buildGeminiRequest(req Request) (geminiRequest, error) 
 		out.Tools = []geminiTool{{FunctionDeclarations: decls}}
 	}
 
-	if req.Temperature > 0 || req.MaxTokens > 0 {
-		out.GenerationConfig = &geminiGenerationConfig{
-			Temperature:     req.Temperature,
-			MaxOutputTokens: req.MaxTokens,
+	// Always set GenerationConfig with a model-aware maxOutputTokens so long
+	// responses are not silently truncated by the Gemini API's conservative
+	// 8192-token default. inferGeminiMaxOutputTokens resolves the real cap for
+	// each model family (65536 for Gemini 2.5 Flash/Pro, 32768 for Flash Lite,
+	// 8192 for older generations). An explicit caller-set MaxTokens always wins.
+	maxOut := req.MaxTokens
+	if maxOut <= 0 {
+		if inferred := inferGeminiMaxOutputTokens(req.Model); inferred > 0 {
+			maxOut = inferred
+		} else {
+			maxOut = defaultGeminiMaxTokens
 		}
+	}
+	out.GenerationConfig = &geminiGenerationConfig{
+		Temperature:     req.Temperature,
+		MaxOutputTokens: maxOut,
 	}
 
 	// Native extended thinking is opt-in per request and only emitted for a model

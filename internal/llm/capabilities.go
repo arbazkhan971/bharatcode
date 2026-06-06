@@ -194,6 +194,64 @@ func inferAnthropicMaxOutput(id string) int {
 	return 0
 }
 
+// geminiMaxOutputRules maps a case-insensitive Gemini model-id substring to the
+// model's maximum output-token allowance. inferGeminiMaxOutputTokens walks the
+// rules in order and returns the first match, so more specific markers must
+// precede the broader ones that would also match them (e.g.
+// "gemini-2.5-flash-lite" before "gemini-2.5"). The values track each model's
+// published max output as of the catalog in defaults/config.json; an
+// unrecognized id returns 0, letting the caller fall back to
+// defaultGeminiMaxTokens.
+//
+// This drives the default maxOutputTokens the Gemini provider sends when a
+// caller leaves MaxTokens unset. Omitting the field causes the Gemini API to
+// apply its own default of 8192 even for the Gemini 2.5 family, which supports
+// up to 65536 output tokens, so long code-generation or analysis responses are
+// silently truncated without the explicit cap.
+var geminiMaxOutputRules = []struct {
+	substring string
+	maxOutput int
+}{
+	// Gemini 2.5 Flash Lite caps at 32768 output tokens. Its id contains the
+	// broader "gemini-2.5" marker, so its specific rule must precede that family
+	// rule to avoid resolving to 65536 — a 2x overcount that causes a 400 when
+	// the value exceeds the model's real limit.
+	{"gemini-2.5-flash-lite", 32_768},
+	// The rolling gemini-flash-lite-latest alias resolves to gemini-2.5-flash-lite.
+	// It shares no "2.5" substring with "gemini-2.5-flash-lite", so it gets its
+	// own rule rather than falling through to the "gemini-2.5" 65536 family rule.
+	{"gemini-flash-lite-latest", 32_768},
+	// The rest of the Gemini 2.5 family (Flash and Pro) supports 65536 output tokens.
+	{"gemini-2.5", 65_536},
+	// The Gemini 3 line keeps the 65536 output budget.
+	{"gemini-3", 65_536},
+	// Rolling latest aliases for the current Gemini 2.5 Flash and Pro generations.
+	{"gemini-flash-latest", 65_536},
+	{"gemini-pro-latest", 65_536},
+	// All other Gemini models (1.5, 2.0, and unlisted variants) cap at 8192,
+	// matching the API's own conservative default so the explicit cap is harmless.
+	// The bare "gemini" rule additionally catches any unlisted model whose id
+	// contains "gemini", preventing it from falling through to the 0 sentinel.
+	{"gemini", 8_192},
+}
+
+// inferGeminiMaxOutputTokens returns the maximum output-token allowance for the
+// Gemini model named by id, or 0 when the id matches no known family (letting
+// the caller fall back to defaultGeminiMaxTokens). The Gemini provider uses
+// this to set a model-aware maxOutputTokens default, preventing silent
+// truncation of long responses on the Gemini 2.5 family (65536 output tokens)
+// when a caller leaves MaxTokens unset and the API would otherwise apply its
+// conservative 8192-token default.
+func inferGeminiMaxOutputTokens(id string) int {
+	lid := strings.ToLower(strings.TrimSpace(id))
+	for _, rule := range geminiMaxOutputRules {
+		if strings.Contains(lid, rule.substring) {
+			return rule.maxOutput
+		}
+	}
+	return 0
+}
+
 // anthropic1MContextSubstrings lists case-insensitive markers in Anthropic
 // model ids whose models can serve the 1M-token context window behind the
 // context-1m beta. The Claude Sonnet 4 line (claude-sonnet-4 and

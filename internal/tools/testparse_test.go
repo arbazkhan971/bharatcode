@@ -120,6 +120,10 @@ func TestClassifyTestRunner(t *testing.T) {
 		"robot tests/":                               runnerRobot,
 		"python -m robot suite.robot":                runnerRobot,
 		"pabot --processes 4 tests/":                 runnerRobot,
+		"cucumber":                                   runnerCucumber,
+		"bundle exec cucumber":                       runnerCucumber,
+		"npx cucumber-js features/":                  runnerCucumber,
+		"echo about cucumbers":                       runnerNone,
 		"echo the robotics demo":                     runnerNone,
 		"echo the trumpeters tune up":                runnerNone,
 		"echo forge testbed":                         runnerNone,
@@ -1829,6 +1833,54 @@ func TestParseFoundryTestFailures_NoFailures(t *testing.T) {
 [PASS] test_Increment() (gas: 28392)
 Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 1.20ms`
 	if got := parseTestFailures("forge test", out); len(got) != 0 {
+		t.Errorf("expected no failures, got %v", got)
+	}
+}
+
+func TestParseCucumberFailures(t *testing.T) {
+	// Ruby cucumber's "Failing Scenarios:" block: each line is a re-runnable
+	// "cucumber <location> # Scenario: <name>" command. The "Scenario:" keyword is
+	// stripped so Name is the bare description and Detail the re-runnable location.
+	out := `Failing Scenarios:
+cucumber features/addition.feature:3 # Scenario: Add two numbers
+cucumber features/addition.feature:9 # Scenario Outline: Add many numbers
+
+2 scenarios (2 failed)
+6 steps (2 failed, 4 passed)`
+	got := parseTestFailures("bundle exec cucumber", out)
+	want := []testFailure{
+		{Name: "Add two numbers", Detail: "features/addition.feature:3"},
+		{Name: "Add many numbers", Detail: "features/addition.feature:9"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseCucumberFailures_JSNoDescription(t *testing.T) {
+	// cucumber-js's rerun lines carry only the location, no "# Scenario: <name>"
+	// suffix, so the location becomes the name and the detail is empty.
+	out := `Failures:
+
+1) Scenario: Subtract numbers # features/sub.feature:4
+   ✖ Then the result should be 1
+       AssertionError: expected 2 to equal 1
+
+Failing scenarios:
+cucumber-js features/sub.feature:4
+
+1 scenario (1 failed)`
+	got := parseTestFailures("npx cucumber-js", out)
+	want := []testFailure{
+		{Name: "features/sub.feature:4"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseCucumberFailures_None(t *testing.T) {
+	// A passing run prints no "cucumber <file>.feature:<line>" rerun lines, so
+	// nothing is extracted.
+	out := `2 scenarios (2 passed)
+6 steps (6 passed)`
+	if got := parseTestFailures("cucumber", out); len(got) != 0 {
 		t.Errorf("expected no failures, got %v", got)
 	}
 }

@@ -472,6 +472,20 @@ var contextWindowRules = []struct {
 	{"qwen-turbo", 1_000_000},
 	{"qwen-flash", 1_000_000},
 	{"qwen-plus", 131_072},
+	// Qwen2.5 and Qwen2 open-weight models (7B and above) ship a 131k context
+	// window, four times the 32k of the bare "qwen" family default. "qwen2.5" must
+	// precede "qwen2" because every qwen2.5 id (e.g. "qwen2.5-72b-instruct") also
+	// contains the "qwen2" substring, so without the ordering the qwen2 rule would
+	// claim qwen2.5 ids first — here both map to the same value so it is harmless,
+	// but the conventional order (specific before general) is preserved for
+	// consistency with the rest of the table. Both rules must precede the bare
+	// "qwen" family rule. Small-parameter variants (0.5B, 1.5B) technically ship a
+	// shorter 32k window, but the large popular models (7B–72B) are 131k, and a
+	// slight overcount on micro-parameter models is far less harmful than the 4x
+	// undercount that the family default imposes on every Qwen2/Qwen2.5 user who
+	// omits context_window from their config.
+	{"qwen2.5", 131_072},
+	{"qwen2", 131_072},
 	{"qwen", 32_768},
 	// Qwen's QwQ reasoning line and QVQ vision-reasoning line both ship a 128k
 	// window, but their ids ("qwq-32b", "qvq-72b-preview") carry neither the

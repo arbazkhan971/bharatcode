@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
@@ -248,11 +249,23 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	m.currentActivity = ""
 	m.chat.FinishStream(m.assistantStreamID())
 	m.chat.Reindex(m.assistantStreamID())
-	// Surface the turn's token counts in the status bar once the turn is done.
-	// The counts live on the last assistant message's Usage field, which the
-	// agent loop populates from the provider's EndEvent.
+	// Surface the turn's token counts (and per-turn USD cost when pricing is
+	// configured) in the status bar once the turn is done. The counts live on
+	// the last assistant message's Usage field, populated by the provider's
+	// EndEvent; the cost is derived from the model's per-MTok rates in config.
 	if done.last != nil && done.last.Usage != nil {
-		m.lastTurnTokens = formatTurnTokens(done.last.Usage.InputTokens, done.last.Usage.OutputTokens)
+		u := done.last.Usage
+		tokens := formatTurnTokens(u.InputTokens, u.OutputTokens)
+		var cfg []config.Model
+		if m.deps.Cfg != nil {
+			cfg = m.deps.Cfg.Models
+		}
+		cost := turnCostUSD(cfg, m.status.Model, u.InputTokens, u.OutputTokens)
+		if cost > 0 {
+			m.lastTurnTokens = tokens + " · " + formatTurnCostUSD(cost)
+		} else {
+			m.lastTurnTokens = tokens
+		}
 	}
 
 	// Drain any steering text the agent could not consume (it arrived after the

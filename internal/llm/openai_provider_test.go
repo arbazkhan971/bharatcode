@@ -343,6 +343,15 @@ func TestNormalizeOpenAIReasoningEffort(t *testing.T) {
 		{"none", "openai/gpt-5.1", "none"},
 		{"none", "gpt-5", ""},
 		{"none", "o3-mini", ""},
+		// "minimal" is the gpt-5 family's fastest setting but the gpt-5.1
+		// generation dropped it for "none". Map it onto "none" there (including
+		// the codex variant and a vendor-prefixed id) so a gpt-5 config keeps
+		// working when bumped to gpt-5.1, while it still passes through verbatim on
+		// the gpt-5 family and the o-series that accept it.
+		{"minimal", "gpt-5.1", "none"},
+		{"Minimal", "gpt-5.1-codex", "none"},
+		{"minimal", "openai/gpt-5.1", "none"},
+		{"minimal", "o3-mini", "minimal"},
 	}
 	for _, tc := range cases {
 		require.Equal(t, tc.want, normalizeOpenAIReasoningEffort(tc.in, tc.model),

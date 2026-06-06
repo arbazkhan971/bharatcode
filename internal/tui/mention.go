@@ -206,12 +206,50 @@ func mentionLang(rel string) string {
 		return "html"
 	case "css":
 		return "css"
+	case "scss", "sass":
+		return "scss"
 	case "sql":
 		return "sql"
 	case "c", "h":
 		return "c"
 	case "cpp", "cc", "hpp", "cxx":
 		return "cpp"
+	case "cs":
+		return "csharp"
+	case "lua":
+		return "lua"
+	case "dart":
+		return "dart"
+	case "ex", "exs":
+		return "elixir"
+	case "erl", "hrl":
+		return "erlang"
+	case "clj", "cljs", "cljc", "edn":
+		return "clojure"
+	case "hs":
+		return "haskell"
+	case "pl", "pm":
+		return "perl"
+	case "r":
+		return "r"
+	case "vue":
+		return "vue"
+	case "svelte":
+		return "svelte"
+	case "proto":
+		return "protobuf"
+	case "graphql", "gql":
+		return "graphql"
+	case "tf", "tfvars", "hcl":
+		return "hcl"
+	case "groovy", "gradle":
+		return "groovy"
+	case "ps1", "psm1":
+		return "powershell"
+	case "zig":
+		return "zig"
+	case "diff", "patch":
+		return "diff"
 	case "xml":
 		return "xml"
 	case "ini", "cfg", "conf":

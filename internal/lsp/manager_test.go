@@ -154,8 +154,9 @@ func TestDiagnosticsPushFallback(t *testing.T) {
 func TestDefaultExtensionsCoversBuiltinSpecs(t *testing.T) {
 	got := DefaultExtensions()
 	want := []string{
-		".c", ".cc", ".cpp", ".cxx", ".go", ".h", ".hh", ".hpp",
-		".js", ".jsx", ".py", ".rs", ".ts", ".tsx",
+		".bash", ".c", ".cc", ".cpp", ".cxx", ".go", ".h", ".hh", ".hpp",
+		".js", ".jsx", ".lua", ".php", ".py", ".rake", ".rb", ".rs",
+		".sh", ".ts", ".tsx", ".zig",
 	}
 	require.Equal(t, want, got, "DefaultExtensions must be the sorted union of the built-in language specs")
 }
@@ -176,6 +177,65 @@ func TestBuiltinSpecsInvokeLSPServers(t *testing.T) {
 		"TypeScript/JavaScript LSP support requires the typescript-language-server binary")
 	require.Contains(t, ts.args, "--stdio",
 		"typescript-language-server must be launched in stdio mode to speak LSP")
+}
+
+func TestBuiltinSpecsAreWellFormed(t *testing.T) {
+	// Every default spec must be usable as-is: a binary to launch, a stable LSP
+	// languageID, at least one file extension to discover it by, and .git as a
+	// last-resort root marker so a server still starts in a plain git checkout
+	// with no language-specific project file. Extensions must be lowercase with a
+	// leading dot (specForPath matches on filepath.Ext, which preserves case) and
+	// no two specs may claim the same extension, which would make discovery
+	// order-dependent.
+	seenExt := map[string]string{}
+	seenName := map[string]bool{}
+	for _, spec := range defaultLanguageSpecs {
+		require.NotEmpty(t, spec.name, "every spec needs a name")
+		require.False(t, seenName[spec.name], "duplicate spec name %q", spec.name)
+		seenName[spec.name] = true
+
+		require.NotEmpty(t, spec.command, "%s spec must name a server binary", spec.name)
+		require.NotEmpty(t, spec.languageID, "%s spec must set an LSP languageID", spec.name)
+		require.NotEmpty(t, spec.extension, "%s spec must claim at least one extension", spec.name)
+		require.Contains(t, spec.rootFiles, ".git",
+			"%s spec must list .git as a fallback root marker", spec.name)
+
+		for ext := range spec.extension {
+			require.True(t, strings.HasPrefix(ext, "."),
+				"%s extension %q must start with a dot", spec.name, ext)
+			require.Equal(t, strings.ToLower(ext), ext,
+				"%s extension %q must be lowercase", spec.name, ext)
+			if owner, ok := seenExt[ext]; ok {
+				t.Fatalf("extension %q claimed by both %q and %q", ext, owner, spec.name)
+			}
+			seenExt[ext] = spec.name
+		}
+	}
+}
+
+func TestBuiltinSpecsCoverPopularLanguages(t *testing.T) {
+	// These servers extend every LSP-backed tool (diagnostics, navigate, symbols,
+	// format, rename, codeactions) to the language out of the box, matching the
+	// default coverage of peer agents. Guard the binary names so a rename does not
+	// silently drop a language back to "no server configured".
+	for _, tc := range []struct {
+		name    string
+		command string
+		ext     string
+	}{
+		{"ruby", "ruby-lsp", ".rb"},
+		{"bash", "bash-language-server", ".sh"},
+		{"lua", "lua-language-server", ".lua"},
+		{"zig", "zls", ".zig"},
+		{"php", "intelephense", ".php"},
+	} {
+		spec, ok := builtinSpec(tc.name)
+		require.Truef(t, ok, "%s must be a built-in spec", tc.name)
+		require.Equalf(t, tc.command, spec.command,
+			"%s LSP support requires the %s binary", tc.name, tc.command)
+		require.Containsf(t, spec.extension, tc.ext,
+			"%s spec must discover %s files", tc.name, tc.ext)
+	}
 }
 
 func builtinSpec(name string) (languageSpec, bool) {

@@ -113,6 +113,8 @@ func parseTestFailures(command, output string) []testFailure {
 		return parseBazelFailures(output)
 	case runnerCrystal:
 		return parseCrystalFailures(output)
+	case runnerZig:
+		return parseZigTestFailures(output)
 	default:
 		return nil
 	}
@@ -161,6 +163,7 @@ const (
 	runnerHaskell
 	runnerBazel
 	runnerCrystal
+	runnerZig
 )
 
 // Word-boundary matchers for the command-name runners, so "go testing the
@@ -375,6 +378,15 @@ var (
 	// "crystal build && go test" chain. A Crystal invocation carries none of the
 	// other runners' substrings (and the bare "spec" never matches \brspec\b).
 	crystalSpecRe = regexp.MustCompile(`\bcrystal\b[^&|;]*\bspec\b`)
+	// `zig test <file>` and `zig build test` drive Zig's built-in test runner,
+	// whose console output marks each failing test with a "Test [N/M] test
+	// "<name>"... FAIL (reason)" line. Both "zig" and "test" are required at word
+	// boundaries within the same command segment, so "zig test src/main.zig",
+	// "zig build test", and "zig test --summary failures" match while
+	// "zig build run" (no test token) and prose like "zigzag tested" — where
+	// "zig" is not at a word boundary — do not. The [^&|;]* keeps the match
+	// within a single command rather than spanning a "zig build && go test" chain.
+	zigTestRe = regexp.MustCompile(`\bzig\b[^&|;]*\btest\b`)
 	// \bnpm t\b matches "npm t" with a trailing word boundary, covering both the
 	// bare "npm t" invocation (npm's built-in alias for "npm test") and "npm t
 	// --watch" (with arguments), while excluding "npm typescript" or "npm ta*"
@@ -675,6 +687,13 @@ func classifyTestRunner(command string) testRunner {
 		// "spec" token never matches the \brspec\b RSpec runner, so the earlier
 		// RSpec case does not claim it.)
 		return runnerCrystal
+	case zigTestRe.MatchString(c):
+		// `zig test <file>` and `zig build test` drive Zig's built-in test runner,
+		// whose console output marks each failing test with a "Test [N/M] test
+		// "<name>"... FAIL (reason)" line. Checked before the JS runners since a
+		// zig invocation carries none of their substrings, but kept explicit to
+		// guard against future overlap.
+		return runnerZig
 	// `bun run test` invokes an arbitrary npm-style test script via bun's package
 	// manager (the same role npm/yarn/pnpm play), so it is classified alongside
 	// those runners rather than as `runnerBun` (bun's native test runner). `bun
@@ -3174,6 +3193,43 @@ func parseCrystalFailures(output string) []testFailure {
 			seen[f.Name] = true
 			failures = append(failures, f)
 		}
+	}
+	return failures
+}
+
+var (
+	// "Test [N/M] test "name"... FAIL (reason)" — Zig's test runner marks each
+	// failed test with this line. Group 1 is the test description (the string
+	// literal passed to the `test` block), group 2 (optional) is the failure
+	// reason in parens, e.g. "AssertionError at src/main.zig:5:5" or "panicked".
+	// The FAIL is followed by optional whitespace and parens so "... FAIL\n" (no
+	// reason, some older builds) and "... FAIL (reason)" both match.
+	zigTestFailRe = regexp.MustCompile(`^Test \[\d+/\d+\] test "([^"]+)"\.\.\. FAIL(?:\s*\(([^)]+)\))?$`)
+)
+
+// parseZigTestFailures extracts failures from Zig's built-in test runner output
+// (`zig test` or `zig build test`). Each failing test is reported on a line:
+//
+//	Test [N/M] test "name"... FAIL (reason)
+//
+// Name is the quoted test description; Detail is the reason in parentheses (e.g.
+// "AssertionError at src/main.zig:5:5") when the runner supplies it. Tests are
+// deduplicated by name in case the same failure appears in both inline output and
+// a summary block.
+func parseZigTestFailures(output string) []testFailure {
+	var failures []testFailure
+	seen := map[string]bool{}
+	for _, ln := range splitLines(output) {
+		m := zigTestFailRe.FindStringSubmatch(ln)
+		if m == nil {
+			continue
+		}
+		name := m[1]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		failures = append(failures, testFailure{Name: name, Detail: strings.TrimSpace(m[2])})
 	}
 	return failures
 }

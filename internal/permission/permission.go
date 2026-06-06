@@ -302,43 +302,19 @@ func (c *Checker) Check(ctx context.Context, req Request) (decision Decision, er
 		return DecisionAllow, nil
 	}
 
-	key := c.getMatchKey(req)
-
-	// 2. Deny-wins pass: a stored Deny at ANY scope is sticky and overrides
-	// any Allow stored at a narrower scope.
-	memScopes := []Scope{ScopeSession, ScopeProject, ScopeForever}
-	for i, mem := range []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory} {
-		if val, ok := mem.Load(key); ok && val.(Decision) == DecisionDeny {
-			scope = memScopes[i]
-			return DecisionDeny, nil
+	// 2-4. Resolve remembered scopes and config lists. A compound bash command
+	// (ls && rm, a | b, $(...), ...) collapses to more than one command head,
+	// each of which must clear permission independently — otherwise auto-approving
+	// a benign head (bash:ls) would silently approve a chained dangerous tail
+	// (rm -rf /). Single commands keep the original single-key resolution exactly.
+	if heads, parseComplete, compound := c.bashCompound(req); compound {
+		if dec, sc, resolved := c.resolveBashHeads(heads, parseComplete); resolved {
+			scope = sc
+			return dec, nil
 		}
-	}
-
-	// 3. Allow resolution in session -> project -> global order. Stored values
-	// are collapsed to Allow/Deny by RememberDecision, and Deny was already
-	// handled above, so any remaining stored value is an Allow.
-	for i, mem := range []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory} {
-		if val, ok := mem.Load(key); ok {
-			scope = memScopes[i]
-			return val.(Decision), nil
-		}
-	}
-
-	// 4. Config-defined allow/deny lists.
-	if c.cfg != nil {
-		// Deny-list wins first.
-		for _, pattern := range c.cfg.Permissions.Deny {
-			if matchPattern(req.ToolName, key, pattern) {
-				return DecisionDeny, nil
-			}
-		}
-
-		// Auto-approve lists.
-		for _, pattern := range c.cfg.Permissions.AutoApprove {
-			if matchPattern(req.ToolName, key, pattern) {
-				return DecisionAllow, nil
-			}
-		}
+	} else if dec, sc, resolved := c.resolveSingleKey(req.ToolName, c.getMatchKey(req)); resolved {
+		scope = sc
+		return dec, nil
 	}
 
 	// 5. Approval-mode policy, consulted before the interactive prompt.
@@ -447,22 +423,11 @@ func updateConfigFile(ctx context.Context, path, key, val string, scope config.S
 func (c *Checker) getMatchKey(req Request) string {
 	switch req.ToolName {
 	case "bash":
-		cmdRaw, ok := req.Args["cmd"].(string)
-		if !ok {
-			cmdRaw, ok = req.Args["CommandLine"].(string)
-		}
-		if !ok || cmdRaw == "" {
+		cmd := bashCmdString(req.Args)
+		if cmd == "" {
 			return "bash"
 		}
-		words := strings.Fields(cmdRaw)
-		for _, w := range words {
-			if strings.HasPrefix(w, "-") {
-				continue
-			}
-			w = strings.Trim(w, "\"'`;|&><")
-			if w == "" {
-				continue
-			}
+		if w := firstCommandWord(cmd); w != "" {
 			return "bash:" + w
 		}
 		return "bash"
@@ -535,4 +500,249 @@ func matchPattern(tool, key, pattern string) bool {
 		return true
 	}
 	return key == pattern
+}
+
+// bashCmdString extracts the shell command line from a bash tool request's
+// arguments, accepting both the native "cmd" key and the "CommandLine" alias.
+func bashCmdString(args map[string]any) string {
+	if v, ok := args["cmd"].(string); ok {
+		return v
+	}
+	if v, ok := args["CommandLine"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// firstCommandWord returns the head (the command name) of a single shell
+// command segment: the first token that is neither a flag nor punctuation. It
+// is the canonical reduction used to key a bash invocation for permission
+// matching, e.g. "git" for "git commit -m ...".
+func firstCommandWord(cmd string) string {
+	for _, w := range strings.Fields(cmd) {
+		if strings.HasPrefix(w, "-") {
+			continue
+		}
+		w = strings.Trim(w, "\"'`;|&><")
+		if w == "" {
+			continue
+		}
+		return w
+	}
+	return ""
+}
+
+// splitBashSegments splits a command line into its sub-command segments at the
+// unquoted shell operators that introduce a new command (";", "&&", "||", "|",
+// background "&", and newlines). Quoting is honored so a separator inside a
+// quoted string (echo "a; b") does not split. It also reports whether a command
+// substitution ($( ... ) or backticks) was seen: such constructs can hide
+// further commands that this lightweight splitter does not descend into, so the
+// caller treats the parse as incomplete and refuses to auto-approve via narrow
+// per-command rules. Over-splitting (treating a separator that bash would have
+// grouped as a boundary) is deliberately tolerated because it only makes
+// auto-approval stricter, never looser.
+func splitBashSegments(cmd string) (segs []string, hasSubstitution bool) {
+	var b strings.Builder
+	var inSingle, inDouble bool
+	flush := func() {
+		if s := strings.TrimSpace(b.String()); s != "" {
+			segs = append(segs, s)
+		}
+		b.Reset()
+	}
+	runes := []rune(cmd)
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
+		switch {
+		case inSingle:
+			b.WriteRune(c)
+			if c == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			// Command substitution stays active inside double quotes, so detect
+			// it here too rather than trusting the quote to neutralize it.
+			if c == '`' {
+				hasSubstitution = true
+			} else if c == '$' && i+1 < len(runes) && runes[i+1] == '(' {
+				hasSubstitution = true
+			}
+			b.WriteRune(c)
+			if c == '"' {
+				inDouble = false
+			}
+		case c == '\'':
+			inSingle = true
+			b.WriteRune(c)
+		case c == '"':
+			inDouble = true
+			b.WriteRune(c)
+		case c == '`':
+			hasSubstitution = true
+			b.WriteRune(c)
+		case c == '$' && i+1 < len(runes) && runes[i+1] == '(':
+			hasSubstitution = true
+			b.WriteRune(c)
+		case c == ';' || c == '\n':
+			flush()
+		case c == '&':
+			if i+1 < len(runes) && runes[i+1] == '&' {
+				i++
+			}
+			flush()
+		case c == '|':
+			if i+1 < len(runes) && runes[i+1] == '|' {
+				i++
+			}
+			flush()
+		default:
+			b.WriteRune(c)
+		}
+	}
+	flush()
+	return segs, hasSubstitution
+}
+
+// bashHeads reduces a command line to the de-duplicated set of permission keys
+// for the command heads it runs ("bash:git", "bash:rm", ...). parseComplete is
+// false when a command substitution was seen, signalling that the key set may be
+// incomplete and so narrow auto-approval must be withheld.
+func bashHeads(cmd string) (heads []string, parseComplete bool) {
+	segs, hasSub := splitBashSegments(cmd)
+	seen := map[string]bool{}
+	for _, s := range segs {
+		w := firstCommandWord(s)
+		if w == "" {
+			continue
+		}
+		key := "bash:" + w
+		if !seen[key] {
+			seen[key] = true
+			heads = append(heads, key)
+		}
+	}
+	return heads, !hasSub
+}
+
+// bashCompound reports whether req is a bash invocation whose command line
+// composes more than one command (or hides commands inside a substitution),
+// returning the per-head permission keys and whether the parse was complete.
+// compound is false for non-bash tools and for a single, fully-parsed command,
+// in which case the caller falls back to the original single-key resolution.
+func (c *Checker) bashCompound(req Request) (heads []string, parseComplete, compound bool) {
+	if req.ToolName != "bash" {
+		return nil, true, false
+	}
+	heads, parseComplete = bashHeads(bashCmdString(req.Args))
+	compound = len(heads) > 1 || !parseComplete
+	return heads, parseComplete, compound
+}
+
+// resolveSingleKey applies the remembered-scope and config-list resolution to a
+// single permission key, returning the decision and the scope it came from. The
+// resolution order matches the original Check flow exactly: a stored Deny at any
+// scope wins, then a stored Allow at the narrowest scope, then the config deny
+// list, then the config auto-approve list. resolved is false when no rule
+// matched, leaving the decision to the approval mode and interactive prompt.
+func (c *Checker) resolveSingleKey(tool, key string) (decision Decision, scope Scope, resolved bool) {
+	memScopes := []Scope{ScopeSession, ScopeProject, ScopeForever}
+	mems := []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory}
+
+	// Deny-wins: a stored Deny at any scope overrides any narrower Allow.
+	for i, mem := range mems {
+		if v, ok := mem.Load(key); ok && v.(Decision) == DecisionDeny {
+			return DecisionDeny, memScopes[i], true
+		}
+	}
+	// Any remaining stored value is an Allow (RememberDecision collapses them).
+	for i, mem := range mems {
+		if v, ok := mem.Load(key); ok {
+			return v.(Decision), memScopes[i], true
+		}
+	}
+	if c.cfg != nil {
+		for _, pattern := range c.cfg.Permissions.Deny {
+			if matchPattern(tool, key, pattern) {
+				return DecisionDeny, ScopeOnce, true
+			}
+		}
+		for _, pattern := range c.cfg.Permissions.AutoApprove {
+			if matchPattern(tool, key, pattern) {
+				return DecisionAllow, ScopeOnce, true
+			}
+		}
+	}
+	return "", ScopeOnce, false
+}
+
+// resolveBashHeads resolves a compound bash command against all of its command
+// heads. Deny wins: if any head is denied at any scope or by the config deny
+// list, the whole command is denied. Allow requires every head to be allowed
+// independently (by a remembered Allow or the config auto-approve list); a
+// single un-cleared head leaves the command for the interactive prompt. When the
+// parse was incomplete (command substitution present), only a blanket bash:* / *
+// auto-approve clears the command — narrow per-command rules are insufficient
+// because the hidden command's head is not in the key set.
+func (c *Checker) resolveBashHeads(heads []string, parseComplete bool) (decision Decision, scope Scope, resolved bool) {
+	memScopes := []Scope{ScopeSession, ScopeProject, ScopeForever}
+	mems := []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory}
+
+	// Deny-wins across every head, memory before config.
+	for _, key := range heads {
+		for i, mem := range mems {
+			if v, ok := mem.Load(key); ok && v.(Decision) == DecisionDeny {
+				return DecisionDeny, memScopes[i], true
+			}
+		}
+	}
+	if c.cfg != nil {
+		for _, key := range heads {
+			for _, pattern := range c.cfg.Permissions.Deny {
+				if matchPattern("bash", key, pattern) {
+					return DecisionDeny, ScopeOnce, true
+				}
+			}
+		}
+	}
+
+	if !parseComplete {
+		if c.cfg != nil {
+			for _, pattern := range c.cfg.Permissions.AutoApprove {
+				if pattern == "*" || pattern == "bash:*" {
+					return DecisionAllow, ScopeOnce, true
+				}
+			}
+		}
+		return "", ScopeOnce, false
+	}
+
+	if len(heads) == 0 {
+		return "", ScopeOnce, false
+	}
+	scope = ScopeOnce
+	for _, key := range heads {
+		allowed := false
+		for i, mem := range mems {
+			if v, ok := mem.Load(key); ok && v.(Decision) == DecisionAllow {
+				allowed = true
+				if scope == ScopeOnce {
+					scope = memScopes[i]
+				}
+				break
+			}
+		}
+		if !allowed && c.cfg != nil {
+			for _, pattern := range c.cfg.Permissions.AutoApprove {
+				if matchPattern("bash", key, pattern) {
+					allowed = true
+					break
+				}
+			}
+		}
+		if !allowed {
+			return "", ScopeOnce, false
+		}
+	}
+	return DecisionAllow, scope, true
 }

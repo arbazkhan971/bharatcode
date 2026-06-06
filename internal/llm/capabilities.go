@@ -466,6 +466,12 @@ var contextWindowRules = []struct {
 	// without this rule the id falls through to "unknown" (0) when a user adds
 	// it without an explicit context_window.
 	{"exaone", 128_000},
+	// Reka — the Reka Core/Flash/Edge line (and the open-weight Reka Flash 3
+	// refresh) exposes a 128k window. The "reka" marker carries no broader
+	// family marker above, so without this rule the id falls through to
+	// "unknown" (0) when a user adds it (commonly via OpenRouter) without an
+	// explicit context_window.
+	{"reka", 128_000},
 	// Google Gemma open-weight line — Gemma 3 lifted the window to 128k while
 	// Gemma 1/2 shipped 8k, so the specific "gemma-3" marker precedes the family.
 	{"gemma-3", 128_000},

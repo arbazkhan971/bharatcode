@@ -88,6 +88,20 @@ type inputState struct {
 	// redoStack holds values displaced by undo, so Ctrl+Y can reinstate them.
 	// It is cleared whenever a new edit is pushed to undoStack.
 	redoStack []string
+
+	// histSearchActive is true while the Ctrl+R reverse-history search mode is
+	// on. Keystrokes refine histSearchQuery instead of editing the buffer.
+	histSearchActive bool
+	// histSearchQuery is the incremental query accumulated from keystrokes since
+	// the search began. Each appended character triggers a new match scan.
+	histSearchQuery string
+	// histSearchPos is the history index where the last match was found,
+	// counting backward from newest. -1 means no match has been found yet for
+	// the current query.
+	histSearchPos int
+	// histSearchSaved holds the buffer contents before the search started so
+	// Esc / Ctrl+G can restore it if the user cancels.
+	histSearchSaved string
 }
 
 // record appends a submitted prompt to history and resets recall and
@@ -455,4 +469,95 @@ func rankFuzzySlash(matches []string, token string) {
 		}
 		return len(matches[i]) < len(matches[j])
 	})
+}
+
+// --- Reverse history search (Ctrl+R / bck-i-search) ---
+
+// startHistSearch enters reverse-history search mode, saving current so it
+// can be restored on cancel. The search begins with an empty query.
+func (s *inputState) startHistSearch(current string) {
+	s.histSearchActive = true
+	s.histSearchSaved = current
+	s.histSearchQuery = ""
+	s.histSearchPos = len(s.history) - 1
+}
+
+// histSearchAcceptChar appends ch to the query and finds the newest history
+// entry that contains it (case-insensitive). Returns the match and true when
+// found; empty string and false when no entry matches the new query. The
+// query is updated regardless so subsequent Ctrl+R steps use the full term.
+func (s *inputState) histSearchAcceptChar(ch string) (string, bool) {
+	s.histSearchQuery += ch
+	return s.histSearchFrom(len(s.history) - 1)
+}
+
+// histSearchBackspace removes the last rune from the query and re-runs the
+// search from the newest entry, widening the match after a deletion. Returns
+// the best match and true when one exists for the shorter query.
+func (s *inputState) histSearchBackspace() (string, bool) {
+	r := []rune(s.histSearchQuery)
+	if len(r) > 0 {
+		s.histSearchQuery = string(r[:len(r)-1])
+	}
+	return s.histSearchFrom(len(s.history) - 1)
+}
+
+// histSearchNext finds the next older match past the current histSearchPos,
+// letting Ctrl+R step through multiple entries that share the query term.
+// Returns empty string and false when no older match exists.
+func (s *inputState) histSearchNext() (string, bool) {
+	if s.histSearchPos <= 0 {
+		return "", false
+	}
+	return s.histSearchFrom(s.histSearchPos - 1)
+}
+
+// histSearchFrom searches backward from fromIdx for an entry containing
+// histSearchQuery (case-insensitive substring match). It records the match
+// position in histSearchPos and returns the entry text with true on success,
+// or empty string with false when nothing matches.
+func (s *inputState) histSearchFrom(fromIdx int) (string, bool) {
+	if len(s.history) == 0 || s.histSearchQuery == "" {
+		s.histSearchPos = -1
+		return "", false
+	}
+	q := strings.ToLower(s.histSearchQuery)
+	for i := fromIdx; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(s.history[i]), q) {
+			s.histSearchPos = i
+			return s.history[i], true
+		}
+	}
+	s.histSearchPos = -1
+	return "", false
+}
+
+// cancelHistSearch exits search mode and returns the buffer value to restore
+// (the one saved when the search began).
+func (s *inputState) cancelHistSearch() string {
+	saved := s.histSearchSaved
+	s.histSearchActive = false
+	s.histSearchQuery = ""
+	s.histSearchPos = -1
+	s.histSearchSaved = ""
+	return saved
+}
+
+// commitHistSearch exits search mode without changing the buffer, keeping
+// whatever match the search landed on.
+func (s *inputState) commitHistSearch() {
+	s.histSearchActive = false
+	s.histSearchQuery = ""
+	s.histSearchPos = -1
+	s.histSearchSaved = ""
+}
+
+// histSearchHint returns the one-line indicator shown below the prompt while
+// reverse-history search is active: "(bck-i-search): <query>_". It returns
+// an empty string when the search is not active.
+func (s *inputState) histSearchHint() string {
+	if !s.histSearchActive {
+		return ""
+	}
+	return "(bck-i-search): " + s.histSearchQuery + "_"
 }

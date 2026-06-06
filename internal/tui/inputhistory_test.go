@@ -702,3 +702,201 @@ func TestPushUndo_BoundedByMaxUndoHistory(t *testing.T) {
 	require.Equal(t, maxUndoHistory, len(st.undoStack),
 		"undo stack must be capped at maxUndoHistory entries")
 }
+
+// --- Reverse history search (Ctrl+R / bck-i-search) tests ---
+
+// keyCtrlR and keyCtrlG produce key-press messages for the history-search bindings.
+func keyCtrlR() tea.KeyPressMsg { return keyCtrl('r') }
+func keyCtrlG() tea.KeyPressMsg { return keyCtrl('g') }
+func keyEsc() tea.KeyPressMsg   { return keySpecial("esc", tea.KeyEsc) }
+
+// TestHistSearch_FindsNewestMatch asserts that typing a query finds the newest
+// history entry containing it, placing it in the buffer.
+func TestHistSearch_FindsNewestMatch(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(3))
+	submitPrompt(t, h, "go test ./...")
+	submitPrompt(t, h, "go build ./...")
+	submitPrompt(t, h, "grep -r foo .")
+
+	_, _ = h.model.Update(keyCtrlR())
+	require.True(t, h.model.inputHistory.histSearchActive, "Ctrl+R must activate bck-i-search mode")
+
+	typeString(t, h.model, "go")
+	// "go build ./..." is the newest entry containing "go"
+	require.Equal(t, "go build ./...", h.model.input.String(),
+		"typing 'go' must recall the newest match")
+}
+
+// TestHistSearch_CtrlRStepsOlder asserts that pressing Ctrl+R again while in
+// search mode steps to the next older match.
+func TestHistSearch_CtrlRStepsOlder(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(3))
+	submitPrompt(t, h, "go test ./...")
+	submitPrompt(t, h, "go build ./...")
+	submitPrompt(t, h, "grep -r foo .")
+
+	_, _ = h.model.Update(keyCtrlR())
+	typeString(t, h.model, "go") // lands on "go build ./..."
+
+	_, _ = h.model.Update(keyCtrlR()) // step to older
+	require.Equal(t, "go test ./...", h.model.input.String(),
+		"second Ctrl+R must step to the next older match")
+}
+
+// TestHistSearch_EscRestoresBuffer asserts that Esc cancels the search and
+// restores the buffer that was in place when Ctrl+R was pressed.
+func TestHistSearch_EscRestoresBuffer(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(1))
+	submitPrompt(t, h, "go build ./...")
+
+	typeString(t, h.model, "draft")
+	_, _ = h.model.Update(keyCtrlR())
+	typeString(t, h.model, "go") // finds "go build ./..."
+	require.Equal(t, "go build ./...", h.model.input.String())
+
+	_, _ = h.model.Update(keyEsc())
+	require.False(t, h.model.inputHistory.histSearchActive, "Esc must exit search mode")
+	require.Equal(t, "draft", h.model.input.String(),
+		"Esc must restore the pre-search buffer")
+}
+
+// TestHistSearch_CtrlGRestoresBuffer asserts that Ctrl+G (the classic cancel
+// key) behaves identically to Esc, restoring the saved buffer.
+func TestHistSearch_CtrlGRestoresBuffer(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(1))
+	submitPrompt(t, h, "go build ./...")
+
+	typeString(t, h.model, "saved")
+	_, _ = h.model.Update(keyCtrlR())
+	typeString(t, h.model, "go")
+
+	_, _ = h.model.Update(keyCtrlG())
+	require.False(t, h.model.inputHistory.histSearchActive, "Ctrl+G must exit search mode")
+	require.Equal(t, "saved", h.model.input.String(),
+		"Ctrl+G must restore the pre-search buffer")
+}
+
+// TestHistSearch_EnterAcceptsAndSubmits asserts that Enter while in search
+// mode commits the current match (exits search mode) and submits the prompt.
+func TestHistSearch_EnterAcceptsAndSubmits(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(2))
+	submitPrompt(t, h, "go build ./...")
+
+	_, _ = h.model.Update(keyCtrlR())
+	typeString(t, h.model, "go") // finds "go build ./..."
+
+	_, cmd := h.model.Update(keySpecial("enter", tea.KeyEnter))
+	h.startBatch(t, cmd)
+	h.drain(t, func() bool { return !h.model.running })
+
+	require.False(t, h.model.inputHistory.histSearchActive, "Enter must exit search mode")
+}
+
+// TestHistSearch_BackspaceShrinsQuery asserts that Backspace in search mode
+// removes the last query character and re-runs the wider search.
+func TestHistSearch_BackshrinsQuery(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(2))
+	submitPrompt(t, h, "go test ./...")
+	submitPrompt(t, h, "run the tests")
+
+	_, _ = h.model.Update(keyCtrlR())
+	typeString(t, h.model, "test") // narrow: finds "run the tests" (newest)
+	require.Equal(t, "run the tests", h.model.input.String())
+
+	_, _ = h.model.Update(keySpecial("backspace", tea.KeyBackspace)) // query becomes "tes"
+	// "run the tests" still contains "tes" and is still the newest match.
+	require.Equal(t, "run the tests", h.model.input.String())
+}
+
+// TestHistSearch_HintActiveWhileSearching asserts histSearchHint returns the
+// "(bck-i-search):" prefix while search is active and "" otherwise.
+func TestHistSearch_HintActiveWhileSearching(t *testing.T) {
+	t.Parallel()
+
+	var st inputState
+	st.history = []string{"go build ./..."}
+	require.Empty(t, st.histSearchHint(), "hint must be empty when search is not active")
+
+	st.startHistSearch("")
+	require.Contains(t, st.histSearchHint(), "(bck-i-search):", "hint must contain the prefix when active")
+
+	st.histSearchAcceptChar("g")
+	require.Contains(t, st.histSearchHint(), "g_", "hint must include the query and cursor")
+
+	st.cancelHistSearch()
+	require.Empty(t, st.histSearchHint(), "hint must be empty after cancel")
+}
+
+// TestHistSearch_NoMatchLeavesBufferUnchanged asserts that typing a query with
+// no matching history entry does not clear the buffer, matching readline
+// behavior where the "(failing bck-i-search):" variant keeps showing the
+// prompt that was in the buffer before.
+func TestHistSearch_NoMatchLeavesBufferUnchanged(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(1))
+	submitPrompt(t, h, "go build ./...")
+
+	typeString(t, h.model, "hello") // live buffer
+	_, _ = h.model.Update(keyCtrlR())
+	typeString(t, h.model, "zzz") // no match
+
+	require.True(t, h.model.inputHistory.histSearchActive)
+	// Buffer must remain as it was (the last successful match or the saved buffer).
+	require.NotEqual(t, "zzz", h.model.input.String(),
+		"a non-matching query must not place the query itself in the buffer")
+}
+
+// TestHistSearch_EmptyHistoryIsNoop asserts that Ctrl+R with no history
+// activates search mode but typing never finds anything, keeping the buffer empty.
+func TestHistSearch_EmptyHistoryIsNoop(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.Update(keyCtrlR())
+	require.True(t, m.inputHistory.histSearchActive, "Ctrl+R must activate search mode even with no history")
+
+	typeString(t, m, "any")
+	require.Empty(t, m.input.String(), "with no history, searching must not place text in the buffer")
+}
+
+// TestHistSearch_RenderShowsHint asserts that renderMain includes the
+// "(bck-i-search):" hint in the rendered output while search is active.
+func TestHistSearch_RenderShowsHint(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	_, _ = m.Update(keyCtrlR())
+	out := plainText(m.renderMain())
+	require.Contains(t, out, "(bck-i-search):",
+		"renderMain must show the bck-i-search hint while search is active")
+}
+
+// TestHistSearch_KeybindingDocumented asserts keybindingGroups lists Ctrl+R so
+// it is discoverable via /keys, matching the contract that every handled key
+// appears in the overlay.
+func TestHistSearch_KeybindingDocumented(t *testing.T) {
+	t.Parallel()
+
+	found := false
+	for _, g := range keybindingGroups {
+		for _, b := range g.bindings {
+			if b.key == "Ctrl+R" {
+				found = true
+			}
+		}
+	}
+	require.True(t, found, "keybindingGroups must document Ctrl+R for history search")
+}

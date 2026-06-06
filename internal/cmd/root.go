@@ -36,6 +36,7 @@ var (
 			Ledger:      application.Ledger,
 			FileTracker: application.FileTracker,
 			Logger:      application.Logger,
+			MCP:         application.MCP,
 		})
 	}
 )

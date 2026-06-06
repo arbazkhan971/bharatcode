@@ -33,17 +33,27 @@ func New(theme styles.Theme) *Viewer {
 // are needed to number the lines that follow.
 var hunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 
-// RenderUnified returns a width-clamped unified diff view.
+// RenderUnified returns a width-clamped unified diff view with intra-line
+// word-diff highlighting on modified line pairs, matching the word-diff
+// behaviour of RenderUnifiedNumbered. lines is kept unchanged throughout so
+// that pair references always read the original raw text.
 func (v *Viewer) RenderUnified(patch string, width int) string {
 	if width < 1 {
 		width = 1
 	}
 	v.lang = detectLang(patch)
 	lines := strings.Split(strings.TrimRight(patch, "\n"), "\n")
+	pairs := pairChanges(lines)
+	out := make([]string, len(lines))
 	for i, line := range lines {
-		lines[i] = v.styleLine(clampWidth(expandTabs(line), width))
+		clamped := clampWidth(expandTabs(line), width)
+		if j := pairs[i]; j >= 0 {
+			out[i] = v.styleWordLine(clamped, clampWidth(expandTabs(lines[j]), width))
+		} else {
+			out[i] = v.styleLine(clamped)
+		}
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
 
 // RenderUnifiedNumbered renders a unified diff like RenderUnified but prefixes

@@ -57,6 +57,10 @@ type Dependencies struct {
 	// off and each Loop pinned to its configured model — the non-breaking
 	// default. Inject a Router (for example, a CostAwareRouter) to opt in.
 	Router Router
+	// ToolAuditor, when set, is forwarded to every Loop the Coordinator creates
+	// so each agent's tool invocations are recorded in the append-only audit log.
+	// It is nil by default, leaving tool auditing off.
+	ToolAuditor ToolAuditor
 }
 
 // Coordinator manages configured named agents.
@@ -297,6 +301,7 @@ func (c *Coordinator) Agent(name string) (*Loop, error) {
 				SystemPrompt:  def.systemPrompt,
 				ToolAllowList: def.tools,
 				Router:        c.deps.Router,
+				ToolAuditor:   c.deps.ToolAuditor,
 			}), nil
 		}
 	}

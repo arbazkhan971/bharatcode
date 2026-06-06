@@ -414,6 +414,56 @@ func TestInputPlaceholder_HiddenWhenChatFocused(t *testing.T) {
 	require.NotContains(t, m.renderMain(), "/keys for shortcuts")
 }
 
+// TestCtrlU_ClearsInputLine proves Ctrl+U wipes the whole prompt buffer in one
+// stroke, the readline clear-line binding, rather than removing a single
+// character the way Backspace does.
+func TestCtrlU_ClearsInputLine(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "a long mistyped prompt")
+	require.NotEqual(t, 0, m.input.Len())
+
+	_, _ = m.Update(keyCtrl('u'))
+	require.Equal(t, 0, m.input.Len(), "Ctrl+U must clear the entire prompt")
+}
+
+// TestCtrlU_EmptyBufferIsNoop proves Ctrl+U on an already-empty prompt is inert,
+// so it never disturbs an idle input line.
+func TestCtrlU_EmptyBufferIsNoop(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	require.Equal(t, 0, m.input.Len())
+
+	_, _ = m.Update(keyCtrl('u'))
+	require.Equal(t, 0, m.input.Len())
+}
+
+// TestCtrlU_ResetsRecallWalk proves clearing the line with Ctrl+U ends an active
+// history recall, mirroring how editing the buffer with Backspace reseeds recall
+// to the newest entry rather than leaving a stale cursor mid-walk.
+func TestCtrlU_ResetsRecallWalk(t *testing.T) {
+	t.Parallel()
+
+	h := newAgentHarness(t, oneTurnScript(2))
+	m := h.model
+
+	submitPrompt(t, h, "alpha")
+	submitPrompt(t, h, "beta")
+
+	_, _ = m.Update(keyUp())
+	require.Equal(t, "beta", m.input.String(), "Up recalls the newest entry")
+
+	_, _ = m.Update(keyCtrl('u'))
+	require.Equal(t, 0, m.input.Len(), "Ctrl+U clears the recalled entry")
+
+	// With recall reset, the next Up starts the walk over from the newest entry
+	// rather than stepping past it to an older one.
+	_, _ = m.Update(keyUp())
+	require.Equal(t, "beta", m.input.String(), "recall restarts at the newest entry after Ctrl+U")
+}
+
 func TestStatusbar_UptimeTickMonotonic(t *testing.T) {
 	t.Parallel()
 

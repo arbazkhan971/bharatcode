@@ -83,8 +83,11 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 		// Per-provider custom headers (OpenRouter attribution, Azure api-key, proxy
 		// tokens) are injected at the transport layer so every provider dialect
 		// honors them without re-plumbing its own header map. Empty headers leave
-		// the client untouched.
-		client := withExtraHeaders(newRetryingClient(timeout), p.Headers)
+		// the client untouched. OpenRouter providers additionally get default
+		// HTTP-Referer / X-Title attribution headers folded in, which the user's
+		// own Headers override.
+		headers := withOpenRouterAttribution(p.BaseURL, p.Headers)
+		client := withExtraHeaders(newRetryingClient(timeout), headers)
 		models := append([]Model(nil), modelsByProvider[name]...)
 
 		var provider Provider

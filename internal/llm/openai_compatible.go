@@ -184,6 +184,37 @@ func isOpenRouter(baseURL string) bool {
 	return strings.Contains(strings.ToLower(baseURL), "openrouter.ai")
 }
 
+// openRouterAttribution is the default HTTP-Referer / X-Title pair sent to
+// OpenRouter so requests are attributed to BharatCode in OpenRouter's dashboard
+// and public model-usage rankings. OpenRouter reads these two headers
+// specifically; they are optional but recommended, and other agents (goose,
+// opencode) send them by default. The value mirrors the User-Agent the tools
+// package already advertises ("BharatCode").
+var openRouterAttribution = map[string]string{
+	"HTTP-Referer": "https://github.com/arbazkhan971/bharatcode",
+	"X-Title":      "BharatCode",
+}
+
+// withOpenRouterAttribution overlays user onto the default attribution headers
+// when baseURL points at OpenRouter, so a request carries HTTP-Referer / X-Title
+// even when the user configured no headers. A user-supplied value for either key
+// wins (so attribution can be customized or cleared by setting it to ""), and a
+// non-OpenRouter base URL is returned unchanged so no other provider gains the
+// headers. The returned map is always a fresh copy, leaving user untouched.
+func withOpenRouterAttribution(baseURL string, user map[string]string) map[string]string {
+	if !isOpenRouter(baseURL) {
+		return user
+	}
+	merged := make(map[string]string, len(openRouterAttribution)+len(user))
+	for k, v := range openRouterAttribution {
+		merged[k] = v
+	}
+	for k, v := range user {
+		merged[k] = v
+	}
+	return merged
+}
+
 // openRouterReasoning maps a request's configured thinking budget or reasoning
 // effort onto OpenRouter's `reasoning` object. A positive thinking budget takes
 // precedence and is sent as max_tokens; otherwise a configured effort is sent as

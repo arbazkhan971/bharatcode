@@ -80,6 +80,15 @@ func TestInferContextWindow(t *testing.T) {
 		// markers must win over the family rule.
 		{"meta-llama/Llama-4-Scout-17B-16E-Instruct", 10_485_760},
 		{"meta-llama/llama-4-maverick", 1_048_576},
+		// TII Falcon: Falcon3 (7B/10B instruct) ships a 32k window; the older
+		// Falcon2-11B line uses the conservative 8k family default. Falcon3 ids
+		// carry no broader family marker, so without the dedicated rule they fall
+		// through to "unknown" (0) when added via OpenRouter without a context_window.
+		{"falcon3-7b-instruct", 32_768},
+		{"falcon3-10b-instruct", 32_768},
+		{"tiiuae/falcon3-7b-instruct", 32_768},
+		{"falcon2-11b", 8_192},
+		{"falcon-40b-instruct", 8_192},
 		{"mixtral-8x7b", 32_768},
 		// Mixtral 8x22B doubled the window to 64k; its id carries the "mixtral"
 		// marker, so the specific rule must win over the 32k family default.
@@ -216,6 +225,17 @@ func TestInferContextWindow(t *testing.T) {
 		// Baidu ERNIE 4.5 exposes a 128k window via its own rule.
 		{"ernie-4.5-300b-a47b", 131_072},
 		{"baidu/ernie-4.5-21b-a3b", 131_072},
+		// InternLM (Shanghai AI Lab): the 1M-context variant ships 1M, the
+		// InternLM2.x and InternLM3 lines ship 32k, and the bare family default
+		// is a conservative 8k. The "internlm2_5-1m" rule must win over "internlm2"
+		// to avoid resolving the 1M variant to 32k; these ids carry no broader
+		// family marker and would otherwise fall through to "unknown" (0).
+		{"internlm2_5-1m-7b-chat", 1_048_576},
+		{"internlm/internlm2_5-1m-7b-chat", 1_048_576},
+		{"internlm2_5-20b-chat", 32_768},
+		{"internlm3-8b-instruct", 32_768},
+		{"internlm3-20b-instruct", 32_768},
+		{"internlm-7b-chat", 8_192},
 		// Tencent Hunyuan exposes a 256k window via its own rule; the id carries no
 		// broader family marker, so without it these fall through to 0.
 		{"hunyuan-a13b-instruct", 262_144},
@@ -306,6 +326,13 @@ func TestInferContextWindow(t *testing.T) {
 		{"gemma-2-9b-it", 8_192},
 		{"command-a-03-2025", 256_000},
 		{"command-r-plus", 128_000},
+		// Cohere Aya multilingual line (Aya-23 and Aya Expanse 8B/32B): all
+		// variants ship an 8k window; the "aya" marker keeps them off the
+		// "unknown" (0) fallback when added via OpenRouter without a context_window.
+		{"aya-expanse-8b", 8_192},
+		{"aya-expanse-32b", 8_192},
+		{"aya-23-35b", 8_192},
+		{"cohere/aya-expanse-8b", 8_192},
 		{"glm-4-plus", 128_000},
 		{"glm-4.5", 128_000},
 		// GLM-4.6 lifted its window to 200k; its id carries the "glm" marker, so the

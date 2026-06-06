@@ -400,10 +400,20 @@ var contextWindowRules = []struct {
 	{"qwq", 131_072},
 	{"qvq", 131_072},
 	// Microsoft Phi open-weight line — Phi-3/Phi-3.5 (mini, small, medium, MoE) as
-	// served by hosted providers ship the long-context 128k variant, while Phi-4
-	// shipped a 16k window. The "phi-3"/"phi-4" markers are deliberately specific:
-	// a bare "phi" rule would also match unrelated ids such as the "dolphin"
-	// finetunes, which carry their base model's (Mistral/Llama) window instead.
+	// served by hosted providers ship the long-context 128k variant, while the
+	// flagship Phi-4 (14B) shipped only a 16k window. The Phi-4 refresh lineup is
+	// not uniform, though: Phi-4-mini and Phi-4-multimodal both ship a 128k window
+	// (8x the flagship) and Phi-4-reasoning/-reasoning-plus a 32k window, so the
+	// specific markers must precede the bare "phi-4" family rule to avoid resolving
+	// those variants to a fraction of their real window. Phi-4-mini-reasoning is
+	// 128k, so the "phi-4-mini" marker is ordered before "phi-4-reasoning" to claim
+	// it first rather than letting the 32k reasoning rule undercount it. The
+	// "phi-3"/"phi-4" markers are deliberately specific: a bare "phi" rule would
+	// also match unrelated ids such as the "dolphin" finetunes, which carry their
+	// base model's (Mistral/Llama) window instead.
+	{"phi-4-mini", 128_000},
+	{"phi-4-multimodal", 128_000},
+	{"phi-4-reasoning", 32_768},
 	{"phi-4", 16_384},
 	{"phi-3", 128_000},
 	// Databricks DBRX exposes a 32k window.

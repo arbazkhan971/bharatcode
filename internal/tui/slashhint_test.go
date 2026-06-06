@@ -423,3 +423,72 @@ func TestRenderSlashHint_ArgUsageDroppedWhenNarrow(t *testing.T) {
 	require.Empty(t, m.renderSlashHint(m.width),
 		"no room for the usage cue, so nothing is rendered")
 }
+
+// TestRenderSlashHint_NarrowedShowsKeybinding asserts that once a prefix narrows
+// to a single command that has a keyboard equivalent, the menu teaches the
+// shortcut inline alongside the description, so a returning user discovers the
+// faster path without opening /keys.
+func TestRenderSlashHint_NarrowedShowsKeybinding(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/dif")
+	hint := stripANSI(m.renderSlashHint(m.width))
+	require.NotContains(t, hint, "\n", "the hint must stay on one row")
+	require.Contains(t, hint, "show the latest edit diff",
+		"the narrowed single match still carries its description")
+	require.Contains(t, hint, "(Ctrl+D)",
+		"a command with a keyboard equivalent teaches the shortcut inline")
+}
+
+// TestRenderSlashHint_NoKeybindingWhenUnbound asserts a settled command with no
+// one-key equivalent shows its description but no parenthesized shortcut, so the
+// cue is never invented for a command the keymap does not bind.
+func TestRenderSlashHint_NoKeybindingWhenUnbound(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	typeString(t, m, "/session")
+	hint := stripANSI(m.renderSlashHint(m.width))
+	require.Contains(t, hint, "restore a recent session",
+		"the narrowed command still carries its description")
+	require.NotContains(t, hint, "(Ctrl+",
+		"a command with no one-key equivalent shows no shortcut")
+}
+
+// TestRenderSlashHint_KeybindingDroppedWhenNarrow asserts the description-and-
+// shortcut suffix is omitted whole rather than wrapping when the row is too
+// narrow, keeping the input height fixed at one row.
+func TestRenderSlashHint_KeybindingDroppedWhenNarrow(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.width = 10
+	typeString(t, m, "/dif")
+	hint := stripANSI(m.renderSlashHint(m.width))
+	require.NotContains(t, hint, "\n", "the hint must stay on one row")
+	require.NotContains(t, hint, "Ctrl+D",
+		"no room for the description-and-shortcut suffix, so it is dropped")
+}
+
+// TestSlashCommandKeysMatchKeybindings asserts every inline shortcut also appears
+// as a binding in the /keys overlay groups, so the inline cue and the keymap
+// overlay never drift apart, and that each keyed command is a real built-in.
+func TestSlashCommandKeysMatchKeybindings(t *testing.T) {
+	t.Parallel()
+
+	keys := map[string]bool{}
+	for _, g := range keybindingGroups {
+		for _, b := range g.bindings {
+			keys[b.key] = true
+		}
+	}
+	builtin := map[string]bool{}
+	for _, c := range slashCommands {
+		builtin[c] = true
+	}
+	for cmd, key := range slashCommandKeys {
+		require.True(t, builtin[cmd], "%s must be a built-in slash command", cmd)
+		require.True(t, keys[key], "shortcut %q for %s must appear in the /keys overlay", key, cmd)
+	}
+}

@@ -175,6 +175,52 @@ func TestKeymap_CtrlP_OpensModelPicker(t *testing.T) {
 	require.True(t, m.dialogs.Contains("model_picker"))
 }
 
+// TestModelPicker_MarksActiveModel proves the model picker flags the model the
+// session is currently using with the active marker and leaves the others with
+// the aligning blank, so an open picker shows at a glance which model is in use
+// rather than listing them all alike.
+func TestModelPicker_MarksActiveModel(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Cfg.Models = []config.Model{
+		{ID: "kimi-k2", Provider: "moonshot"},
+		{ID: "gpt-5", Provider: "openai"},
+	}
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	require.Equal(t, "kimi-k2", m.status.Model, "the first agent's model is the active one")
+	m.pushModelPicker()
+	body := m.dialogs.Render(100)
+
+	require.Contains(t, body, "● moonshot/kimi-k2", "the active model row must carry the marker")
+	require.Contains(t, body, "  openai/gpt-5", "an inactive model row must keep the aligning blank")
+	require.NotContains(t, body, "● openai/gpt-5", "only the active model may be marked")
+}
+
+// TestAgentList_MarksActiveAgent proves the agent picker flags the session's
+// active agent the same way the model picker does, so the two pickers orient the
+// reader identically.
+func TestAgentList_MarksActiveAgent(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Cfg.Agents = []config.Agent{
+		{Name: "coder", Model: "kimi-k2"},
+		{Name: "reviewer", Model: "kimi-k2"},
+	}
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	require.Equal(t, "coder", m.status.Agent, "the first agent is the active one")
+	body := m.agentList()
+
+	require.Contains(t, body, "● coder", "the active agent row must carry the marker")
+	require.Contains(t, body, "  reviewer", "an inactive agent row must keep the aligning blank")
+	require.NotContains(t, body, "● reviewer", "only the active agent may be marked")
+}
+
 // TestScrollStatus_OnlyWhenScrolledUp asserts the scroll segment is empty at the
 // bottom (the common case keeps the status bar unchanged) and reports the count
 // of newer lines hidden below once the view is scrolled up, with singular/plural

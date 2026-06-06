@@ -720,10 +720,11 @@ var (
 	// framework's marker, not part of the message, so it is dropped.
 	goPanicRe = regexp.MustCompile(`^panic: (.*?)(?: \[recovered\])?$`)
 	// "FAIL\tgithub.com/x/y [build failed]" — a package that failed to compile
-	// (or whose test setup failed) rather than a failing assertion. Go emits no
-	// "--- FAIL:" line in this case, so without separate handling a failed run
-	// would surface zero structured failures.
-	goBuildFailRe = regexp.MustCompile(`^FAIL\s+(\S+) \[(build failed|setup failed)\]$`)
+	// (or whose test setup or vet check failed) rather than a failing assertion.
+	// Go emits no "--- FAIL:" line in these cases, so without separate handling
+	// a failed run would surface zero structured failures. Group 2 is the reason
+	// bracket content: "build failed", "setup failed", or "vet failed".
+	goBuildFailRe = regexp.MustCompile(`^FAIL\s+(\S+) \[(build failed|setup failed|vet failed)\]$`)
 	// A compiler/vet diagnostic at column 0, e.g. "./foo.go:10:2: undefined: x"
 	// or an absolute path. Used as the detail for a build failure. Indented
 	// assertion details are matched by goDetailRe instead, so the two do not

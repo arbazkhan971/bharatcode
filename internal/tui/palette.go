@@ -14,6 +14,11 @@ import (
 // two pickers visually consistent.
 const paletteWindow = 12
 
+// paletteMaxRecent is the maximum number of recently-executed palette commands
+// kept in memory. When no filter is active, these appear at the top of the
+// palette so the most-used commands are always one keystroke away.
+const paletteMaxRecent = 5
+
 // paletteEntry is one row in the command palette: the slash command name and
 // its terse one-line description.
 type paletteEntry struct {
@@ -70,16 +75,38 @@ func (m *model) allPaletteEntries() []paletteEntry {
 	return out
 }
 
-// visiblePaletteEntries returns the palette entries that match m.paletteFilter,
-// ranked in three tiers — command-name prefix first, then substring anywhere in
-// the name-or-description haystack, then scattered subsequence — the same
-// ranking the session picker and @-file picker use, so filtering feels
-// consistent across all interactive pickers in the TUI. An empty filter returns
-// every entry in canonical order.
+// visiblePaletteEntries returns the palette entries to display. When no filter
+// is active and there are recent commands, the recent entries appear first
+// (most-recent first) followed by all remaining commands in canonical order;
+// entries already shown in the recent section are not repeated below. When a
+// filter is active, the full ranked three-tier search (prefix → substring →
+// subsequence) is applied over all entries regardless of recency, matching the
+// session picker and @-file picker behaviour.
 func (m *model) visiblePaletteEntries() []paletteEntry {
 	all := m.allPaletteEntries()
 	if m.paletteFilter == "" {
-		return all
+		if len(m.paletteRecent) == 0 {
+			return all
+		}
+		// Build a description lookup and promote valid recent commands to the top.
+		descMap := make(map[string]string, len(all))
+		for _, e := range all {
+			descMap[e.name] = e.desc
+		}
+		recentSet := make(map[string]bool, len(m.paletteRecent))
+		out := make([]paletteEntry, 0, len(all))
+		for _, r := range m.paletteRecent {
+			if desc, ok := descMap[r]; ok {
+				out = append(out, paletteEntry{name: r, desc: desc})
+				recentSet[r] = true
+			}
+		}
+		for _, e := range all {
+			if !recentSet[e.name] {
+				out = append(out, e)
+			}
+		}
+		return out
 	}
 	q := strings.ToLower(m.paletteFilter)
 	var prefix, substr, subseq []paletteEntry
@@ -102,6 +129,44 @@ func (m *model) visiblePaletteEntries() []paletteEntry {
 	return append(out, subseq...)
 }
 
+// paletteRecentLen returns how many of the recent command names exist in the
+// current palette entry list. Dynamic recipe commands can disappear between
+// sessions, so this is always validated against allPaletteEntries.
+func (m *model) paletteRecentLen() int {
+	if len(m.paletteRecent) == 0 {
+		return 0
+	}
+	all := m.allPaletteEntries()
+	valid := make(map[string]bool, len(all))
+	for _, e := range all {
+		valid[e.name] = true
+	}
+	count := 0
+	for _, r := range m.paletteRecent {
+		if valid[r] {
+			count++
+		}
+	}
+	return count
+}
+
+// recordPaletteRecent prepends name to m.paletteRecent, removes any existing
+// duplicate, and caps the slice at paletteMaxRecent — so the most-recently-used
+// command always appears first and the list never grows unbounded.
+func (m *model) recordPaletteRecent(name string) {
+	prev := m.paletteRecent
+	m.paletteRecent = make([]string, 0, len(prev)+1)
+	m.paletteRecent = append(m.paletteRecent, name)
+	for _, r := range prev {
+		if r != name {
+			m.paletteRecent = append(m.paletteRecent, r)
+		}
+	}
+	if len(m.paletteRecent) > paletteMaxRecent {
+		m.paletteRecent = m.paletteRecent[:paletteMaxRecent]
+	}
+}
+
 // openCommandPalette opens the interactive command palette dialog. The palette
 // shows all slash commands with descriptions, lets the user type-to-filter and
 // navigate with arrow keys, and executes the selected command on Enter —
@@ -120,10 +185,13 @@ func (m *model) openCommandPalette() (tea.Model, tea.Cmd) {
 
 // paletteBody renders the dialog body for the command palette: an optional
 // filter echo, a windowed cursor-marked list of matching entries, and a scroll
-// indicator when the list is long enough to require windowing.
+// indicator when the list is long enough to require windowing. When no filter
+// is active and recent commands exist, a "Recent" section header is shown above
+// the first row and a divider is inserted between the recent and full-list
+// sections — matching the UX in opencode and goose.
 func (m *model) paletteBody() string {
 	visible := m.visiblePaletteEntries()
-	lines := make([]string, 0, paletteWindow+4)
+	lines := make([]string, 0, paletteWindow+6)
 	if m.paletteFilter != "" {
 		count := m.theme.Muted.Render(fmt.Sprintf("· %d of %d", len(visible), len(m.allPaletteEntries())))
 		lines = append(lines, "Filter: "+m.paletteFilter+" "+count, "")
@@ -133,12 +201,31 @@ func (m *model) paletteBody() string {
 		lines = append(lines, "", "type to filter · esc to cancel")
 		return strings.Join(lines, "\n")
 	}
+
+	// recentLen is the number of recent-section entries at the front of visible
+	// when no filter is active; zero during filtered searches.
+	recentLen := 0
+	if m.paletteFilter == "" {
+		recentLen = m.paletteRecentLen()
+	}
+
 	start, end := paletteWindowBounds(m.paletteCursor, len(visible))
+
+	// Show the "Recent" section header only when the window begins at row 0.
+	if recentLen > 0 && start == 0 {
+		lines = append(lines, m.theme.Muted.Render("  Recent"))
+	}
 	if start > 0 {
 		lines = append(lines, m.theme.Muted.Render(fmt.Sprintf("⋯ %d more above", start)))
 	}
+
 	q := strings.ToLower(m.paletteFilter)
 	for i := start; i < end; i++ {
+		// Insert the section divider between recent and all-commands when both
+		// sections are visible in the current window.
+		if recentLen > 0 && i == recentLen {
+			lines = append(lines, m.theme.Muted.Render("  ─────────────────────"))
+		}
 		e := visible[i]
 		if i == m.paletteCursor {
 			row := "> " + m.theme.Accent.Render(e.name)
@@ -243,6 +330,7 @@ func (m *model) handlePaletteKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.Cm
 		chosen := visible[m.paletteCursor]
 		m.dialogs.Pop()
 		m.paletteFilter = ""
+		m.recordPaletteRecent(chosen.name)
 		// Execute the chosen command via the slash dispatcher, preserving the
 		// current prompt so the user's in-progress text is untouched.
 		_, execCmd := m.handleSlash(chosen.name)

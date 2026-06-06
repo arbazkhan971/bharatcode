@@ -295,6 +295,16 @@ func TestInferContextWindow(t *testing.T) {
 		// specific rule must win over the 128k family default.
 		{"glm-4.6", 200_000},
 		{"nemotron-4-340b", 128_000},
+		// Upstage Solar (via OpenRouter, "upstage/solar-..."): Pro 3 is 128k, Pro 2
+		// is 64k, and the original Pro / Mini line stays at 32k. The specific
+		// "solar-pro-3"/"solar-pro-2" rules must win over the 32k "solar" family
+		// default, mirroring the other version-tiered families above.
+		{"upstage/solar-pro-3", 131_072},
+		{"solar-pro-3", 131_072},
+		{"upstage/solar-pro-2", 65_536},
+		{"solar-pro-2", 65_536},
+		{"solar-pro", 32_768},
+		{"solar-mini", 32_768},
 		// Case-insensitive and whitespace-tolerant.
 		{"  GPT-4O  ", 128_000},
 		// Unknown ids stay "unknown" (zero).

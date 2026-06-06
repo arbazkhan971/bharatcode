@@ -247,13 +247,21 @@ func (m *model) renderFiletree(width, height int) string {
 
 	// Surface the quick-filter on its own row while it is active (or applied) so
 	// the user can see what is narrowing the listing; a trailing caret marks live
-	// capture, the way an inline filter shows its cursor.
+	// capture, the way an inline filter shows its cursor. A muted "M of N" count
+	// follows when the filter has actually narrowed the listing, so a reader sees
+	// how much a query hid in a large workspace rather than only the survivors —
+	// the way the /keys overlay reports its matches.
 	if f.filtering || f.filter != "" {
 		label := "/" + f.filter
 		if f.filtering {
 			label += "▌"
 		}
-		b.WriteString(m.theme.Accent.Render(clampLine(label, width)))
+		summary := filetreeFilterSummary(len(f.files), len(f.allFiles))
+		if summary != "" && len([]rune(label))+len([]rune(summary)) <= width {
+			b.WriteString(m.theme.Accent.Render(label) + m.theme.Muted.Render(summary))
+		} else {
+			b.WriteString(m.theme.Accent.Render(clampLine(label, width)))
+		}
 		b.WriteByte('\n')
 	}
 
@@ -391,6 +399,22 @@ func filetreeTitle(cursor, count int) string {
 		return "Files"
 	}
 	return "Files (" + strconv.Itoa(cursor+1) + "/" + strconv.Itoa(count) + ")"
+}
+
+// filetreeFilterSummary formats the muted " M of N" count appended to the
+// file-tree quick-filter row, reporting how many files survived the filter out
+// of the full workspace listing — the way the /keys overlay reports "M of N
+// shortcuts match" — so a narrowed panel in a large workspace shows how much it
+// hid rather than only the survivors. It returns "" when the listing is empty
+// (nothing to count) or when the filter matched everything (matched == total),
+// where the count would only restate the visible rows; a filter that matched
+// nothing still reports "0 of N" so the reader sees the query excluded the whole
+// workspace rather than that the panel is merely empty.
+func filetreeFilterSummary(matched, total int) string {
+	if total <= 0 || matched >= total {
+		return ""
+	}
+	return fmt.Sprintf("  %d of %d", matched, total)
 }
 
 // filetreeListingRows returns how many file rows the listing may occupy in a

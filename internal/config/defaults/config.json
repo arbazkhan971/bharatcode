@@ -154,7 +154,10 @@
       "api_key_env": "MISTRAL_API_KEY",
       "models": [
         "mistral-large-latest",
-        "codestral-latest"
+        "mistral-small-latest",
+        "codestral-latest",
+        "devstral-small-2507",
+        "magistral-medium-latest"
       ]
     },
     {
@@ -744,6 +747,33 @@
       "context_window": 256000,
       "input_price_per_mtok_usd": 0.30,
       "output_price_per_mtok_usd": 0.90,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "mistral-small-latest",
+      "provider": "mistral",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.10,
+      "output_price_per_mtok_usd": 0.30,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "devstral-small-2507",
+      "provider": "mistral",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.10,
+      "output_price_per_mtok_usd": 0.30,
+      "supports_images": false,
+      "supports_tools": true
+    },
+    {
+      "id": "magistral-medium-latest",
+      "provider": "mistral",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0.40,
+      "output_price_per_mtok_usd": 1.60,
       "supports_images": false,
       "supports_tools": true
     },

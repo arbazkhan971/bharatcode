@@ -73,7 +73,8 @@ func TestClassifyTestRunner(t *testing.T) {
 		"swift test --filter CalculatorTests":        runnerSwift,
 		"bun test":                                   runnerBun,
 		"bun test ./math.test.ts":                    runnerBun,
-		"bun run test":                               runnerNone,
+		"bun run test":                               runnerJest,
+		"bun run test -- --watch":                    runnerJest,
 		"mocha":                                      runnerMocha,
 		"npx mocha test/*.js":                        runnerMocha,
 		"ctest":                                      runnerCTest,
@@ -712,6 +713,24 @@ AssertionError: expected 500 to be 200
 	got := parseTestFailures("vitest", out)
 	want := []testFailure{
 		{Name: "returns 200", Detail: "AssertionError: expected 500 to be 200"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseBunRunTestFailures(t *testing.T) {
+	// `bun run test` invokes an npm-style test script via bun-as-package-manager
+	// and typically runs jest or vitest underneath — the same output shape as `npm
+	// run test`. Failures must be extracted with the jest parser.
+	out := `  ✓ adds correctly (2 ms)
+  ✕ subtracts correctly (3 ms)
+
+  ● Calculator › subtracts correctly
+
+    expect(received).toBe(expected)
+`
+	got := parseTestFailures("bun run test", out)
+	want := []testFailure{
+		{Name: "subtracts correctly", Detail: "expect(received).toBe(expected)"},
 	}
 	assertFailures(t, got, want)
 }

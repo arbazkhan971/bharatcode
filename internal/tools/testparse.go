@@ -669,11 +669,16 @@ func classifyTestRunner(command string) testRunner {
 		// "spec" token never matches the \brspec\b RSpec runner, so the earlier
 		// RSpec case does not claim it.)
 		return runnerCrystal
+	// `bun run test` invokes an arbitrary npm-style test script via bun's package
+	// manager (the same role npm/yarn/pnpm play), so it is classified alongside
+	// those runners rather than as `runnerBun` (bun's native test runner). `bun
+	// test` — bun's own runner, which uses a "✗" glyph distinct from jest's "✕" —
+	// is already claimed above and never reaches this case.
 	case strings.Contains(c, "jest"), strings.Contains(c, "vitest"),
 		strings.Contains(c, "npm test"), strings.Contains(c, "npm t "),
 		strings.Contains(c, "npm run test"), strings.Contains(c, "yarn test"),
 		strings.Contains(c, "yarn run test"), strings.Contains(c, "pnpm test"),
-		strings.Contains(c, "pnpm run test"):
+		strings.Contains(c, "pnpm run test"), strings.Contains(c, "bun run test"):
 		return runnerJest
 	default:
 		return runnerNone

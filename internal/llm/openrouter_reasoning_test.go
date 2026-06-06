@@ -80,6 +80,18 @@ func TestOpenRouterReasoning(t *testing.T) {
 		require.Zero(t, r.MaxTokens, label)
 	}
 
+	// The "minimal" effort — the fastest gpt-5 setting — has no OpenRouter label
+	// (OpenRouter accepts only low/medium/high), so it degrades to "low", the
+	// closest accepted effort, rather than being forwarded as a value OpenRouter
+	// would reject. The match is case- and whitespace-insensitive.
+	for _, label := range []string{"minimal", "MINIMAL", " minimal "} {
+		r = openRouterReasoning(Request{ReasoningEffort: label})
+		require.NotNil(t, r, label)
+		require.Equal(t, "low", r.Effort, label)
+		require.Nil(t, r.Enabled, label)
+		require.Zero(t, r.MaxTokens, label)
+	}
+
 	// A positive budget still wins over an "auto" effort and is sent as max_tokens.
 	r = openRouterReasoning(Request{Thinking: &ThinkingConfig{BudgetTokens: 1024}, ReasoningEffort: "auto"})
 	require.NotNil(t, r)
@@ -148,6 +160,17 @@ func TestOpenRouterStreamSetsReasoningFromEffort(t *testing.T) {
 		req.ReasoningEffort = "high"
 	})
 	require.Contains(t, string(body), `"reasoning":{"effort":"high"}`)
+}
+
+// TestOpenRouterStreamMapsMinimalEffortToLow proves a configured "minimal" effort
+// reaches OpenRouter as reasoning.effort:"low" — the closest label OpenRouter
+// accepts — rather than the "minimal" the API would reject for a non-OpenAI model.
+func TestOpenRouterStreamMapsMinimalEffortToLow(t *testing.T) {
+	body := openRouterWireBody(t, "/openrouter.ai/api/v1", "google/gemini-2.5-pro", func(req *Request) {
+		req.ReasoningEffort = "minimal"
+	})
+	require.Contains(t, string(body), `"reasoning":{"effort":"low"}`)
+	require.NotContains(t, string(body), `"minimal"`)
 }
 
 // TestOpenRouterStreamSetsReasoningEnabledFromAuto proves an "auto" effort is

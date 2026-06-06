@@ -88,11 +88,12 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.lastContextPct = 0  // clear previous context-window fill while the new turn runs
 	// Inline any @-file references so the model sees their contents, while the
 	// chat bubble above keeps the user's original text. Resolution is scoped to
-	// the workspace root; unresolved mentions are left untouched.
-	expanded, _ := expandFileMentions(prompt, m.workspaceRoot)
+	// the workspace root; unresolved mentions are left untouched. Image files
+	// (PNG/JPEG/GIF/WebP) are returned as separate ImageBlocks for vision models.
+	expanded, _, imgBlocks := expandFileMentions(prompt, m.workspaceRoot)
 	// Re-inject the active goal as a persistent frame on every turn so the
 	// model stays anchored to it; the bubble above stays free of the frame.
-	return m.runAgent(m.frameForAgent(expanded)), nil
+	return m.runAgent(m.frameForAgent(expanded), imgBlocks), nil
 }
 
 // ensureSession creates a persisted session row the first time the user runs a
@@ -123,15 +124,24 @@ func (m *model) ensureSession() error {
 // through the agent bus (drained by the listen loop) while this command runs;
 // the returned runDoneMsg fires only after Run releases its run mutex, which
 // makes it safe to start the next turn.
-func (m *model) runAgent(prompt string) tea.Cmd {
+//
+// imgBlocks carries any inline images collected from @-mention resolution; they
+// are appended to the user message's content so vision-capable models can
+// inspect them. A nil or empty slice produces a plain text-only message.
+func (m *model) runAgent(prompt string, imgBlocks []message.ImageBlock) tea.Cmd {
 	loop := m.deps.Agent
 	sessionID := m.sessionID
 	ctx := m.ctx
 	repo := m.deps.Sessions
 	return func() tea.Msg {
+		content := make([]message.ContentBlock, 0, 1+len(imgBlocks))
+		content = append(content, message.TextBlock{Text: prompt})
+		for _, img := range imgBlocks {
+			content = append(content, img)
+		}
 		userMsg := message.Message{
 			Role:    message.RoleUser,
-			Content: []message.ContentBlock{message.TextBlock{Text: prompt}},
+			Content: content,
 		}
 		err := loop.Run(ctx, sessionID, userMsg)
 		return runDoneMsg{last: lastAssistantMessage(ctx, repo, sessionID), err: err}

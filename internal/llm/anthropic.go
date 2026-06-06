@@ -63,8 +63,9 @@ func (p *anthropicProvider) SupportsImages() bool {
 
 // betaHeader returns the value for the anthropic-beta request header given the
 // target model, or "" when no beta features apply. Today the only opt-in is the
-// 1M-token context window on the Claude Sonnet 4 line, enabled when the user has
-// configured a context_window above the standard 200k for that model.
+// 1M-token context window on the Claude Sonnet 4 and Opus 4.8 lines, enabled
+// when the user has configured a context_window above the standard 200k for
+// that model.
 func (p *anthropicProvider) betaHeader(model string) string {
 	if modelSupportsAnthropic1MContext(p.models, model) {
 		return anthropic1MContextBeta

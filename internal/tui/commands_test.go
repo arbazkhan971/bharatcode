@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1045,4 +1046,70 @@ func TestSlashHelp_ListsCustomPromptsWithFrontmatter(t *testing.T) {
 	require.Contains(t, out, "/triage", "registered prompt name must appear in /help output")
 	require.Contains(t, out, "<test-name>", "prompt argument hint must appear in /help output")
 	require.Contains(t, out, "Triage a flaky test", "prompt description must appear in /help output")
+}
+
+// TestSessionWindowBounds_FollowsCursor asserts the session-picker scroll window
+// keeps the cursor inside a bounded slice: a short list is shown whole, a long
+// list yields a window of at most sessionWindow rows that always contains the
+// cursor and is clamped to the ends rather than running past them.
+func TestSessionWindowBounds_FollowsCursor(t *testing.T) {
+	// A list no longer than the window is shown entire, regardless of cursor.
+	start, end := sessionWindowBounds(0, sessionWindow)
+	require.Equal(t, 0, start)
+	require.Equal(t, sessionWindow, end, "a list within the window is shown whole")
+
+	const total = sessionWindow + 8
+	for cursor := 0; cursor < total; cursor++ {
+		start, end := sessionWindowBounds(cursor, total)
+		require.GreaterOrEqual(t, start, 0, "window start must not go negative")
+		require.LessOrEqual(t, end, total, "window end must not exceed the list")
+		require.Equal(t, sessionWindow, end-start, "a long list shows exactly a window of rows")
+		require.True(t, cursor >= start && cursor < end, "cursor %d must sit inside [%d,%d)", cursor, start, end)
+	}
+
+	// The ends are reachable without a half-empty window: the first row anchors
+	// the window at the top, the last row at the bottom.
+	start, end = sessionWindowBounds(0, total)
+	require.Equal(t, 0, start, "cursor at the top anchors the window at row 0")
+	start, end = sessionWindowBounds(total-1, total)
+	require.Equal(t, total, end, "cursor at the bottom anchors the window at the last row")
+}
+
+// TestSlashSessions_WindowsLongListAroundCursor asserts the rendered picker
+// scrolls a bounded window of rows that follows the cursor when more sessions
+// match than fit, standing the hidden rows in with "⋯ N more" markers and always
+// keeping the selected row on screen.
+func TestSlashSessions_WindowsLongListAroundCursor(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// Seed more sessions than the window can show at once.
+	const total = sessionWindow + 6
+	for i := 0; i < total; i++ {
+		_ = seedSession(t, h.repo, fmt.Sprintf("session %02d", i), "work")
+	}
+
+	h.submitSlash(t, "/sessions")
+	require.True(t, m.dialogs.Contains("sessions"), "session picker must open")
+	require.GreaterOrEqual(t, len(m.visibleSessions()), total, "every seeded session must be a candidate")
+
+	// At the top there is nothing above but rows hidden below.
+	top := plainText(m.dialogs.Render(200))
+	require.NotContains(t, top, "more above", "no rows are hidden above the first row")
+	require.Contains(t, top, "more below", "rows past the window must be marked below")
+	// Each session row carries exactly one " msgs " count, so the token count is
+	// the number of rows drawn — the window cap, not the whole list.
+	require.Equal(t, sessionWindow, strings.Count(top, " msgs "), "only a window of rows is drawn")
+
+	// Walk the cursor to the last row; the window must scroll with it so the
+	// selected row stays visible and the markers flip to "above".
+	for i := 0; i < total-1; i++ {
+		_, _ = m.Update(keySpecial("down", tea.KeyDown))
+	}
+	last := m.visibleSessions()[m.sessionCursor]
+	bottom := plainText(m.dialogs.Render(200))
+	require.Contains(t, bottom, "more above", "rows before the window must be marked above")
+	require.NotContains(t, bottom, "more below", "no rows are hidden below the last row")
+	require.Contains(t, bottom, "> "+last.Title, "the selected last row must stay on screen")
 }

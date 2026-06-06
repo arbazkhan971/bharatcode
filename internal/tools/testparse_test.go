@@ -1282,6 +1282,41 @@ Test Suite 'All tests' passed at 2026-06-05 10:00:01.000`
 	}
 }
 
+func TestParseSwiftTestFailures_SwiftTesting(t *testing.T) {
+	out := `◇ Test run started.
+◇ Suite CalculatorTests started.
+◇ Test addition() started.
+✔ Test addition() passed after 0.001 seconds.
+◇ Test subtraction() started.
+✘ Test subtraction() recorded an issue at CalculatorTests.swift:22:5: Expectation failed: (result → 3) == (expected → 4)
+✘ Test subtraction() failed after 0.002 seconds with 1 issue.
+✘ Test crash() recorded an issue: Caught error: boom
+✘ Test crash() failed after 0.000 seconds with 1 issue.
+✘ Test run with 3 tests failed after 0.010 seconds with 2 issues.`
+	got := parseTestFailures("swift test", out)
+	want := []testFailure{
+		{Name: "subtraction()", Detail: "Expectation failed: (result → 3) == (expected → 4)"},
+		{Name: "crash()", Detail: "Caught error: boom"},
+	}
+	assertFailures(t, got, want)
+}
+
+// A single `swift test` run can drive both XCTest and Swift Testing suites; both
+// failure shapes must surface from one parse.
+func TestParseSwiftTestFailures_MixedFrameworks(t *testing.T) {
+	out := `Test Case 'LegacyTests.testOld' started.
+/work/Tests/LegacyTests.swift:10: error: LegacyTests.testOld : XCTAssertTrue failed
+Test Case 'LegacyTests.testOld' failed (0.001 seconds).
+✘ Test modern() recorded an issue at ModernTests.swift:5:3: Expectation failed: 1 == 2
+✘ Test modern() failed after 0.001 seconds with 1 issue.`
+	got := parseTestFailures("swift test", out)
+	want := []testFailure{
+		{Name: "LegacyTests.testOld", Detail: "XCTAssertTrue failed"},
+		{Name: "modern()", Detail: "Expectation failed: 1 == 2"},
+	}
+	assertFailures(t, got, want)
+}
+
 func TestParseBunTestFailures(t *testing.T) {
 	out := `bun test v1.1.0
 

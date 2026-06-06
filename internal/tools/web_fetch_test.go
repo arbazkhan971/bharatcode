@@ -241,6 +241,145 @@ func TestWebFetchBlocksMetadataEndpoint(t *testing.T) {
 	}
 }
 
+func TestRewriteGitHubURL(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		// blob URL with file path → raw host, drop blob/ segment
+		{
+			name:  "blob with file path",
+			input: "https://github.com/golang/go/blob/master/src/fmt/print.go",
+			want:  "https://raw.githubusercontent.com/golang/go/master/src/fmt/print.go",
+		},
+		// blob URL without a trailing file path (bare repo root blob)
+		{
+			name:  "blob without file path",
+			input: "https://github.com/golang/go/blob/master",
+			want:  "https://raw.githubusercontent.com/golang/go/master",
+		},
+		// raw view URL (already raw-ish) → same rewrite as blob
+		{
+			name:  "raw view URL",
+			input: "https://github.com/golang/go/raw/master/src/fmt/print.go",
+			want:  "https://raw.githubusercontent.com/golang/go/master/src/fmt/print.go",
+		},
+		// line-number anchor is stripped
+		{
+			name:  "blob with line anchor",
+			input: "https://github.com/golang/go/blob/master/src/fmt/print.go#L42-L58",
+			want:  "https://raw.githubusercontent.com/golang/go/master/src/fmt/print.go",
+		},
+		// SHA ref instead of branch name
+		{
+			name:  "blob at SHA ref",
+			input: "https://github.com/golang/go/blob/abc123def456/main.go",
+			want:  "https://raw.githubusercontent.com/golang/go/abc123def456/main.go",
+		},
+		// gist root page → /raw appended
+		{
+			name:  "gist root",
+			input: "https://gist.github.com/alice/deadbeef01234567",
+			want:  "https://gist.github.com/alice/deadbeef01234567/raw",
+		},
+		// already-raw gist (three path segments) → unchanged
+		{
+			name:  "gist already raw",
+			input: "https://gist.github.com/alice/deadbeef01234567/raw",
+			want:  "https://gist.github.com/alice/deadbeef01234567/raw",
+		},
+		// non-GitHub URL → unchanged
+		{
+			name:  "non-github URL",
+			input: "https://pkg.go.dev/fmt",
+			want:  "https://pkg.go.dev/fmt",
+		},
+		// GitHub issues page → unchanged (not blob/raw)
+		{
+			name:  "github issues URL",
+			input: "https://github.com/golang/go/issues/12345",
+			want:  "https://github.com/golang/go/issues/12345",
+		},
+		// GitHub repo root → unchanged (fewer than 4 path segments)
+		{
+			name:  "github repo root",
+			input: "https://github.com/golang/go",
+			want:  "https://github.com/golang/go",
+		},
+		// empty string → unchanged
+		{
+			name:  "empty",
+			input: "",
+			want:  "",
+		},
+		// www prefix is normalised away
+		{
+			name:  "www.github.com blob",
+			input: "https://www.github.com/golang/go/blob/master/main.go",
+			want:  "https://raw.githubusercontent.com/golang/go/master/main.go",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rewriteGitHubURL(tc.input)
+			if got != tc.want {
+				t.Fatalf("rewriteGitHubURL(%q)\n  got  %q\n  want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// captureTransport is a net/http RoundTripper that records the request URL and
+// returns a canned response, without making a real network connection. It lets
+// the integration test verify that the tool sends its request to the rewritten
+// URL (raw.githubusercontent.com) rather than the original github.com address.
+type captureTransport struct {
+	gotURL string
+	body   string
+	ct     string // Content-Type header value
+}
+
+func (c *captureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.gotURL = req.URL.String()
+	rec := httptest.NewRecorder()
+	if c.ct != "" {
+		rec.Header().Set("Content-Type", c.ct)
+	} else {
+		rec.Header().Set("Content-Type", "text/plain")
+	}
+	rec.WriteHeader(http.StatusOK)
+	_, _ = rec.WriteString(c.body)
+	return rec.Result(), nil
+}
+
+// TestWebFetchRewritesGitHubBlobURL verifies that the tool rewrites a
+// github.com/blob URL into its raw-content form before fetching, so the model
+// receives clean file text rather than GitHub's HTML viewer page.
+func TestWebFetchRewritesGitHubBlobURL(t *testing.T) {
+	const rawContent = "package main\n\nfunc main() {}\n"
+	ct := &captureTransport{body: rawContent}
+	tool := &webFetchTool{client: &http.Client{Transport: ct}}
+
+	args, _ := json.Marshal(map[string]string{
+		"url": "https://github.com/golang/go/blob/master/src/fmt/print.go",
+	})
+	res, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected tool error: %s", res.Content)
+	}
+	const wantURLPrefix = "https://raw.githubusercontent.com/golang/go/master/src/fmt/print.go"
+	if ct.gotURL != wantURLPrefix {
+		t.Fatalf("tool fetched %q, want %q", ct.gotURL, wantURLPrefix)
+	}
+	if !strings.Contains(res.Content, "package main") {
+		t.Fatalf("expected raw file content in result, got:\n%s", res.Content)
+	}
+}
+
 func TestWebFetchBlocksRedirectToPrivate(t *testing.T) {
 	// A public-looking page that redirects into a blocked range must still be
 	// refused: the Control hook runs on every dial, including the redirect's.

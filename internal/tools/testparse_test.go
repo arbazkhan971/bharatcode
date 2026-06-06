@@ -19,6 +19,14 @@ func TestClassifyTestRunner(t *testing.T) {
 		"python -m nose2":                            runnerUnittest,
 		"nosetests tests/":                           runnerUnittest,
 		"echo a diagnosis2 of the problem":           runnerNone,
+		"tox":                                        runnerTox,
+		"tox -e py311":                               runnerTox,
+		"uvx tox":                                    runnerTox,
+		"nox":                                        runnerTox,
+		"nox -s tests":                               runnerTox,
+		"echo feeling intoxicated":                   runnerNone,
+		"echo an obnoxious bug":                      runnerNone,
+		"tox -e py -- pytest -k foo":                 runnerPytest,
 		"npm test":                                   runnerJest,
 		"npm run test -- --ci":                       runnerJest,
 		"yarn test":                                  runnerJest,
@@ -300,6 +308,60 @@ tests/test_a.py::test_err ERROR`
 		{Name: "tests/test_a.py::test_err"},
 	}
 	assertFailures(t, got, want)
+}
+
+func TestParseToxFailures_Pytest(t *testing.T) {
+	// tox runs pytest in its managed env and relays its output; the pytest
+	// short-summary lines surface through the tox-routed parser. tox's own
+	// per-environment "py311: FAILED ..." summary is indented and must not be
+	// mistaken for a pytest "FAILED <id>" line.
+	out := `py311 run-test: commands[0] | pytest -q
+tests/test_a.py .F
+=========================== short test summary info ============================
+FAILED tests/test_a.py::test_two - AssertionError: assert 1 == 2
+======================== 1 failed, 1 passed in 0.05s ===========================
+ERROR: py311: commands failed
+  py311: FAILED tests/test_a.py`
+	got := parseTestFailures("tox -e py311", out)
+	want := []testFailure{
+		{Name: "tests/test_a.py::test_two", Detail: "AssertionError: assert 1 == 2"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseToxFailures_UnittestFallback(t *testing.T) {
+	// A nox session that runs stdlib unittest carries no pytest summary, so the
+	// tox-routed parser falls back to the unittest report.
+	out := `nox > Running session tests
+nox > python -m unittest
+.F
+======================================================================
+FAIL: test_upper (test_module.TestStringMethods)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "test_module.py", line 5, in test_upper
+    self.assertEqual('foo'.upper(), 'FOOO')
+AssertionError: 'FOO' != 'FOOO'
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.001s
+
+FAILED (failures=1)
+nox > Session tests failed.`
+	got := parseTestFailures("nox -s tests", out)
+	want := []testFailure{
+		{Name: "test_upper (test_module.TestStringMethods)", Detail: "AssertionError: 'FOO' != 'FOOO'"},
+	}
+	assertFailures(t, got, want)
+}
+
+func TestParseToxFailures_NoFailures(t *testing.T) {
+	out := `py311 run-test: commands[0] | pytest -q
+======================== 3 passed in 0.05s ===========================
+  py311: OK`
+	if got := parseTestFailures("tox", out); got != nil {
+		t.Errorf("expected nil for passing tox run, got %v", got)
+	}
 }
 
 func TestParseUnittestFailures(t *testing.T) {

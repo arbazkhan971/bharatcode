@@ -83,6 +83,7 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.running = true
 	m.turnStartedAt = m.now
 	m.currentActivity = ""
+	m.lastTurnTokens = "" // clear previous turn's counts while the new turn runs
 	// Inline any @-file references so the model sees their contents, while the
 	// chat bubble above keeps the user's original text. Resolution is scoped to
 	// the workspace root; unresolved mentions are left untouched.
@@ -247,6 +248,12 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	m.currentActivity = ""
 	m.chat.FinishStream(m.assistantStreamID())
 	m.chat.Reindex(m.assistantStreamID())
+	// Surface the turn's token counts in the status bar once the turn is done.
+	// The counts live on the last assistant message's Usage field, which the
+	// agent loop populates from the provider's EndEvent.
+	if done.last != nil && done.last.Usage != nil {
+		m.lastTurnTokens = formatTurnTokens(done.last.Usage.InputTokens, done.last.Usage.OutputTokens)
+	}
 
 	// Drain any steering text the agent could not consume (it arrived after the
 	// loop's final steering check but before its run mutex released). The queue

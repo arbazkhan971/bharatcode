@@ -183,10 +183,15 @@ type model struct {
 	// tool returns (and at turn end), so an empty value means the agent is
 	// thinking between tools.
 	currentActivity string
-	turn            int
-	queueCounter    int
-	eventCh         <-chan agent.Event
-	eventCancel     func()
+	// lastTurnTokens is the formatted token-count segment for the most recently
+	// completed turn (e.g. "1.2k in · 234 out"). It is cleared when a new turn
+	// starts and set once the turn finishes, so the bar shows idle-turn stats
+	// rather than stale counts from a previous run.
+	lastTurnTokens string
+	turn           int
+	queueCounter   int
+	eventCh        <-chan agent.Event
+	eventCancel    func()
 
 	// Autonomous goal-loop state (CHANGE 2).
 	goalActive    bool
@@ -977,6 +982,7 @@ func (m *model) renderMain() string {
 		parts = append(parts, tabBar)
 	}
 	m.status.Working = runningStatus(m.turnStartedAt, m.now, m.currentActivity)
+	m.status.TurnTokens = m.lastTurnTokens
 	m.status.Search = m.search.statusSegment()
 	// clampChat finalizes m.chatScroll (clamping it to the scrollable range), so
 	// the scroll indicator is computed from it afterwards to reflect the window
@@ -1066,6 +1072,32 @@ func scrollStatus(scroll, maxScroll int) string {
 		seg += fmt.Sprintf(" · %d%% back", pct)
 	}
 	return seg
+}
+
+// formatTurnTokens returns the compact status-bar segment shown after a turn
+// completes, e.g. "1.2k in · 234 out". It summarises the provider-reported
+// input and output token counts so the user can see context consumption at a
+// glance. An empty string is returned when both counts are zero, so the segment
+// is absent until real usage arrives.
+func formatTurnTokens(inputTokens, outputTokens int) string {
+	if inputTokens == 0 && outputTokens == 0 {
+		return ""
+	}
+	return compactTokenCount(inputTokens) + " in · " + compactTokenCount(outputTokens) + " out"
+}
+
+// compactTokenCount formats n as a short string: the raw number when it fits
+// in three digits, and a one-decimal "Nk" abbreviation for thousands, matching
+// how Claude Code and opencode keep token counts compact in their status areas.
+func compactTokenCount(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	f := float64(n) / 1000.0
+	if f < 10 {
+		return fmt.Sprintf("%.1fk", f)
+	}
+	return fmt.Sprintf("%.0fk", f)
 }
 
 // spinnerFrames are the braille glyphs cycled to signal that the agent is

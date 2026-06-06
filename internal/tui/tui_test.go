@@ -15,6 +15,7 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/db"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -880,4 +881,57 @@ func TestTurnCost_AbsentWhenNoPricing(t *testing.T) {
 		"a model with no pricing must not show a cost segment")
 	require.Contains(t, m.lastTurnTokens, "5.0k in · 500 out",
 		"the token segment must still appear without a cost suffix")
+}
+
+// TestInitialSessionID_PreloadsHistory verifies that when Dependencies.InitialSessionID
+// is set, newModel pre-populates the chat with the stored transcript and marks the
+// session as persisted — matching the --continue / -c startup behaviour.
+func TestInitialSessionID_PreloadsHistory(t *testing.T) {
+	t.Parallel()
+
+	// Build a real session repo with one seeded session.
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "continue.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+	repo := session.NewRepo(database)
+
+	sess := &session.Session{Title: "My session", Model: "test-model", Agent: "coder"}
+	require.NoError(t, repo.Create(context.Background(), sess))
+	require.NoError(t, repo.AppendMessage(context.Background(), sess.ID, message.Message{
+		Role:    message.RoleUser,
+		Content: []message.ContentBlock{message.TextBlock{Text: "hello from the past"}},
+	}))
+
+	deps := testDeps()
+	deps.Sessions = repo
+	deps.InitialSessionID = sess.ID
+
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	require.Equal(t, sess.ID, m.sessionID, "sessionID must be the continued session")
+	require.True(t, m.sessionPersisted, "sessionPersisted must be true for a continued session")
+	require.Equal(t, sess.ID, m.status.SessionID, "status bar must reflect the continued session")
+	// The chat list should contain the seeded message, so the view contains its text.
+	require.Contains(t, m.renderMain(), "hello from the past",
+		"chat history must be visible after --continue")
+}
+
+// TestInitialSessionID_InvalidID_StartsBlank verifies that a bad or unknown
+// InitialSessionID silently degrades to a fresh session rather than failing.
+func TestInitialSessionID_InvalidID_StartsBlank(t *testing.T) {
+	t.Parallel()
+
+	// Use a real (empty) repo so Get returns ErrNotFound rather than panicking.
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "blank.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+
+	deps := testDeps()
+	deps.Sessions = session.NewRepo(database)
+	deps.InitialSessionID = "does-not-exist"
+
+	m := newModel(context.Background(), deps)
+	require.Equal(t, "new", m.sessionID, "unknown session ID must start a fresh session")
+	require.False(t, m.sessionPersisted, "sessionPersisted must be false for a fresh session")
 }

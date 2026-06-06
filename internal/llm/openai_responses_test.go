@@ -204,10 +204,12 @@ func TestResponsesProviderMapsOutputAndUsage(t *testing.T) {
 	require.Equal(t, "Hello from BharatCode.", assembled)
 
 	// Terminal EndEvent carries the mapped usage with non-zero, correctly named
-	// token counts and cached-read tokens from input_tokens_details.
+	// token counts and cached-read tokens from input_tokens_details. input_tokens
+	// (42) includes the 7 cached tokens, which are subtracted back out of the
+	// non-cached input count (42 - 7 = 35) so the ledger does not bill them twice.
 	end, ok := findEvent[EndEvent](got)
 	require.True(t, ok, "expected an EndEvent")
-	require.Equal(t, 42, end.Usage.InputTokens)
+	require.Equal(t, 35, end.Usage.InputTokens)
 	require.Equal(t, 13, end.Usage.OutputTokens)
 	require.Equal(t, 7, end.Usage.CacheReadTokens)
 
@@ -646,7 +648,9 @@ func TestResponsesProviderStreamsText(t *testing.T) {
 
 	end, ok := findEvent[EndEvent](got)
 	require.True(t, ok, "expected a terminal EndEvent")
-	require.Equal(t, 42, end.Usage.InputTokens)
+	// input_tokens (42) includes the 7 cached tokens; they are subtracted back
+	// out (42 - 7 = 35) so the cache reads are not double-billed.
+	require.Equal(t, 35, end.Usage.InputTokens)
 	require.Equal(t, 13, end.Usage.OutputTokens)
 	require.Equal(t, 7, end.Usage.CacheReadTokens)
 }

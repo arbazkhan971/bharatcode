@@ -163,6 +163,12 @@ func TestInferContextWindow(t *testing.T) {
 		// "exaone" marker keeps it off the "unknown" (0) fallback.
 		{"LGAI-EXAONE/EXAONE-4.0-32B", 128_000},
 		{"exaone-3.5-32b-instruct", 128_000},
+		// Reka Core/Flash/Edge (and the open-weight Reka Flash 3 refresh) expose a
+		// 128k window; the "reka" marker keeps these ids off the "unknown" (0)
+		// fallback.
+		{"reka-flash-3", 128_000},
+		{"reka-core-20240501", 128_000},
+		{"rekaai/reka-flash-3", 128_000},
 		// deepseek-chat (V3 non-thinking) and deepseek-reasoner (thinking) both
 		// expose a 128k window on the official API.
 		{"deepseek-chat", 131_072},

@@ -227,7 +227,13 @@ func withOpenRouterAttribution(baseURL string, user map[string]string) map[strin
 // effort is lowercased so a value like "High" matches OpenRouter's lowercase
 // labels. When neither a budget nor an effort is configured it returns nil so the
 // field is omitted and the model's own default applies rather than reasoning
-// being force-enabled.
+// being force-enabled. A configured "minimal" effort — the fastest setting on the
+// OpenAI gpt-5 family — has no OpenRouter equivalent (OpenRouter's effort accepts
+// only low/medium/high and 400s on "minimal"), so it maps to the closest accepted
+// label, "low", rather than being forwarded verbatim. This mirrors the graceful
+// "minimal" remapping the OpenAI (minimal->none) and Gemini (minimal->small budget)
+// paths already apply to the same uniform knob; the OpenRouter path is reached only
+// for non-OpenAI-reasoning models, where "minimal" is never a valid upstream label.
 func openRouterReasoning(req Request) *openAIReasoning {
 	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
 		return &openAIReasoning{MaxTokens: req.Thinking.BudgetTokens}
@@ -241,6 +247,8 @@ func openRouterReasoning(req Request) *openAIReasoning {
 	case "none":
 		off := false
 		return &openAIReasoning{Enabled: &off}
+	case "minimal":
+		return &openAIReasoning{Effort: "low"}
 	default:
 		return &openAIReasoning{Effort: effort}
 	}

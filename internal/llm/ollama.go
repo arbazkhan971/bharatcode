@@ -51,7 +51,7 @@ func (p *ollamaProvider) Stream(ctx context.Context, req Request) (<-chan Event,
 		return nil, fmt.Errorf("model %q images: %w", req.Model, ErrUnsupportedFeature)
 	}
 
-	body, err := buildOllamaRequest(req)
+	body, err := buildOllamaRequest(req, p.numCtx(req.Model))
 	if err != nil {
 		return nil, fmt.Errorf("building local provider request: %w", err)
 	}
@@ -113,7 +113,24 @@ func (p *ollamaProvider) readResponse(ctx context.Context, resp *http.Response, 
 	}
 }
 
-func buildOllamaRequest(req Request) (ollamaRequest, error) {
+// numCtx returns the context window (in tokens) to request from Ollama for the
+// model named by id. Ollama defaults num_ctx to a small window (2k–4k tokens)
+// regardless of the model's real capacity, and silently truncates any prompt
+// that exceeds it — which for an agent quietly drops earlier turns and tool
+// output, corrupting the conversation rather than erroring. The model's
+// configured context_window (or, when unset, the family heuristic the registry
+// already applies) is a known, user-controllable budget, so pass it through as
+// num_ctx to size the window correctly. A user who hits local memory pressure
+// can lower context_window in config to shrink the allocation. A zero/unknown
+// window returns 0, which the builder omits so Ollama keeps its own default.
+func (p *ollamaProvider) numCtx(id string) int {
+	if model, ok := findModel(p.models, id); ok && model.ContextWindow > 0 {
+		return model.ContextWindow
+	}
+	return inferContextWindow(id)
+}
+
+func buildOllamaRequest(req Request, numCtx int) (ollamaRequest, error) {
 	openReq, err := buildOpenAIRequest(req, imageStyleOllama)
 	if err != nil {
 		return ollamaRequest{}, err
@@ -126,6 +143,7 @@ func buildOllamaRequest(req Request) (ollamaRequest, error) {
 		Options: ollamaOptions{
 			Temperature: req.Temperature,
 			NumPredict:  req.MaxTokens,
+			NumCtx:      numCtx,
 		},
 	}, nil
 }
@@ -148,6 +166,11 @@ type ollamaRequest struct {
 type ollamaOptions struct {
 	Temperature float64 `json:"temperature,omitempty"`
 	NumPredict  int     `json:"num_predict,omitempty"`
+	// NumCtx sizes the model's context window for this request. It is omitted
+	// when zero so Ollama applies its own (small) default; otherwise it carries
+	// the model's configured/inferred context_window so long agent prompts are
+	// not silently truncated. See ollamaProvider.numCtx.
+	NumCtx int `json:"num_ctx,omitempty"`
 }
 
 type ollamaChunk struct {

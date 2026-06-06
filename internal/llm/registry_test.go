@@ -331,6 +331,60 @@ func TestOllamaStreamsJSONLines(t *testing.T) {
 	require.Len(t, captured.Tools, 1)
 }
 
+// TestOllamaRequestSetsNumCtxFromContextWindow proves the Ollama request carries
+// options.num_ctx sized to the model's configured context window, so a long agent
+// prompt is not silently truncated at Ollama's small default window.
+func TestOllamaRequestSetsNumCtxFromContextWindow(t *testing.T) {
+	var captured ollamaRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+		fmt.Fprintln(w, `{"done":true,"prompt_eval_count":1,"eval_count":1}`)
+	}))
+	defer server.Close()
+
+	reg, err := NewRegistry(testConfig("ollama", config.ProviderOllama, server.URL))
+	require.NoError(t, err)
+	provider, err := reg.Get("ollama")
+	require.NoError(t, err)
+
+	events, err := provider.Stream(context.Background(), Request{
+		Model:    "test-model",
+		Messages: []message.Message{{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}}},
+	})
+	require.NoError(t, err)
+	collectEvents(events)
+
+	// testConfig configures test-model with a 128k context window.
+	require.Equal(t, 128000, captured.Options.NumCtx)
+}
+
+// TestBuildOllamaRequestOmitsZeroNumCtx proves a zero context window leaves
+// num_ctx off the wire so Ollama keeps its own default rather than receiving
+// num_ctx:0 (which would request an empty context).
+func TestBuildOllamaRequestOmitsZeroNumCtx(t *testing.T) {
+	body, err := buildOllamaRequest(Request{Model: "test-model"}, 0)
+	require.NoError(t, err)
+	require.Equal(t, 0, body.Options.NumCtx)
+
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "num_ctx")
+}
+
+// TestOllamaNumCtxFallsBackToInference proves that when a configured model omits
+// an explicit context_window, the provider falls back to the family heuristic
+// (here gpt-4o's 128k) rather than sending no num_ctx.
+func TestOllamaNumCtxFallsBackToInference(t *testing.T) {
+	// A configured model with no explicit context_window still resolves to the
+	// family heuristic keyed on its id.
+	p := &ollamaProvider{
+		models: []Model{{ID: "gpt-4o", Provider: "ollama"}},
+	}
+	require.Equal(t, 128000, p.numCtx("gpt-4o"))
+	// An id matching no known family stays at 0 so num_ctx is omitted.
+	require.Equal(t, 0, p.numCtx("totally-unknown-model"))
+}
+
 func TestAnthropicProviderIsRegistered(t *testing.T) {
 	cfg := testConfig("anthropic", config.ProviderAnthropic, "")
 	// Point at a missing API key env so Stream fails before any network call,

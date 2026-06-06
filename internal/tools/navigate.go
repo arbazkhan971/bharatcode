@@ -26,6 +26,14 @@ const (
 	// navigateLocationCap truncation is applied, so callers know the rendered
 	// list is complete when total == len(MetadataLocations).
 	MetadataTotal = "total"
+	// MetadataHoverText holds the hover text string from a hover action. It
+	// matches the Content field exactly (including any truncation notice), so
+	// consumers can read the text directly from metadata without reparsing the
+	// free-form Content string.
+	MetadataHoverText = "text"
+	// MetadataSignatureText holds the signature-help text from a signature
+	// action, mirroring MetadataHoverText for the signature action.
+	MetadataSignatureText = "text"
 )
 
 // navigateLocation is one resolved site returned in navigate metadata. Path is
@@ -247,9 +255,15 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if strings.TrimSpace(text) == "" {
 			return Result{Content: "No hover information found."}, nil
 		}
+		bounded := boundHoverText(strings.TrimRight(text, "\n"))
 		return Result{
-			Content:  boundHoverText(strings.TrimRight(text, "\n")),
-			Metadata: map[string]any{"path": args.Path, "line": args.Line, "column": col},
+			Content: bounded,
+			Metadata: map[string]any{
+				"path":            args.Path,
+				"line":            args.Line,
+				"column":          col,
+				MetadataHoverText: bounded,
+			},
 		}, nil
 	case "signature":
 		text, err := t.source.SignatureHelp(ctx, path, line0, col0)
@@ -259,9 +273,15 @@ func (t *navigateTool) Run(ctx context.Context, raw json.RawMessage) (res Result
 		if strings.TrimSpace(text) == "" {
 			return Result{Content: "No signature help found."}, nil
 		}
+		bounded := boundHoverText(strings.TrimRight(text, "\n"))
 		return Result{
-			Content:  boundHoverText(strings.TrimRight(text, "\n")),
-			Metadata: map[string]any{"path": args.Path, "line": args.Line, "column": col},
+			Content: bounded,
+			Metadata: map[string]any{
+				"path":                args.Path,
+				"line":                args.Line,
+				"column":              col,
+				MetadataSignatureText: bounded,
+			},
 		}, nil
 	case "prepare_rename":
 		pr, err := t.source.PrepareRename(ctx, path, line0, col0)

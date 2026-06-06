@@ -921,6 +921,59 @@ func TestNavigateSignatureHasPositionMetadata(t *testing.T) {
 	require.Equal(t, 12, result.Metadata["column"])
 }
 
+func TestNavigateHoverHasTextInMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{hover: "func Foo() int\n"}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 3, "column": 5, "action": "hover",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// The text metadata key must match the Content exactly.
+	require.Equal(t, result.Content, result.Metadata[MetadataHoverText])
+}
+
+func TestNavigateSignatureHasTextInMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	src := &fakeNavigate{signature: "→ Bar(y string)\n"}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 6, "column": 2, "action": "signature",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	// The text metadata key must match the Content exactly.
+	require.Equal(t, result.Content, result.Metadata[MetadataSignatureText])
+}
+
+func TestNavigateHoverTruncatedTextInMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeNavFile(t, dir)
+	// Build a hover string large enough to trigger the byte cap so the metadata
+	// "text" field contains the same truncated content as Content.
+	var sb strings.Builder
+	for i := 0; i < 800; i++ {
+		fmt.Fprintf(&sb, "field%03d int\n", i)
+	}
+	src := &fakeNavigate{hover: sb.String()}
+	tool := &navigateTool{source: src, workDir: dir}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "action": "hover",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	require.Contains(t, result.Content, "lines truncated]")
+	// Metadata text must equal Content even when truncated, so consumers do not
+	// need to re-parse the free-form Content string.
+	require.Equal(t, result.Content, result.Metadata[MetadataHoverText])
+}
+
 func TestNavigateEmptyResultHasNoMetadata(t *testing.T) {
 	dir := t.TempDir()
 	writeNavFile(t, dir)

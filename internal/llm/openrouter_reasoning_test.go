@@ -224,6 +224,39 @@ func TestNonOpenRouterStreamOmitsReasoning(t *testing.T) {
 	require.NotContains(t, string(body), `"reasoning"`)
 }
 
+// TestOpenRouterStreamRequestsNativeUsage proves an OpenRouter request opts into
+// native usage accounting (usage.include:true) so the streamed usage chunk
+// carries the upstream provider's real token counts rather than OpenRouter's
+// default tokenizer estimate. It applies to a plain chat model with no reasoning
+// configured, since usage accounting is independent of the reasoning controls.
+func TestOpenRouterStreamRequestsNativeUsage(t *testing.T) {
+	body := openRouterWireBody(t, "/openrouter.ai/api/v1", "anthropic/claude-sonnet-4-5", nil)
+	require.Contains(t, string(body), `"usage":{"include":true}`)
+}
+
+// TestOpenRouterStreamRequestsNativeUsageForReasoningModel proves the usage
+// accounting flag is sent even for an OpenAI reasoning model reached via
+// OpenRouter — which is excluded from the unified `reasoning` object — confirming
+// usage.include sits outside the reasoning gate.
+func TestOpenRouterStreamRequestsNativeUsageForReasoningModel(t *testing.T) {
+	body := openRouterWireBody(t, "/openrouter.ai/api/v1", "openai/o3", func(req *Request) {
+		req.ReasoningEffort = "high"
+	})
+	require.Contains(t, string(body), `"usage":{"include":true}`)
+	// The reasoning object is still excluded for the OpenAI reasoning model, so
+	// usage accounting and reasoning gating remain independent.
+	require.NotContains(t, string(body), `"reasoning":{`)
+}
+
+// TestNonOpenRouterStreamOmitsNativeUsage proves the usage.include flag is
+// OpenRouter-specific: a different openai_compatible backend never receives it,
+// since the field is not part of the standard chat/completions request and some
+// backends would reject an unknown field.
+func TestNonOpenRouterStreamOmitsNativeUsage(t *testing.T) {
+	body := openRouterWireBody(t, "/v1", "deepseek-chat", nil)
+	require.NotContains(t, string(body), `"usage"`)
+}
+
 func TestWithOpenRouterAttribution(t *testing.T) {
 	// A non-OpenRouter base URL is returned unchanged (same map, no attribution).
 	user := map[string]string{"X-Proxy": "tok"}

@@ -29,6 +29,22 @@ type openAIChatRequest struct {
 	// otherwise so other openai_compatible backends never receive a field they
 	// would reject.
 	Reasoning *openAIReasoning `json:"reasoning,omitempty"`
+	// Usage opts an OpenRouter request into native usage accounting. By default
+	// OpenRouter reports GPT-tokenizer *estimates* in the streamed usage chunk;
+	// with {"include": true} it instead returns the upstream provider's real
+	// token counts — including the prompt_tokens_details.cached_tokens cache
+	// breakdown — so the ledger prices the request the way the provider actually
+	// billed it. It is set only for OpenRouter providers and omitted otherwise so
+	// other openai_compatible backends never receive a field they would reject.
+	Usage *openAIUsageRequest `json:"usage,omitempty"`
+}
+
+// openAIUsageRequest is OpenRouter's usage-accounting request object. Setting
+// Include true makes OpenRouter return the upstream provider's native token
+// counts and the request cost in the response usage object rather than its
+// default tokenizer estimate.
+type openAIUsageRequest struct {
+	Include bool `json:"include"`
 }
 
 // openAIReasoning is OpenRouter's reasoning request object. At most one of

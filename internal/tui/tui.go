@@ -192,6 +192,12 @@ type model struct {
 	// made multiple calls — giving the user a sense of progress without having
 	// to scroll up to count "[tool: ...]" lines in the chat.
 	turnToolCount int
+	// turnErrShown records that the in-flight turn already surfaced a run error
+	// inline (via EventRunError) so handleRunDone does not re-report the same
+	// failure as a dialog. It is reset at turn start and set when the error
+	// event renders, letting handleRunDone cover only the error paths that
+	// return without publishing an event (which would otherwise be silent).
+	turnErrShown bool
 	// lastTurnTokens is the formatted token-count segment for the most recently
 	// completed turn (e.g. "1.2k in · 234 out"). It is cleared when a new turn
 	// starts and set once the turn finishes, so the bar shows idle-turn stats
@@ -280,6 +286,15 @@ type model struct {
 	// persisted session messages are loaded (the same source as /diff). Tests
 	// set it to return a fixed slice, mirroring the exportDir test seam.
 	editDiffSource func() []message.Message
+
+	// onboarding holds the first-run setup flow state. Its zero value is inert,
+	// so a session that never onboards renders exactly as before. It is populated
+	// by openOnboarding and cleared when setup finishes or is skipped.
+	onboarding onboardingState
+	// onboardingChecked guards the one-shot first-run check so onboarding is
+	// offered at most once per session — on the first WindowSizeMsg, when a dialog
+	// width is known — and never re-opens after the user dismisses or completes it.
+	onboardingChecked bool
 
 	// tabs holds the open session tabs. Each tab owns its own chat List and
 	// session identity; the active tab's per-session fields are mirrored onto
@@ -388,7 +403,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.layout = computeLayout(msg.Width, msg.Height)
+		// Offer first-run onboarding once a width is known so its dialog renders
+		// correctly. A dialog pushed in newModel would render before any size
+		// arrives; gating on the first WindowSizeMsg is the safe place. The check
+		// runs at most once per session and is a no-op when setup already resolves.
+		if !m.onboardingChecked {
+			m.onboardingChecked = true
+			m.maybeStartOnboarding()
+		}
 		return m, nil
+	case startChatGPTLoginMsg:
+		return m.handleStartChatGPTLogin()
 	case tea.FocusMsg:
 		m.notifications.SetFocused(true)
 		return m, nil
@@ -412,6 +437,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.PasteMsg:
+		// While onboarding is collecting an API key, route a bracketed paste into
+		// the masked key buffer — pasting a key is the common case — stripping any
+		// stray surrounding whitespace/newlines so a copied key is stored cleanly.
+		if top := m.dialogs.Top(); top != nil && top.ID() == onboardingDialogID && m.onboarding.step == onboardingKeyEntry {
+			m.onboarding.keyInput.WriteString(strings.TrimSpace(string(msg)))
+			m.onboarding.errMsg = ""
+			m.refreshOnboarding()
+			return m, nil
+		}
 		// Bracketed-paste delivers the clipboard content as one PasteMsg.
 		// Append it verbatim (preserving embedded newlines) so users can paste
 		// multi-line text — code snippets, bullet lists, error traces — into
@@ -475,6 +509,15 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// keys before the generic dialog handler, mirroring the session picker.
 		if top.ID() == "model_picker" && len(m.modelCandidates) > 0 {
 			if consumed, cmd := m.handleModelPickerKey(msg); consumed {
+				return m, cmd
+			}
+		}
+		// The onboarding dialog carries its menu/key-entry state on the model and
+		// must intercept navigation and entry keys before the generic dialog
+		// handler, mirroring the model picker. An unconsumed key (esc on the menu)
+		// falls through so the generic handler dismisses the dialog.
+		if top.ID() == onboardingDialogID {
+			if consumed, cmd := m.handleOnboardingKey(msg); consumed {
 				return m, cmd
 			}
 		}
@@ -874,6 +917,18 @@ func (m *model) submitInput() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") {
 		return m.handleSlash(text)
 	}
+	// A bare "exit" or "quit" typed at an idle prompt quits gracefully, matching
+	// the muscle memory of a shell or REPL. It is gated on an idle prompt so the
+	// words can still be sent verbatim to the agent mid-turn (where a user might
+	// genuinely be asking about "exit codes"); the /exit and /quit slash forms
+	// always quit regardless of run state.
+	if !m.running {
+		switch strings.ToLower(text) {
+		case "exit", "quit":
+			m.quitting = true
+			return m, tea.Quit
+		}
+	}
 	// While a turn is in flight, a plain message is queued as steering for the
 	// running agent instead of starting a second concurrent Run (which would
 	// panic on the loop's run mutex). It is delivered at the next safe boundary.
@@ -968,7 +1023,7 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.deps.Permission.SetYolo(m.status.Yolo)
 	case "/save":
 		m.dialogs.Push(&dialog.Text{DialogID: "save", Title: "Saved", Body: "Session save requested.", Theme: m.theme})
-	case "/quit":
+	case "/quit", "/exit":
 		m.quitting = true
 		return m, tea.Quit
 	default:
@@ -1633,7 +1688,7 @@ func (m *model) slashHelpLines() []string {
 		"/mcp - list MCP servers with their connection state and capability counts",
 		"/plan - restrict the agent to read-only tools and propose a plan",
 		"/approve - exit plan mode and re-enable execution tools",
-		"/model - open model picker",
+		"/model - open model picker (switch to a provider you have a key for)",
 		"/agent - open agent picker",
 		"/goal [text|run|stop|clear] - show, set, run, stop, or clear the goal",
 		"/permissions [read-only|auto|full] - show or set approval mode",
@@ -1641,7 +1696,9 @@ func (m *model) slashHelpLines() []string {
 		"/theme [dark|light|high-contrast] - show or switch the color theme",
 		"/yolo - toggle permission bypass",
 		"/save - persist session",
-		"/quit - exit",
+		"/quit - exit (or just type 'exit')",
+		"/exit - exit (alias for /quit)",
+		"setup: set a provider API key env var (e.g. ANTHROPIC_API_KEY) or run 'bharatcode login <provider> --token ...', then /model to select it",
 	}
 	// Append registered recipes so the help listing stays self-documenting as
 	// new recipes are dropped into the recipe directories.

@@ -234,12 +234,12 @@ func TestMatchSlash_FuzzyFallback(t *testing.T) {
 // token as a contiguous substring sorts ahead of ones that only match it as a
 // scattered subsequence, and within the subsequence band the tighter match span
 // wins. For "/et", "/budget" contains "et" outright, so it leads the subsequence
-// matches; within that band "/agent" (e..t span 3) precedes "/revert" (5)
-// precedes "/export" (6).
+// matches; within that band "/agent" (e..t span 3) precedes "/exit" (4)
+// precedes "/revert" (5) precedes "/export" (6).
 func TestMatchSlash_FuzzyRanksByRelevance(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, []string{"/budget", "/agent", "/revert", "/export"}, matchSlash(slashCommands, "/et"),
+	require.Equal(t, []string{"/budget", "/agent", "/exit", "/revert", "/export"}, matchSlash(slashCommands, "/et"),
 		"substring match leads, then subsequence matches by tightest span")
 }
 

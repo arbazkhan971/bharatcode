@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -649,4 +651,83 @@ func TestTurnNotifyBody(t *testing.T) {
 	got := turnNotifyBody(msg(longLine))
 	require.LessOrEqual(t, len(got), 100)
 	require.True(t, strings.HasSuffix(got, "..."))
+}
+
+// TestFriendlyRunError_AuthGetsHint asserts a missing-credentials error (one
+// wrapping llm.ErrAuth) is rewritten with an actionable hint pointing at /model
+// and key setup, while the provider's specific message is preserved and a
+// non-auth error is returned unchanged.
+func TestFriendlyRunError_AuthGetsHint(t *testing.T) {
+	t.Parallel()
+
+	authErr := fmt.Errorf("calling provider: no API key for deepseek: set DEEPSEEK_API_KEY or run 'bharatcode login deepseek': %w", llm.ErrAuth)
+	got := friendlyRunError(authErr)
+	require.Contains(t, got, "no API key for deepseek", "the provider's specific remedy must be kept")
+	require.Contains(t, got, "/model", "an auth error must point the user at the model picker")
+	require.Contains(t, strings.ToLower(got), "key", "an auth error must mention setting a key")
+
+	plain := errors.New("boom: network unreachable")
+	require.Equal(t, "boom: network unreachable", friendlyRunError(plain),
+		"a non-auth error must be returned verbatim")
+
+	require.Empty(t, friendlyRunError(nil), "a nil error yields an empty string")
+}
+
+// TestEventRunError_AuthRendersFriendlyHint asserts that when the agent emits a
+// run error wrapping ErrAuth, the chat shows the actionable hint rather than a
+// bare "authentication failed", and marks the turn as having surfaced an error.
+func TestEventRunError_AuthRendersFriendlyHint(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	authErr := fmt.Errorf("calling provider: no API key for deepseek: set DEEPSEEK_API_KEY: %w", llm.ErrAuth)
+	m.handleAgentEvent(agentEventMsg(agent.Event{Kind: agent.EventRunError, Err: authErr}))
+
+	rendered := plainText(m.chat.Render(200))
+	require.Contains(t, rendered, "no API key for deepseek", "the auth error detail must reach the chat")
+	require.Contains(t, rendered, "/model", "the auth error must surface the /model hint inline")
+	require.True(t, m.turnErrShown, "rendering a run error must mark the turn as already surfaced")
+}
+
+// TestHandleRunDone_SurfacesUnpublishedError asserts that a turn error which was
+// NOT already shown inline (e.g. a Run path that returns without publishing an
+// EventRunError) is surfaced in the chat, so the failure is never silently
+// swallowed.
+func TestHandleRunDone_SurfacesUnpublishedError(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.turnErrShown = false
+	m.handleRunDone(runDoneMsg{err: errors.New("appending user message: disk full")})
+
+	rendered := plainText(m.chat.Render(200))
+	require.Contains(t, rendered, "disk full", "an unpublished run error must still reach the chat")
+}
+
+// TestHandleRunDone_QuietOnCancel asserts that a user interrupt (context
+// cancellation) is not reported as a fault: the chat stays free of an error
+// line, since the cancellation was intentional.
+func TestHandleRunDone_QuietOnCancel(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.turnErrShown = false
+	m.handleRunDone(runDoneMsg{err: fmt.Errorf("calling provider: %w", context.Canceled)})
+
+	rendered := plainText(m.chat.Render(200))
+	require.NotContains(t, rendered, "[error:", "a user cancellation must not render an error line")
+}
+
+// TestHandleRunDone_NoDoubleReport asserts that an error already surfaced inline
+// (turnErrShown set by EventRunError) is not re-reported by handleRunDone, so the
+// user does not see the same failure twice.
+func TestHandleRunDone_NoDoubleReport(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.turnErrShown = true
+	m.handleRunDone(runDoneMsg{err: fmt.Errorf("calling provider: %w", llm.ErrAuth)})
+
+	rendered := plainText(m.chat.Render(200))
+	require.NotContains(t, rendered, "[error:", "handleRunDone must not duplicate an inline-reported error")
 }

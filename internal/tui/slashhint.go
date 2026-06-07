@@ -67,6 +67,7 @@ var slashCommandDescriptions = map[string]string{
 	"/search":      "find a term in the chat",
 	"/compact":     "summarize older turns to shrink context",
 	"/quit":        "exit",
+	"/exit":        "exit",
 }
 
 // slashCommandArgHints maps a built-in slash command that takes arguments to the

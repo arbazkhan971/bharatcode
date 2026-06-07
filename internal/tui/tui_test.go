@@ -18,6 +18,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/db"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
+	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
@@ -411,6 +412,73 @@ func TestCtrlC_InterruptsRunningTurnInsteadOfQuitting(t *testing.T) {
 	require.True(t, idle.quitting,
 		"Ctrl+C on an idle empty prompt must still quit")
 	require.NotNil(t, cmd, "quitting must return a command")
+}
+
+// TestExitAliases_Quit asserts that /exit and /quit both quit, and that a bare
+// "exit" or "quit" typed at an idle prompt also quits — matching shell/REPL
+// muscle memory — while the words are still sent verbatim to the agent when a
+// turn is in flight (so a question about "exit codes" is not eaten).
+func TestExitAliases_Quit(t *testing.T) {
+	t.Parallel()
+
+	for _, cmd := range []string{"/exit", "/quit", "exit", "quit", "EXIT", "Quit"} {
+		m := newSizedModel(t)
+		m.input.WriteString(cmd)
+		_, c := m.Update(keySpecial("enter", tea.KeyEnter))
+		require.Truef(t, m.quitting, "%q must set quitting", cmd)
+		require.NotNilf(t, c, "%q must return a quit command", cmd)
+	}
+}
+
+// TestBareExit_NotQuitDuringRun asserts that a bare "exit" typed mid-turn is
+// treated as input (queued as steering), not an app quit, so it can still reach
+// the agent — a user might genuinely be asking about "exit" mid-task. The /exit
+// slash form, by contrast, always quits regardless of run state.
+func TestBareExit_NotQuitDuringRun(t *testing.T) {
+	provider := &gatedProvider{release: make(chan struct{})}
+	provider.scripts = [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "working"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}
+
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	m.input.WriteString("first prompt")
+	_, startCmd := m.Update(keySpecial("enter", tea.KeyEnter))
+	require.True(t, m.running, "first prompt must start a run")
+	msgCh := runBatch(t, startCmd)
+	waitForCalls(t, provider, 1)
+
+	// Bare "exit" while running: must NOT quit, and must be queued as steering.
+	m.input.WriteString("exit")
+	_, steerCmd := m.Update(keySpecial("enter", tea.KeyEnter))
+	require.False(t, m.quitting, "a bare 'exit' during a run must not quit the app")
+	require.Nil(t, steerCmd, "the queued steering message must not start a new run command")
+	require.Contains(t, plainText(m.chat.Render(200)), "[queued]", "a bare 'exit' mid-run is queued as steering")
+
+	close(provider.release)
+	done := drainUntilRunDone(t, h, msgCh)
+	require.NoError(t, done.err)
+}
+
+// TestSlashHelp_MentionsProviderSetup asserts the /help listing tells a first-run
+// user how to make the agent work: set a provider key (env var or 'bharatcode
+// login') and pick the model with /model.
+func TestSlashHelp_MentionsProviderSetup(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	body := strings.Join(m.slashHelpLines(), "\n")
+	require.Contains(t, body, "bharatcode login", "/help must mention the login command for setting a key")
+	require.Contains(t, body, "API key", "/help must mention setting an API key")
+	require.Contains(t, body, "/exit", "/help must document the /exit alias")
 }
 
 // TestScrollStatus_SurfacesInStatusBar drives the rendered view: at rest the

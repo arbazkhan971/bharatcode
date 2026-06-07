@@ -44,6 +44,7 @@ var slashCommands = []string{
 	"/search",
 	"/compact",
 	"/quit",
+	"/exit",
 }
 
 // inputState holds the in-session prompt history and the in-progress slash

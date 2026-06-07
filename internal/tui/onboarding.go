@@ -100,6 +100,13 @@ func (m *model) needsOnboarding() bool {
 		// layer surfaces a precise error if a turn is actually attempted.
 		return false
 	}
+	// chatgpt uses an OAuth session file rather than an API key env var, so
+	// HasAPIKey would always return true (empty envVar → no key needed). Check
+	// the session file directly instead and trigger onboarding when it is absent.
+	if prov.Type == config.ProviderChatGPT {
+		_, err := llm.ChatGPTStatus()
+		return err != nil
+	}
 	return !llm.HasAPIKey(prov.APIKeyEnv, strings.ToLower(prov.Name))
 }
 

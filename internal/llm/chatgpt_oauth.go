@@ -507,7 +507,12 @@ func startChatGPTLogin(ctx context.Context, opts LoginOptions) (*chatgptAuth, er
 		deliver(callbackResult{code: code})
 	})
 
-	server := &http.Server{Handler: mux}
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+	}
 	go func() { _ = server.Serve(listener) }()
 	// Always shut the server down on return so the port is freed even on error.
 	defer func() {

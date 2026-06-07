@@ -3,6 +3,7 @@ package llm
 import (
 	"fmt"
 	"os"
+	"sync"
 )
 
 // keyringServiceName is the service identifier used when storing and retrieving
@@ -34,6 +35,11 @@ func (noopKeyring) Get(_, _ string) (string, error) { return "", nil }
 
 func (noopKeyring) Set(_, _, _ string) error { return nil }
 
+// keyringMu guards activeKeyring and activeKeyringWriter. SetKeyring* acquires
+// a write lock; resolveAPIKey and StoreAPIKey acquire a read lock so concurrent
+// provider goroutines do not race against startup wiring.
+var keyringMu sync.RWMutex
+
 // activeKeyring is the package-level keyring reader used by resolveAPIKey.
 // It starts as a no-op; cmd layer replaces it with the OS keyring at startup.
 var activeKeyring keyringReader = noopKeyring{}
@@ -48,7 +54,9 @@ var activeKeyringWriter keyringWriter = noopKeyring{}
 // the cmd layer after boot so that provider key resolution can consult the OS
 // keyring without creating an import cycle between internal/llm and internal/cmd.
 func SetKeyringReader(r keyringReader) {
+	keyringMu.Lock()
 	activeKeyring = r
+	keyringMu.Unlock()
 }
 
 // SetKeyringWriter replaces the package-level keyring writer. It is called by
@@ -57,7 +65,9 @@ func SetKeyringReader(r keyringReader) {
 // cycle between internal/llm and internal/cmd. A token stored this way is
 // resolvable immediately on the next provider call, since key lookup is lazy.
 func SetKeyringWriter(w keyringWriter) {
+	keyringMu.Lock()
 	activeKeyringWriter = w
+	keyringMu.Unlock()
 }
 
 // StoreAPIKey persists a provider token in the OS keyring under the shared
@@ -68,10 +78,13 @@ func SetKeyringWriter(w keyringWriter) {
 // provider-build time — a token stored here takes effect on the very next turn,
 // with no restart required.
 func StoreAPIKey(providerName, token string) error {
-	if activeKeyringWriter == nil {
+	keyringMu.RLock()
+	w := activeKeyringWriter
+	keyringMu.RUnlock()
+	if w == nil {
 		return fmt.Errorf("storing API key for %s: no keyring configured", providerName)
 	}
-	if err := activeKeyringWriter.Set(keyringServiceName, providerName, token); err != nil {
+	if err := w.Set(keyringServiceName, providerName, token); err != nil {
 		return fmt.Errorf("storing API key for %s: %w", providerName, err)
 	}
 	return nil
@@ -104,8 +117,11 @@ func resolveAPIKey(envVar, providerName string) (string, error) {
 	if v := os.Getenv(envVar); v != "" {
 		return v, nil
 	}
-	if activeKeyring != nil {
-		if v, err := activeKeyring.Get(keyringServiceName, providerName); err == nil && v != "" {
+	keyringMu.RLock()
+	kr := activeKeyring
+	keyringMu.RUnlock()
+	if kr != nil {
+		if v, err := kr.Get(keyringServiceName, providerName); err == nil && v != "" {
 			return v, nil
 		}
 	}

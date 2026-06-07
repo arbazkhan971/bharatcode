@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/app"
+	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/offline"
 	"github.com/arbazkhan971/bharatcode/internal/selfupdate"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -154,6 +155,10 @@ func resolveInitialSession(ctx context.Context, application *app.App, opts *root
 }
 
 func buildApp(ctx context.Context, opts *rootOptions) (*app.App, error) {
+	// Wire the OS keyring into the llm package so 'bharatcode login' tokens are
+	// consulted when a provider's env var is not set.
+	llm.SetKeyringReader(keyring)
+
 	application, err := newApp(ctx, app.Options{
 		ConfigPath: opts.configPath,
 		ProjectDir: opts.projectDir,

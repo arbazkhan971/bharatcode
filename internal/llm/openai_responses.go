@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -74,9 +73,10 @@ func (p *openAIResponsesProvider) Stream(ctx context.Context, req Request) (<-ch
 	}
 	apiKey := ""
 	if p.apiKeyEnv != "" {
-		apiKey = os.Getenv(p.apiKeyEnv)
-		if apiKey == "" {
-			return nil, fmt.Errorf("reading %s: %w", p.apiKeyEnv, ErrAuth)
+		var err error
+		apiKey, err = resolveAPIKey(p.apiKeyEnv, p.name)
+		if err != nil {
+			return nil, err
 		}
 	}
 

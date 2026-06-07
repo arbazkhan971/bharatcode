@@ -414,6 +414,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case startChatGPTLoginMsg:
 		return m.handleStartChatGPTLogin()
+	case chatgptLoginDoneMsg:
+		return m.handleChatGPTLoginDone(msg)
 	case tea.FocusMsg:
 		m.notifications.SetFocused(true)
 		return m, nil

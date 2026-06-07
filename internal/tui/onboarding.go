@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
@@ -184,6 +185,11 @@ func (m *model) buildOnboardingOptions() []onboardingOption {
 				continue
 			case config.ProviderCodexOAuth:
 				// Represented by the dedicated ChatGPT sign-in row below.
+				continue
+			case config.ProviderChatGPT:
+				// The chatgpt provider has no API key env var — it uses its own
+				// OAuth session file. It is represented by the dedicated
+				// "Sign in with ChatGPT" row at the bottom of the menu.
 				continue
 			}
 			opts = append(opts, onboardingOption{
@@ -494,26 +500,126 @@ func (m *model) completeOnboarding(mod config.Model, providerName string) {
 	})
 }
 
+// chatgptLoginDoneMsg is delivered to Update when the ChatGPT OAuth flow
+// launched by handleStartChatGPTLogin completes (successfully or with an error).
+// It carries the signed-in identity (on success) or the error so the TUI can
+// activate the chatgpt model or surface a precise failure message.
+type chatgptLoginDoneMsg struct {
+	id  llm.ChatGPTIdentity
+	err error
+}
+
+// chatgptFuncExec is a tea.ExecCommand that wraps a plain Go function.
+// tea.Exec (bubbletea v2) pauses the alt-screen TUI, releases the terminal to
+// the function so it can write progress lines and interact with the user's
+// browser, then restores the TUI when the function returns. The three Set*
+// methods satisfy the ExecCommand interface; the function uses the writers
+// wired in by Set* for its output so the terminal state is correct.
+type chatgptFuncExec struct {
+	run    func(stdout io.Writer) (llm.ChatGPTIdentity, error)
+	stdout io.Writer
+	result chatgptLoginDoneMsg
+}
+
+func (c *chatgptFuncExec) SetStdin(_ io.Reader)  {}
+func (c *chatgptFuncExec) SetStderr(_ io.Writer) {}
+func (c *chatgptFuncExec) SetStdout(w io.Writer) { c.stdout = w }
+
+// Run executes the OAuth flow with the terminal's stdout wired in by
+// bubbletea before the call. The result is stored on the struct so the
+// ExecCallback closure (in handleStartChatGPTLogin) can read it after Run
+// returns.
+func (c *chatgptFuncExec) Run() error {
+	id, err := c.run(c.stdout)
+	c.result = chatgptLoginDoneMsg{id: id, err: err}
+	// Always return nil: a login error is a domain error surfaced via
+	// chatgptLoginDoneMsg, not an exec-level failure. Returning a non-nil
+	// error here would cause bubbletea to skip RestoreTerminal on some paths.
+	return nil
+}
+
 // handleStartChatGPTLogin handles the experimental ChatGPT sign-in chosen in
-// onboarding. The browser-based OAuth flow is blocking and writes to stdout, so
-// it cannot run inside the alt-screen event loop here — that in-TUI wiring is the
-// OAuth work's to add against this seam (the startChatGPTLoginMsg dispatch). For
-// now this surfaces the current sign-in status and points the user at the
-// working 'bharatcode auth chatgpt' command, so the option is genuinely useful
-// rather than a dead end. It lives here (not inline in Update) so the OAuth flow
-// has one well-named place to build on.
+// onboarding. If the user is already signed in it activates the chatgpt model
+// and shows a confirmation. Otherwise it uses tea.Exec to pause the alt-screen
+// TUI, release the terminal, and run the browser-based OAuth (PKCE) flow
+// interactively; when the flow completes the TUI resumes and
+// chatgptLoginDoneMsg is dispatched to finalize the session.
 func (m *model) handleStartChatGPTLogin() (tea.Model, tea.Cmd) {
-	body := "Run 'bharatcode auth chatgpt' to sign in with ChatGPT (experimental),\n" +
-		"then restart, or pick a provider and paste an API key (Ctrl+P)."
+	// Fast-path: already signed in — activate the model and confirm.
 	if id, err := llm.ChatGPTStatus(); err == nil {
 		who := id.Email
 		if who == "" {
 			who = "your ChatGPT account"
 		}
-		body = fmt.Sprintf("Already signed in as %s.\n\nPick the ChatGPT/codex model with /model to use it.", who)
+		mod := m.defaultModelForProvider("chatgpt")
+		if mod.ID != "" {
+			m.applyModel(mod)
+		}
+		body := fmt.Sprintf("Already signed in as %s.\n\nType a message to begin.", who)
+		if mod.ID == "" {
+			body = fmt.Sprintf("Already signed in as %s.\n\nPick the ChatGPT model with /model to use it.", who)
+		}
+		m.dialogs.Push(&dialog.Text{
+			DialogID: "chatgpt_login",
+			Title:    "Sign in with ChatGPT",
+			Body:     body,
+			Theme:    m.theme,
+		})
+		return m, nil
+	}
+
+	// Run the OAuth flow by pausing the TUI so the browser interaction and
+	// progress lines can use the terminal directly. bubbletea v2's tea.Exec
+	// releases the alt-screen, calls exec.Run() (which calls our closure),
+	// then restores the TUI. The callback delivers chatgptLoginDoneMsg so
+	// Update can activate the model on success.
+	exec := &chatgptFuncExec{
+		run: func(stdout io.Writer) (llm.ChatGPTIdentity, error) {
+			return llm.LoginChatGPT(m.ctx, stdout)
+		},
+	}
+	return m, tea.Exec(exec, func(err error) tea.Msg {
+		// err here is exec.Run()'s return value, which we always set to nil
+		// (domain errors are stored in exec.result). Read the real outcome.
+		return exec.result
+	})
+}
+
+// handleChatGPTLoginDone processes the result of the OAuth flow launched by
+// handleStartChatGPTLogin. On success it activates the chatgpt model and shows
+// a confirmation so the user can chat immediately. On failure it surfaces the
+// error and points to the CLI fallback so the session is not stranded.
+func (m *model) handleChatGPTLoginDone(msg chatgptLoginDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		body := "ChatGPT sign-in failed: " + msg.err.Error() +
+			"\n\nRun 'bharatcode auth chatgpt' in a terminal and restart, or pick a\n" +
+			"provider and paste an API key (Ctrl+P)."
+		m.dialogs.Push(&dialog.Text{
+			DialogID: "chatgpt_login_error",
+			Title:    "Sign in with ChatGPT",
+			Body:     body,
+			Theme:    m.theme,
+		})
+		return m, nil
+	}
+	// OAuth succeeded — activate the first chatgpt model so the next turn
+	// goes to the right provider without requiring a /model selection.
+	mod := m.defaultModelForProvider("chatgpt")
+	if mod.ID != "" {
+		m.applyModel(mod)
+	}
+	who := msg.id.Email
+	if who == "" {
+		who = "your ChatGPT account"
+	}
+	body := fmt.Sprintf("Signed in as %s.", who)
+	if mod.ID != "" {
+		body = fmt.Sprintf("Signed in as %s. Using chatgpt/%s.\n\nType a message to begin.", who, mod.ID)
+	} else {
+		body += "\n\nPick the ChatGPT model with /model to use it."
 	}
 	m.dialogs.Push(&dialog.Text{
-		DialogID: "chatgpt_login",
+		DialogID: "chatgpt_login_done",
 		Title:    "Sign in with ChatGPT",
 		Body:     body,
 		Theme:    m.theme,

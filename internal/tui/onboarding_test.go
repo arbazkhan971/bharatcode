@@ -308,9 +308,13 @@ func TestOnboarding_ChatGPTDispatchesStartLoginMsg(t *testing.T) {
 	_, isStart := msg.(startChatGPTLoginMsg)
 	require.True(t, isStart, "ChatGPT selection must dispatch startChatGPTLoginMsg")
 
-	// Feeding that message back surfaces the placeholder hook without crashing.
-	_, _ = m.Update(startChatGPTLoginMsg{})
-	require.True(t, m.dialogs.Contains("chatgpt_login"), "the ChatGPT login handler must open its dialog")
+	// Feeding that message back launches the OAuth flow via tea.Exec: a non-nil
+	// command is returned (the exec that will pause the TUI and open the
+	// browser), and no dialog is pushed synchronously when the user is not yet
+	// signed in (dialogs are shown asynchronously after the flow completes via
+	// chatgptLoginDoneMsg).
+	_, oauthCmd := m.Update(startChatGPTLoginMsg{})
+	require.NotNil(t, oauthCmd, "the ChatGPT login handler must return an exec command")
 }
 
 // --- navigation -----------------------------------------------------------

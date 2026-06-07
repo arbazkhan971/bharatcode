@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -83,9 +82,10 @@ func (p *anthropicProvider) Stream(ctx context.Context, req Request) (<-chan Eve
 
 	apiKey := ""
 	if p.apiKeyEnv != "" {
-		apiKey = os.Getenv(p.apiKeyEnv)
-		if apiKey == "" {
-			return nil, fmt.Errorf("reading %s: %w", p.apiKeyEnv, ErrAuth)
+		var err error
+		apiKey, err = resolveAPIKey(p.apiKeyEnv, p.name)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -127,9 +127,10 @@ func (p *anthropicProvider) Stream(ctx context.Context, req Request) (<-chan Eve
 func (p *anthropicProvider) CountTokens(ctx context.Context, req Request) (int, error) {
 	apiKey := ""
 	if p.apiKeyEnv != "" {
-		apiKey = os.Getenv(p.apiKeyEnv)
-		if apiKey == "" {
-			return 0, fmt.Errorf("reading %s: %w", p.apiKeyEnv, ErrAuth)
+		var err error
+		apiKey, err = resolveAPIKey(p.apiKeyEnv, p.name)
+		if err != nil {
+			return 0, err
 		}
 	}
 

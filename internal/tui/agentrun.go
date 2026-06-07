@@ -2,12 +2,14 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
@@ -85,6 +87,7 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.turnStartedAt = m.now
 	m.currentActivity = ""
 	m.turnToolCount = 0   // reset per-turn tool-call counter
+	m.turnErrShown = false // reset per-turn error-surfaced flag
 	m.lastTurnTokens = "" // clear previous turn's counts while the new turn runs
 	m.lastContextPct = 0  // clear previous context-window fill while the new turn runs
 	// Inline any @-file references so the model sees their contents, while the
@@ -239,10 +242,11 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 	case agent.EventRunError:
 		msg := "agent error"
 		if ev.Err != nil {
-			msg = ev.Err.Error()
+			msg = friendlyRunError(ev.Err)
 		}
 		m.chat.Stream(streamID, "\n[error: "+msg+"]\n")
 		m.chat.FinishStream(streamID)
+		m.turnErrShown = true
 	case agent.EventAutoCompacted:
 		// Surface a brief inline notice so users understand why the visible
 		// history shrank. The notice is injected as a synthetic stream so it
@@ -310,6 +314,17 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 		// The turn errored or was interrupted: discard the leftover steering
 		// rather than auto-starting it, since the user likely just cancelled.
 		m.stopGoal()
+		// Surface the failure when it was not already reported inline via an
+		// EventRunError. Several Run error paths return without publishing an
+		// event (e.g. session-append failures), which would otherwise vanish.
+		// A user interrupt (context cancellation) is intentional, not a fault,
+		// so it stays quiet.
+		if !m.turnErrShown && !errors.Is(done.err, context.Canceled) {
+			id := m.assistantStreamID()
+			m.chat.Stream(id, "\n[error: "+friendlyRunError(done.err)+"]\n")
+			m.chat.FinishStream(id)
+			m.chat.Reindex(id)
+		}
 		return m, nil
 	}
 
@@ -346,6 +361,24 @@ func turnNotifyBody(last *message.Message) string {
 		return text[:maxLen-3] + "..."
 	}
 	return text
+}
+
+// friendlyRunError converts a turn error into a message the user can act on. A
+// missing-credentials failure (anything wrapping llm.ErrAuth) is the common
+// first-run case — the default model's provider has no key — so instead of the
+// raw "calling provider: ... : authentication failed" it returns a hint that
+// names the in-app fixes: switch to a configured model with /model, or set a
+// key / sign in. The provider's own message (which names the exact env var and
+// 'bharatcode login' command) is kept as the lead so the specific remedy is not
+// lost. Non-auth errors are returned verbatim.
+func friendlyRunError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, llm.ErrAuth) {
+		return err.Error() + "\nTip: run /model to pick a model you have a key for, or set the key / sign in, then resend."
+	}
+	return err.Error()
 }
 
 // assistantText extracts the plain-text content of an assistant message.

@@ -35,6 +35,13 @@
       ]
     },
     {
+      "name": "chatgpt",
+      "type": "chatgpt",
+      "models": [
+        "gpt-5.1-codex"
+      ]
+    },
+    {
       "name": "deepseek",
       "type": "openai_compatible",
       "base_url": "https://api.deepseek.com/v1",
@@ -385,6 +392,15 @@
       "output_price_per_mtok_usd": 0.00,
       "supports_images": true,
       "supports_tools": true
+    },
+    {
+      "id": "gpt-5.1-codex",
+      "provider": "chatgpt",
+      "context_window": 400000,
+      "input_price_per_mtok_usd": 0.00,
+      "output_price_per_mtok_usd": 0.00,
+      "supports_images": true,
+      "supports_tools": false
     },
     {
       "id": "deepseek-chat",

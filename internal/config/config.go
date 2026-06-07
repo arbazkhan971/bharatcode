@@ -87,6 +87,13 @@ const (
 	// CLI's stored ChatGPT subscription token. It talks to OpenAI's private
 	// Codex backend; unsupported and outside OpenAI's third-party terms.
 	ProviderCodexOAuth ProviderType = "codex_oauth"
+	// ProviderChatGPT is the experimental "Sign in with ChatGPT" provider. Like
+	// ProviderCodexOAuth it talks to OpenAI's private ChatGPT Codex backend, but
+	// BharatCode performs the OAuth (PKCE) login itself via 'bharatcode auth
+	// chatgpt' and owns the token lifecycle (refresh included) rather than
+	// borrowing the Codex CLI's on-disk token. Unsupported, outside OpenAI's
+	// third-party terms, and for personal single-account use only.
+	ProviderChatGPT ProviderType = "chatgpt"
 	// ProviderGemini is for Google's native Generative Language API
 	// (generateContent / streamGenerateContent) used by Gemini models.
 	ProviderGemini ProviderType = "gemini"

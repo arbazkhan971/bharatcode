@@ -28,6 +28,11 @@ const providerOpenAIResponses = config.ProviderOpenAIResponses
 // stored ChatGPT subscription token. See codexOAuthProvider for the caveats.
 const providerCodexOAuth = config.ProviderCodexOAuth
 
+// providerChatGPT is the experimental "Sign in with ChatGPT" provider, which
+// performs its own OAuth login and owns the token lifecycle. See
+// chatgptOAuthProvider for the caveats.
+const providerChatGPT = config.ProviderChatGPT
+
 // Registry holds configured providers and is safe for concurrent callers.
 type Registry struct {
 	mu        sync.RWMutex
@@ -108,6 +113,12 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 			// Experimental: reuses the Codex CLI's local subscription token.
 			// BaseURL overrides the auth-file path for tests; empty = default.
 			provider = newCodexOAuthProvider(p.Name, models, client, p.BaseURL)
+		case providerChatGPT:
+			// Experimental: "Sign in with ChatGPT". BharatCode performs the OAuth
+			// login ('bharatcode auth chatgpt') and stores/refreshes the token
+			// itself. BaseURL overrides the auth-file path for tests; empty =
+			// default config-dir location.
+			provider = newChatGPTOAuthProvider(p.Name, models, client, p.BaseURL)
 		case config.ProviderOpenAICompatible, config.ProviderLMStudio:
 			provider = newOpenAICompatibleProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
 		case config.ProviderOllama:

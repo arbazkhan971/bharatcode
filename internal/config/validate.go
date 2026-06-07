@@ -29,7 +29,7 @@ func Validate(cfg *Config) error {
 
 		switch prov.Type {
 		case ProviderAnthropic, ProviderOpenAI, ProviderOpenAICompatible, ProviderOllama, ProviderLMStudio,
-			ProviderOpenAIResponses, ProviderCodexOAuth, ProviderGemini, ProviderAzure:
+			ProviderOpenAIResponses, ProviderCodexOAuth, ProviderChatGPT, ProviderGemini, ProviderAzure:
 			// Valid
 		default:
 			return fmt.Errorf("invalid provider type %q at /providers/%d/type", prov.Type, i)

@@ -109,6 +109,7 @@ func newRootCmd() *cobra.Command {
 		newRunCmd(),
 		newLoginCmd(),
 		newLogoutCmd(),
+		newAuthCmd(),
 		newModelsCmd(),
 		newSessionsCmd(),
 		newRevertCmd(),
@@ -156,8 +157,10 @@ func resolveInitialSession(ctx context.Context, application *app.App, opts *root
 
 func buildApp(ctx context.Context, opts *rootOptions) (*app.App, error) {
 	// Wire the OS keyring into the llm package so 'bharatcode login' tokens are
-	// consulted when a provider's env var is not set.
+	// consulted when a provider's env var is not set, and so the TUI's first-run
+	// onboarding can persist a token through the same backend key resolution reads.
 	llm.SetKeyringReader(keyring)
+	llm.SetKeyringWriter(keyring)
 
 	application, err := newApp(ctx, app.Options{
 		ConfigPath: opts.configPath,

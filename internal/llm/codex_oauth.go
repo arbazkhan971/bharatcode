@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -192,8 +193,20 @@ func (p *codexOAuthProvider) readResponse(ctx context.Context, resp *http.Respon
 	defer resp.Body.Close()
 
 	send(ctx, events, StartEvent{Provider: p.Name(), Model: model})
+	if err := emitCodexBackendStream(ctx, resp.Body, events); err != nil {
+		send(ctx, events, ErrorEvent{Err: err})
+	}
+}
+
+// emitCodexBackendStream parses the ChatGPT Codex backend's Responses SSE stream
+// and emits DeltaText/Thinking events as they arrive, followed by a terminal
+// EndEvent carrying the reported usage. Start is emitted by the caller. The
+// backend's event shape is identical for both the Codex-CLI-token path
+// (codexOAuthProvider) and the BharatCode-login path (chatgptOAuthProvider), so
+// both share this helper.
+func emitCodexBackendStream(ctx context.Context, body io.Reader, events chan<- Event) error {
 	var usage Usage
-	err := readSSE(ctx, resp.Body, func(ev sseEvent) error {
+	err := readSSE(ctx, body, func(ev sseEvent) error {
 		if ev.Data == "" || ev.Data == "[DONE]" {
 			return nil
 		}
@@ -224,8 +237,8 @@ func (p *codexOAuthProvider) readResponse(ctx context.Context, resp *http.Respon
 		return nil
 	})
 	if err != nil {
-		send(ctx, events, ErrorEvent{Err: err})
-		return
+		return err
 	}
 	send(ctx, events, EndEvent{Usage: usage})
+	return nil
 }

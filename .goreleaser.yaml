@@ -54,6 +54,9 @@ brews:
   - name: bharatcode
     ids:
       - bharatcode
+    # Write into Formula/ — Homebrew reads that before the repo root, so the
+    # tap must keep the formula there (not at the root) to avoid a stale split.
+    directory: Formula
     repository:
       owner: arbazkhan971
       name: homebrew-tap

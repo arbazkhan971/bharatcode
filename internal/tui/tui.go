@@ -1087,6 +1087,9 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	if text == "/revert" || strings.HasPrefix(text, "/revert ") {
 		return m.handleRevert(text)
 	}
+	if text == "/rename" || strings.HasPrefix(text, "/rename ") {
+		return m.handleRename(text), nil
+	}
 
 	switch text {
 	case "/tabs":

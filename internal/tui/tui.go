@@ -160,14 +160,13 @@ type model struct {
 	theme     styles.Theme
 	themeName string
 	chat      *chat.List
-	// vp is the scrollable transcript container. The chat list renders the
-	// activity-stream string and renderMain pushes it in via SetContent; the
-	// viewport windows it to the laid-out chat height and owns the vertical
-	// scroll position. chatScroll (lines from the bottom) stays the model's
-	// scroll intent — set by the mouse, the scroll keys, and search — and
-	// clampChat translates it into the viewport's offset each frame so the two
-	// never drift.
-	vp            viewport.Model
+	// vp is the scrollable transcript container. The viewport is sized
+	// (SetWidth/SetHeight) exclusively in Update's WindowSizeMsg handler so the
+	// render path stays free of dimension mutations. Per-frame content (including
+	// search highlights) is loaded via SetContent inside clampChat, which also
+	// drives the scroll offset and returns m.vp.View() — replacing the old
+	// hand-rolled strings.Split window that broke on ANSI-escaped lines.
+	vp viewport.Model
 	dialogs       dialog.Stack
 	footer        tuiledger.Footer
 	status        statusbar.Bar
@@ -434,10 +433,12 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	return m
 }
 
-// Init starts lightweight subscriptions, the agent-event listen loop, the
-// uptime ticker, and the streaming spinner.
+// Init starts lightweight subscriptions, the agent-event listen loop, and the
+// uptime ticker. The streaming spinner is NOT started here; it begins only when
+// a turn is launched (startRun/continueRun batch its first Tick alongside the
+// run command) so it does not leak a 12fps timer while the session is idle.
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.waitLedger(), m.waitPermission(), m.ensureListening(), tick(), m.streamSpinner.Tick)
+	return tea.Batch(m.waitLedger(), m.waitPermission(), m.ensureListening(), tick())
 }
 
 // Update applies one Bubble Tea message.
@@ -562,7 +563,12 @@ func (m *model) viewString() string {
 			overlay := pickerModal(m.sessionPickerList, "Sessions", m.width, m.height)
 			body = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
 		default:
-			body += "\n" + m.dialogs.Render(m.width)
+			// Center the dialog over the transcript using lipgloss.Place, the same
+			// way the picker types do, so permission dialogs, error dialogs, and the
+			// onboarding dialog float at the correct terminal position rather than
+			// being appended below the transcript via raw "\n" concatenation.
+			overlay := m.dialogs.Render(m.width)
+			body = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
 		}
 	}
 	return body
@@ -1370,7 +1376,11 @@ func (m *model) renderMain() string {
 		chatH = max(0, chatH-1)
 	}
 
-	m.status.Working = runningStatus(m.turnStartedAt, m.now, m.currentActivity, m.turnToolCount)
+	spinnerView := ""
+	if m.running {
+		spinnerView = m.streamSpinner.View()
+	}
+	m.status.Working = runningStatus(m.turnStartedAt, m.now, m.currentActivity, m.turnToolCount, spinnerView)
 	m.status.TurnTokens = m.lastTurnTokens
 	m.status.ContextPct = m.lastContextPct
 	m.status.Search = m.search.statusSegment()
@@ -1403,32 +1413,28 @@ func (m *model) renderMain() string {
 	return lipgloss.JoinVertical(lipgloss.Left, zones...)
 }
 
-// clampChat pushes the rendered transcript s into the scrollable viewport, sizes
-// the viewport to width x height, and returns the visible window. m.chatScroll —
-// the number of lines the view is scrolled up from the newest content — is the
-// scroll intent the mouse, scroll keys, and search set; clampChat clamps it to
-// the scrollable range (writing the clamped value back so the model never keeps
-// an out-of-range offset after a resize or a content change) and translates it
-// into the viewport's top offset: a scroll of 0 anchors the view to the bottom
-// via GotoBottom (so newly streamed output follows), while a positive scroll
-// reveals that many lines of older content. m.chatMaxScroll records the furthest
-// the view can travel so the status bar can report a reading position. The
-// returned window is sliced from s so it matches the line space chatScroll
-// indexes (the same space the search highlighter addresses) exactly.
-func (m *model) clampChat(s string, width, height int) string {
+// clampChat loads the rendered transcript s into the viewport, applies the
+// model's scroll intent (chatScroll lines up from the bottom), and returns
+// m.vp.View() — the viewport's own ANSI-safe window into the content.
+//
+// Viewport sizing (SetWidth/SetHeight) is done exclusively in Update handlers
+// (WindowSizeMsg) so this function never changes the viewport's dimensions:
+// it only calls SetContent (content may be search-highlighted each frame) and
+// SetYOffset/GotoBottom (to apply the scroll intent) before delegating the
+// actual rendering to the viewport component. Replacing the old hand-rolled
+// strings.Split slice with m.vp.View() is the key correctness fix: the
+// viewport correctly counts ANSI-escaped wrapped lines whereas the byte-split
+// approach undercounts them and corrupts the displayed window.
+func (m *model) clampChat(s string, _, height int) string {
 	if height <= 0 {
 		m.chatScroll = 0
 		m.chatMaxScroll = 0
 		return ""
 	}
-	if width < 1 {
-		width = 1
-	}
-	// The viewport is the live container: it holds the transcript and owns the
-	// scroll offset. Size it first so its line accounting matches the window we
-	// return, then load the content.
-	m.vp.SetWidth(width)
-	m.vp.SetHeight(height)
+
+	// Load the per-frame content (may include search highlights) into the
+	// viewport. Width/height are already set in Update; this call only refreshes
+	// the text, so the viewport's line accounting is current for this frame.
 	m.vp.SetContent(s)
 
 	lines := strings.Split(s, "\n")
@@ -1454,21 +1460,7 @@ func (m *model) clampChat(s string, width, height int) string {
 		m.vp.SetYOffset(maxScroll - m.chatScroll)
 	}
 
-	if len(lines) <= height {
-		return s
-	}
-	// Window the source lines by the viewport's resolved top offset so the
-	// returned slice matches both what the viewport shows and the line space the
-	// search highlighter addresses. (end is exclusive.)
-	start := m.vp.YOffset
-	if start < 0 {
-		start = 0
-	}
-	end := start + height
-	if end > len(lines) {
-		end = len(lines)
-	}
-	return strings.Join(lines[start:end], "\n")
+	return m.vp.View()
 }
 
 // scrollStatus returns the status-bar segment describing scrollback position
@@ -1581,11 +1573,6 @@ func compactTokenCount(n int) string {
 	return fmt.Sprintf("%.0fk", f)
 }
 
-// spinnerFrames are the braille glyphs cycled to signal that the agent is
-// actively working. One frame is advanced per one-second status tick, so the
-// indicator visibly animates while a turn is in flight.
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
 // interruptHintAfter is how long a turn must run before runningStatus appends
 // the "ctrl+c to interrupt" hint. A short turn finishes before the reader could
 // act on it, so the bar stays uncluttered; only a turn long enough that the user
@@ -1596,27 +1583,20 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const interruptHintAfter = 10 * time.Second
 
 // runningStatus returns the status-bar segment shown while a turn is in flight:
-// a cycling spinner, a label for what the agent is doing, the elapsed time,
-// and — when the turn has invoked at least one tool — a "[N]" count of total
-// tool calls so far, e.g. "⠙ working 3s" or "⠙ Bash 3s [2]". The "[N]" count
-// gives the user a progress signal — they can see how many tool invocations
-// have accumulated without scrolling up to count "[tool: ...]" chat lines,
-// matching the step-counter Claude Code and opencode show in their progress
-// indicators. The label is the name of the tool currently running (activity),
-// falling back to "working" while the agent is thinking between tools, so the
-// reader can tell a long turn is shelling out or editing rather than merely
-// stalled. It returns "" when no turn is running (a zero start time), so the
-// bar reverts to its idle form the moment the agent finishes. The elapsed time
-// is taken from now-started and the spinner frame from the whole-second elapsed
-// count, so the glyph advances in step with the one-second tick that drives the
-// duration. A negative elapsed (clock skew) is treated as zero so the frame
-// index never goes out of range.
+// the bubbles spinner view (spinnerView, pre-rendered from m.streamSpinner.View()),
+// a label for what the agent is doing, the elapsed time, and — when the turn has
+// invoked at least one tool — a "[N]" count of total tool calls so far, e.g.
+// "⣾ working 3s" or "⣾ Bash 3s [2]". spinnerView is passed in so the function
+// stays side-effect-free; the caller (renderMain) reads m.streamSpinner.View()
+// while streaming and passes "" when idle. It returns "" when no turn is running
+// (a zero start time) so the bar reverts to its idle form the moment the agent
+// finishes. A negative elapsed (clock skew) is treated as zero.
 //
 // Once the turn has run past interruptHintAfter the segment gains a
 // "(ctrl+c to interrupt)" hint, so a user watching a long run learns how to stop
 // it without quitting the session — Ctrl+C interrupts a turn in flight rather
 // than quitting (see the key handler) but nothing else advertises that.
-func runningStatus(started, now time.Time, activity string, toolCount int) string {
+func runningStatus(started, now time.Time, activity string, toolCount int, spinnerView string) string {
 	if started.IsZero() {
 		return ""
 	}
@@ -1628,7 +1608,7 @@ func runningStatus(started, now time.Time, activity string, toolCount int) strin
 	if label == "" {
 		label = "working"
 	}
-	frame := spinnerFrames[int(elapsed/time.Second)%len(spinnerFrames)]
+	frame := spinnerView
 	seg := frame + " " + label + " " + util.HumanDuration(elapsed)
 	if toolCount > 0 {
 		seg += fmt.Sprintf(" [%d]", toolCount)

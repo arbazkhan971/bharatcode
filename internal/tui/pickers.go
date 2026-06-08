@@ -348,3 +348,12 @@ func stepStreamSpinner(sp spinner.Model, msg spinner.TickMsg, running bool) (spi
 	}
 	return sp.Update(msg)
 }
+
+// updateList forwards msg to the bubbles list's Update method and returns the
+// updated list.Model and tea.Cmd. bubbles/v2 list.Model.Update already returns
+// (list.Model, tea.Cmd) — not (tea.Model, tea.Cmd) — so no type assertion is
+// needed; this wrapper exists to give callers a uniform call site and to make
+// the forwarding explicit in the picker key handlers.
+func updateList(l list.Model, msg tea.Msg) (list.Model, tea.Cmd) {
+	return l.Update(msg)
+}

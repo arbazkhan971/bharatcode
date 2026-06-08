@@ -72,6 +72,13 @@ func (m *model) openSessionPicker() (tea.Model, tea.Cmd) {
 	m.sessionCandidates = sessions
 	m.sessionCursor = 0
 	m.sessionFilter = ""
+	// Rebuild the bubbles/list picker so it reflects the freshly loaded sessions
+	// and has the correct size for the current terminal. The dialog stack entry is
+	// still pushed for the text-body fallback path; the overlay renderer in
+	// viewString uses the list when sessionCandidates is non-empty.
+	lw, lh := pickerListSize(m.width, m.height)
+	m.sessionPickerList = newSessionPicker(sessions, m.sessionID, m.sessionPersisted, m.now)
+	m.sessionPickerList.SetSize(lw, lh)
 	m.dialogs.Push(&dialog.Text{
 		DialogID: "sessions",
 		Title:    "Sessions",

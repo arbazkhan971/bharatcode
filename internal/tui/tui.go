@@ -31,9 +31,12 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/util"
 	"github.com/charmbracelet/bubbles/v2/help"
 	"github.com/charmbracelet/bubbles/v2/key"
+	"github.com/charmbracelet/bubbles/v2/list"
+	"github.com/charmbracelet/bubbles/v2/spinner"
 	"github.com/charmbracelet/bubbles/v2/textarea"
 	"github.com/charmbracelet/bubbles/v2/viewport"
 	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/charmbracelet/lipgloss/v2"
 )
 
 const (
@@ -180,7 +183,18 @@ type model struct {
 	// handleKey via key.Matches.
 	keys keyMap
 	// help renders the muted footer help bar from keys.
-	help             help.Model
+	help help.Model
+	// streamSpinner animates the MiniDot braille glyph while the agent is
+	// producing a turn. It runs only while m.running so the per-frame tick loop
+	// terminates cleanly at turn end.
+	streamSpinner spinner.Model
+	// modelPickerList is the bubbles/list used for the /model picker overlay. It
+	// is (re)built when the picker opens and resized on every WindowSizeMsg.
+	modelPickerList list.Model
+	// sessionPickerList is the bubbles/list used for the /sessions picker
+	// overlay. It is (re)built when the picker opens and resized on every
+	// WindowSizeMsg.
+	sessionPickerList list.Model
 	inputHistory     inputState
 	focus            focusState
 	width            int
@@ -369,26 +383,29 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	}
 
 	m := &model{
-		ctx:             ctx,
-		deps:            deps,
-		theme:           theme,
-		themeName:       theme.Name,
-		chat:            chatList,
-		vp:              viewport.New(viewport.WithWidth(minWidth), viewport.WithHeight(1)),
-		footer:          footer,
-		status:          statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
-		notifications:   notification.NewFocusAware(notification.SystemNotifier{}),
-		textInput:       newPromptInput(),
-		keys:            defaultKeyMap(),
-		help:            newHelpModel(),
-		focus:           focusInput,
-		width:           minWidth,
-		height:          minHeight,
-		startedAt:       now,
-		now:             now,
-		sessionID:       sessionID,
-		workspaceRoot:   workingDir(),
-		copyToClipboard: systemClipboardCopy,
+		ctx:               ctx,
+		deps:              deps,
+		theme:             theme,
+		themeName:         theme.Name,
+		chat:              chatList,
+		vp:                viewport.New(viewport.WithWidth(minWidth), viewport.WithHeight(1)),
+		footer:            footer,
+		status:            statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
+		notifications:     notification.NewFocusAware(notification.SystemNotifier{}),
+		textInput:         newPromptInput(),
+		keys:              defaultKeyMap(),
+		help:              newHelpModel(),
+		streamSpinner:     newStreamSpinner(),
+		modelPickerList:   newModelPicker(deps.Cfg.Models, modelName),
+		sessionPickerList: newSessionPicker(nil, sessionID, false, now),
+		focus:             focusInput,
+		width:             minWidth,
+		height:            minHeight,
+		startedAt:         now,
+		now:               now,
+		sessionID:         sessionID,
+		workspaceRoot:     workingDir(),
+		copyToClipboard:   systemClipboardCopy,
 	}
 	if continueSession != nil {
 		m.sessionPersisted = true
@@ -417,10 +434,10 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	return m
 }
 
-// Init starts lightweight subscriptions, the agent-event listen loop, and the
-// uptime ticker.
+// Init starts lightweight subscriptions, the agent-event listen loop, the
+// uptime ticker, and the streaming spinner.
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.waitLedger(), m.waitPermission(), m.ensureListening(), tick())
+	return tea.Batch(m.waitLedger(), m.waitPermission(), m.ensureListening(), tick(), m.streamSpinner.Tick)
 }
 
 // Update applies one Bubble Tea message.
@@ -430,6 +447,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.layout = computeLayout(msg.Width, msg.Height)
+		// Resize the bubbles viewport to the chat pane. The tab bar borrows one
+		// row when more than one tab is open; chatViewportHeight already accounts
+		// for that, so use it as the definitive height.
+		m.vp.SetWidth(m.layout.chat.W)
+		m.vp.SetHeight(m.chatViewportHeight())
+		// Resize the prompt textarea to the input column.
+		if w := promptInputWidth(msg.Width); w > 0 {
+			m.textInput.SetWidth(w)
+		}
+		// Keep the help bar bound to the terminal width.
+		m.help.Width = msg.Width
+		// Resize the bubbles list pickers so their modals fit the new size.
+		lw, lh := pickerListSize(msg.Width, msg.Height)
+		m.modelPickerList.SetSize(lw, lh)
+		m.sessionPickerList.SetSize(lw, lh)
 		// Offer first-run onboarding once a width is known so its dialog renders
 		// correctly. A dialog pushed in newModel would render before any size
 		// arrives; gating on the first WindowSizeMsg is the safe place. The check
@@ -439,6 +471,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.maybeStartOnboarding()
 		}
 		return m, nil
+	case spinner.TickMsg:
+		// Forward tick to the streaming spinner only while a turn is in flight;
+		// once idle, stepStreamSpinner returns nil so the per-frame loop ends.
+		sp, cmd := stepStreamSpinner(m.streamSpinner, msg, m.running)
+		m.streamSpinner = sp
+		return m, cmd
 	case startChatGPTLoginMsg:
 		return m.handleStartChatGPTLogin()
 	case chatgptLoginDoneMsg:
@@ -509,8 +547,23 @@ func (m *model) viewString() string {
 	}
 
 	body := m.renderMain()
+
+	// Render any open dialog or picker as a centered overlay using lipgloss.Place
+	// so it floats over the transcript at the correct terminal position. The
+	// picker types (model_picker, sessions) use their bubbles/list rendering;
+	// all others fall through to the dialog stack's plain-text render.
 	if m.dialogs.Len() > 0 {
-		body += "\n" + m.dialogs.Render(m.width)
+		top := m.dialogs.Top()
+		switch {
+		case top != nil && top.ID() == "model_picker" && len(m.modelCandidates) > 0:
+			overlay := pickerModal(m.modelPickerList, "Model", m.width, m.height)
+			body = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
+		case top != nil && top.ID() == "sessions" && len(m.sessionCandidates) > 0:
+			overlay := pickerModal(m.sessionPickerList, "Sessions", m.width, m.height)
+			body = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay)
+		default:
+			body += "\n" + m.dialogs.Render(m.width)
+		}
 	}
 	return body
 }
@@ -1317,10 +1370,6 @@ func (m *model) renderMain() string {
 		chatH = max(0, chatH-1)
 	}
 
-	parts := []string{header}
-	if tabBar != "" {
-		parts = append(parts, tabBar)
-	}
 	m.status.Working = runningStatus(m.turnStartedAt, m.now, m.currentActivity, m.turnToolCount)
 	m.status.TurnTokens = m.lastTurnTokens
 	m.status.ContextPct = m.lastContextPct
@@ -1336,13 +1385,22 @@ func (m *model) renderMain() string {
 	// chat width sizes the viewport so over-long lines clip to the pane.
 	chatView := m.clampChat(chatBody, chatW, chatH)
 	m.status.Scroll = scrollStatus(m.chatScroll, m.chatMaxScroll)
-	parts = append(parts,
+
+	// Compose the screen top-to-bottom with lipgloss.JoinVertical so each zone
+	// is a discrete block rather than a hand-joined string. Header and optional
+	// tab bar come first, then the scrollable transcript, the bordered input box,
+	// the status bar, and the footer ledger row.
+	zones := []string{header}
+	if tabBar != "" {
+		zones = append(zones, tabBar)
+	}
+	zones = append(zones,
 		chatView,
 		clampHeight(input, m.layout.input.H),
 		m.status.Render(m.width),
 		m.footer.Render(m.width),
 	)
-	return strings.Join(parts, "\n")
+	return lipgloss.JoinVertical(lipgloss.Left, zones...)
 }
 
 // clampChat pushes the rendered transcript s into the scrollable viewport, sizes
@@ -1599,6 +1657,12 @@ func (m *model) pushModelPicker() {
 			break
 		}
 	}
+	// Rebuild the bubbles/list picker for the current models and terminal size.
+	// The dialog stack entry is still pushed for the text-body fallback; the
+	// overlay renderer in viewString uses the list when modelCandidates is set.
+	lw, lh := pickerListSize(m.width, m.height)
+	m.modelPickerList = newModelPicker(m.deps.Cfg.Models, m.status.Model)
+	m.modelPickerList.SetSize(lw, lh)
 	m.dialogs.Push(&dialog.Text{
 		DialogID: "model_picker",
 		Title:    "Models",

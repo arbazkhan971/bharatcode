@@ -1313,7 +1313,17 @@ func (m *model) applyTheme(name string) bool {
 }
 
 func (m *model) renderMain() string {
-	header := m.theme.Header.Render("BharatCode")
+	// Header: BharatCode wordmark (saffron "Bharat" + green "Code") with a thin
+	// tricolor accent rule underneath — the one tasteful brand moment on screen.
+	// The rule is drawn at the full terminal width so it reads as a page-top
+	// boundary rather than a floating element.
+	wordmark := styles.Wordmark()
+	triRule := styles.TricolorRule(m.width)
+	header := lipgloss.JoinVertical(lipgloss.Left,
+		m.theme.Header.Render(wordmark),
+		triRule,
+	)
+
 	// When the side panel is visible, carve its column out of the chat width
 	// here in the render rather than in computeLayout, so the persistent layout
 	// rects still span the full width (keeping the resize invariant intact).
@@ -1335,7 +1345,8 @@ func (m *model) renderMain() string {
 	// input buffer into it first. The textarea owns the "› " glyph, the muted
 	// placeholder (shown on an empty focused buffer), the block cursor, and
 	// word-wrap, replacing the hand-rolled renderInputArea + "▌" glyph.
-	m.textInput = syncPromptInput(m.textInput, m.input.String(), m.focus == focusInput, m.width)
+	focused := m.focus == focusInput
+	m.textInput = syncPromptInput(m.textInput, m.input.String(), focused, m.width)
 	input := renderPromptInput(m.textInput)
 	// Surface the slash-completion menu beneath the prompt so the commands Tab
 	// would cycle through are discoverable without pressing it. It occupies one
@@ -1343,7 +1354,7 @@ func (m *model) renderMain() string {
 	// renders nothing for a non-slash buffer. The reverse history search hint
 	// takes priority when Ctrl+R search is active, hiding the other menus.
 	hinted := false
-	if m.focus == focusInput {
+	if focused {
 		if hint := m.inputHistory.histSearchHint(); hint != "" {
 			input += "\n" + m.theme.Muted.Render(hint)
 			hinted = true
@@ -1364,17 +1375,33 @@ func (m *model) renderMain() string {
 			input += "\n" + bar
 		}
 	}
+	// Wrap the textarea in the branded InputPanel bordered box: saffron rounded
+	// border when focused, muted when blurred. The border + internal padding give
+	// the prompt a raised, framed feel that makes the active input unmistakable.
+	// Width is set to the full terminal width so the border spans the pane; the
+	// textarea's own content width is set narrower (promptInputWidth) so the text
+	// never sits against the frame. The layout.input.H=3 budget accommodates the
+	// top border (1) + content (1) + bottom border (1).
+	inputPanelStyle := styles.InputPanelBlurred.Width(m.width - 2)
+	if focused {
+		inputPanelStyle = styles.InputPanel.Width(m.width - 2)
+	}
+	inputPanel := inputPanelStyle.Render(input)
 
 	// The tab bar is rendered between the header and the chat when more than one
 	// tab is open. With a single tab it is empty and the row is omitted, so the
 	// default layout is byte-for-byte unchanged. It borrows a chat row, so the
 	// chat body is clamped one line shorter when the bar is present to preserve
-	// the overall height.
+	// the overall height. The header now uses two rows (wordmark + tricolor rule)
+	// so the layout height is adjusted accordingly.
 	tabBar := m.renderTabBar(m.width)
 	chatH := m.layout.chat.H
 	if tabBar != "" {
 		chatH = max(0, chatH-1)
 	}
+	// The tricolor rule adds one row to the header region; subtract it from the
+	// chat height so the total screen height stays within bounds.
+	chatH = max(0, chatH-1)
 
 	spinnerView := ""
 	if m.running {
@@ -1389,6 +1416,16 @@ func (m *model) renderMain() string {
 	} else {
 		m.status.InputTokens = ""
 	}
+	// The bordered input panel has a dynamic height (the slash/mention hint and
+	// help-bar rows come and go), so its full height is measured here and the
+	// transcript is shrunk to absorb the difference from the static budget. The
+	// panel itself is rendered WHOLE — never clamped — because clamping would drop
+	// its top border row and leave the box open at the top.
+	inputH := lipgloss.Height(inputPanel)
+	if extra := inputH - m.layout.input.H; extra > 0 {
+		chatH = max(0, chatH-extra)
+	}
+
 	// clampChat pushes the transcript into the scrollable viewport and finalizes
 	// m.chatScroll (clamping it to the scrollable range), so the scroll indicator
 	// is computed from it afterwards to reflect the window actually shown. The
@@ -1397,16 +1434,16 @@ func (m *model) renderMain() string {
 	m.status.Scroll = scrollStatus(m.chatScroll, m.chatMaxScroll)
 
 	// Compose the screen top-to-bottom with lipgloss.JoinVertical so each zone
-	// is a discrete block rather than a hand-joined string. Header and optional
-	// tab bar come first, then the scrollable transcript, the bordered input box,
-	// the status bar, and the footer ledger row.
+	// is a discrete block rather than a hand-joined string. Header (wordmark +
+	// tricolor rule) and optional tab bar come first, then the scrollable
+	// transcript, the bordered input panel, the status bar, and the footer row.
 	zones := []string{header}
 	if tabBar != "" {
 		zones = append(zones, tabBar)
 	}
 	zones = append(zones,
 		chatView,
-		clampHeight(input, m.layout.input.H),
+		inputPanel,
 		m.status.Render(m.width),
 		m.footer.Render(m.width),
 	)

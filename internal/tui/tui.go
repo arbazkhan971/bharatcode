@@ -29,6 +29,10 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/tui/statusbar"
 	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 	"github.com/arbazkhan971/bharatcode/internal/util"
+	"github.com/charmbracelet/bubbles/v2/help"
+	"github.com/charmbracelet/bubbles/v2/key"
+	"github.com/charmbracelet/bubbles/v2/textarea"
+	"github.com/charmbracelet/bubbles/v2/viewport"
 	tea "github.com/charmbracelet/bubbletea/v2"
 )
 
@@ -148,16 +152,35 @@ type (
 )
 
 type model struct {
-	ctx              context.Context
-	deps             Dependencies
-	theme            styles.Theme
-	themeName        string
-	chat             *chat.List
-	dialogs          dialog.Stack
-	footer           tuiledger.Footer
-	status           statusbar.Bar
-	notifications    *notification.FocusAware
-	input            strings.Builder
+	ctx       context.Context
+	deps      Dependencies
+	theme     styles.Theme
+	themeName string
+	chat      *chat.List
+	// vp is the scrollable transcript container. The chat list renders the
+	// activity-stream string and renderMain pushes it in via SetContent; the
+	// viewport windows it to the laid-out chat height and owns the vertical
+	// scroll position. chatScroll (lines from the bottom) stays the model's
+	// scroll intent — set by the mouse, the scroll keys, and search — and
+	// clampChat translates it into the viewport's offset each frame so the two
+	// never drift.
+	vp            viewport.Model
+	dialogs       dialog.Stack
+	footer        tuiledger.Footer
+	status        statusbar.Bar
+	notifications *notification.FocusAware
+	input         strings.Builder
+	// textInput is the bubbles textarea that renders the prompt (the "› " glyph,
+	// placeholder, cursor, and word-wrap). The input buffer above remains the
+	// canonical prompt text — driving history, undo/redo, recall, completion, and
+	// reverse search — and is mirrored into textInput before each render via
+	// syncPromptInput. The textarea is the view layer; the buffer is the model.
+	textInput textarea.Model
+	// keys is the global keymap surfaced in the footer help bar and matched in
+	// handleKey via key.Matches.
+	keys keyMap
+	// help renders the muted footer help bar from keys.
+	help             help.Model
 	inputHistory     inputState
 	focus            focusState
 	width            int
@@ -351,9 +374,13 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 		theme:           theme,
 		themeName:       theme.Name,
 		chat:            chatList,
+		vp:              viewport.New(viewport.WithWidth(minWidth), viewport.WithHeight(1)),
 		footer:          footer,
 		status:          statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
 		notifications:   notification.NewFocusAware(notification.SystemNotifier{}),
+		textInput:       newPromptInput(),
+		keys:            defaultKeyMap(),
+		help:            newHelpModel(),
 		focus:           focusInput,
 		width:           minWidth,
 		height:          minHeight,
@@ -550,6 +577,35 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleHistSearchKey(msg)
 	}
 
+	// Global bindings that open a picker or panel are matched through the shared
+	// keymap (the same bindings the footer help bar advertises) so the dispatch
+	// and the help text read from one source. They are context-free — unlike
+	// Enter/Tab/Ctrl+C below, whose behavior depends on focus and run state — so
+	// matching them here keeps the string switch for the stateful keys.
+	switch {
+	case key.Matches(msg, m.keys.Palette):
+		// The interactive command palette — a filterable, executable list of every
+		// slash command. Always available; not blocked by the running state so a
+		// user can open it mid-turn without interrupting the agent.
+		return m.openCommandPalette()
+	case key.Matches(msg, m.keys.Model):
+		m.pushModelPicker()
+		return m, nil
+	case key.Matches(msg, m.keys.Diff):
+		return m.handleDiff()
+	case key.Matches(msg, m.keys.Files):
+		m.filetree.toggle(m.workspaceRoot)
+		return m, nil
+	case key.Matches(msg, m.keys.NewTab):
+		return m, m.newTab()
+	case key.Matches(msg, m.keys.Help) && m.focus == focusChat:
+		// Toggle the expanded footer help. It is gated on chat focus so "?" typed
+		// at the prompt is still inserted as text; the full /keys overlay lists the
+		// complete keymap regardless of focus.
+		m.help.ShowAll = !m.help.ShowAll
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "ctrl+c":
 		// While a turn is in flight, Ctrl+C interrupts it rather than quitting, so a
@@ -636,9 +692,6 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case "ctrl+t":
-		// Open a new session tab and switch to it.
-		return m, m.newTab()
 	case "ctrl+w":
 		// Close the active tab (the last tab is kept).
 		return m, m.closeTab()
@@ -648,26 +701,11 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+shift+tab", "ctrl+left":
 		// Cycle to the previous tab (wraps); no-op with a single tab.
 		return m, m.prevTab()
-	case "ctrl+k":
-		// Open the interactive command palette — a filterable, executable list of
-		// every slash command — matching the command-palette UX in Claude Code and
-		// opencode (Ctrl+K / Ctrl+Shift+P). The palette is always available; it is
-		// not blocked by the running state so a user can open it mid-turn to check
-		// what commands exist without interrupting the agent.
-		return m.openCommandPalette()
-	case "ctrl+p":
-		m.pushModelPicker()
-		return m, nil
 	case "ctrl+a":
 		m.dialogs.Push(&dialog.Text{DialogID: "agent_picker", Title: "Agents", Body: m.agentList(), Theme: m.theme})
 		return m, nil
 	case "ctrl+s":
 		m.dialogs.Push(&dialog.Text{DialogID: "settings", Title: "Settings", Body: "No editable settings in this first pass.", Theme: m.theme})
-		return m, nil
-	case "ctrl+d":
-		return m.handleDiff()
-	case "ctrl+f":
-		m.filetree.toggle(m.workspaceRoot)
 		return m, nil
 	case "shift+up":
 		// Scroll the scrollback one line at a time, the finest keyboard step —
@@ -1234,31 +1272,37 @@ func (m *model) renderMain() string {
 		panel := m.renderFiletree(filetreeWidth, m.layout.chat.H)
 		chatBody = joinPanels(panel, chatBody, filetreeWidth, m.layout.chat.H)
 	}
-	cursor := ""
-	if m.focus == focusInput {
-		cursor = "▌"
-	}
-	input := renderInputArea(m.input.String(), cursor)
-	// An empty prompt shows a muted placeholder advertising the discovery
-	// affordances — slash commands, @-file mentions, and the help listing — the
-	// way Claude Code and opencode hint at their input shortcuts. It is dropped
-	// the moment the user types anything, so it never competes with real input,
-	// and is gated on input focus so a focused-elsewhere view stays uncluttered.
-	if m.focus == focusInput && m.input.Len() == 0 {
-		input += m.theme.Muted.Render(inputPlaceholder)
-	}
+	// Render the prompt through the bubbles textarea, mirroring the canonical
+	// input buffer into it first. The textarea owns the "› " glyph, the muted
+	// placeholder (shown on an empty focused buffer), the block cursor, and
+	// word-wrap, replacing the hand-rolled renderInputArea + "▌" glyph.
+	m.textInput = syncPromptInput(m.textInput, m.input.String(), m.focus == focusInput, m.width)
+	input := renderPromptInput(m.textInput)
 	// Surface the slash-completion menu beneath the prompt so the commands Tab
 	// would cycle through are discoverable without pressing it. It occupies one
 	// of the input region's spare rows, so the layout height is unchanged, and
 	// renders nothing for a non-slash buffer. The reverse history search hint
 	// takes priority when Ctrl+R search is active, hiding the other menus.
+	hinted := false
 	if m.focus == focusInput {
 		if hint := m.inputHistory.histSearchHint(); hint != "" {
 			input += "\n" + m.theme.Muted.Render(hint)
+			hinted = true
 		} else if hint := m.renderSlashHint(m.width); hint != "" {
 			input += "\n" + hint
+			hinted = true
 		} else if hint := m.renderMentionHint(m.width); hint != "" {
 			input += "\n" + hint
+			hinted = true
+		}
+	}
+	// Fill a spare input row with the muted footer help bar (bubbles/help) when no
+	// completion hint is occupying it, so the core bindings stay visible without
+	// adding a row to the rigid layout. A hint takes that row when active; the
+	// /keys overlay always lists the full keymap regardless.
+	if !hinted {
+		if bar := renderHelpBar(m.help, m.keys, m.width); bar != "" {
+			input += "\n" + bar
 		}
 	}
 
@@ -1286,10 +1330,11 @@ func (m *model) renderMain() string {
 	} else {
 		m.status.InputTokens = ""
 	}
-	// clampChat finalizes m.chatScroll (clamping it to the scrollable range), so
-	// the scroll indicator is computed from it afterwards to reflect the window
-	// actually shown.
-	chatView := m.clampChat(chatBody, chatH)
+	// clampChat pushes the transcript into the scrollable viewport and finalizes
+	// m.chatScroll (clamping it to the scrollable range), so the scroll indicator
+	// is computed from it afterwards to reflect the window actually shown. The
+	// chat width sizes the viewport so over-long lines clip to the pane.
+	chatView := m.clampChat(chatBody, chatW, chatH)
 	m.status.Scroll = scrollStatus(m.chatScroll, m.chatMaxScroll)
 	parts = append(parts,
 		chatView,
@@ -1300,20 +1345,34 @@ func (m *model) renderMain() string {
 	return strings.Join(parts, "\n")
 }
 
-// clampChat renders the chat body into a window of at most height lines,
-// honoring m.chatScroll. A scroll of 0 anchors the window to the bottom (the
-// newest content), matching the prior bottom-clamp behavior; a positive scroll
-// reveals that many lines of older content. The offset is clamped to the
-// scrollable range here so callers (the mouse-wheel handler) need not know the
-// rendered line count, and an over-scroll past the top simply pins to the first
-// line. It also writes the clamped offset back so the model never retains an
-// out-of-range scroll after a resize or content change.
-func (m *model) clampChat(s string, height int) string {
+// clampChat pushes the rendered transcript s into the scrollable viewport, sizes
+// the viewport to width x height, and returns the visible window. m.chatScroll —
+// the number of lines the view is scrolled up from the newest content — is the
+// scroll intent the mouse, scroll keys, and search set; clampChat clamps it to
+// the scrollable range (writing the clamped value back so the model never keeps
+// an out-of-range offset after a resize or a content change) and translates it
+// into the viewport's top offset: a scroll of 0 anchors the view to the bottom
+// via GotoBottom (so newly streamed output follows), while a positive scroll
+// reveals that many lines of older content. m.chatMaxScroll records the furthest
+// the view can travel so the status bar can report a reading position. The
+// returned window is sliced from s so it matches the line space chatScroll
+// indexes (the same space the search highlighter addresses) exactly.
+func (m *model) clampChat(s string, width, height int) string {
 	if height <= 0 {
 		m.chatScroll = 0
 		m.chatMaxScroll = 0
 		return ""
 	}
+	if width < 1 {
+		width = 1
+	}
+	// The viewport is the live container: it holds the transcript and owns the
+	// scroll offset. Size it first so its line accounting matches the window we
+	// return, then load the content.
+	m.vp.SetWidth(width)
+	m.vp.SetHeight(height)
+	m.vp.SetContent(s)
+
 	lines := strings.Split(s, "\n")
 	maxScroll := len(lines) - height
 	if maxScroll < 0 {
@@ -1326,12 +1385,31 @@ func (m *model) clampChat(s string, height int) string {
 	if m.chatScroll < 0 {
 		m.chatScroll = 0
 	}
+
+	// Drive the viewport from the clamped intent. chatScroll counts lines up from
+	// the bottom, so the viewport's top offset is its complement. At the bottom we
+	// call GotoBottom explicitly so the AtBottom contract holds and freshly
+	// appended output is followed; otherwise pin the exact offset.
+	if m.chatScroll == 0 {
+		m.vp.GotoBottom()
+	} else {
+		m.vp.SetYOffset(maxScroll - m.chatScroll)
+	}
+
 	if len(lines) <= height {
 		return s
 	}
-	// end is exclusive; scrolling up by chatScroll moves the window earlier.
-	end := len(lines) - m.chatScroll
-	start := end - height
+	// Window the source lines by the viewport's resolved top offset so the
+	// returned slice matches both what the viewport shows and the line space the
+	// search highlighter addresses. (end is exclusive.)
+	start := m.vp.YOffset
+	if start < 0 {
+		start = 0
+	}
+	end := start + height
+	if end > len(lines) {
+		end = len(lines)
+	}
 	return strings.Join(lines[start:end], "\n")
 }
 

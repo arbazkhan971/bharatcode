@@ -1,4 +1,11 @@
 // Package chat renders conversation messages with streaming-cache support.
+//
+// The transcript is drawn as an activity stream: each turn is led by an accent
+// bullet, tool and command turns by a bold action verb, their sub-output indented
+// under a muted "└" connector with long output elided to "… +N lines", faint
+// horizontal rules separate turns, and added/removed lines inside command output
+// are tinted green/red. The rendered string is the content the main model pushes
+// into its scrollable viewport.
 package chat
 
 import (
@@ -9,7 +16,18 @@ import (
 	"unicode"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
+	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 	"github.com/arbazkhan971/bharatcode/internal/util"
+)
+
+// subOutputElideOver is the line count past which a turn's sub-output (command
+// or tool result) is collapsed: the first subOutputHead lines are kept and the
+// remainder is replaced with a faint "… +N lines" hint, so a long log does not
+// bury the conversation while the head still shows what happened. Output at or
+// below the threshold renders in full.
+const (
+	subOutputElideOver = 12
+	subOutputHead      = 10
 )
 
 // List stores rendered chat items and invalidates only changed messages.
@@ -237,7 +255,9 @@ func SearchLinesRe(text string, re *regexp.Regexp) []int {
 	return matches
 }
 
-// Render returns the rendered message list for width.
+// Render returns the rendered activity-stream transcript for width. Turns are
+// separated by a faint full-width rule so the eye can tell where one turn ends
+// and the next begins, the divider an activity stream draws between entries.
 func (l *List) Render(width int) string {
 	if width < 1 {
 		width = 1
@@ -245,6 +265,10 @@ func (l *List) Render(width int) string {
 	var b strings.Builder
 	for i := range l.items {
 		if i > 0 {
+			// A blank line, a faint rule, and a blank line set each turn apart
+			// without a heavy border.
+			b.WriteString("\n\n")
+			b.WriteString(styles.Rule(width))
 			b.WriteString("\n\n")
 		}
 		b.WriteString(l.renderItem(i, width))
@@ -264,36 +288,181 @@ func (l *List) renderItem(idx int, width int) string {
 	}
 
 	l.renderRegions++
-	prefix := string(it.role)
-	if prefix == "" {
-		prefix = "message"
-	}
-	header := prefix
-	if !it.createdAt.IsZero() {
-		header += " · " + formatTimestamp(it.createdAt)
+	header := l.itemHeader(it)
+
+	// A turn whose body reads as a tool or command action ("tool: edit", a
+	// "$ go test" command line, or a tool-role result) renders in the command
+	// style: a bold action-verb header and its output indented under a muted
+	// connector, with long output elided and added/removed lines tinted. It is
+	// detected from the flattened body so the renderer needs no extra block
+	// plumbing.
+	if verb, rest, ok := commandTurn(it); ok {
+		it.cachedWidth = width
+		it.cachedBody = renderCommandTurn(header, verb, rest, width)
+		return it.cachedBody
 	}
 
-	var body string
 	// Render assistant prose as markdown once it is complete. While a message
 	// is still streaming we keep the fast plain wrap so each delta does not pay
 	// the cost of a full markdown re-render (and to avoid flicker on partial,
 	// not-yet-valid markdown).
 	if l.md != nil && it.role == message.RoleAssistant && !it.streaming && it.body != "" {
 		if rendered, ok := l.md.Render(it.body, width-2); ok {
-			body = strings.TrimRight(rendered, "\n")
+			body := strings.TrimRight(rendered, "\n")
 			it.cachedWidth = width
 			it.cachedBody = header + "\n" + body
 			return it.cachedBody
 		}
 	}
 
-	body = wrap(it.body, width-4)
+	body := wrap(it.body, width-4)
 	if it.streaming {
 		body += " ▌"
 	}
 	it.cachedWidth = width
 	it.cachedBody = header + "\n" + indent(body, "  ")
 	return it.cachedBody
+}
+
+// itemHeader returns the bullet-led header line for a turn: an accent bullet, the
+// role, and (when the message carries a server timestamp) a "· HH:MM" suffix. The
+// "role · time" segment is emitted as plain, contiguous text — no styling is
+// injected between the role and the time — so it stays greppable and aligns with
+// the activity stream's restrained chrome.
+func (l *List) itemHeader(it *item) string {
+	role := string(it.role)
+	if role == "" {
+		role = "message"
+	}
+	label := role
+	if !it.createdAt.IsZero() {
+		label += " · " + formatTimestamp(it.createdAt)
+	}
+	return styles.Bullet() + " " + label
+}
+
+// commandTurn reports whether a turn's flattened body reads as a tool or command
+// action and, if so, returns the bold verb to lead it with and the remaining body
+// (the action's output). A turn qualifies when its first line is a "tool: <name>"
+// marker (as flatten emits for a ToolUseBlock), a shell prompt ("$ ", "❯ "), or
+// when it is a tool-role result. The verb is the human-readable action; rest is
+// the sub-output rendered under the connector. A streaming turn never qualifies —
+// it is prose being typed live, not a finished command block.
+func commandTurn(it *item) (verb, rest string, ok bool) {
+	if it.streaming {
+		return "", "", false
+	}
+	first, tail := splitFirstLine(it.body)
+	trimmed := strings.TrimSpace(first)
+	switch {
+	case strings.HasPrefix(trimmed, "tool: "):
+		name := strings.TrimSpace(strings.TrimPrefix(trimmed, "tool: "))
+		return verbForTool(name), tail, true
+	case strings.HasPrefix(trimmed, "$ "), strings.HasPrefix(trimmed, "❯ "):
+		// Keep the command line itself as the first output line so the reader
+		// sees what ran above its output.
+		return "Running", it.body, true
+	case it.role == message.RoleTool:
+		return "Result", it.body, true
+	default:
+		return "", "", false
+	}
+}
+
+// verbForTool maps a tool name to the bold action verb that leads its turn. A
+// known name gets an imperative present participle ("Editing", "Reading"); an
+// unknown name is shown verbatim so a new tool still reads sensibly.
+func verbForTool(name string) string {
+	switch strings.ToLower(name) {
+	case "edit", "write", "apply_patch", "str_replace":
+		return "Editing"
+	case "read", "view", "cat":
+		return "Reading"
+	case "bash", "shell", "exec", "run":
+		return "Running"
+	case "search", "grep", "glob", "find":
+		return "Searching"
+	case "":
+		return "tool"
+	default:
+		return name
+	}
+}
+
+// renderCommandTurn renders a tool/command turn: the bullet header with the bold
+// verb appended, then the output indented under a muted "└" connector. Long
+// output is elided to its head with a faint "… +N lines" hint, and added/removed
+// lines are tinted so a diff in the output reads at a glance. Empty output
+// renders the header alone.
+func renderCommandTurn(header, verb, rest string, width int) string {
+	var b strings.Builder
+	b.WriteString(header)
+	if verb != "" {
+		b.WriteString(" ")
+		b.WriteString(styles.Verb.Render(verb))
+	}
+
+	out := strings.TrimRight(rest, "\n")
+	if strings.TrimSpace(out) == "" {
+		return b.String()
+	}
+
+	indentW := width - 4
+	for _, line := range elide(strings.Split(out, "\n"), subOutputElideOver, subOutputHead) {
+		b.WriteString("\n")
+		b.WriteString(styles.Connector())
+		b.WriteString(" ")
+		b.WriteString(styleOutputLine(line, indentW))
+	}
+	return b.String()
+}
+
+// styleOutputLine wraps a single sub-output line and tints it when it reads as a
+// diff addition or removal, so an inline diff in command output carries the
+// green/red the activity stream reserves for changes. The elision hint is drawn
+// faint; every other line renders muted, the recessive weight sub-output takes.
+func styleOutputLine(line string, width int) string {
+	wrapped := wrap(line, width)
+	switch {
+	case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+		return styles.DiffAdd.Render(wrapped)
+	case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+		return styles.DiffDel.Render(wrapped)
+	case isElisionHint(line):
+		return styles.Faint.Render(wrapped)
+	default:
+		return styles.Muted.Render(wrapped)
+	}
+}
+
+// elide collapses a long block of output lines: when there are more than over
+// lines, the first head are kept and the rest replaced with a single
+// "… +N lines" hint, so a long log shows its head without burying the transcript.
+// Shorter blocks are returned unchanged.
+func elide(lines []string, over, head int) []string {
+	if len(lines) <= over {
+		return lines
+	}
+	hidden := len(lines) - head
+	out := make([]string, 0, head+1)
+	out = append(out, lines[:head]...)
+	out = append(out, fmt.Sprintf("… +%d lines", hidden))
+	return out
+}
+
+// isElisionHint reports whether a sub-output line is the "… +N lines" hint elide
+// inserts, so the renderer can draw it faint rather than muted.
+func isElisionHint(line string) bool {
+	return strings.HasPrefix(line, "… +") && strings.HasSuffix(line, " lines")
+}
+
+// splitFirstLine splits s into its first line and the remainder (everything after
+// the first newline). A string with no newline returns itself and "".
+func splitFirstLine(s string) (first, rest string) {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
 }
 
 func flatten(msg message.Message) string {

@@ -1,7 +1,12 @@
 // Package styles centralizes TUI colors and lipgloss styles.
 package styles
 
-import "github.com/charmbracelet/lipgloss/v2"
+import (
+	"os"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss/v2"
+)
 
 // Dark palette (the default).
 const (
@@ -221,4 +226,190 @@ func ByName(name string) (Theme, bool) {
 // Names returns the selectable theme names in display order.
 func Names() []string {
 	return []string{NameDark, NameLight, NameHighContrast}
+}
+
+// ---------------------------------------------------------------------------
+// Activity-stream primitives.
+//
+// The styled values below back the activity-stream transcript and the chat
+// chrome (prompt, status bar, bordered input box, modals). They are a restrained
+// palette — mostly the terminal's own foreground with a few accents (amber for
+// the active model, blue for paths/links, faint red/green reserved for diffs) —
+// so the surface reads like a production agent TUI rather than a wall of color.
+//
+// Their colors resolve once at package load via lightDark, chosen from the
+// terminal's detected background so a single set of primitives looks right on
+// both light and dark terminals without the caller threading a Theme. The named
+// Theme constructors above (Default/Light/HighContrast) remain the switchable,
+// persisted palette the rest of the TUI already wires; these primitives layer
+// alongside them for the redesigned chat surface.
+// ---------------------------------------------------------------------------
+
+// Restrained accent palette. Each entry is a (light, dark) pair fed to
+// lightDark; the light value is darker so it reads on a pale terminal and the
+// dark value is brighter so it reads on a black one.
+const (
+	// amber tints the active model badge and "in-progress" accents — the one
+	// warm color in the palette.
+	amberLight = "#b5740a"
+	amberDark  = "#e2b341"
+
+	// blue tints paths and links.
+	blueLight = "#0066cc"
+	blueDark  = "#6cb6ff"
+
+	// primary is the body foreground; it tracks the terminal's own text color so
+	// prose reads as plain text, not a tinted block.
+	primaryLight = "#1f2430"
+	primaryDark  = "#d7dde8"
+
+	// meta is the muted gray for sub-output, metadata, and the dimmer half of the
+	// status bar.
+	metaLight = "#5b6172"
+	metaDark  = "#8b93a7"
+
+	// faint is the nearly-invisible gray used for horizontal rules and elision
+	// hints ("… +N lines") — present but recessive.
+	faintLight = "#9aa0ad"
+	faintDark  = "#4b5163"
+
+	// diff add/delete are desaturated green/red, used only inside diffs.
+	diffAddLight = "#1e8a3c"
+	diffAddDark  = "#7bbf86"
+	diffDelLight = "#c0392b"
+	diffDelDark  = "#d98a8a"
+)
+
+// hasDarkBackground is detected once from the terminal so the primitives below
+// resolve to a single coherent palette. Detection failures (for example no real
+// terminal under test) fall back to dark, the default surface.
+var hasDarkBackground = lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
+
+// lightDark picks the light or dark variant of a color pair for the detected
+// background. Build colors through it rather than hardcoding a single hex so the
+// primitives read on both light and dark terminals.
+var lightDark = lipgloss.LightDark(hasDarkBackground)
+
+// Primitive colors, resolved once for the detected background.
+var (
+	colorPrimary = lightDark(lipgloss.Color(primaryLight), lipgloss.Color(primaryDark))
+	colorMetaC   = lightDark(lipgloss.Color(metaLight), lipgloss.Color(metaDark))
+	colorFaint   = lightDark(lipgloss.Color(faintLight), lipgloss.Color(faintDark))
+	colorAmber   = lightDark(lipgloss.Color(amberLight), lipgloss.Color(amberDark))
+	colorBlue    = lightDark(lipgloss.Color(blueLight), lipgloss.Color(blueDark))
+	colorAddC    = lightDark(lipgloss.Color(diffAddLight), lipgloss.Color(diffAddDark))
+	colorDelC    = lightDark(lipgloss.Color(diffDelLight), lipgloss.Color(diffDelDark))
+)
+
+// Restrained styled primitives. These are immutable lipgloss styles; copy and
+// extend them (.Bold(true), .Width(n), ...) at the call site as needed.
+var (
+	// Primary renders body text in the terminal's foreground.
+	Primary = lipgloss.NewStyle().Foreground(colorPrimary)
+	// Muted renders sub-output, metadata, and secondary text.
+	Muted = lipgloss.NewStyle().Foreground(colorMetaC)
+	// Faint renders the most recessive elements (rules, elision hints).
+	Faint = lipgloss.NewStyle().Foreground(colorFaint)
+	// Accent (amber) marks the active model and in-progress activity — the one
+	// warm accent.
+	Accent = lipgloss.NewStyle().Foreground(colorAmber)
+	// Link (blue) marks paths and links.
+	Link = lipgloss.NewStyle().Foreground(colorBlue)
+	// DiffAdd / DiffDel color added / removed diff lines. Reserved for diffs so
+	// green/red carry meaning wherever they appear.
+	DiffAdd = lipgloss.NewStyle().Foreground(colorAddC)
+	DiffDel = lipgloss.NewStyle().Foreground(colorDelC)
+
+	// Verb renders the bold action verb that leads a transcript turn
+	// ("Editing", "Running", ...).
+	Verb = lipgloss.NewStyle().Foreground(colorPrimary).Bold(true)
+	// Meta renders the muted trailing metadata on a turn line.
+	Meta = Muted
+	// Placeholder renders the dim prompt placeholder text.
+	Placeholder = lipgloss.NewStyle().Foreground(colorFaint)
+
+	// InputBox frames the prompt textarea: a rounded border in the muted color
+	// with single-column horizontal padding so the cursor never sits on the
+	// frame.
+	InputBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorMetaC).
+			Padding(0, 1)
+
+	// InputBoxActive is InputBox with the accent border, used while the prompt is
+	// focused so the active field reads at a glance.
+	InputBoxActive = InputBox.BorderForeground(colorAmber)
+
+	// ModalBox frames dialogs (model picker, sessions, onboarding, command
+	// palette): a rounded border in the accent color with interior padding so the
+	// modal floats above the transcript.
+	ModalBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorAmber).
+			Padding(1, 2)
+)
+
+// Glyph strings used by the activity-stream layout. They are plain runes so a
+// caller can measure or pad around them; wrap in a style (e.g. Faint.Render) to
+// color them.
+const (
+	// BulletGlyph leads each transcript turn.
+	BulletGlyph = "•"
+	// ConnectorGlyph leads a turn's muted sub-output line.
+	ConnectorGlyph = "└"
+	// PromptGlyph is the input prompt marker ("› ").
+	PromptGlyph = "› "
+)
+
+// Bullet returns the turn bullet in the accent color, the marker that leads each
+// activity-stream turn.
+func Bullet() string {
+	return Accent.Render(BulletGlyph)
+}
+
+// Connector returns the muted "└" that leads a turn's sub-output line, so nested
+// command output reads as subordinate to the turn that produced it.
+func Connector() string {
+	return Muted.Render(ConnectorGlyph)
+}
+
+// Prompt returns the styled input prompt glyph ("› ") in the accent color.
+func Prompt() string {
+	return Accent.Render(PromptGlyph)
+}
+
+// Rule returns a faint full-width horizontal rule of the given width, the thin
+// divider drawn between transcript turns. A width below 1 yields the empty
+// string so a rule never renders wider than its pane; callers pass the measured
+// content width.
+func Rule(width int) string {
+	if width < 1 {
+		return ""
+	}
+	return Faint.Render(strings.Repeat("─", width))
+}
+
+// ModelBadge renders the minimal status-bar model descriptor: the model name in
+// the warm amber accent followed by a muted effort qualifier ("kimi-k2 high").
+// An empty effort renders just the model; an empty model renders the empty
+// string so the badge collapses cleanly when nothing is active.
+func ModelBadge(model, effort string) string {
+	model = strings.TrimSpace(model)
+	effort = strings.TrimSpace(effort)
+	if model == "" {
+		return ""
+	}
+	badge := Accent.Render(model)
+	if effort != "" {
+		badge += " " + Muted.Render(effort)
+	}
+	return badge
+}
+
+// IsDarkBackground reports whether the primitives resolved against a dark
+// terminal background. Components that need to make their own light/dark choice
+// (for example building a matching glamour renderer) can branch on it so they
+// stay consistent with the rest of the palette.
+func IsDarkBackground() bool {
+	return hasDarkBackground
 }

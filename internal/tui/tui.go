@@ -1340,9 +1340,19 @@ func (m *model) renderMain() string {
 	// (chatW matches renderedChatBody), so it must run before the file-tree join
 	// which shifts or wraps lines.
 	chatBody = m.highlightMatches(chatBody)
+	// Effective chat height: the layout's chat rows minus the rows the header's
+	// tricolor rule and an optional tab bar borrow. The file-tree panel must be
+	// rendered at THIS height (not the raw layout height) so its header isn't
+	// clipped when the joined panel+chat is later clamped to the same height.
+	tabBar := m.renderTabBar(m.width)
+	chatH := m.layout.chat.H
+	if tabBar != "" {
+		chatH = max(0, chatH-1)
+	}
+	chatH = max(0, chatH-1) // header tricolor rule
 	if m.filetree.visible {
-		panel := m.renderFiletree(filetreeWidth, m.layout.chat.H)
-		chatBody = joinPanels(panel, chatBody, filetreeWidth, m.layout.chat.H)
+		panel := m.renderFiletree(filetreeWidth, chatH)
+		chatBody = joinPanels(panel, chatBody, filetreeWidth, chatH)
 	}
 	// Render the prompt through the bubbles textarea, mirroring the canonical
 	// input buffer into it first. The textarea owns the "› " glyph, the muted
@@ -1391,20 +1401,6 @@ func (m *model) renderMain() string {
 	}
 	inputPanel := inputPanelStyle.Render(input)
 
-	// The tab bar is rendered between the header and the chat when more than one
-	// tab is open. With a single tab it is empty and the row is omitted, so the
-	// default layout is byte-for-byte unchanged. It borrows a chat row, so the
-	// chat body is clamped one line shorter when the bar is present to preserve
-	// the overall height. The header now uses two rows (wordmark + tricolor rule)
-	// so the layout height is adjusted accordingly.
-	tabBar := m.renderTabBar(m.width)
-	chatH := m.layout.chat.H
-	if tabBar != "" {
-		chatH = max(0, chatH-1)
-	}
-	// The tricolor rule adds one row to the header region; subtract it from the
-	// chat height so the total screen height stays within bounds.
-	chatH = max(0, chatH-1)
 
 	spinnerView := ""
 	if m.running {
@@ -1534,7 +1530,10 @@ func (m *model) clampChat(s string, _, height int) string {
 	// the input panel rises to sit just under the last message instead of leaving
 	// a dead band of blank rows. Once content overflows, fall back to the
 	// fixed-height scrollable viewport so scrolling and line accounting are exact.
-	if maxScroll == 0 {
+	// Skip the shrink when the file-tree panel is visible: it is joined to the
+	// chat body at the full pane height, so trimming to the transcript's natural
+	// height would clip the panel.
+	if maxScroll == 0 && !m.filetree.visible {
 		return strings.TrimRight(s, "\n")
 	}
 
@@ -1881,6 +1880,7 @@ func (m *model) slashHelpLines() []string {
 		"/tabs - list open tabs",
 		"/compact - summarize older turns to shrink context",
 		"/fork - branch the current session",
+		"/rename <new title> - rename the current session",
 		"/diff - show the latest edit diff",
 		"/revert [apply|force] - undo this session's file changes (preview first, then apply)",
 		"/export [md|html] - write the session transcript to a file",

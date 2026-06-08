@@ -26,6 +26,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/tools"
 	"github.com/arbazkhan971/bharatcode/internal/tui/notification"
+	"github.com/charmbracelet/bubbles/v2/spinner"
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -394,6 +395,16 @@ func (h *agentHarness) pump(t *testing.T, cmd tea.Cmd) {
 	}
 	msg := execWithTimeout(cmd, listenPollTimeout)
 	if msg == nil {
+		return
+	}
+	// The streaming spinner's Tick is a self-perpetuating cosmetic timer: each
+	// TickMsg yields another Tick while a turn runs. In production bubbletea
+	// schedules those off the synchronous path, but this test pump runs commands
+	// inline and would recurse on ticks forever, starving real run progress.
+	// Apply the tick (so the spinner state advances) but do NOT pump its
+	// follow-up Tick — it carries no run-progress and never terminates.
+	if _, ok := msg.(spinner.TickMsg); ok {
+		h.model.Update(msg)
 		return
 	}
 	if batch, ok := msg.(tea.BatchMsg); ok {

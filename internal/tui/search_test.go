@@ -423,11 +423,12 @@ func TestHighlightMatches_AllHits(t *testing.T) {
 	}
 }
 
-// TestHighlightMatches_SkipsStyledLine asserts a match line that already carries
-// ANSI styling (a markdown-rendered line) is left byte-for-byte unchanged, so
-// splicing a highlight span never corrupts existing escapes, while a plain
-// sibling match is still highlighted.
-func TestHighlightMatches_SkipsStyledLine(t *testing.T) {
+// TestHighlightMatches_HighlightsWithinStyledLine asserts that a match line
+// already carrying ANSI styling (every transcript line does now: the role accent
+// bar and colored label) gets the term highlighted within its plain-text spans,
+// without corrupting the existing escapes — so search still works once the
+// transcript is styled. A plain sibling match is also highlighted.
+func TestHighlightMatches_HighlightsWithinStyledLine(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
@@ -437,8 +438,12 @@ func TestHighlightMatches_SkipsStyledLine(t *testing.T) {
 	m.search = searchState{term: "foo", matches: []int{0, 1}, current: 1}
 	got := m.highlightMatches(body)
 	lines := strings.Split(got, "\n")
-	require.Equal(t, styledLine, lines[1],
-		"a line with existing ANSI styling must be left unchanged")
+	// The styled current-match line gets its plain-span "foo" emphasized while its
+	// existing red styling is preserved.
+	require.Contains(t, lines[1], m.theme.Match.Render("foo"),
+		"the term inside a styled line must be highlighted")
+	require.Contains(t, lines[1], "\x1b[31m",
+		"the line's existing ANSI styling must be preserved")
 	require.Contains(t, lines[0], m.theme.MatchOther.Render("foo"),
 		"a plain sibling match must still be highlighted")
 }

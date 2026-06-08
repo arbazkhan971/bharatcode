@@ -493,12 +493,21 @@ func (m *model) refreshModelPicker() {
 	})
 }
 
-// applyModel updates the active model display to the selected model. The
-// status bar model field is updated immediately so the UI reflects the choice
-// on the next render. This mirrors how the session picker updates status.Model
-// when restoring a session.
+// applyModel updates the active model display and rebinds the live agent loop
+// to the selected model's provider. The status bar is updated immediately so
+// the UI reflects the choice on the next render; the loop rebind takes effect
+// at the next clean turn boundary (after any in-flight Run finishes). When the
+// Coordinator cannot resolve the model to a provider (e.g. the provider is not
+// configured), the display is still updated but the routing error is silently
+// logged — the user will see an auth or routing error on the next turn, which
+// is more informative than blocking the selection.
 func (m *model) applyModel(mod config.Model) {
 	m.status.Model = mod.ID
+	if m.deps.Coordinator != nil && m.deps.Agent != nil {
+		if provider, err := m.deps.Coordinator.SetActiveModel("coder", mod.ID); err == nil {
+			m.deps.Agent.SetModel(mod.ID, provider)
+		}
+	}
 }
 
 // restoreSession switches the active session to id and loads its persisted

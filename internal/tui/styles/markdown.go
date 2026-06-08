@@ -7,12 +7,13 @@ import (
 	"github.com/charmbracelet/glamour"
 )
 
-// markdownDarkJSON is a restrained dark glamour theme derived from glamour's
-// stock dark style and calmed for the activity-stream transcript: the h1
-// highlight background is flattened, every heading is unified to one muted amber
-// accent, and the rule/link/inline-code colors are dimmed so prose reads as
-// mostly monochrome with only a few accents. The chat component pairs it with
-// the viewport width via NewMarkdownRenderer.
+// markdownDarkJSON is the premium dark glamour theme for the activity-stream
+// transcript, tuned to the BharatCode brand: headings lead in saffron and step
+// down to a muted warm grey, inline code and fenced blocks sit on a subtly
+// tinted warm-dark surface with a desaturated warm chroma palette, links are a
+// soft recessive blue, and the rule is faint — so prose reads as warm and
+// branded with only a few accents rather than a wall of color. The chat
+// component pairs it with the viewport width via NewMarkdownRenderer.
 //
 //go:embed markdown-dark.json
 var markdownDarkJSON []byte

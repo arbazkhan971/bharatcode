@@ -686,6 +686,35 @@ func (m *model) handleFork() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// handleRename sets the title of the active session. The new title is the
+// argument after "/rename"; a bare "/rename" shows usage. It is a no-op (with an
+// explanatory dialog) when there is no persisted session yet. The new title is
+// reflected immediately in the footer/status and the session switcher.
+func (m *model) handleRename(text string) tea.Model {
+	_, args := splitSlash(text)
+	title := strings.TrimSpace(args)
+
+	if !m.sessionPersisted {
+		m.dialogs.Push(&dialog.Text{DialogID: "rename", Title: "Rename", Body: "No active session to rename yet. Send a prompt first.", Theme: m.theme})
+		return m
+	}
+	if title == "" {
+		m.dialogs.Push(&dialog.Text{DialogID: "rename", Title: "Rename", Body: "Usage: /rename <new title>\n\nRenames the current session so it is easy to find in /sessions.", Theme: m.theme})
+		return m
+	}
+	if err := m.deps.Sessions.SetTitle(m.ctx, m.sessionID, title); err != nil {
+		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Rename failed", Body: err.Error(), Theme: m.theme})
+		return m
+	}
+	m.dialogs.Push(&dialog.Text{
+		DialogID: "rename",
+		Title:    "Renamed session",
+		Body:     fmt.Sprintf("Session %s is now titled %q.", shortSessionID(m.sessionID), title),
+		Theme:    m.theme,
+	})
+	return m
+}
+
 // compactStreamID is the chat-list key for the /compact confirmation. A fixed
 // id keeps it distinct from per-turn assistant bubbles; only one confirmation
 // is shown at a time, so it does not need a counter suffix.

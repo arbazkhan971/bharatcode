@@ -24,6 +24,7 @@ var slashCommands = []string{
 	"/model",
 	"/agent",
 	"/sessions",
+	"/rename",
 	"/tab",
 	"/tabs",
 	"/fork",

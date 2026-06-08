@@ -402,6 +402,29 @@ func (l *Loop) Interrupt() {
 	}
 }
 
+// SetModel rebinds the Loop to a different model and provider. It waits for
+// any in-flight Run to finish before applying the change, so the swap always
+// takes effect at a clean turn boundary — the next call to Run uses the new
+// provider. It is safe to call from any goroutine (including the TUI main
+// goroutine) while a Run is executing on a background goroutine.
+func (l *Loop) SetModel(modelID string, p llm.Provider) {
+	l.runMu.Lock()
+	defer l.runMu.Unlock()
+	l.cfg.Model = modelID
+	l.cfg.Provider = p
+	l.activeModel = modelID
+}
+
+// Provider returns the provider the Loop is currently bound to. It acquires
+// the run mutex so it is safe to call from any goroutine and always returns a
+// consistent snapshot that reflects the latest SetModel call. The returned
+// Provider is valid until the next SetModel call.
+func (l *Loop) Provider() llm.Provider {
+	l.runMu.Lock()
+	defer l.runMu.Unlock()
+	return l.cfg.Provider
+}
+
 // Steer queues text as a steering message for the in-flight Run. When a Run is
 // active, the text is appended to the conversation as the next user message at
 // the next safe boundary (after the current tool batch, before the next

@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
@@ -486,6 +488,40 @@ func (m *model) defaultOllamaModel() config.Model {
 	return config.Model{}
 }
 
+// persistActiveModel writes modelID into the "coder" agent entry of the user's
+// global config file so the choice survives a restart. It reads the existing
+// global file (or starts from an empty Config when none exists), updates the
+// first "coder" agent's model field, and saves it back. This preserves all
+// other customisations the user has in their global file (providers, models,
+// hooks, etc.).
+//
+// Errors are non-fatal: the in-session routing is already correct via applyModel;
+// the worst outcome of a failed write is that the user needs to sign in again
+// after a restart.
+func (m *model) persistActiveModel(ctx context.Context, modelID string) {
+	cfg, err := config.LoadFrom(ctx, config.GlobalPath(), "")
+	if err != nil {
+		// No existing file or parse error: start from an empty config so we
+		// don't accidentally inherit defaults that belong only in the binary.
+		cfg = &config.Config{}
+	}
+	// Update the "coder" agent or, if absent, append one.
+	found := false
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "coder" {
+			cfg.Agents[i].Model = modelID
+			found = true
+			break
+		}
+	}
+	if !found {
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "coder", Model: modelID})
+	}
+	if err := config.Save(ctx, cfg, config.ScopeGlobal); err != nil {
+		slog.Warn("Persisting active model to global config", "model", modelID, "error", err)
+	}
+}
+
 // completeOnboarding finalizes a successful setup: it activates the chosen model
 // (reusing the model picker's applyModel so the status bar and live state move
 // together) and shows a brief confirmation. The user can chat right away — the
@@ -561,6 +597,7 @@ func (m *model) handleStartChatGPTLogin() (tea.Model, tea.Cmd) {
 		mod := m.defaultModelForProvider("chatgpt")
 		if mod.ID != "" {
 			m.applyModel(mod)
+			m.persistActiveModel(m.ctx, mod.ID)
 		}
 		body := fmt.Sprintf("Already signed in as %s.\n\nType a message to begin.", who)
 		if mod.ID == "" {
@@ -611,9 +648,11 @@ func (m *model) handleChatGPTLoginDone(msg chatgptLoginDoneMsg) (tea.Model, tea.
 	}
 	// OAuth succeeded — activate the first chatgpt model so the next turn
 	// goes to the right provider without requiring a /model selection.
+	// Also persist the choice to the global config so a restart picks it up.
 	mod := m.defaultModelForProvider("chatgpt")
 	if mod.ID != "" {
 		m.applyModel(mod)
+		m.persistActiveModel(m.ctx, mod.ID)
 	}
 	who := msg.id.Email
 	if who == "" {

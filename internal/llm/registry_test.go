@@ -915,6 +915,48 @@ func TestAzureProviderUsesApiKeyHeader(t *testing.T) {
 		"Azure endpoint must not receive an Authorization header")
 }
 
+// TestDefaultConfigChatGPTProviderOwnsgpt51Codex asserts that the embedded
+// default config registers "chatgpt" as the provider for "gpt-5.1-codex" and
+// that the registry builds a chatgptOAuthProvider for it — not any other type.
+// This is the registration-layer half of the routing-correctness proof: if the
+// registry is sound then a correctly wired TUI activation path (Loop.SetModel)
+// will always route gpt-5.1-codex turns to the chatgpt OAuth provider.
+func TestDefaultConfigChatGPTProviderOwnsgpt51Codex(t *testing.T) {
+	cfg := config.Default()
+
+	reg, err := NewRegistry(cfg)
+	require.NoError(t, err)
+
+	// The chatgpt provider must be registered.
+	chatgptProvider, err := reg.Get("chatgpt")
+	require.NoError(t, err, "default config must register the 'chatgpt' provider")
+
+	// It must be the OAuth-login-based provider, not an openai_compatible stub.
+	_, ok := chatgptProvider.(*chatgptOAuthProvider)
+	require.True(t, ok, "chatgpt provider must be a chatgptOAuthProvider, got %T", chatgptProvider)
+
+	// The gpt-5.1-codex model must appear in the chatgpt provider's catalog.
+	found := false
+	for _, m := range chatgptProvider.Models() {
+		if m.ID == "gpt-5.1-codex" {
+			found = true
+			require.Equal(t, "chatgpt", m.Provider,
+				"gpt-5.1-codex catalog entry must reference the chatgpt provider")
+			break
+		}
+	}
+	require.True(t, found, "chatgpt provider must expose gpt-5.1-codex in its model catalog")
+
+	// The deepseek provider must NOT claim gpt-5.1-codex. If it did, resolveProvider
+	// could non-deterministically route it to the deepseek key check.
+	deepseekProvider, err := reg.Get("deepseek")
+	require.NoError(t, err, "default config must register the 'deepseek' provider")
+	for _, m := range deepseekProvider.Models() {
+		require.NotEqual(t, "gpt-5.1-codex", m.ID,
+			"deepseek provider must not claim gpt-5.1-codex")
+	}
+}
+
 func collectEvents(events <-chan Event) []Event {
 	var out []Event
 	for event := range events {

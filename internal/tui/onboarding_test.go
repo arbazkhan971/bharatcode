@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -286,6 +287,10 @@ func TestOnboarding_LocalOllamaActivatesModelNoKey(t *testing.T) {
 func TestOnboarding_ChatGPTDispatchesStartLoginMsg(t *testing.T) {
 	withMemKeyring(t)
 	t.Setenv("DEEPSEEK_API_KEY", "")
+	// Point ChatGPTStatus() at a non-existent temp file so the fast-path
+	// ("already signed in") does not fire on machines with a real
+	// chatgpt_auth.json, guaranteeing the OAuth exec path is taken.
+	t.Setenv("BHARATCODE_CHATGPT_AUTH", filepath.Join(t.TempDir(), "chatgpt_auth.json"))
 	m := sizedOnboardingModel(t, onboardingDeps())
 
 	idx := -1

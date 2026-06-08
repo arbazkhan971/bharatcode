@@ -18,6 +18,22 @@ type editDiff struct {
 	After  string
 }
 
+// editPatchForToolCall builds the unified-diff patch for a single edit, write,
+// or multiedit tool call directly from its raw arguments, so the live transcript
+// can show the change inline as a diff the moment the tool runs — before the
+// turn's messages are persisted. It reuses editDiffsFromToolUse and unifiedPatch,
+// the same helpers /diff drives over stored messages, so an inline edit diff and
+// the /diff view render identically. It returns "" for any non-editing tool or
+// when the arguments do not decode, leaving the caller to render the plain tool
+// turn instead.
+func editPatchForToolCall(name string, input json.RawMessage) string {
+	diffs := editDiffsFromToolUse(message.ToolUseBlock{Name: name, Input: input})
+	if len(diffs) == 0 {
+		return ""
+	}
+	return unifiedPatch(diffs)
+}
+
 // latestEditDiffs scans messages newest-first and returns the before/after
 // diffs for the most recent edit, multiedit, or write tool invocation. It
 // returns nil when no such tool call is present. A single multiedit yields one

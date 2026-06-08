@@ -25,9 +25,9 @@ func (p *namedProvider) Stream(_ context.Context, _ llm.Request) (<-chan llm.Eve
 	close(ch)
 	return ch, nil
 }
-func (p *namedProvider) Models() []llm.Model       { return p.models }
-func (p *namedProvider) SupportsTools() bool       { return false }
-func (p *namedProvider) SupportsImages() bool      { return false }
+func (p *namedProvider) Models() []llm.Model  { return p.models }
+func (p *namedProvider) SupportsTools() bool  { return false }
+func (p *namedProvider) SupportsImages() bool { return false }
 
 // newCoordinatorWithProviders builds a started Coordinator wired with the
 // supplied provider map. The "coder" agent defaults to the first model of the

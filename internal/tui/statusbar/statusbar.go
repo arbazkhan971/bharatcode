@@ -87,7 +87,12 @@ const (
 	prioUptime      = 20
 )
 
-// Render returns one status line.
+// Render returns one status line. The model name is rendered as a saffron brand
+// pill (styles.ModelBadge) so it reads as the primary identity anchor; all
+// remaining segments stay as plain text so the priority-drop and truncation
+// logic operates on printable widths without ANSI interference. The dim styled
+// separator is applied at the final join step so the bar reads as a segmented
+// strip; the overall status background is applied last.
 func (b Bar) Render(width int) string {
 	now := b.Now
 	if now.IsZero() {
@@ -98,9 +103,9 @@ func (b Bar) Render(width int) string {
 		started = now
 	}
 
-	// Build the segments in display order. The first four are always present so
-	// a bar that fits is byte-identical to the plain " · "-joined form; the rest
-	// appear only when their field is set.
+	// Build the segments in display order using PLAIN text so fitSegmentsSlice
+	// can measure and drop using simple rune counting (the existing invariant that
+	// the priority-drop tests were written against).
 	segs := []segment{
 		{b.Model, prioModel},
 		{b.Agent, prioAgent},
@@ -135,8 +140,44 @@ func (b Bar) Render(width int) string {
 		segs = append(segs, segment{b.InputTokens, prioInputTokens})
 	}
 
-	line := fitSegments(segs, width)
-	return b.Theme.Status.Render(truncateLine(line, width))
+	// Fit using plain widths — this is the invariant the priority-drop tests rely
+	// on. fitSegmentsSlice returns the surviving segment slice so we can work
+	// with the individual texts without re-splitting the joined string (which
+	// would incorrectly split segments whose own text contains " · ", e.g.
+	// TurnTokens = "1.2k in · 234 out").
+	survived := fitSegmentsSlice(segs, width)
+
+	badge := styles.ModelBadge(b.Model, "")
+	if badge == "" {
+		badge = styles.Muted.Render(b.Model)
+	}
+	styledSep := styles.Separator.Render(" · ")
+
+	// Build the styled segment list, substituting the badge for the model anchor.
+	styledParts := make([]string, len(survived))
+	for i, s := range survived {
+		if i == 0 {
+			styledParts[i] = badge
+		} else {
+			styledParts[i] = s.text
+		}
+	}
+
+	// Check whether the PLAIN joined line exceeds width. If it does, apply
+	// truncateLine (which adds "…") to the plain form, then return the plain
+	// truncated line wrapped in the status style (no badge, but the "…" marker
+	// is correct). This path is only hit when even the anchor alone is too long —
+	// a normal bar fits after priority-dropping, so this is the rare fallback.
+	plainParts := make([]string, len(survived))
+	for i, s := range survived {
+		plainParts[i] = s.text
+	}
+	plainLine := strings.Join(plainParts, " · ")
+	if width > 0 && len([]rune(plainLine)) > width {
+		return b.Theme.Status.Render(truncateLine(plainLine, width))
+	}
+
+	return b.Theme.Status.Render(strings.Join(styledParts, styledSep))
 }
 
 // fitSegments joins segs with " · " in their given (display) order, dropping the
@@ -147,6 +188,19 @@ func (b Bar) Render(width int) string {
 // still exceed width when even the highest-priority survivor alone does not fit;
 // the caller's ellipsis truncation handles that final case.
 func fitSegments(segs []segment, width int) string {
+	survived := fitSegmentsSlice(segs, width)
+	parts := make([]string, len(survived))
+	for i, s := range survived {
+		parts[i] = s.text
+	}
+	return strings.Join(parts, " · ")
+}
+
+// fitSegmentsSlice applies the priority-drop logic and returns the surviving
+// segment slice rather than a joined string, so callers that need to style
+// individual segments (for example replacing the model with a branded badge)
+// can do so without accidentally touching " · " inside segment text.
+func fitSegmentsSlice(segs []segment, width int) []segment {
 	join := func(s []segment) string {
 		parts := make([]string, len(s))
 		for i, seg := range s {
@@ -156,7 +210,9 @@ func fitSegments(segs []segment, width int) string {
 	}
 
 	if width <= 0 {
-		return join(segs)
+		out := make([]segment, len(segs))
+		copy(out, segs)
+		return out
 	}
 
 	// Drop on a copy so the caller's slice (and its backing array) is untouched —
@@ -177,7 +233,7 @@ func fitSegments(segs []segment, width int) string {
 		}
 		segs = append(segs[:drop], segs[drop+1:]...)
 	}
-	return join(segs)
+	return segs
 }
 
 // truncateLine clamps line to at most width runes. When a line is cut short an

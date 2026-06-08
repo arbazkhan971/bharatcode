@@ -30,6 +30,10 @@ type rootOptions struct {
 	offline         bool
 	continueSession bool
 	profile         string
+	// logToFile routes diagnostics to a log file instead of stderr. Only the
+	// interactive TUI path sets it; the 'run' subcommand and other non-TTY
+	// callers leave it false so their stderr/JSON logging is preserved.
+	logToFile bool
 }
 
 var (
@@ -78,6 +82,13 @@ func newRootCmd() *cobra.Command {
 				return fmt.Errorf("unknown command %q", args[0])
 			}
 			ctx := cmd.Context()
+			// The interactive TUI takes over the screen, so slog output must go
+			// to a log file rather than the terminal. slog targets stderr, so the
+			// redirect is gated on stderr being a terminal too — otherwise an
+			// invocation that redirects only stdout (e.g. `bharatcode > out.txt`)
+			// would still flood the attached terminal via stderr. Non-interactive
+			// launches (pipes, redirects, CI) keep their stderr/JSON logging.
+			opts.logToFile = stdoutIsTerminal() && stderrIsTerminal()
 			application, err := buildApp(ctx, opts)
 			if err != nil {
 				return err
@@ -169,6 +180,7 @@ func buildApp(ctx context.Context, opts *rootOptions) (*app.App, error) {
 		Verbose:    opts.verbose,
 		Offline:    opts.offline,
 		Profile:    opts.profile,
+		LogToFile:  opts.logToFile,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("constructing app: %w", err)
@@ -246,6 +258,17 @@ func maybeAutoUpdate(ctx context.Context, application *app.App, opts *rootOption
 // non-interactive contexts (pipes, redirects, CI, unit tests).
 func stdoutIsTerminal() bool {
 	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// stderrIsTerminal reports whether standard error is an interactive character
+// device. slog writes to stderr, so the log-to-file redirect checks this stream
+// (not just stdout) before keeping diagnostics off the terminal.
+func stderrIsTerminal() bool {
+	info, err := os.Stderr.Stat()
 	if err != nil {
 		return false
 	}

@@ -39,13 +39,17 @@ const scrollTopSentinel = 1 << 30
 
 // chatViewportHeight returns the number of chat rows currently visible: the
 // laid-out chat height, less the one row the tab bar borrows when more than one
-// tab is open. It mirrors the height clampChat renders into, so a page scroll
-// moves by exactly what the user sees. It never returns less than one.
+// tab is open, and less the one row the tricolor brand rule adds to the header
+// region (the layout's headerH is 1 but the rendered header occupies 2 rows).
+// It mirrors the height clampChat renders into, so a page scroll moves by
+// exactly what the user sees. It never returns less than one.
 func (m *model) chatViewportHeight() int {
 	h := m.layout.chat.H
 	if len(m.tabs) > 1 {
 		h--
 	}
+	// The tricolor rule adds one row to the header beyond the layoutted headerH=1.
+	h--
 	if h < 1 {
 		return 1
 	}

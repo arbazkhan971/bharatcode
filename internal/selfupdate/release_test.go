@@ -4,10 +4,10 @@ import "testing"
 
 func TestCompareVersions(t *testing.T) {
 	tests := []struct {
-		name        string
-		current     string
-		latest      string
-		wantUpdate  bool
+		name       string
+		current    string
+		latest     string
+		wantUpdate bool
 	}{
 		{"patch newer", "v0.2.0", "v0.2.1", true},
 		{"equal", "v0.2.1", "v0.2.1", false},

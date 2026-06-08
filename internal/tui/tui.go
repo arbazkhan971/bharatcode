@@ -16,6 +16,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
+	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/mcp"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
@@ -166,7 +167,7 @@ type model struct {
 	// search highlights) is loaded via SetContent inside clampChat, which also
 	// drives the scroll offset and returns m.vp.View() — replacing the old
 	// hand-rolled strings.Split window that broke on ANSI-escaped lines.
-	vp viewport.Model
+	vp            viewport.Model
 	dialogs       dialog.Stack
 	footer        tuiledger.Footer
 	status        statusbar.Bar
@@ -194,15 +195,15 @@ type model struct {
 	// overlay. It is (re)built when the picker opens and resized on every
 	// WindowSizeMsg.
 	sessionPickerList list.Model
-	inputHistory     inputState
-	focus            focusState
-	width            int
-	height           int
-	layout           layout
-	startedAt        time.Time
-	now              time.Time
-	sessionID        string
-	sessionPersisted bool
+	inputHistory      inputState
+	focus             focusState
+	width             int
+	height            int
+	layout            layout
+	startedAt         time.Time
+	now               time.Time
+	sessionID         string
+	sessionPersisted  bool
 	// tabFirstPrompt is the first user prompt submitted in the active tab, used
 	// to title the tab in the /tabs listing. It mirrors the active tab's
 	// firstPrompt field the way sessionID mirrors the tab's session (see
@@ -245,8 +246,13 @@ type model struct {
 	lastContextPct int
 	turn           int
 	queueCounter   int
-	eventCh        <-chan agent.Event
-	eventCancel    func()
+	// toolTurnSeq is a monotonic counter that gives every appended tool turn
+	// (invocation or result) a unique chat-list id. A monotonic seq avoids
+	// collisions when read-only tool calls run concurrently and their events
+	// interleave, since each appended turn is its own discrete item.
+	toolTurnSeq int
+	eventCh     <-chan agent.Event
+	eventCancel func()
 
 	// Autonomous goal-loop state (CHANGE 2).
 	goalActive    bool
@@ -355,6 +361,9 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	// Render assistant markdown with syntax-highlighted code blocks. The glamour
 	// style follows the active theme so light/dark stay consistent.
 	chatList.EnableMarkdown(theme.Markdown)
+	// Render edit/write tool turns as inline unified diffs (line numbers, red/green
+	// tinting) through a theme-built viewer, matching the /diff command's look.
+	chatList.EnableDiff(theme)
 
 	// When --continue is used, pre-load the requested session so the TUI opens
 	// with its history intact instead of starting blank. The load happens here
@@ -1048,6 +1057,7 @@ func (m *model) steerRun(text string) (tea.Model, tea.Cmd) {
 	m.queueCounter++
 	id := fmt.Sprintf("%s-%d", queuedStreamPrefix, m.queueCounter)
 	m.chat.Stream(id, queuedPrefix+text)
+	m.chat.SetRole(id, message.RoleUser)
 	m.chat.FinishStream(id)
 	m.chat.Reindex(id)
 	return m, nil
@@ -1312,6 +1322,9 @@ func (m *model) applyTheme(name string) bool {
 	// The glamour markdown style follows the theme; EnableMarkdown also resets
 	// the chat render cache so already-shown messages re-render in the new style.
 	m.chat.EnableMarkdown(theme.Markdown)
+	// Re-point the diff viewer at the new theme so inline edit diffs re-tint to
+	// match; like EnableMarkdown it resets the render cache.
+	m.chat.EnableDiff(theme)
 	return true
 }
 
@@ -1400,7 +1413,6 @@ func (m *model) renderMain() string {
 		inputPanelStyle = styles.InputPanel.Width(m.width - 2)
 	}
 	inputPanel := inputPanelStyle.Render(input)
-
 
 	spinnerView := ""
 	if m.running {
@@ -1794,18 +1806,54 @@ func initialIdentity(cfg *config.Config) (string, string) {
 	if cfg == nil {
 		return "unknown", "coder"
 	}
+	agentName := "coder"
+	if len(cfg.Agents) > 0 {
+		agentName = emptyDefault(cfg.Agents[0].Name, "coder")
+	}
+	// When the user is signed in with ChatGPT, default a fresh session to their
+	// ChatGPT model rather than the config's default agent model. Otherwise the
+	// default (e.g. deepseek, which needs an API key the user hasn't set) makes
+	// first-run onboarding fire on every start even though they are logged in.
+	if chatgptModel := chatgptModelIfSignedIn(cfg); chatgptModel != "" {
+		return chatgptModel, agentName
+	}
 	if len(cfg.Agents) > 0 {
 		agent := cfg.Agents[0]
 		model := agent.Model
 		if model == "" && len(cfg.Models) > 0 {
 			model = cfg.Models[0].ID
 		}
-		return emptyDefault(model, "unknown"), emptyDefault(agent.Name, "coder")
+		return emptyDefault(model, "unknown"), agentName
 	}
 	if len(cfg.Models) > 0 {
 		return cfg.Models[0].ID, "coder"
 	}
 	return "unknown", "coder"
+}
+
+// chatgptModelIfSignedIn returns the first configured model on a chatgpt-type
+// provider when a "Sign in with ChatGPT" session exists, or "" otherwise. It is
+// used to default a fresh session to the ChatGPT model once the user has logged
+// in, so they are not re-prompted to pick a model on every start.
+func chatgptModelIfSignedIn(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if _, err := llm.ChatGPTStatus(); err != nil {
+		return ""
+	}
+	chatgptProviders := make(map[string]bool)
+	for _, p := range cfg.Providers {
+		if p.Type == config.ProviderChatGPT {
+			chatgptProviders[p.Name] = true
+		}
+	}
+	for _, mod := range cfg.Models {
+		if chatgptProviders[mod.Provider] {
+			return mod.ID
+		}
+	}
+	return ""
 }
 
 func emptyDefault(value string, fallback string) string {

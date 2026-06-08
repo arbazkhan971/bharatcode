@@ -12,6 +12,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/session"
+	"github.com/arbazkhan971/bharatcode/internal/tui/chat"
 	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
 	tea "github.com/charmbracelet/bubbletea/v2"
 )
@@ -43,6 +44,15 @@ type runDoneMsg struct {
 // instead of appending to the previous one.
 func (m *model) assistantStreamID() string {
 	return fmt.Sprintf("assistant-%d", m.turn)
+}
+
+// nextToolTurnID returns a fresh, unique chat-list id for an appended tool turn
+// (a tool invocation or its result). The monotonic counter guarantees each turn
+// is a distinct item even when concurrent read-only calls interleave their
+// events, so no two tool turns ever share an id and collapse into one bubble.
+func (m *model) nextToolTurnID() string {
+	m.toolTurnSeq++
+	return fmt.Sprintf("tool-%d", m.toolTurnSeq)
 }
 
 // startRun ensures a session exists, renders the user's prompt, launches the
@@ -87,10 +97,10 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.running = true
 	m.turnStartedAt = m.now
 	m.currentActivity = ""
-	m.turnToolCount = 0   // reset per-turn tool-call counter
+	m.turnToolCount = 0    // reset per-turn tool-call counter
 	m.turnErrShown = false // reset per-turn error-surfaced flag
-	m.lastTurnTokens = "" // clear previous turn's counts while the new turn runs
-	m.lastContextPct = 0  // clear previous context-window fill while the new turn runs
+	m.lastTurnTokens = ""  // clear previous turn's counts while the new turn runs
+	m.lastContextPct = 0   // clear previous context-window fill while the new turn runs
 	// Inline any @-file references so the model sees their contents, while the
 	// chat bubble above keeps the user's original text. Resolution is scoped to
 	// the workspace root; unresolved mentions are left untouched. Image files
@@ -231,10 +241,58 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		// status can show total tool invocations for progress clarity.
 		m.currentActivity = ev.ToolName
 		m.turnToolCount++
-		m.chat.Stream(streamID, "\n[tool: "+ev.ToolName+"]\n")
+		// Close the assistant's prose bubble (if any) so the tool block becomes its
+		// own turn rather than merging into the surrounding text. Reindex detaches
+		// the id so the next model text after the tool opens a fresh bubble instead
+		// of re-appending to the closed one.
+		m.chat.FinishStream(streamID)
+		m.chat.Reindex(streamID)
+		// Append the invocation as a discrete turn. A message carrying only a
+		// ToolUseBlock flattens to "tool: <name>", which the activity-stream
+		// renderer leads with the action verb (e.g. "Running", "Editing"). The raw
+		// JSON arguments (ev.ToolInput) are intentionally not rendered — only the
+		// name drives the verb, so no argument JSON leaks into the transcript.
+		useID := m.nextToolTurnID()
+		if patch := editPatchForToolCall(ev.ToolName, ev.ToolInput); patch != "" {
+			// A file-modifying tool (edit, write, multiedit) carries enough in its
+			// arguments to show the change as a unified diff, the way /diff does.
+			// Lead the turn with the "tool: <name>" marker so the verb still reads
+			// "Editing", then carry the patch tagged with the diff marker so the
+			// renderer routes it through the diff viewer (line numbers, red/green)
+			// rather than dumping the raw arguments. A new-file write shows all-green;
+			// an edit shows red/green hunks.
+			m.chat.Append(message.Message{
+				ID:   useID,
+				Role: message.RoleAssistant,
+				Content: []message.ContentBlock{message.TextBlock{
+					Text: "tool: " + ev.ToolName + "\n" + chat.DiffMarker + "\n" + patch,
+				}},
+			})
+		} else {
+			m.chat.Append(message.Message{
+				ID:   useID,
+				Role: message.RoleAssistant,
+				Content: []message.ContentBlock{message.ToolUseBlock{
+					ID:    useID,
+					Name:  ev.ToolName,
+					Input: ev.ToolInput,
+				}},
+			})
+		}
 	case agent.EventToolResult:
 		m.currentActivity = ""
-		m.chat.Stream(streamID, "[done: "+ev.ToolName+"]\n")
+		// Append the tool's output as its own turn. A tool-role message flattens to
+		// its raw content, and the renderer leads it with a "Result" verb and draws
+		// the output indented under the muted connector, with long output elided and
+		// added/removed lines tinted. Empty output renders the header alone, so a
+		// silent tool does not leave a dangling bubble.
+		m.chat.Append(message.Message{
+			ID:   m.nextToolTurnID(),
+			Role: message.RoleTool,
+			Content: []message.ContentBlock{message.ToolResultBlock{
+				Content: ev.ToolResult,
+			}},
+		})
 	case agent.EventLoopDetected:
 		if text := assistantText(ev.Message); text != "" {
 			m.chat.Stream(streamID, "\n"+text)
@@ -245,14 +303,21 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		if ev.Err != nil {
 			msg = friendlyRunError(ev.Err)
 		}
-		m.chat.Stream(streamID, "\n[error: "+msg+"]\n")
+		// Close any open prose bubble, then surface the failure as its own discrete
+		// notice turn rather than a bracketed marker dumped into the text.
 		m.chat.FinishStream(streamID)
+		m.chat.Reindex(streamID)
+		m.chat.Append(message.Message{
+			ID:      m.nextToolTurnID(),
+			Role:    message.RoleTool,
+			Content: []message.ContentBlock{message.ToolResultBlock{Content: "Error: " + msg, IsError: true}},
+		})
 		m.turnErrShown = true
 	case agent.EventAutoCompacted:
 		// Surface a brief inline notice so users understand why the visible
 		// history shrank. The notice is injected as a synthetic stream so it
 		// appears between the current assistant bubble and the next one.
-		m.chat.Stream(streamID, "\n[context auto-compacted — older turns summarised to free space]\n")
+		m.chat.Stream(streamID, "\nContext auto-compacted — older turns summarised to free space.\n")
 	case agent.EventTurnFinished:
 		if text := assistantText(ev.Message); text != "" {
 			m.chat.Stream(streamID, text)
@@ -321,10 +386,17 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 		// A user interrupt (context cancellation) is intentional, not a fault,
 		// so it stays quiet.
 		if !m.turnErrShown && !errors.Is(done.err, context.Canceled) {
+			// Close any open prose bubble, then surface the failure as its own
+			// discrete notice turn — mirroring the EventRunError path above —
+			// rather than dumping a marker into the assistant text.
 			id := m.assistantStreamID()
-			m.chat.Stream(id, "\n[error: "+friendlyRunError(done.err)+"]\n")
 			m.chat.FinishStream(id)
 			m.chat.Reindex(id)
+			m.chat.Append(message.Message{
+				ID:      m.nextToolTurnID(),
+				Role:    message.RoleTool,
+				Content: []message.ContentBlock{message.ToolResultBlock{Content: "Error: " + friendlyRunError(done.err), IsError: true}},
+			})
 		}
 		return m, nil
 	}

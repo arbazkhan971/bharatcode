@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -40,7 +41,15 @@ type Event struct {
 	Kind      EventKind
 	Message   *message.Message
 	ToolName  string
-	Err       error
+	// ToolInput carries the raw JSON arguments of the tool call. It is set on
+	// EventToolCalled so consumers can render the invocation (e.g. the command
+	// a shell tool is about to run) without reaching back into history.
+	ToolInput json.RawMessage
+	// ToolResult carries the tool's result content in the same truncated form
+	// that is appended to the conversation history. It is set on
+	// EventToolResult so consumers can render the output inline.
+	ToolResult string
+	Err        error
 }
 
 // ErrUnknownAgent is returned when a requested named agent is not configured.

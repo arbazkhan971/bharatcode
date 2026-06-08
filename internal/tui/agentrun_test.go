@@ -69,7 +69,12 @@ func TestSubmitInput_DrivesAgentAndStreamsToChat(t *testing.T) {
 	require.Contains(t, rendered, "please run echo", "user prompt must be echoed into the chat")
 	require.Contains(t, rendered, "Reading the file now.", "scripted assistant text must reach the chat")
 	require.Contains(t, rendered, "All done with the task.", "final scripted assistant text must reach the chat")
-	require.Contains(t, rendered, "[tool: echo]", "scripted tool call must reach the chat")
+	// The tool call now renders as a discrete activity-stream turn led by the
+	// tool's action verb (the bare name for an unmapped tool), not the old
+	// bracketed "[tool: echo]" marker dumped into the assistant bubble.
+	require.NotContains(t, rendered, "[tool: echo]", "tool calls must no longer render as bracket markers")
+	require.NotContains(t, rendered, "[done:", "tool results must no longer render as bracket markers")
+	require.Regexp(t, regexp.MustCompile(`(?i)\becho\b`), rendered, "scripted tool call must reach the chat as a styled turn")
 
 	require.GreaterOrEqual(t, provider.calls(), 2, "provider must be called once per agent turn")
 	require.False(t, m.running, "run must have finished")
@@ -79,6 +84,45 @@ func TestSubmitInput_DrivesAgentAndStreamsToChat(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, msgs)
 	require.Equal(t, "please run echo", firstUserText(msgs), "user prompt must be persisted by the agent loop")
+}
+
+// TestEditToolCall_RendersInlineUnifiedDiff is the change-D contract test: a
+// scripted edit tool call must surface in the transcript as a tinted unified
+// diff (the removed line in the old fragment, the added line in the new), led by
+// the "Editing" verb — not as the raw tool arguments or a plain confirmation.
+// The inline diff is built from the EventToolCalled arguments, which fire before
+// the tool executes, so the edit's own filesystem outcome does not matter here.
+func TestEditToolCall_RendersInlineUnifiedDiff(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "Applying the edit."},
+			llm.ToolUseEndEvent{ID: "call-1", Name: "edit", Input: json.RawMessage(`{"path":"f.go","old_string":"alpha","new_string":"omega"}`)},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}},
+		},
+		{
+			llm.DeltaTextEvent{Text: "Done."},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 8, OutputTokens: 4}},
+		},
+	}}
+
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	h.submit(t, "please edit the file")
+	h.drain(t, func() bool { return !m.running })
+
+	rendered := plainText(m.chat.Render(200))
+	require.Contains(t, rendered, "Editing", "an edit call must lead with the Editing verb")
+	require.Contains(t, rendered, "alpha", "the removed fragment must appear in the inline diff")
+	require.Contains(t, rendered, "omega", "the added fragment must appear in the inline diff")
+	require.Contains(t, rendered, "f.go", "the edited file's diff header must appear")
+	// The raw argument JSON must never leak into the transcript.
+	require.NotContains(t, rendered, "old_string", "raw tool arguments must not render")
+	require.NotContains(t, rendered, "new_string", "raw tool arguments must not render")
+
+	// The styled render must carry diff tinting (ANSI), proving the diff routed
+	// through the viewer rather than dumping plain text.
+	require.Contains(t, m.chat.Render(200), "\x1b[", "the inline diff must be tinted")
 }
 
 // TestGoalRun_IteratesUntilCap is the CHANGE 2 contract test: when no

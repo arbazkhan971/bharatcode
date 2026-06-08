@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -54,6 +55,11 @@ type Options struct {
 	YOLO bool
 	// Verbose enables debug logging.
 	Verbose bool
+	// LogToFile routes diagnostics to an append-only log file under the data
+	// dir instead of stderr. The interactive TUI sets this so slog output never
+	// corrupts the rendered screen; non-interactive callers leave it false to
+	// keep the stderr/JSON behavior that pipes and CI depend on.
+	LogToFile bool
 	// Offline forces sovereignty offline mode on regardless of the
 	// BHARATCODE_OFFLINE environment variable: non-localhost providers are
 	// rejected and the web_fetch/web_search tools are withheld.
@@ -82,6 +88,12 @@ type App struct {
 	Tools       *tools.Registry
 	Agent       *agent.Coordinator
 	Logger      *slog.Logger
+
+	// logFile holds the diagnostics log handle when logging is routed to a file
+	// (the interactive TUI path). It is closed by closeSteps so the descriptor is
+	// released on Close rather than leaking for the process lifetime. nil when
+	// logging targets stderr.
+	logFile *os.File
 
 	rootCtx    context.Context
 	cancelRoot context.CancelFunc
@@ -127,9 +139,14 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	}
 
 	logger := newLogger(opts.Verbose)
+	var logFile *os.File
+	if opts.LogToFile {
+		logger, logFile = newLoggerToFile(defaultLogPath(), opts.Verbose)
+	}
 	rootCtx, cancel := context.WithCancel(ctx)
 	app := &App{
 		Logger:     logger,
+		logFile:    logFile,
 		rootCtx:    rootCtx,
 		cancelRoot: cancel,
 	}
@@ -144,11 +161,14 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		cancel()
 		return nil, cause
 	}
+	// Register the diagnostics log handle first so it is closed last during
+	// rollback (closeSteps runs in reverse), after any other rollback warning has
+	// been written through the logger that targets it. No-op when logFile is nil.
+	closers = append(closers, closeStep{name: "logfile", close: closeLogFile(logFile)})
 
 	projectDir, globalConfigPath, projectConfigPath, dbPath, err := resolvePaths(opts)
 	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("constructing util paths: %w", err)
+		return rollback(fmt.Errorf("constructing util paths: %w", err))
 	}
 
 	app.DB, err = db.Open(rootCtx, dbPath)
@@ -327,6 +347,10 @@ func newBus() *Bus {
 
 func (a *App) closeSteps() []closeStep {
 	return []closeStep{
+		// closeSteps runs in reverse order, so the log file listed first is closed
+		// last — after every other subsystem has had the chance to log a close
+		// warning through the logger that writes to it.
+		{name: "logfile", close: closeLogFile(a.logFile)},
 		{name: "db", close: closeDB(a.DB)},
 		{name: "audit", close: closeAudit(a.Audit)},
 		{name: "pubsub", close: closeBus(a.Bus)},
@@ -334,6 +358,17 @@ func (a *App) closeSteps() []closeStep {
 		{name: "lsp", close: closeLSP(a.LSP)},
 		{name: "mcp", close: closeMCP(a.MCP)},
 		{name: "agent", close: closeAgent(a.Agent)},
+	}
+}
+
+// closeLogFile releases the diagnostics log handle opened by newLoggerToFile.
+// It is a no-op when logging targets stderr (logFile is nil).
+func closeLogFile(f *os.File) func(context.Context) error {
+	return func(context.Context) error {
+		if f == nil {
+			return nil
+		}
+		return f.Close()
 	}
 }
 
@@ -567,6 +602,18 @@ func resolvePaths(opts Options) (projectDir, globalConfigPath, projectConfigPath
 }
 
 func defaultDBPath() string {
+	return filepath.Join(dataDir(), "bharatcode.db")
+}
+
+// defaultLogPath returns the append-only diagnostics log location, alongside the
+// database under the same data-dir convention as defaultDBPath.
+func defaultLogPath() string {
+	return filepath.Join(dataDir(), "bharatcode.log")
+}
+
+// dataDir resolves the BharatCode data directory using the XDG_DATA_HOME logic,
+// falling back to ~/.local/share and finally the current directory.
+func dataDir() string {
 	dataHome := os.Getenv("XDG_DATA_HOME")
 	if dataHome == "" {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
@@ -576,17 +623,41 @@ func defaultDBPath() string {
 	if dataHome == "" {
 		dataHome = "."
 	}
-	return filepath.Join(util.ExpandPath(dataHome), "bharatcode", "bharatcode.db")
+	return filepath.Join(util.ExpandPath(dataHome), "bharatcode")
+}
+
+func levelFor(verbose bool) slog.Level {
+	if verbose {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
 }
 
 func newLogger(verbose bool) *slog.Logger {
-	level := slog.LevelInfo
-	if verbose {
-		level = slog.LevelDebug
-	}
-	opts := &slog.HandlerOptions{Level: level}
+	opts := &slog.HandlerOptions{Level: levelFor(verbose)}
 	if fileInfo, err := os.Stderr.Stat(); err == nil && fileInfo.Mode()&os.ModeCharDevice != 0 {
 		return slog.New(slog.NewTextHandler(os.Stderr, opts))
 	}
 	return slog.New(slog.NewJSONHandler(os.Stderr, opts))
+}
+
+// newLoggerToFile builds a logger that appends diagnostics to path so slog
+// output never reaches the terminal and corrupts the TUI. The file is opened
+// O_CREATE|O_WRONLY|O_APPEND; verbose raises the threshold to Debug, writing
+// more to the file without ever routing back to stderr. If the file cannot be
+// opened the logger discards records — falling back to stderr would re-introduce
+// exactly the noise this redirect exists to prevent.
+// The returned *os.File is the open log handle (or nil if the file could not be
+// opened, in which case records are discarded). The caller owns the handle and
+// must close it on shutdown; App stores it and closes it in closeSteps.
+func newLoggerToFile(path string, verbose bool) (*slog.Logger, *os.File) {
+	opts := &slog.HandlerOptions{Level: levelFor(verbose)}
+	if dir := filepath.Dir(path); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, opts)), nil
+	}
+	return slog.New(slog.NewTextHandler(f, opts)), f
 }

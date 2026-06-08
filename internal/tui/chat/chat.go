@@ -16,9 +16,18 @@ import (
 	"unicode"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
+	"github.com/arbazkhan971/bharatcode/internal/tui/diff"
 	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 	"github.com/arbazkhan971/bharatcode/internal/util"
 )
+
+// DiffMarker is the sentinel first line that tags a tool turn's body as a
+// pre-built unified diff: the live edit/write path emits it ahead of the patch
+// text so the renderer routes the body through the diff viewer (line numbers,
+// red/green tinting) rather than the plain sub-output styler. It is invisible —
+// the renderer strips it before drawing — and is the same diff the /diff command
+// shows, so an edit reads consistently whether reviewed inline or on demand.
+const DiffMarker = "\x00diff\x00"
 
 // subOutputElideOver is the line count past which a turn's sub-output (command
 // or tool result) is collapsed: the first subOutputHead lines are kept and the
@@ -36,6 +45,11 @@ type List struct {
 	index         map[string]int
 	renderRegions int
 	md            *markdownRenderer
+	// diffViewer renders an edit/write tool turn's inline unified diff with line
+	// numbers and red/green tinting. It is nil until EnableDiff is called; while
+	// nil such a turn falls back to the plain sub-output styler, so the list is
+	// always renderable even before a theme is wired.
+	diffViewer *diff.Viewer
 }
 
 type item struct {
@@ -69,6 +83,19 @@ func (l *List) EnableMarkdown(style string) {
 	}
 }
 
+// EnableDiff wires a diff viewer built from theme so edit/write tool turns whose
+// body is tagged with DiffMarker render as a proper unified diff (line numbers,
+// red/green tinting) instead of plain sub-output. Calling it resets the render
+// cache so already-shown turns re-render through the viewer; it follows the same
+// reset contract as EnableMarkdown so a theme switch repaints both.
+func (l *List) EnableDiff(theme styles.Theme) {
+	l.diffViewer = diff.New(theme)
+	for i := range l.items {
+		l.items[i].cachedWidth = 0
+		l.items[i].cachedBody = ""
+	}
+}
+
 // Append adds a complete message to the visible list.
 func (l *List) Append(msg message.Message) {
 	if l.index == nil {
@@ -78,9 +105,18 @@ func (l *List) Append(msg message.Message) {
 	if id == "" {
 		id = fmt.Sprintf("msg-%d", len(l.items)+1)
 	}
+	role := msg.Role
+	// The agent loop persists tool results as user-role messages whose sole block
+	// is a ToolResultBlock. Treat such a message as a tool turn so a reloaded
+	// session (e.g. --continue) renders the result as a styled "Result" activity
+	// turn, identical to how the live path shows it — rather than as plain
+	// user-bubble prose. Real user prose is untouched.
+	if role == message.RoleUser && isSoleToolResult(msg) {
+		role = message.RoleTool
+	}
 	body := flatten(msg)
 	if idx, ok := l.index[id]; ok {
-		l.items[idx].role = msg.Role
+		l.items[idx].role = role
 		l.items[idx].body = body
 		if !msg.CreatedAt.IsZero() {
 			l.items[idx].createdAt = msg.CreatedAt
@@ -90,7 +126,7 @@ func (l *List) Append(msg message.Message) {
 		return
 	}
 	l.index[id] = len(l.items)
-	l.items = append(l.items, item{id: id, role: msg.Role, body: body, createdAt: msg.CreatedAt})
+	l.items = append(l.items, item{id: id, role: role, body: body, createdAt: msg.CreatedAt})
 }
 
 // Stream appends delta to a streaming assistant message.
@@ -275,8 +311,15 @@ func (l *List) Render(width int) string {
 		width = 1
 	}
 	var b strings.Builder
+	wrote := false
 	for i := range l.items {
-		if i > 0 {
+		if !renderable(&l.items[i]) {
+			// A finished turn with no visible content (e.g. an assistant bubble that
+			// produced only tool calls and never any prose) is skipped so it leaves
+			// no empty framed bubble in the transcript.
+			continue
+		}
+		if wrote {
 			// A blank line, a faint dotted rule, and a blank line create generous
 			// breathing room between turns without a heavy solid separator.
 			b.WriteString("\n")
@@ -284,8 +327,28 @@ func (l *List) Render(width int) string {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(l.renderItem(i, width))
+		wrote = true
 	}
 	return b.String()
+}
+
+// renderable reports whether an item has anything worth drawing. A streaming
+// item always renders (it shows the live cursor even before its first delta). A
+// finished item with an all-whitespace body renders nothing — that is the empty
+// assistant bubble a tool-only turn would otherwise leave behind. A command/tool
+// turn with empty output still renders, since its header alone is meaningful
+// (the action verb), so empties are only dropped for plain prose turns.
+func renderable(it *item) bool {
+	if it.streaming {
+		return true
+	}
+	if strings.TrimSpace(it.body) != "" {
+		return true
+	}
+	// An empty body still renders when the turn carries a command/tool header, so
+	// a silent tool shows its verb line rather than vanishing entirely.
+	_, _, ok := commandTurn(it)
+	return ok
 }
 
 // RenderRegions returns the number of item render cache misses.
@@ -309,7 +372,7 @@ func (l *List) renderItem(idx int, width int) string {
 	// block uses UserBlock chrome (muted left bar) since tool/command turns are
 	// not assistant prose and shouldn't claim the saffron accent.
 	if verb, rest, ok := commandTurn(it); ok {
-		raw := renderCommandTurn(header, verb, rest, width)
+		raw := renderCommandTurn(header, verb, rest, width, l.diffViewer)
 		it.cachedWidth = width
 		it.cachedBody = applyTurnBlock(it.role, raw, width)
 		return it.cachedBody
@@ -404,7 +467,7 @@ func commandTurn(it *item) (verb, rest string, ok bool) {
 // unknown name is shown verbatim so a new tool still reads sensibly.
 func verbForTool(name string) string {
 	switch strings.ToLower(name) {
-	case "edit", "write", "apply_patch", "str_replace":
+	case "edit", "write", "multiedit", "apply_patch", "str_replace":
 		return "Editing"
 	case "read", "view", "cat":
 		return "Reading"
@@ -424,12 +487,23 @@ func verbForTool(name string) string {
 // output is elided to its head with a faint "… +N lines" hint, and added/removed
 // lines are tinted so a diff in the output reads at a glance. Empty output
 // renders the header alone.
-func renderCommandTurn(header, verb, rest string, width int) string {
+//
+// A body tagged with DiffMarker is a pre-built unified diff for an edit/write: it
+// is rendered through viewer (line numbers, intra-line word emphasis, red/green
+// tinting) so an edit reads the way the /diff command shows it, rather than as
+// the tool's plain text confirmation. viewer may be nil (no theme wired yet), in
+// which case the patch falls back to the plain sub-output styler, which still
+// tints +/- lines.
+func renderCommandTurn(header, verb, rest string, width int, viewer *diff.Viewer) string {
 	var b strings.Builder
 	b.WriteString(header)
 	if verb != "" {
 		b.WriteString(" ")
 		b.WriteString(styles.Verb.Render(verb))
+	}
+
+	if patch, ok := strings.CutPrefix(rest, DiffMarker+"\n"); ok {
+		return renderDiffTurn(b.String(), patch, width, viewer)
 	}
 
 	out := strings.TrimRight(rest, "\n")
@@ -443,6 +517,52 @@ func renderCommandTurn(header, verb, rest string, width int) string {
 		b.WriteString(styles.Connector())
 		b.WriteString(" ")
 		b.WriteString(styleOutputLine(line, indentW))
+	}
+	return b.String()
+}
+
+// renderDiffTurn draws a unified diff under a tool turn's header, indented under
+// the same muted connector the plain sub-output uses so an inline edit diff sits
+// in the activity stream like any other tool output. The diff is rendered with
+// line numbers and red/green tinting through viewer at the indented width so it
+// clips to the pane exactly as the /diff command does, then elided past the
+// shared line cap with the same "… +N lines" hint so a sprawling rewrite does not
+// bury the conversation. A nil viewer (no theme yet) or an empty patch falls back
+// to the plain per-line styler, which still tints +/- lines.
+func renderDiffTurn(head, patch string, width int, viewer *diff.Viewer) string {
+	indentW := width - 4
+	if indentW < 1 {
+		indentW = 1
+	}
+
+	// Render through the viewer when one is wired (line numbers, word-diff, tint);
+	// otherwise fall back to the plain styler so the patch still reads as a diff.
+	// Elision then runs over whatever lines the viewer produced (it may itself fold
+	// long context runs), so the line cap counts displayed rows, not raw patch
+	// lines — keeping a tall diff bounded the same way other sub-output is.
+	var lines []string
+	if viewer != nil && strings.TrimSpace(patch) != "" {
+		lines = strings.Split(viewer.RenderUnifiedNumbered(patch, indentW), "\n")
+	} else {
+		for _, line := range strings.Split(strings.TrimRight(patch, "\n"), "\n") {
+			lines = append(lines, styleOutputLine(line, indentW))
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(head)
+	for _, line := range elide(lines, subOutputElideOver, subOutputHead) {
+		b.WriteString("\n")
+		b.WriteString(styles.Connector())
+		b.WriteString(" ")
+		if isElisionHint(line) {
+			// elide inserts the hint as plain text; draw it faint like other elisions.
+			b.WriteString(styles.Faint.Render(line))
+			continue
+		}
+		// The line is already styled (by the viewer or the fallback styler) — emit
+		// it verbatim so its ANSI tinting and gutter survive.
+		b.WriteString(line)
 	}
 	return b.String()
 }
@@ -493,6 +613,18 @@ func splitFirstLine(s string) (first, rest string) {
 		return s[:i], s[i+1:]
 	}
 	return s, ""
+}
+
+// isSoleToolResult reports whether msg's only content block is a ToolResultBlock.
+// The agent loop persists tool output as a user-role message of exactly this
+// shape, so Append uses this to render reloaded results as tool turns, matching
+// the live path. A message mixing a result with prose is left as-is.
+func isSoleToolResult(msg message.Message) bool {
+	if len(msg.Content) != 1 {
+		return false
+	}
+	_, ok := msg.Content[0].(message.ToolResultBlock)
+	return ok
 }
 
 func flatten(msg message.Message) string {

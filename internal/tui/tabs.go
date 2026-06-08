@@ -129,6 +129,7 @@ func (m *model) newTab() tea.Cmd {
 
 	chatList := chat.New()
 	chatList.EnableMarkdown(m.theme.Markdown)
+	chatList.EnableDiff(m.theme)
 	modelName, agentName := initialIdentity(m.deps.Cfg)
 	fresh := tab{
 		chat:        chatList,

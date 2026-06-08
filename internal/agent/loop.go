@@ -1244,13 +1244,16 @@ func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCa
 		return tools.Result{Content: "unknown tool: " + call.Name, IsError: true}
 	}
 	wrapped := hookedTool{inner: tool, hooks: l.cfg.Hooks, sessionID: sessionID, agentName: l.name, allowed: l.toolAllowed(call.Name)}
-	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolCalled, ToolName: call.Name})
+	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolCalled, ToolName: call.Name, ToolInput: call.Input})
 	result, err := l.runToolSafely(ctx, &wrapped, call)
 	if err != nil {
 		l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventRunError, ToolName: call.Name, Err: err})
 		return tools.Result{Content: err.Error(), IsError: true}
 	}
-	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolResult, ToolName: call.Name})
+	// Carry the same truncated content that the caller appends to history so
+	// the live render and the persisted turn show identical output.
+	content := truncateToolResult(result.Content, l.toolResultMaxBytes(), result.IsError)
+	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolResult, ToolName: call.Name, ToolResult: content})
 	return result
 }
 

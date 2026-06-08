@@ -507,9 +507,11 @@ func AccentBar() string {
 
 // RoleLabel returns a turn's role label styled for who is speaking: the
 // assistant label in saffron-bold and the user label in muted-bold, with an
-// optional "· HH:MM" timestamp suffix in the faintest chrome. ts is the
-// preformatted time string ("" to omit it). A blank role falls back to
-// "message" rendered muted.
+// optional "· HH:MM" timestamp suffix. ts is the preformatted time string
+// ("" to omit it). The role and timestamp are rendered together as one styled
+// string so the literal "role · HH:MM" text is contiguous within the ANSI
+// output and callers can match it as a plain substring (strings.Contains works).
+// A blank role falls back to "message" rendered muted.
 func RoleLabel(role, ts string) string {
 	var labelStyle lipgloss.Style
 	switch role {
@@ -523,11 +525,14 @@ func RoleLabel(role, ts string) string {
 			role = "message"
 		}
 	}
-	out := labelStyle.Render(role)
+	label := role
 	if ts != "" {
-		out += " " + Timestamp.Render("· "+ts)
+		// Append the separator and timestamp inside the same Render call so the
+		// whole "role · HH:MM" string is a single styled span — no ANSI reset
+		// between "role" and " · HH:MM" means strings.Contains finds it intact.
+		label += " · " + ts
 	}
-	return out
+	return labelStyle.Render(label)
 }
 
 // SoftRule returns a refined, recessive separator of the given width: a faint

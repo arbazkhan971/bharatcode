@@ -159,6 +159,67 @@ func TestNewBus_AgentTopicBuffer_NotLossy(t *testing.T) {
 	require.GreaterOrEqual(t, agentEventBufferSize, 256)
 }
 
+func TestNewLoggerToFile_AppendsAndRespectsLevel(t *testing.T) {
+	tests := []struct {
+		name      string
+		verbose   bool
+		wantDebug bool
+	}{
+		{name: "info level drops debug records", verbose: false, wantDebug: false},
+		{name: "verbose keeps debug records", verbose: true, wantDebug: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "nested", "bharatcode.log")
+
+			logger, f := newLoggerToFile(path, tc.verbose)
+			require.NotNil(t, f)
+			logger.Info("info record")
+			logger.Debug("debug record")
+			require.NoError(t, f.Close())
+
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			contents := string(data)
+			require.Contains(t, contents, "info record")
+			if tc.wantDebug {
+				require.Contains(t, contents, "debug record")
+			} else {
+				require.NotContains(t, contents, "debug record")
+			}
+
+			// A second logger over the same path must append, not truncate.
+			logger2, f2 := newLoggerToFile(path, tc.verbose)
+			require.NotNil(t, f2)
+			logger2.Info("second record")
+			require.NoError(t, f2.Close())
+			data, err = os.ReadFile(path)
+			require.NoError(t, err)
+			require.Contains(t, string(data), "info record")
+			require.Contains(t, string(data), "second record")
+		})
+	}
+}
+
+func TestNewLoggerToFile_UnopenablePath_FallsBackToDiscard(t *testing.T) {
+	// A path whose parent is a regular file cannot be created; the logger must
+	// degrade to a no-op rather than panic or write to stderr.
+	file := filepath.Join(t.TempDir(), "blocker")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+	bad := filepath.Join(file, "bharatcode.log")
+
+	logger, f := newLoggerToFile(bad, false)
+	require.NotNil(t, logger)
+	require.Nil(t, f) // unopenable path yields a nil handle and a discard logger
+	require.NotPanics(t, func() { logger.Info("ignored") })
+}
+
+func TestDefaultLogPath_SharesDataDirWithDB(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
+	require.Equal(t, filepath.Dir(defaultDBPath()), filepath.Dir(defaultLogPath()))
+	require.Equal(t, "bharatcode.log", filepath.Base(defaultLogPath()))
+}
+
 func setAppEnv(t *testing.T, tempDir string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))

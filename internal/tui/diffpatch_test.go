@@ -1,9 +1,69 @@
 package tui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+// TestEditPatchForToolCall_EditYieldsRedGreenHunk asserts the live-path helper
+// builds the same kind of patch /diff shows for an edit: the changed line appears
+// once as a removal and once as an addition, with the unchanged surroundings as
+// context.
+func TestEditPatchForToolCall_EditYieldsRedGreenHunk(t *testing.T) {
+	input := json.RawMessage(`{"path":"f.go","old_string":"keep\nold\nkeep2","new_string":"keep\nnew\nkeep2"}`)
+	patch := editPatchForToolCall("edit", input)
+	if patch == "" {
+		t.Fatal("an edit call must yield a patch")
+	}
+	_, removed, added := byMarker(patch)
+	if !contains(removed, "old") {
+		t.Fatalf("edit patch must remove the old line, got removed=%v", removed)
+	}
+	if !contains(added, "new") {
+		t.Fatalf("edit patch must add the new line, got added=%v", added)
+	}
+}
+
+// TestEditPatchForToolCall_WriteIsAllGreen asserts a write to a new file yields a
+// patch whose body is entirely additions — no removals — so the transcript shows
+// an all-green diff for a created file.
+func TestEditPatchForToolCall_WriteIsAllGreen(t *testing.T) {
+	input := json.RawMessage(`{"path":"new.txt","content":"line one\nline two"}`)
+	patch := editPatchForToolCall("write", input)
+	if patch == "" {
+		t.Fatal("a write call must yield a patch")
+	}
+	_, removed, added := byMarker(patch)
+	if len(removed) != 0 {
+		t.Fatalf("a new-file write must have no removed lines, got %v", removed)
+	}
+	if !contains(added, "line one") || !contains(added, "line two") {
+		t.Fatalf("a write patch must add every content line, got added=%v", added)
+	}
+}
+
+// TestEditPatchForToolCall_NonEditReturnsEmpty asserts a non-editing tool (or one
+// whose arguments do not decode) yields no patch, so the caller renders the plain
+// tool turn instead of an empty diff.
+func TestEditPatchForToolCall_NonEditReturnsEmpty(t *testing.T) {
+	if p := editPatchForToolCall("bash", json.RawMessage(`{"command":"ls"}`)); p != "" {
+		t.Fatalf("a non-editing tool must yield no patch, got:\n%s", p)
+	}
+	if p := editPatchForToolCall("edit", json.RawMessage(`not json`)); p != "" {
+		t.Fatalf("undecodable arguments must yield no patch, got:\n%s", p)
+	}
+}
+
+// contains reports whether ss holds want.
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
 
 // byMarker groups a single-file patch's body lines by their marker, returning
 // the context (" "), removed ("-"), and added ("+") content with markers

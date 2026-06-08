@@ -167,7 +167,7 @@ type model struct {
 	// search highlights) is loaded via SetContent inside clampChat, which also
 	// drives the scroll offset and returns m.vp.View() — replacing the old
 	// hand-rolled strings.Split window that broke on ANSI-escaped lines.
-	vp viewport.Model
+	vp            viewport.Model
 	dialogs       dialog.Stack
 	footer        tuiledger.Footer
 	status        statusbar.Bar
@@ -195,15 +195,15 @@ type model struct {
 	// overlay. It is (re)built when the picker opens and resized on every
 	// WindowSizeMsg.
 	sessionPickerList list.Model
-	inputHistory     inputState
-	focus            focusState
-	width            int
-	height           int
-	layout           layout
-	startedAt        time.Time
-	now              time.Time
-	sessionID        string
-	sessionPersisted bool
+	inputHistory      inputState
+	focus             focusState
+	width             int
+	height            int
+	layout            layout
+	startedAt         time.Time
+	now               time.Time
+	sessionID         string
+	sessionPersisted  bool
 	// tabFirstPrompt is the first user prompt submitted in the active tab, used
 	// to title the tab in the /tabs listing. It mirrors the active tab's
 	// firstPrompt field the way sessionID mirrors the tab's session (see
@@ -246,8 +246,13 @@ type model struct {
 	lastContextPct int
 	turn           int
 	queueCounter   int
-	eventCh        <-chan agent.Event
-	eventCancel    func()
+	// toolTurnSeq is a monotonic counter that gives every appended tool turn
+	// (invocation or result) a unique chat-list id. A monotonic seq avoids
+	// collisions when read-only tool calls run concurrently and their events
+	// interleave, since each appended turn is its own discrete item.
+	toolTurnSeq int
+	eventCh     <-chan agent.Event
+	eventCancel func()
 
 	// Autonomous goal-loop state (CHANGE 2).
 	goalActive    bool
@@ -356,6 +361,9 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	// Render assistant markdown with syntax-highlighted code blocks. The glamour
 	// style follows the active theme so light/dark stay consistent.
 	chatList.EnableMarkdown(theme.Markdown)
+	// Render edit/write tool turns as inline unified diffs (line numbers, red/green
+	// tinting) through a theme-built viewer, matching the /diff command's look.
+	chatList.EnableDiff(theme)
 
 	// When --continue is used, pre-load the requested session so the TUI opens
 	// with its history intact instead of starting blank. The load happens here
@@ -1314,6 +1322,9 @@ func (m *model) applyTheme(name string) bool {
 	// The glamour markdown style follows the theme; EnableMarkdown also resets
 	// the chat render cache so already-shown messages re-render in the new style.
 	m.chat.EnableMarkdown(theme.Markdown)
+	// Re-point the diff viewer at the new theme so inline edit diffs re-tint to
+	// match; like EnableMarkdown it resets the render cache.
+	m.chat.EnableDiff(theme)
 	return true
 }
 
@@ -1402,7 +1413,6 @@ func (m *model) renderMain() string {
 		inputPanelStyle = styles.InputPanel.Width(m.width - 2)
 	}
 	inputPanel := inputPanelStyle.Render(input)
-
 
 	spinnerView := ""
 	if m.running {

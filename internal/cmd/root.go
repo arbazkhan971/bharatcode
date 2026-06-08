@@ -194,17 +194,21 @@ func closeApp(ctx context.Context, application *app.App) {
 // notice. The new binary takes effect on the next launch; the running process
 // is deliberately not re-executed. Every failure is a non-fatal warning that
 // never blocks startup.
+// maybeAutoUpdate runs a best-effort startup update check. By default it only
+// NOTIFIES: if a newer release tag exists it prints a one-line, install-method-
+// aware hint (npm/brew/binary) and does nothing else. In-place self-replacement
+// is opt-in (Options.AutoUpdate) AND limited to binary installs, since npm- and
+// Homebrew-managed binaries would be clobbered by the package manager and must
+// be upgraded through it. Any network error or uncertainty stays silent.
 func maybeAutoUpdate(ctx context.Context, application *app.App, opts *rootOptions, warn io.Writer) {
 	if application == nil || application.Cfg == nil {
-		return
-	}
-	if !application.Cfg.Options.AutoUpdate {
 		return
 	}
 	if (opts != nil && opts.offline) || offline.EnabledFromEnv() {
 		return
 	}
-	// Only a real release build (stamped version + commit) should self-update.
+	// Only a real release build (stamped version + commit) checks for updates;
+	// a dev/source build would compare a placeholder and nag spuriously.
 	if version == "" || commit == "" || commit == "0000000" {
 		return
 	}
@@ -215,15 +219,26 @@ func maybeAutoUpdate(ctx context.Context, application *app.App, opts *rootOption
 	ctx, cancel := context.WithTimeout(ctx, startupUpdateTimeout)
 	defer cancel()
 
-	status, err := selfupdate.Check(ctx, selfupdate.DefaultAPIURL, commit)
+	status, err := selfupdate.CheckRelease(ctx, selfupdate.DefaultReleaseAPIURL, version)
 	if err != nil || !status.UpdateAvailable {
 		return
 	}
-	if err := selfupdate.Apply(ctx, selfupdate.ApplyOptions{}); err != nil {
-		_, _ = fmt.Fprintf(warn, "bharatcode: auto-update skipped: %v\n", err)
+
+	method := selfupdate.DetectInstallMethod()
+
+	// Opt-in self-replace, but only where it is safe to overwrite our own
+	// executable. Everywhere else (and by default) we fall through to notify.
+	if application.Cfg.Options.AutoUpdate && method == selfupdate.InstallBinary {
+		if err := selfupdate.Apply(ctx, selfupdate.ApplyOptions{}); err != nil {
+			_, _ = fmt.Fprintf(warn, "bharatcode: auto-update skipped: %v\n", err)
+			return
+		}
+		_, _ = fmt.Fprintln(warn, "bharatcode: updated to the latest release; restart to use it.")
 		return
 	}
-	_, _ = fmt.Fprintln(warn, "bharatcode: updated to the latest release; restart to use it.")
+
+	// Default path: tell the user how to update for their install method.
+	_, _ = fmt.Fprintf(warn, "bharatcode: %s\n", status.AdviceFor(method))
 }
 
 // stdoutIsTerminal reports whether standard output is an interactive character

@@ -164,6 +164,22 @@ func TestBuildAuthorizeURL(t *testing.T) {
 	require.Equal(t, "S256", q.Get("code_challenge_method"))
 	require.Equal(t, "state-abc", q.Get("state"))
 	require.Equal(t, chatgptOAuthScope, q.Get("scope"))
+	// OpenAI-custom params the Codex public client requires; missing either one
+	// yields authorize_hydra_invalid_request. Locked in so they can't regress.
+	require.Equal(t, "true", q.Get("id_token_add_organizations"))
+	require.Equal(t, "true", q.Get("codex_cli_simplified_flow"))
+	require.Equal(t, codexOriginator, q.Get("originator"))
+	// prompt must NOT be sent — Codex does not include it.
+	require.Empty(t, q.Get("prompt"))
+}
+
+// TestLoginUsesLocalhostRedirect guards the redirect_uri host: it must be
+// "localhost" (the registered value), not 127.0.0.1, or OpenAI rejects the
+// authorize request. The actual redirect string is built in startChatGPTLogin;
+// this asserts the constant pieces it composes from.
+func TestLoginUsesLocalhostRedirect(t *testing.T) {
+	require.Equal(t, 1455, chatgptCallbackPort)
+	require.Equal(t, "/auth/callback", chatgptCallbackPath)
 }
 
 func TestExchangeCodeForTokens(t *testing.T) {

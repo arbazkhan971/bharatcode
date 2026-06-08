@@ -45,9 +45,10 @@ const (
 	chatgptAuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	chatgptTokenURL     = "https://auth.openai.com/oauth/token"
 
-	// chatgptOAuthScope is the scope set Codex requests; offline_access is what
-	// yields a refresh_token.
-	chatgptOAuthScope = "openid profile email offline_access"
+	// chatgptOAuthScope is the scope set the current Codex CLI requests;
+	// offline_access yields a refresh_token, and the api.connectors.* scopes
+	// match what the registered client expects.
+	chatgptOAuthScope = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 
 	// chatgptCallbackPort is the fixed loopback port the redirect_uri targets.
 	// It is fixed (not ephemeral) because it must match a redirect URI the OAuth
@@ -411,9 +412,15 @@ func buildAuthorizeURL(challenge, redirectURI, state string) string {
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
-		// id_token claims drive routing; ask the consent screen to mint the
-		// account id into them, mirroring the Codex CLI's authorize request.
-		"prompt": {"login"},
+		// These two are OpenAI-custom params the Codex public client is
+		// registered to require. Omitting them is what produces
+		// authorize_hydra_invalid_request. id_token_add_organizations makes the
+		// id_token carry the org/account claims the backend routes on.
+		"id_token_add_organizations": {"true"},
+		"codex_cli_simplified_flow":  {"true"},
+		// originator identifies the client; the Codex CLI sends codex_cli_rs and
+		// the ChatGPT backend keys behaviour off it.
+		"originator": {codexOriginator},
 	}
 	return chatgptAuthorizeURL + "?" + q.Encode()
 }
@@ -469,7 +476,12 @@ func startChatGPTLogin(ctx context.Context, opts LoginOptions) (*chatgptAuth, er
 		return nil, err
 	}
 
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d%s", chatgptCallbackPort, chatgptCallbackPath)
+	// The redirect_uri host MUST be "localhost" (not 127.0.0.1): OpenAI's OAuth
+	// server does exact-string matching against the redirect URI registered for
+	// the Codex public client, which uses "localhost". A 127.0.0.1 host is
+	// rejected with authorize_hydra_invalid_request. The listener can still bind
+	// the loopback IP — only the URL string must say localhost.
+	redirectURI := fmt.Sprintf("http://localhost:%d%s", chatgptCallbackPort, chatgptCallbackPath)
 
 	// Bind the loopback listener before opening the browser so the redirect
 	// cannot arrive before the server is ready. A bind failure (port in use) is

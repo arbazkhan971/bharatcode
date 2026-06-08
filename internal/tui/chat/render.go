@@ -3,6 +3,7 @@ package chat
 import (
 	"sync"
 
+	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 	"github.com/charmbracelet/glamour"
 )
 
@@ -48,13 +49,24 @@ func (m *markdownRenderer) rendererFor(width int) *glamour.TermRenderer {
 	if tr, ok := m.byW[width]; ok {
 		return tr
 	}
-	tr, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(m.style),
-		glamour.WithWordWrap(width),
-	)
+	tr, err := newRenderer(m.style, width)
 	if err != nil {
 		return nil
 	}
 	m.byW[width] = tr
 	return tr
+}
+
+// newRenderer builds the glamour renderer for a style at a width. The dark
+// (default) style uses the restrained, custom activity-stream theme; other named
+// styles (for example "light") fall back to glamour's matching stock style so
+// the renderer still follows the active theme.
+func newRenderer(style string, width int) (*glamour.TermRenderer, error) {
+	if style == "" || style == "dark" {
+		return styles.NewMarkdownRenderer(width)
+	}
+	return glamour.NewTermRenderer(
+		glamour.WithStandardStyle(style),
+		glamour.WithWordWrap(width),
+	)
 }

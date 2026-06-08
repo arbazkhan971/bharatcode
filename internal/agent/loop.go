@@ -262,6 +262,13 @@ type Loop struct {
 	cancelRun context.CancelFunc
 	allowed   map[string]struct{}
 
+	// modelMu guards cfg.Model, cfg.Provider, and activeModel when they are
+	// read or written by SetModel/Provider outside of a Run. Using a separate
+	// RWMutex for these fields means SetModel/Provider never contend with the
+	// long-held runMu, so calling Provider() from the TUI while a turn is in
+	// flight (e.g. for status-bar rendering) cannot deadlock.
+	modelMu sync.RWMutex
+
 	// compactMu guards the in-memory compaction snapshot below. Run reads it
 	// and Compact writes it, potentially from different goroutines.
 	compactMu sync.Mutex
@@ -400,6 +407,29 @@ func (l *Loop) Interrupt() {
 	if l.cancelRun != nil {
 		l.cancelRun()
 	}
+}
+
+// SetModel rebinds the Loop to a different model and provider. It guards only
+// the model/provider fields with modelMu — NOT runMu — so the swap can happen
+// concurrently with a running turn. Locking runMu here (which Run holds for the
+// whole turn) would block every model switch and Provider() read until the
+// in-flight turn finished, deadlocking the steering path. Run reads the provider
+// under the same modelMu, so the swap stays tear-free. Safe from any goroutine.
+func (l *Loop) SetModel(modelID string, p llm.Provider) {
+	l.modelMu.Lock()
+	defer l.modelMu.Unlock()
+	l.cfg.Model = modelID
+	l.cfg.Provider = p
+	l.activeModel = modelID
+}
+
+// Provider returns the provider the Loop is currently bound to. It takes only a
+// modelMu read lock (never runMu) so it is safe to call from any goroutine —
+// including while a turn is running — and reflects the latest SetModel call.
+func (l *Loop) Provider() llm.Provider {
+	l.modelMu.RLock()
+	defer l.modelMu.RUnlock()
+	return l.cfg.Provider
 }
 
 // Steer queues text as a steering message for the in-flight Run. When a Run is

@@ -275,12 +275,18 @@ func (m *model) highlightMatches(body string) string {
 		if idx < 0 || idx >= len(lines) {
 			continue
 		}
-		if strings.ContainsRune(lines[idx], '\x1b') {
-			continue
-		}
 		style := m.theme.MatchOther
 		if idx == current {
 			style = m.theme.Match
+		}
+		// Transcript lines now carry styling (the role accent bar, colored
+		// labels), so a line nearly always contains escape codes. Highlight the
+		// term only within the line's PLAIN text spans — the runs between SGR
+		// sequences — so the needle is emphasized without corrupting the existing
+		// ANSI (which a naive whole-line replace over escaped text would do).
+		if strings.ContainsRune(lines[idx], '\x1b') {
+			lines[idx] = highlightInPlainSpans(lines[idx], m.search.term, m.search.re, style)
+			continue
 		}
 		if m.search.re != nil {
 			lines[idx] = highlightTermRe(lines[idx], m.search.re, style)
@@ -290,6 +296,40 @@ func (m *model) highlightMatches(body string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// highlightInPlainSpans applies the term/regex highlight to the plain-text runs
+// of a line that already contains ANSI escape sequences (e.g. an accent bar and
+// colored label prefix). It splits the line into escape sequences and plain
+// spans, highlights only the plain spans, and rejoins — so the needle is
+// emphasized without slicing through or duplicating the surrounding SGR codes.
+func highlightInPlainSpans(line, term string, re *regexp.Regexp, style lipgloss.Style) string {
+	var b strings.Builder
+	for len(line) > 0 {
+		loc := ansiSeq.FindStringIndex(line)
+		if loc == nil {
+			b.WriteString(highlightSpan(line, term, re, style))
+			break
+		}
+		if loc[0] > 0 {
+			b.WriteString(highlightSpan(line[:loc[0]], term, re, style))
+		}
+		b.WriteString(line[loc[0]:loc[1]]) // the escape sequence, untouched
+		line = line[loc[1]:]
+	}
+	return b.String()
+}
+
+// highlightSpan highlights a plain (escape-free) span using the regex when set,
+// else the literal term.
+func highlightSpan(span, term string, re *regexp.Regexp, style lipgloss.Style) string {
+	if re != nil {
+		return highlightTermRe(span, re, style)
+	}
+	return highlightTerm(span, term, style)
+}
+
+// ansiSeq matches a single ANSI SGR escape sequence.
+var ansiSeq = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // highlightTerm wraps every occurrence of term in line with style, leaving the
 // rest untouched. Matching follows the same smart-case rule as the search that

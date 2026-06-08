@@ -325,6 +325,29 @@ func (c *Coordinator) List() []string {
 	return out
 }
 
+// SetActiveModel rebinds the named agent to modelID and returns the resolved
+// provider so the caller can forward it to the live Loop via Loop.SetModel.
+// It resolves the provider by scanning all configured providers for one whose
+// Models() list contains modelID, matching the same logic as resolveProvider.
+// An error is returned when modelID is not found in any configured provider.
+func (c *Coordinator) SetActiveModel(agentName, modelID string) (llm.Provider, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	provider, providerName, resolved, err := c.resolveProvider(modelID)
+	if err != nil {
+		return nil, fmt.Errorf("setting active model %q on agent %q: %w", modelID, agentName, err)
+	}
+	for i := range c.agents {
+		if c.agents[i].name == agentName {
+			c.agents[i].provider = provider
+			c.agents[i].providerName = providerName
+			c.agents[i].model = resolved
+			return provider, nil
+		}
+	}
+	return nil, fmt.Errorf("setting active model: agent %q not found: %w", agentName, ErrUnknownAgent)
+}
+
 func (c *Coordinator) applyConfigAgent(def *agentDef) {
 	for _, raw := range c.cfg.Agents {
 		if raw.Name != def.name {
@@ -347,7 +370,17 @@ func (c *Coordinator) resolveProvider(modelID string) (llm.Provider, string, str
 		return nil, "", "", fmt.Errorf("resolving provider: no providers configured")
 	}
 	if modelID != "" {
-		for name, provider := range c.deps.Providers {
+		// Collect and sort provider names so iteration order is deterministic:
+		// if two providers both advertise the same model ID (misconfiguration),
+		// the alphabetically-first provider wins consistently instead of varying
+		// per process restart due to Go map non-determinism.
+		searchNames := make([]string, 0, len(c.deps.Providers))
+		for name := range c.deps.Providers {
+			searchNames = append(searchNames, name)
+		}
+		sort.Strings(searchNames)
+		for _, name := range searchNames {
+			provider := c.deps.Providers[name]
 			for _, model := range provider.Models() {
 				if model.ID == modelID {
 					return provider, name, modelID, nil

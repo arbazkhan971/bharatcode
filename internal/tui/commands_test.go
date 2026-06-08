@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
@@ -17,9 +18,103 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/recipe"
 	"github.com/arbazkhan971/bharatcode/internal/session"
+	"github.com/arbazkhan971/bharatcode/internal/tools"
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 )
+
+// TestApplyModelRebindsLiveAgentLoop is the routing-correctness test for
+// applyModel. It wires a coordinator with two named providers ("deepseek" and
+// "chatgpt") whose startup config pins the "coder" agent to deepseek-chat (the
+// production default). Calling applyModel with the gpt-5.1-codex model must
+// rebind the live Loop's provider to the chatgpt provider so the next user
+// turn is routed correctly — not to deepseek, which would fail with an auth
+// error when no DEEPSEEK_API_KEY is set.
+func TestApplyModelRebindsLiveAgentLoop(t *testing.T) {
+	deepseekProv := &namedFakeProvider{
+		name: "deepseek",
+		models: []llm.Model{{
+			ID: "deepseek-chat", Provider: "deepseek",
+			ContextWindow: 65536, SupportsTools: true,
+		}},
+	}
+	chatgptProv := &namedFakeProvider{
+		name: "chatgpt",
+		models: []llm.Model{{
+			ID: "gpt-5.1-codex", Provider: "chatgpt",
+			ContextWindow: 128000, SupportsTools: true,
+		}},
+	}
+
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "tui.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+	repo := session.NewRepo(database)
+
+	cfg := &config.Config{
+		Models: []config.Model{
+			{ID: "deepseek-chat", Provider: "deepseek", ContextWindow: 65536, SupportsTools: true},
+			{ID: "gpt-5.1-codex", Provider: "chatgpt", ContextWindow: 128000, SupportsTools: true},
+		},
+		// Default agent is pinned to deepseek-chat — matching the production
+		// defaults/config.json so this test exercises the real bug scenario.
+		Agents: []config.Agent{{Name: "coder", Model: "deepseek-chat"}},
+		Ledger: config.LedgerConfig{MaxInrPerMonth: 100},
+	}
+
+	coord := buildTwoProviderCoord(t, cfg, repo, deepseekProv, chatgptProv)
+
+	loop, err := coord.Agent("coder")
+	require.NoError(t, err)
+	require.Equal(t, "deepseek", loop.Provider().Name(),
+		"pre-condition: loop must start on the deepseek provider")
+
+	m := newModel(context.Background(), Dependencies{
+		Agent:       loop,
+		Coordinator: coord,
+		Sessions:    repo,
+		Cfg:         cfg,
+	})
+
+	// Simulate what onboarding.go does after a successful ChatGPT login.
+	chatgptModel := config.Model{ID: "gpt-5.1-codex", Provider: "chatgpt"}
+	m.applyModel(chatgptModel)
+
+	require.Equal(t, "gpt-5.1-codex", m.status.Model,
+		"status bar must show the selected model id")
+	require.Equal(t, "chatgpt", m.deps.Agent.Provider().Name(),
+		"the live loop must be rebound to the chatgpt provider after applyModel")
+}
+
+// namedFakeProvider is a minimal provider stub that returns a fixed name and
+// model list. It is used to prove provider selection without HTTP calls.
+type namedFakeProvider struct {
+	name   string
+	models []llm.Model
+}
+
+func (p *namedFakeProvider) Name() string { return p.name }
+func (p *namedFakeProvider) Stream(_ context.Context, _ llm.Request) (<-chan llm.Event, error) {
+	ch := make(chan llm.Event)
+	close(ch)
+	return ch, nil
+}
+func (p *namedFakeProvider) Models() []llm.Model  { return p.models }
+func (p *namedFakeProvider) SupportsTools() bool  { return true }
+func (p *namedFakeProvider) SupportsImages() bool { return false }
+
+// buildTwoProviderCoord builds a started Coordinator wired with two providers.
+func buildTwoProviderCoord(t *testing.T, cfg *config.Config, repo *session.Repo, p1, p2 llm.Provider) *agent.Coordinator {
+	t.Helper()
+	coord, err := agent.NewCoordinator(cfg, agent.Dependencies{
+		Tools:     tools.NewRegistry(tools.Dependencies{}),
+		Sessions:  repo,
+		Providers: map[string]llm.Provider{p1.Name(): p1, p2.Name(): p2},
+	})
+	require.NoError(t, err)
+	require.NoError(t, coord.Start(context.Background()))
+	return coord
+}
 
 // indexOfSession returns the index of id within candidates, or -1.
 func indexOfSession(candidates []session.Session, id string) int {

@@ -57,10 +57,11 @@ func (p *chatgptOAuthProvider) Models() []Model {
 	return models
 }
 
-// SupportsTools is false: the ChatGPT-plan backend's Responses surface does not
-// reliably accept function tools for third-party clients, so tools are rejected
-// rather than silently dropped (mirroring codexOAuthProvider).
-func (p *chatgptOAuthProvider) SupportsTools() bool { return false }
+// SupportsTools reports whether the active model accepts function tools. The
+// ChatGPT-plan Codex backend (chatgpt.com/backend-api/codex/responses) is the
+// same surface the Codex CLI drives with tools, so tools are supported for
+// tool-capable models — a coding agent is unusable without them.
+func (p *chatgptOAuthProvider) SupportsTools() bool { return supportsTools(p.models) }
 
 func (p *chatgptOAuthProvider) SupportsImages() bool { return supportsImages(p.models) }
 
@@ -120,8 +121,8 @@ func (p *chatgptOAuthProvider) credentials(ctx context.Context) (token, accountI
 // OAuth bearer and account-id headers, reusing the shared Responses request
 // builder and SSE parser. Tool calls are rejected on this path.
 func (p *chatgptOAuthProvider) Stream(ctx context.Context, req Request) (<-chan Event, error) {
-	if len(req.Tools) > 0 {
-		return nil, fmt.Errorf("chatgpt responses tools: %w", ErrUnsupportedFeature)
+	if len(req.Tools) > 0 && !modelSupportsTools(p.models, req.Model) {
+		return nil, fmt.Errorf("model %q tools: %w", req.Model, ErrUnsupportedFeature)
 	}
 	if hasImages(req.Messages) && !modelSupportsImages(p.models, req.Model) {
 		return nil, fmt.Errorf("model %q images: %w", req.Model, ErrUnsupportedFeature)
@@ -188,7 +189,12 @@ func (p *chatgptOAuthProvider) readResponse(ctx context.Context, resp *http.Resp
 	defer resp.Body.Close()
 
 	send(ctx, events, StartEvent{Provider: p.Name(), Model: model})
-	if err := emitCodexBackendStream(ctx, resp.Body, events); err != nil {
+	// The ChatGPT-plan backend speaks the same Responses SSE wire format as the
+	// public Responses API, including function-call events. Use the full
+	// Responses stream parser (which decodes tool calls) rather than a text-only
+	// reader — without it the model's tool calls are silently dropped and a
+	// coding turn produces no file and no output.
+	if err := emitResponsesStream(ctx, resp.Body, events); err != nil {
 		send(ctx, events, ErrorEvent{Err: err})
 	}
 }

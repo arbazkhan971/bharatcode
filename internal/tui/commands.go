@@ -72,6 +72,13 @@ func (m *model) openSessionPicker() (tea.Model, tea.Cmd) {
 	m.sessionCandidates = sessions
 	m.sessionCursor = 0
 	m.sessionFilter = ""
+	// Rebuild the bubbles/list picker so it reflects the freshly loaded sessions
+	// and has the correct size for the current terminal. The dialog stack entry is
+	// still pushed for the text-body fallback path; the overlay renderer in
+	// viewString uses the list when sessionCandidates is non-empty.
+	lw, lh := pickerListSize(m.width, m.height)
+	m.sessionPickerList = newSessionPicker(sessions, m.sessionID, m.sessionPersisted, m.now)
+	m.sessionPickerList.SetSize(lw, lh)
 	m.dialogs.Push(&dialog.Text{
 		DialogID: "sessions",
 		Title:    "Sessions",
@@ -209,76 +216,88 @@ func (m *model) highlightSessionMatch(title, query string) string {
 }
 
 // handleSessionPickerKey processes navigation and selection while the session
-// picker is open. It returns whether the key was consumed; an unconsumed key
-// (other than enter/esc) falls through to the dialog's own handler.
+// picker is open. It forwards every consumed key to m.sessionPickerList.Update
+// so the bubbles/list cursor tracks actual keystrokes and its View() (called
+// from pickerModal in viewString) reflects the true cursor position. The old
+// integer sessionCursor path is kept in sync so refreshSessionPicker's text
+// body falls back correctly when the bubbles list is empty. It returns whether
+// the key was consumed; an unconsumed key (esc) falls through to the generic
+// dialog handler.
 func (m *model) handleSessionPickerKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.Cmd) {
+	// updateSessionList forwards the key to the bubbles/list component and
+	// stores the updated model, so the list cursor moves on each keystroke.
+	updateSessionList := func() tea.Cmd {
+		var listCmd tea.Cmd
+		m.sessionPickerList, listCmd = updateList(m.sessionPickerList, msg)
+		return listCmd
+	}
+
 	switch msg.String() {
 	case "up":
 		if m.sessionCursor > 0 {
 			m.sessionCursor--
-			m.refreshSessionPicker()
 		}
-		return true, nil
+		cmd = updateSessionList()
+		m.refreshSessionPicker()
+		return true, cmd
 	case "down":
 		if m.sessionCursor < len(m.visibleSessions())-1 {
 			m.sessionCursor++
-			m.refreshSessionPicker()
 		}
-		return true, nil
+		cmd = updateSessionList()
+		m.refreshSessionPicker()
+		return true, cmd
 	case "home":
-		// Jump to the first visible row, mirroring the chat's Home binding
-		// (oldest message). A no-op when already at the top.
-		if m.sessionCursor != 0 {
-			m.sessionCursor = 0
-			m.refreshSessionPicker()
-		}
-		return true, nil
+		m.sessionCursor = 0
+		cmd = updateSessionList()
+		m.refreshSessionPicker()
+		return true, cmd
 	case "end":
-		// Jump to the last visible row, mirroring the chat's End binding (newest
-		// message). A no-op on an empty or single-row list.
-		if last := len(m.visibleSessions()) - 1; last >= 0 && m.sessionCursor != last {
+		if last := len(m.visibleSessions()) - 1; last >= 0 {
 			m.sessionCursor = last
-			m.refreshSessionPicker()
 		}
-		return true, nil
+		cmd = updateSessionList()
+		m.refreshSessionPicker()
+		return true, cmd
 	case "pgup":
-		// Page up moves the cursor a windowful at a time, mirroring the chat's
-		// PgUp, so a long session list is traversable faster than one row per
-		// keystroke. The step is clamped at the first row.
-		if m.sessionCursor > 0 {
-			m.sessionCursor -= sessionWindow
-			if m.sessionCursor < 0 {
-				m.sessionCursor = 0
-			}
-			m.refreshSessionPicker()
+		m.sessionCursor -= sessionWindow
+		if m.sessionCursor < 0 {
+			m.sessionCursor = 0
 		}
-		return true, nil
+		cmd = updateSessionList()
+		m.refreshSessionPicker()
+		return true, cmd
 	case "pgdown":
-		// Page down is the mirror of PgUp, advancing the cursor a windowful and
-		// clamping at the last visible row.
-		if last := len(m.visibleSessions()) - 1; last >= 0 && m.sessionCursor < last {
+		if last := len(m.visibleSessions()) - 1; last >= 0 {
 			m.sessionCursor += sessionWindow
 			if m.sessionCursor > last {
 				m.sessionCursor = last
 			}
-			m.refreshSessionPicker()
 		}
-		return true, nil
+		cmd = updateSessionList()
+		m.refreshSessionPicker()
+		return true, cmd
 	case "backspace":
-		// Backspace edits the live filter rather than dismissing the picker.
 		if m.sessionFilter != "" {
 			r := []rune(m.sessionFilter)
 			m.sessionFilter = string(r[:len(r)-1])
 			m.sessionCursor = 0
-			m.refreshSessionPicker()
 		}
-		return true, nil
+		cmd = updateSessionList()
+		m.refreshSessionPicker()
+		return true, cmd
 	case "enter":
+		// Use the integer cursor / custom filter path as the canonical selection
+		// source, since the bubbles list's built-in filter is not driving our
+		// custom visibleSessions filter. The list is forwarded the key so its own
+		// cursor moves in sync for rendering purposes, but the resolved choice
+		// comes from the custom filtered view.
+		cmd = updateSessionList()
 		visible := m.visibleSessions()
 		if len(visible) == 0 {
 			// Nothing matches the filter; keep the picker open rather than
 			// restoring an arbitrary session.
-			return true, nil
+			return true, cmd
 		}
 		chosen := visible[m.sessionCursor]
 		m.dialogs.Pop()
@@ -286,13 +305,12 @@ func (m *model) handleSessionPickerKey(msg tea.KeyPressMsg) (consumed bool, cmd 
 		m.sessionFilter = ""
 		return true, m.restoreSession(chosen.ID)
 	default:
-		// A printable keypress extends the filter query. Anything else (esc,
-		// etc.) falls through to the dialog's own handler.
 		if text := msg.Key().Text; text != "" {
 			m.sessionFilter += text
 			m.sessionCursor = 0
+			cmd = updateSessionList()
 			m.refreshSessionPicker()
-			return true, nil
+			return true, cmd
 		}
 		return false, nil
 	}
@@ -403,78 +421,94 @@ func (m *model) modelPickerBody() string {
 }
 
 // handleModelPickerKey processes navigation and selection while the model
-// picker is open. It mirrors handleSessionPickerKey exactly, returning whether
-// the key was consumed so an unconsumed key falls through to the dialog's own
-// handler (esc to dismiss).
+// picker is open. It mirrors handleSessionPickerKey: every consumed key is
+// forwarded to m.modelPickerList.Update so the bubbles/list cursor moves and
+// its View() reflects the true selection. The integer modelCursor is kept in
+// sync for the text-body fallback rendered by refreshModelPicker.
 func (m *model) handleModelPickerKey(msg tea.KeyPressMsg) (consumed bool, cmd tea.Cmd) {
+	updateModelList := func() tea.Cmd {
+		var listCmd tea.Cmd
+		m.modelPickerList, listCmd = updateList(m.modelPickerList, msg)
+		return listCmd
+	}
+
 	switch msg.String() {
 	case "up":
 		if m.modelCursor > 0 {
 			m.modelCursor--
-			m.refreshModelPicker()
 		}
-		return true, nil
+		cmd = updateModelList()
+		m.refreshModelPicker()
+		return true, cmd
 	case "down":
 		if m.modelCursor < len(m.visibleModels())-1 {
 			m.modelCursor++
-			m.refreshModelPicker()
 		}
-		return true, nil
+		cmd = updateModelList()
+		m.refreshModelPicker()
+		return true, cmd
 	case "home":
-		if m.modelCursor != 0 {
-			m.modelCursor = 0
-			m.refreshModelPicker()
-		}
-		return true, nil
+		m.modelCursor = 0
+		cmd = updateModelList()
+		m.refreshModelPicker()
+		return true, cmd
 	case "end":
-		if last := len(m.visibleModels()) - 1; last >= 0 && m.modelCursor != last {
+		if last := len(m.visibleModels()) - 1; last >= 0 {
 			m.modelCursor = last
-			m.refreshModelPicker()
 		}
-		return true, nil
+		cmd = updateModelList()
+		m.refreshModelPicker()
+		return true, cmd
 	case "pgup":
-		if m.modelCursor > 0 {
-			m.modelCursor -= modelWindow
-			if m.modelCursor < 0 {
-				m.modelCursor = 0
-			}
-			m.refreshModelPicker()
+		m.modelCursor -= modelWindow
+		if m.modelCursor < 0 {
+			m.modelCursor = 0
 		}
-		return true, nil
+		cmd = updateModelList()
+		m.refreshModelPicker()
+		return true, cmd
 	case "pgdown":
-		if last := len(m.visibleModels()) - 1; last >= 0 && m.modelCursor < last {
+		if last := len(m.visibleModels()) - 1; last >= 0 {
 			m.modelCursor += modelWindow
 			if m.modelCursor > last {
 				m.modelCursor = last
 			}
-			m.refreshModelPicker()
 		}
-		return true, nil
+		cmd = updateModelList()
+		m.refreshModelPicker()
+		return true, cmd
 	case "backspace":
 		if m.modelFilter != "" {
 			r := []rune(m.modelFilter)
 			m.modelFilter = string(r[:len(r)-1])
 			m.modelCursor = 0
-			m.refreshModelPicker()
 		}
-		return true, nil
+		cmd = updateModelList()
+		m.refreshModelPicker()
+		return true, cmd
 	case "enter":
+		// Use the integer cursor / custom filter path as the canonical selection
+		// source, mirroring the session picker. The list is forwarded the key so
+		// its cursor moves in sync for rendering, but the resolved choice comes
+		// from the custom filtered view.
+		cmd = updateModelList()
 		visible := m.visibleModels()
 		if len(visible) == 0 {
-			return true, nil
+			return true, cmd
 		}
 		chosen := visible[m.modelCursor]
 		m.dialogs.Pop()
 		m.modelCandidates = nil
 		m.modelFilter = ""
 		m.applyModel(chosen)
-		return true, nil
+		return true, cmd
 	default:
 		if text := msg.Key().Text; text != "" {
 			m.modelFilter += text
 			m.modelCursor = 0
+			cmd = updateModelList()
 			m.refreshModelPicker()
-			return true, nil
+			return true, cmd
 		}
 		return false, nil
 	}
@@ -493,12 +527,21 @@ func (m *model) refreshModelPicker() {
 	})
 }
 
-// applyModel updates the active model display to the selected model. The
-// status bar model field is updated immediately so the UI reflects the choice
-// on the next render. This mirrors how the session picker updates status.Model
-// when restoring a session.
+// applyModel updates the active model display and rebinds the live agent loop
+// to the selected model's provider. The status bar is updated immediately so
+// the UI reflects the choice on the next render; the loop rebind takes effect
+// at the next clean turn boundary (after any in-flight Run finishes). When the
+// Coordinator cannot resolve the model to a provider (e.g. the provider is not
+// configured), the display is still updated but the routing error is silently
+// logged — the user will see an auth or routing error on the next turn, which
+// is more informative than blocking the selection.
 func (m *model) applyModel(mod config.Model) {
 	m.status.Model = mod.ID
+	if m.deps.Coordinator != nil && m.deps.Agent != nil {
+		if provider, err := m.deps.Coordinator.SetActiveModel("coder", mod.ID); err == nil {
+			m.deps.Agent.SetModel(mod.ID, provider)
+		}
+	}
 }
 
 // restoreSession switches the active session to id and loads its persisted
@@ -641,6 +684,35 @@ func (m *model) handleFork() (tea.Model, tea.Cmd) {
 		Theme:    m.theme,
 	})
 	return m, cmd
+}
+
+// handleRename sets the title of the active session. The new title is the
+// argument after "/rename"; a bare "/rename" shows usage. It is a no-op (with an
+// explanatory dialog) when there is no persisted session yet. The new title is
+// reflected immediately in the footer/status and the session switcher.
+func (m *model) handleRename(text string) tea.Model {
+	_, args := splitSlash(text)
+	title := strings.TrimSpace(args)
+
+	if !m.sessionPersisted {
+		m.dialogs.Push(&dialog.Text{DialogID: "rename", Title: "Rename", Body: "No active session to rename yet. Send a prompt first.", Theme: m.theme})
+		return m
+	}
+	if title == "" {
+		m.dialogs.Push(&dialog.Text{DialogID: "rename", Title: "Rename", Body: "Usage: /rename <new title>\n\nRenames the current session so it is easy to find in /sessions.", Theme: m.theme})
+		return m
+	}
+	if err := m.deps.Sessions.SetTitle(m.ctx, m.sessionID, title); err != nil {
+		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Rename failed", Body: err.Error(), Theme: m.theme})
+		return m
+	}
+	m.dialogs.Push(&dialog.Text{
+		DialogID: "rename",
+		Title:    "Renamed session",
+		Body:     fmt.Sprintf("Session %s is now titled %q.", shortSessionID(m.sessionID), title),
+		Theme:    m.theme,
+	})
+	return m
 }
 
 // compactStreamID is the chat-list key for the /compact confirmation. A fixed

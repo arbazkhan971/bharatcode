@@ -47,27 +47,27 @@ func (m *model) assistantStreamID() string {
 
 // startRun ensures a session exists, renders the user's prompt, launches the
 // agent loop in a background goroutine, and kicks off the event listen loop. It
-// is used for user-initiated turns; goal-loop continuations use continueRun so
-// they do not spawn a second concurrent listener.
+// also starts the streaming spinner here (not in Init) so the 12fps tick loop
+// runs only while a turn is in flight rather than from program startup.
 func (m *model) startRun(prompt string) (tea.Model, tea.Cmd) {
 	runCmd, err := m.launchTurn(prompt)
 	if err != nil {
 		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Run failed", Body: err.Error(), Theme: m.theme})
 		return m, nil
 	}
-	return m, tea.Batch(runCmd, m.ensureListening())
+	return m, tea.Batch(runCmd, m.ensureListening(), m.streamSpinner.Tick)
 }
 
 // continueRun launches another turn that feeds prompt to the agent and reuses
-// the existing listen loop. It returns only the run command; the caller is
-// responsible for keeping a single listener alive.
+// the existing listen loop. It also starts the streaming spinner so the braille
+// animation is visible for goal-loop continuations — mirrors startRun's batch.
 func (m *model) continueRun(prompt string) tea.Cmd {
 	runCmd, err := m.launchTurn(prompt)
 	if err != nil {
 		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Run failed", Body: err.Error(), Theme: m.theme})
 		return nil
 	}
-	return runCmd
+	return tea.Batch(runCmd, m.streamSpinner.Tick)
 }
 
 // launchTurn ensures a session exists, opens a fresh turn, renders the prompt

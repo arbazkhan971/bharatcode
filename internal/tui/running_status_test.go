@@ -11,13 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testSpinner is a fixed glyph used in place of the bubbles spinner view so
+// tests are deterministic and independent of the spinner's tick state.
+const testSpinner = "⣾"
+
 // TestRunningStatus_IdleReturnsEmpty proves that a zero start time produces an
 // empty segment, so the status bar shows nothing for the Working field between
 // turns — the bar reverts to its idle form the moment the agent finishes.
 func TestRunningStatus_IdleReturnsEmpty(t *testing.T) {
 	t.Parallel()
 
-	got := runningStatus(time.Time{}, time.Now(), "", 0)
+	got := runningStatus(time.Time{}, time.Now(), "", 0, "")
 	require.Empty(t, got, "idle (zero start) must produce an empty segment")
 }
 
@@ -27,16 +31,9 @@ func TestRunningStatus_ShowsSpinnerAndLabel(t *testing.T) {
 	t.Parallel()
 
 	start := time.Now()
-	got := runningStatus(start, start.Add(2*time.Second), "Bash", 0)
+	got := runningStatus(start, start.Add(2*time.Second), "Bash", 0, testSpinner)
 
-	var found bool
-	for _, f := range spinnerFrames {
-		if strings.Contains(got, f) {
-			found = true
-			break
-		}
-	}
-	require.True(t, found, "segment must contain a spinner glyph")
+	require.Contains(t, got, testSpinner, "segment must contain the spinner glyph")
 	require.Contains(t, got, "Bash", "segment must contain the tool label")
 }
 
@@ -46,7 +43,7 @@ func TestRunningStatus_FallsBackToWorking(t *testing.T) {
 	t.Parallel()
 
 	start := time.Now()
-	got := runningStatus(start, start.Add(time.Second), "", 0)
+	got := runningStatus(start, start.Add(time.Second), "", 0, testSpinner)
 	require.Contains(t, got, "working", "empty activity must fall back to 'working'")
 }
 
@@ -57,7 +54,7 @@ func TestRunningStatus_ZeroToolCount_NoCountSuffix(t *testing.T) {
 	t.Parallel()
 
 	start := time.Now()
-	got := runningStatus(start, start.Add(time.Second), "Bash", 0)
+	got := runningStatus(start, start.Add(time.Second), "Bash", 0, testSpinner)
 	require.NotContains(t, got, "[", "zero tool count must not add a bracket suffix")
 }
 
@@ -70,7 +67,7 @@ func TestRunningStatus_WithToolCount_AppendsCount(t *testing.T) {
 
 	start := time.Now()
 	for _, n := range []int{1, 3, 10} {
-		got := runningStatus(start, start.Add(time.Second), "Bash", n)
+		got := runningStatus(start, start.Add(time.Second), "Bash", n, testSpinner)
 		want := fmt.Sprintf("[%d]", n)
 		require.Contains(t, got, want, "tool count %d must appear as %q in the segment", n, want)
 	}
@@ -85,7 +82,7 @@ func TestRunningStatus_CountPrecedesInterruptHint(t *testing.T) {
 	start := time.Now()
 	// A 15-second elapsed time exceeds interruptHintAfter, so both the count
 	// and the hint should appear.
-	got := runningStatus(start, start.Add(15*time.Second), "Bash", 4)
+	got := runningStatus(start, start.Add(15*time.Second), "Bash", 4, testSpinner)
 
 	countIdx := strings.Index(got, "[4]")
 	hintIdx := strings.Index(got, "(ctrl+c")

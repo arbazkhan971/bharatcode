@@ -278,27 +278,26 @@ func TestScrollStatus_PositionSuffix(t *testing.T) {
 }
 
 // TestRunningStatus_OnlyWhileTurnInFlight asserts the working segment is empty
-// when no turn is running (zero start time), names the elapsed turn time once a
-// turn begins, and advances its spinner glyph as seconds pass.
+// when no turn is running (zero start time) and names the elapsed turn time
+// once a turn begins. The spinner view is now owned by the bubbles spinner
+// component and supplied by the caller; tests pass a fixed glyph.
 func TestRunningStatus_OnlyWhileTurnInFlight(t *testing.T) {
 	t.Parallel()
 
+	const sv = "⣾"
 	start := time.Unix(100, 0)
-	require.Empty(t, runningStatus(time.Time{}, start, "", 0),
+	require.Empty(t, runningStatus(time.Time{}, start, "", 0, sv),
 		"an idle prompt (zero start) must add no working segment")
 
-	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second), "", 0),
-		"a running turn must report its elapsed time")
+	got := runningStatus(start, start.Add(3*time.Second), "", 0, sv)
+	require.Equal(t, sv+" working 3s", got,
+		"a running turn must report its elapsed time with the supplied spinner view")
 
-	// A negative elapsed (clock skew) must clamp to the first frame, not panic.
-	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(-time.Second), "", 0), spinnerFrames[0]+" working "),
-		"a negative elapsed must clamp to the first frame without panicking")
-
-	// The spinner advances one frame per whole second and wraps at the end.
-	first := runningStatus(start, start.Add(time.Second), "", 0)
-	tenth := runningStatus(start, start.Add(time.Duration(len(spinnerFrames))*time.Second), "", 0)
-	require.True(t, strings.HasPrefix(first, spinnerFrames[1]))
-	require.True(t, strings.HasPrefix(tenth, spinnerFrames[0]), "the spinner must wrap around")
+	// A negative elapsed (clock skew) must not panic and must still prepend the
+	// spinner view followed by the working label.
+	negGot := runningStatus(start, start.Add(-time.Second), "", 0, sv)
+	require.True(t, strings.HasPrefix(negGot, sv+" working "),
+		"a negative elapsed must clamp gracefully without panicking")
 }
 
 // TestRunningStatus_InterruptHint asserts the working segment advertises the
@@ -308,24 +307,25 @@ func TestRunningStatus_OnlyWhileTurnInFlight(t *testing.T) {
 func TestRunningStatus_InterruptHint(t *testing.T) {
 	t.Parallel()
 
+	const sv = "⣾"
 	start := time.Unix(100, 0)
 
 	// A short run shows no interrupt hint — it would finish before the reader
 	// could act on it.
-	require.NotContains(t, runningStatus(start, start.Add(3*time.Second), "", 0), "interrupt",
+	require.NotContains(t, runningStatus(start, start.Add(3*time.Second), "", 0, sv), "interrupt",
 		"a short turn must not advertise the interrupt key")
 
 	// Just before the threshold the hint is still withheld.
-	require.NotContains(t, runningStatus(start, start.Add(interruptHintAfter-time.Second), "", 0), "interrupt",
+	require.NotContains(t, runningStatus(start, start.Add(interruptHintAfter-time.Second), "", 0, sv), "interrupt",
 		"the hint must stay hidden until the turn passes the threshold")
 
 	// At and past the threshold the hint appears, naming the key that interrupts.
-	atThreshold := runningStatus(start, start.Add(interruptHintAfter), "", 0)
+	atThreshold := runningStatus(start, start.Add(interruptHintAfter), "", 0, sv)
 	require.Contains(t, atThreshold, "(ctrl+c to interrupt)",
 		"a turn at the threshold must advertise the interrupt key")
 	require.Contains(t, atThreshold, "working",
 		"the interrupt hint must not displace the activity label")
-	require.Contains(t, runningStatus(start, start.Add(interruptHintAfter+time.Minute), "Bash", 0), "(ctrl+c to interrupt)",
+	require.Contains(t, runningStatus(start, start.Add(interruptHintAfter+time.Minute), "Bash", 0, sv), "(ctrl+c to interrupt)",
 		"a long-running tool must keep advertising the interrupt key")
 }
 
@@ -356,18 +356,20 @@ func TestCurrentActivity_TracksToolLifecycle(t *testing.T) {
 // TestRunningStatus_NamesActiveTool asserts the working segment shows the name
 // of the tool the agent is currently running, falling back to "working" when no
 // tool is active, so a long turn reads as the step it is on rather than a bare
-// "working".
+// "working". The spinner view is now supplied by the caller; tests pass a
+// fixed glyph so assertions are deterministic.
 func TestRunningStatus_NamesActiveTool(t *testing.T) {
 	t.Parallel()
 
+	const sv = "⣾"
 	start := time.Unix(100, 0)
-	require.Equal(t, spinnerFrames[3]+" Bash 3s", runningStatus(start, start.Add(3*time.Second), "Bash", 0),
+	require.Equal(t, sv+" Bash 3s", runningStatus(start, start.Add(3*time.Second), "Bash", 0, sv),
 		"a running tool must name itself in the working segment")
-	require.Equal(t, spinnerFrames[3]+" working 3s", runningStatus(start, start.Add(3*time.Second), "", 0),
+	require.Equal(t, sv+" working 3s", runningStatus(start, start.Add(3*time.Second), "", 0, sv),
 		"an empty activity must fall back to the generic working label")
-	// The elapsed and spinner cadence are unchanged by the activity label.
-	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(time.Second), "Edit", 0), spinnerFrames[1]+" Edit "),
-		"the spinner frame must still advance independently of the activity label")
+	// The elapsed is unchanged by the activity label; the spinner view echoes through.
+	require.True(t, strings.HasPrefix(runningStatus(start, start.Add(time.Second), "Edit", 0, sv), sv+" Edit "),
+		"the spinner view must appear before the activity label")
 }
 
 // TestRunningStatus_SurfacesInStatusBar drives the rendered view: at rest the

@@ -1437,6 +1437,11 @@ func (m *model) renderMain() string {
 	// is a discrete block rather than a hand-joined string. Header (wordmark +
 	// tricolor rule) and optional tab bar come first, then the scrollable
 	// transcript, the bordered input panel, the status bar, and the footer row.
+	// Drop the cost/budget footer segments when the active model is served by a
+	// flat-rate subscription provider (ChatGPT login) — there every request is
+	// billed to the plan, so "$0.00 · ₹0.00" is meaningless noise.
+	m.footer.Subscription = m.activeModelIsSubscription()
+
 	zones := []string{header}
 	if tabBar != "" {
 		zones = append(zones, tabBar)
@@ -1448,6 +1453,30 @@ func (m *model) renderMain() string {
 		m.footer.Render(m.width),
 	)
 	return lipgloss.JoinVertical(lipgloss.Left, zones...)
+}
+
+// activeModelIsSubscription reports whether the active model's provider bills a
+// flat-rate subscription (the ChatGPT-login providers) rather than per token.
+func (m *model) activeModelIsSubscription() bool {
+	if m.deps.Cfg == nil {
+		return false
+	}
+	var providerName string
+	for _, mod := range m.deps.Cfg.Models {
+		if mod.ID == m.status.Model {
+			providerName = mod.Provider
+			break
+		}
+	}
+	if providerName == "" {
+		return false
+	}
+	for _, p := range m.deps.Cfg.Providers {
+		if p.Name == providerName {
+			return p.Type == config.ProviderChatGPT || p.Type == config.ProviderCodexOAuth
+		}
+	}
+	return false
 }
 
 // clampChat loads the rendered transcript s into the viewport, applies the

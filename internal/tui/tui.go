@@ -1526,6 +1526,15 @@ func (m *model) clampChat(s string, _, height int) string {
 		m.vp.SetYOffset(maxScroll - m.chatScroll)
 	}
 
+	// When the whole transcript fits in the viewport (nothing to scroll), return
+	// it at its NATURAL height rather than the viewport's full padded height, so
+	// the input panel rises to sit just under the last message instead of leaving
+	// a dead band of blank rows. Once content overflows, fall back to the
+	// fixed-height scrollable viewport so scrolling and line accounting are exact.
+	if maxScroll == 0 {
+		return strings.TrimRight(s, "\n")
+	}
+
 	return m.vp.View()
 }
 

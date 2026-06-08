@@ -370,7 +370,17 @@ func (c *Coordinator) resolveProvider(modelID string) (llm.Provider, string, str
 		return nil, "", "", fmt.Errorf("resolving provider: no providers configured")
 	}
 	if modelID != "" {
-		for name, provider := range c.deps.Providers {
+		// Collect and sort provider names so iteration order is deterministic:
+		// if two providers both advertise the same model ID (misconfiguration),
+		// the alphabetically-first provider wins consistently instead of varying
+		// per process restart due to Go map non-determinism.
+		searchNames := make([]string, 0, len(c.deps.Providers))
+		for name := range c.deps.Providers {
+			searchNames = append(searchNames, name)
+		}
+		sort.Strings(searchNames)
+		for _, name := range searchNames {
+			provider := c.deps.Providers[name]
 			for _, model := range provider.Models() {
 				if model.ID == modelID {
 					return provider, name, modelID, nil

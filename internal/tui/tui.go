@@ -1049,6 +1049,7 @@ func (m *model) steerRun(text string) (tea.Model, tea.Cmd) {
 	m.queueCounter++
 	id := fmt.Sprintf("%s-%d", queuedStreamPrefix, m.queueCounter)
 	m.chat.Stream(id, queuedPrefix+text)
+	m.chat.SetRole(id, message.RoleUser)
 	m.chat.FinishStream(id)
 	m.chat.Reindex(id)
 	return m, nil

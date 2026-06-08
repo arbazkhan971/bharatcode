@@ -81,6 +81,7 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 		m.tabFirstPrompt = prompt
 	}
 	m.chat.Stream(userStreamID, prompt)
+	m.chat.SetRole(userStreamID, message.RoleUser)
 	m.chat.FinishStream(userStreamID)
 	m.chat.Reindex(userStreamID)
 	m.running = true

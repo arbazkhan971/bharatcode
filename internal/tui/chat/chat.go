@@ -113,6 +113,18 @@ func (l *List) Stream(id string, delta string) {
 	l.items[idx].cachedBody = ""
 }
 
+// SetRole overrides the role of the streamed item with the given id. Stream
+// creates items as assistant turns; the user-prompt echo uses this to relabel
+// its item as a user turn so it renders with the "user" header and accent rather
+// than masquerading as the assistant.
+func (l *List) SetRole(id string, role message.Role) {
+	if idx, ok := l.index[id]; ok {
+		l.items[idx].role = role
+		l.items[idx].cachedWidth = 0
+		l.items[idx].cachedBody = ""
+	}
+}
+
 // FinishStream marks a streaming message complete.
 func (l *List) FinishStream(id string) {
 	if idx, ok := l.index[id]; ok {
@@ -256,8 +268,8 @@ func SearchLinesRe(text string, re *regexp.Regexp) []int {
 }
 
 // Render returns the rendered activity-stream transcript for width. Turns are
-// separated by a faint full-width rule so the eye can tell where one turn ends
-// and the next begins, the divider an activity stream draws between entries.
+// separated by a soft dotted rule so the eye can tell where one turn ends and
+// the next begins without the heavy visual weight of a solid full-width line.
 func (l *List) Render(width int) string {
 	if width < 1 {
 		width = 1
@@ -265,10 +277,10 @@ func (l *List) Render(width int) string {
 	var b strings.Builder
 	for i := range l.items {
 		if i > 0 {
-			// A blank line, a faint rule, and a blank line set each turn apart
-			// without a heavy border.
-			b.WriteString("\n\n")
-			b.WriteString(styles.Rule(width))
+			// A blank line, a faint dotted rule, and a blank line create generous
+			// breathing room between turns without a heavy solid separator.
+			b.WriteString("\n")
+			b.WriteString(styles.SoftRule(width))
 			b.WriteString("\n\n")
 		}
 		b.WriteString(l.renderItem(i, width))
@@ -293,24 +305,28 @@ func (l *List) renderItem(idx int, width int) string {
 	// A turn whose body reads as a tool or command action ("tool: edit", a
 	// "$ go test" command line, or a tool-role result) renders in the command
 	// style: a bold action-verb header and its output indented under a muted
-	// connector, with long output elided and added/removed lines tinted. It is
-	// detected from the flattened body so the renderer needs no extra block
-	// plumbing.
+	// connector, with long output elided and added/removed lines tinted. The
+	// block uses UserBlock chrome (muted left bar) since tool/command turns are
+	// not assistant prose and shouldn't claim the saffron accent.
 	if verb, rest, ok := commandTurn(it); ok {
+		raw := renderCommandTurn(header, verb, rest, width)
 		it.cachedWidth = width
-		it.cachedBody = renderCommandTurn(header, verb, rest, width)
+		it.cachedBody = applyTurnBlock(it.role, raw, width)
 		return it.cachedBody
 	}
 
 	// Render assistant prose as markdown once it is complete. While a message
 	// is still streaming we keep the fast plain wrap so each delta does not pay
 	// the cost of a full markdown re-render (and to avoid flicker on partial,
-	// not-yet-valid markdown).
+	// not-yet-valid markdown). Markdown content is rendered within the block
+	// width minus the left bar + padding so it clips within the frame.
 	if l.md != nil && it.role == message.RoleAssistant && !it.streaming && it.body != "" {
+		// Reserve 2 columns for the left bar + padding drawn by AssistantBlock.
 		if rendered, ok := l.md.Render(it.body, width-2); ok {
 			body := strings.TrimRight(rendered, "\n")
+			raw := header + "\n" + body
 			it.cachedWidth = width
-			it.cachedBody = header + "\n" + body
+			it.cachedBody = applyTurnBlock(it.role, raw, width)
 			return it.cachedBody
 		}
 	}
@@ -319,26 +335,40 @@ func (l *List) renderItem(idx int, width int) string {
 	if it.streaming {
 		body += " ▌"
 	}
+	raw := header + "\n" + indent(body, "  ")
 	it.cachedWidth = width
-	it.cachedBody = header + "\n" + indent(body, "  ")
+	it.cachedBody = applyTurnBlock(it.role, raw, width)
 	return it.cachedBody
 }
 
-// itemHeader returns the bullet-led header line for a turn: an accent bullet, the
-// role, and (when the message carries a server timestamp) a "· HH:MM" suffix. The
-// "role · time" segment is emitted as plain, contiguous text — no styling is
-// injected between the role and the time — so it stays greppable and aligns with
-// the activity stream's restrained chrome.
+// applyTurnBlock wraps the rendered turn body in the role-appropriate left-bar
+// block style: saffron AccentBar + slight indent for assistant, muted faint bar
+// for user/tool turns. The block gives every turn a framed left edge so the
+// reader instantly tells who is speaking. width is the available pane width;
+// the block sets its own width so the left bar clips with the pane.
+func applyTurnBlock(role message.Role, body string, width int) string {
+	// The left border + padding takes 2 columns; leave the rest for content.
+	contentW := width - 2
+	if contentW < 1 {
+		contentW = 1
+	}
+	switch role {
+	case message.RoleAssistant:
+		return styles.AssistantBlock.Width(contentW).Render(body)
+	default:
+		return styles.UserBlock.Width(contentW).Render(body)
+	}
+}
+
+// itemHeader returns the bullet-led header line for a turn: an accent bullet, a
+// role label styled by who is speaking (saffron-bold for the assistant, muted for
+// the user), and an optional "· HH:MM" timestamp suffix in the faintest chrome.
 func (l *List) itemHeader(it *item) string {
-	role := string(it.role)
-	if role == "" {
-		role = "message"
-	}
-	label := role
+	ts := ""
 	if !it.createdAt.IsZero() {
-		label += " · " + formatTimestamp(it.createdAt)
+		ts = formatTimestamp(it.createdAt)
 	}
-	return styles.Bullet() + " " + label
+	return styles.Bullet() + " " + styles.RoleLabel(string(it.role), ts)
 }
 
 // commandTurn reports whether a turn's flattened body reads as a tool or command

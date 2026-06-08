@@ -70,6 +70,20 @@ func newRunCmd() *cobra.Command {
 				return fmt.Errorf("resolving agent: %w", err)
 			}
 
+			// A --model override must re-point the loop at the provider that owns
+			// that model, not just change the model id in the request: the loop is
+			// bound to its agent's default provider at construction, so without
+			// this a "--model gpt-5.1-codex" would still stream to the default
+			// (e.g. deepseek) provider and fail auth. SetActiveModel resolves the
+			// owning provider; SetModel rebinds the live loop atomically.
+			if modelName != "" {
+				provider, err := application.Agent.SetActiveModel(effectiveAgent, modelName)
+				if err != nil {
+					return fmt.Errorf("selecting model %q: %w", modelName, err)
+				}
+				loop.SetModel(modelName, provider)
+			}
+
 			if jsonStream {
 				if err := runJSON(cmd, application, loop, s.ID, prompt); err != nil {
 					return err

@@ -28,16 +28,10 @@
       ]
     },
     {
-      "name": "codex",
-      "type": "codex_oauth",
-      "models": [
-        "gpt-5.5"
-      ]
-    },
-    {
       "name": "chatgpt",
       "type": "chatgpt",
       "models": [
+        "gpt-5.5",
         "gpt-5.1-codex"
       ]
     },
@@ -386,7 +380,7 @@
     },
     {
       "id": "gpt-5.5",
-      "provider": "codex",
+      "provider": "chatgpt",
       "context_window": 400000,
       "input_price_per_mtok_usd": 0.00,
       "output_price_per_mtok_usd": 0.00,
@@ -400,7 +394,7 @@
       "input_price_per_mtok_usd": 0.00,
       "output_price_per_mtok_usd": 0.00,
       "supports_images": true,
-      "supports_tools": false
+      "supports_tools": true
     },
     {
       "id": "deepseek-chat",

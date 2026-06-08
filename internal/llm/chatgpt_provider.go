@@ -189,7 +189,12 @@ func (p *chatgptOAuthProvider) readResponse(ctx context.Context, resp *http.Resp
 	defer resp.Body.Close()
 
 	send(ctx, events, StartEvent{Provider: p.Name(), Model: model})
-	if err := emitCodexBackendStream(ctx, resp.Body, events); err != nil {
+	// The ChatGPT-plan backend speaks the same Responses SSE wire format as the
+	// public Responses API, including function-call events. Use the full
+	// Responses stream parser (which decodes tool calls) rather than a text-only
+	// reader — without it the model's tool calls are silently dropped and a
+	// coding turn produces no file and no output.
+	if err := emitResponsesStream(ctx, resp.Body, events); err != nil {
 		send(ctx, events, ErrorEvent{Err: err})
 	}
 }

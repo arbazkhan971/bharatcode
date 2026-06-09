@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -83,4 +84,41 @@ func TestEvalCmdListFlag(t *testing.T) {
 	out := buf.String()
 	require.Contains(t, out, "go-fix")
 	require.Contains(t, out, "codex-parity")
+}
+
+func TestEvalCmdLiveFlagsRegistered(t *testing.T) {
+	cmd := newEvalCmd()
+	// The live-provider flags must be wired and parse.
+	require.NotNil(t, cmd.Flags().Lookup("live-provider"))
+	require.NotNil(t, cmd.Flags().Lookup("max-tasks"))
+}
+
+func TestEvalCmdHelpShowsLiveFlags(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := newEvalCmd()
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"--help"})
+	err := cmd.ExecuteContext(context.Background())
+	require.NoError(t, err)
+	out := buf.String()
+	require.Contains(t, out, "--live-provider")
+	require.Contains(t, out, "--max-tasks")
+	// The help text must mention the gate so users know how to enable it.
+	require.Contains(t, out, "BHARATCODE_LIVE_EVAL")
+}
+
+func TestEvalCmdLiveProviderGatedWithoutEnv(t *testing.T) {
+	// Without BHARATCODE_LIVE_EVAL=1 the command must fail fast with a clear
+	// error before touching any real provider.
+	t.Setenv("BHARATCODE_LIVE_EVAL", "")
+	require.NoError(t, os.Unsetenv("BHARATCODE_LIVE_EVAL"))
+
+	var buf bytes.Buffer
+	cmd := newEvalCmd()
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--live-provider"})
+	err := cmd.ExecuteContext(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "BHARATCODE_LIVE_EVAL")
 }

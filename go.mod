@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/bubbletea/v2 v2.0.0-beta.6
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss/v2 v2.0.0-beta.3
+	github.com/creack/pty v1.1.18
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/mark3labs/mcp-go v0.40.0
 	github.com/pmezard/go-difflib v1.0.0

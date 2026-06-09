@@ -221,8 +221,10 @@ func maybeAutoUpdate(ctx context.Context, application *app.App, opts *rootOption
 		return
 	}
 	// Only a real release build (stamped version + commit) checks for updates;
-	// a dev/source build would compare a placeholder and nag spuriously.
-	if version == "" || commit == "" || commit == "0000000" {
+	// a dev/source build would compare a placeholder and nag spuriously. An
+	// unstamped build keeps the dev sentinels from version.go ("v0.0.0" /
+	// "0000000"); treat those (and an empty stamp) as development.
+	if version == "" || version == "v0.0.0" || commit == "" || commit == "0000000" {
 		return
 	}
 	if !stdoutIsTerminal() {

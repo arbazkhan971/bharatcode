@@ -9,7 +9,43 @@ permissions:
   contents: write
 
 jobs:
+  # Blocking pre-release gate. The same tests/build/ux-smoke the everyday CI
+  # runs, re-asserted here so a tag can never cut a release the gate would have
+  # failed (CI runs on the branch; this runs on the pushed tag). goreleaser
+  # `needs:` this job, so a red gate stops the release before any asset, npm
+  # publish, or tap push happens. Linux-only and offline: the checks are
+  # OS-independent, so one runner keeps the gate fast.
+  gate:
+    name: pre-release gate (test + build + ux-smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Build CLI for ux-smoke
+        run: go build -o bharatcode .
+
+      - name: UX smoke
+        # Guards the redraw flood, the "Changed files:" summary, the doctor
+        # ChatGPT status line, and clean exits against the built binary.
+        # Provider-dependent checks skip (not fail) when no provider is
+        # reachable, so this is green offline.
+        run: scripts/ux-smoke.sh ./bharatcode
+
   goreleaser:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -79,3 +115,41 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
+
+  # Post-release verification. Once the GitHub release and the npm package are
+  # both published, confirm the same version is reachable across channels for
+  # the tag that triggered this run. Runs last (needs: npm-publish) so every
+  # channel it checks has had a chance to publish.
+  #
+  # The checks reach remote registries: `gh release view` for the GitHub
+  # release and its assets, and `npm view bharatcode-cli version` for npm —
+  # both available on this runner (gh is preinstalled and authenticated via
+  # GH_TOKEN; npm comes from setup-node). The script's brew and installed-binary
+  # checks have no tooling here (no Homebrew, the freshly published binary is
+  # not on PATH) and SKIP themselves cleanly, so POSTREL_REQUIRE_ALL is left
+  # unset — promoting those to failures would red every release for tools this
+  # runner is not meant to have. continue-on-error keeps even the checks that do
+  # run non-fatal: they depend on network and on registries propagating, so a
+  # transient lag surfaces as a warning annotation rather than failing an
+  # already-published release. The blocking quality gate is the `gate` job
+  # above, before anything ships.
+  post-release-smoke:
+    needs: npm-publish
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Post-release smoke
+        env:
+          # gh release view needs a token to read the release in this repo.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/post-release-smoke.sh "${GITHUB_REF_NAME}"

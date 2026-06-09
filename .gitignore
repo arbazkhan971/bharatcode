@@ -44,3 +44,19 @@ go.work.sum
 
 # Claude Code / agent session state
 .claude/
+
+# Local Playwright MCP state (browser console logs and page snapshots).
+.playwright-mcp/
+
+# Local browser/TUI screenshots and generated site captures dropped at the
+# repo root by docs/preview tooling. Scoped to the root with a leading slash
+# so intentional images under assets/ stay tracked.
+/*-live.jpeg
+/tui-*.png
+/comparison-check.jpeg
+/full-redesign.jpeg
+/new-hero.jpeg
+/ref-*.jpeg
+/site-current.jpeg
+/bharatcode-home.png
+/tictactoe-game.png

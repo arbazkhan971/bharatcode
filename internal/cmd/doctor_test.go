@@ -79,6 +79,37 @@ func TestDoctorReportsConfiguredProviderEnvVar(t *testing.T) {
 	require.Contains(t, stdout, "Config valid")
 }
 
+func TestDoctorReportsChatGPTSubscriptionStatus(t *testing.T) {
+	configPath := writeConfig(t, chatgptDoctorConfig())
+
+	authPath := filepath.Join(t.TempDir(), "chatgpt_auth.json")
+	t.Setenv("BHARATCODE_CHATGPT_AUTH", authPath)
+	require.NoError(t, os.WriteFile(authPath, []byte(`{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "access-token",
+    "account_id": "acct-123"
+  },
+  "account": {
+    "email": "dev@example.com",
+    "plan": "plus"
+  }
+}`), 0o600))
+
+	stdout, _, err := executeDoctor(t, "--config", configPath, "doctor")
+	require.NoError(t, err)
+	require.Regexp(t, `\[OK\s*\] ChatGPT subscription: signed in as dev@example.com on the plus plan`, stdout)
+}
+
+func TestDoctorWarnsWhenChatGPTSubscriptionMissing(t *testing.T) {
+	configPath := writeConfig(t, chatgptDoctorConfig())
+	t.Setenv("BHARATCODE_CHATGPT_AUTH", filepath.Join(t.TempDir(), "missing.json"))
+
+	stdout, _, err := executeDoctor(t, "--config", configPath, "doctor")
+	require.NoError(t, err)
+	require.Regexp(t, `\[WARN\s*\] ChatGPT subscription: not signed in`, stdout)
+}
+
 func TestDoctorWarnsWhenConfigMissing(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
 	stdout, _, err := executeDoctor(t, "--config", missing, "doctor")
@@ -170,6 +201,39 @@ func executeDoctor(t *testing.T, args ...string) (string, string, error) {
 	root.SetArgs(args)
 	err := executeCommand(context.Background(), root)
 	return stdout.String(), stderr.String(), err
+}
+
+func chatgptDoctorConfig() string {
+	return `{
+  "providers": [
+    {
+      "name": "chatgpt",
+      "type": "chatgpt",
+      "models": ["gpt-5.1-codex"]
+    }
+  ],
+  "models": [
+    {
+      "id": "gpt-5.1-codex",
+      "provider": "chatgpt",
+      "context_window": 128000,
+      "input_price_per_mtok_usd": 0,
+      "output_price_per_mtok_usd": 0,
+      "supports_tools": true
+    }
+  ],
+  "agents": [
+    {
+      "name": "coder",
+      "model": "gpt-5.1-codex",
+      "system_prompt": "You are concise."
+    }
+  ],
+  "ledger": {
+    "currency": "INR",
+    "usd_inr_rate": 83.5
+  }
+}`
 }
 
 func TestRunDoctorIgnoresUnwiredDataDirOverride(t *testing.T) {

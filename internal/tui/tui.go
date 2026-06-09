@@ -100,7 +100,11 @@ func Run(ctx context.Context, deps Dependencies) error {
 	}
 
 	model := newModel(ctx, deps)
-	program := tea.NewProgram(model, tea.WithContext(ctx))
+	opts := []tea.ProgramOption{tea.WithContext(ctx)}
+	if shouldDisableRenderer() {
+		opts = append(opts, tea.WithoutRenderer())
+	}
+	program := tea.NewProgram(model, opts...)
 	_, err := program.Run()
 	if err == nil {
 		return nil
@@ -109,6 +113,31 @@ func Run(ctx context.Context, deps Dependencies) error {
 		return ctxErr
 	}
 	return fmt.Errorf("running tui program: %w", err)
+}
+
+// shouldDisableRenderer selects the quiet path for headless or CI-style runs.
+// A real interactive terminal keeps the live renderer; explicit headless
+// overrides, CI, and dumb terminals fall back to the non-rendering program
+// mode so PTY captures do not accumulate redraw noise.
+func shouldDisableRenderer() bool {
+	switch {
+	case envTruthy("BHARATCODE_HEADLESS"):
+		return true
+	case envTruthy("CI"):
+		return true
+	}
+	term := strings.ToLower(strings.TrimSpace(os.Getenv("TERM")))
+	return term == "" || term == "dumb"
+}
+
+func envTruthy(name string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	switch v {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func validateDependencies(deps Dependencies) error {

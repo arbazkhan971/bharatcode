@@ -708,6 +708,25 @@ func TestTurnNotifyBody(t *testing.T) {
 	require.True(t, strings.HasSuffix(got, "..."))
 }
 
+func TestTurnNotifyBodyFromMessagesFallsBackToToolResult(t *testing.T) {
+	t.Parallel()
+
+	msgs := []message.Message{
+		{
+			Role:    message.RoleAssistant,
+			Content: []message.ContentBlock{message.TextBlock{Text: ""}},
+		},
+		{
+			Role: message.RoleTool,
+			Content: []message.ContentBlock{message.ToolResultBlock{
+				Content: "created /tmp/work/notes/new.txt (6 bytes)\n\ndiagnostics passed",
+			}},
+		},
+	}
+
+	require.Equal(t, "created /tmp/work/notes/new.txt (6 bytes)", turnNotifyBodyFromMessages(msgs))
+}
+
 // TestFriendlyRunError_AuthGetsHint asserts a missing-credentials error (one
 // wrapping llm.ErrAuth) is rewritten with an actionable hint pointing at /model
 // and key setup, while the provider's specific message is preserved and a

@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/util"
 	"github.com/spf13/cobra"
 )
@@ -99,6 +100,8 @@ func runDoctor(ctx context.Context, w io.Writer, opts *rootOptions, look func(st
 	doctorSection(w, "Provider API keys")
 	doctorCheckAPIKeys(w, cfg)
 
+	doctorCheckChatGPTSubscription(w, cfg)
+
 	doctorSection(w, "External tools")
 	doctorCheckTools(w, cfg, look)
 
@@ -152,6 +155,47 @@ func doctorCheckAPIKeys(w io.Writer, cfg *config.Config) {
 			doctorLine(w, doctorStatusWarn, name, "not set")
 		}
 	}
+}
+
+// doctorCheckChatGPTSubscription reports the sign-in status for the configured
+// ChatGPT provider. It is only shown when a chatgpt provider is enabled in the
+// loaded config, because that is the only time the credential file matters.
+func doctorCheckChatGPTSubscription(w io.Writer, cfg *config.Config) {
+	if !doctorHasEnabledProvider(cfg, config.ProviderChatGPT) {
+		return
+	}
+
+	id, err := llm.ChatGPTStatus()
+	if err != nil {
+		doctorLine(w, doctorStatusWarn, "ChatGPT subscription", "not signed in (run 'bharatcode auth chatgpt')")
+		return
+	}
+
+	detail := "signed in"
+	if id.Email != "" {
+		detail = "signed in as " + id.Email
+	}
+	if id.Plan != "" {
+		detail += " on the " + id.Plan + " plan"
+	}
+	if id.Expired {
+		detail += " (access token expired; will refresh on next use)"
+	}
+	doctorLine(w, doctorStatusOK, "ChatGPT subscription", detail)
+}
+
+// doctorHasEnabledProvider reports whether cfg contains an enabled provider of
+// the given type.
+func doctorHasEnabledProvider(cfg *config.Config, typ config.ProviderType) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, p := range cfg.Providers {
+		if p.Type == typ && !p.Disabled {
+			return true
+		}
+	}
+	return false
 }
 
 // doctorAPIKeyEnvVars returns the sorted union of the always-reported

@@ -405,7 +405,17 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	// learns the turn finished while they were away — matching the behaviour of
 	// Claude Code and opencode. FocusAware suppresses the call when the window
 	// still has focus, so this is a no-op for interactive sessions.
-	_ = m.notifications.Notify("BharatCode", turnNotifyBody(done.last))
+	body := turnNotifyBody(done.last)
+	if body == "Turn complete" {
+		if m.deps.Sessions != nil && m.sessionPersisted && m.sessionID != "" {
+			if msgs, err := m.deps.Sessions.Messages(m.ctx, m.sessionID); err == nil {
+				if fallback := turnNotifyBodyFromMessages(msgs); fallback != "" {
+					body = fallback
+				}
+			}
+		}
+	}
+	_ = m.notifications.Notify("BharatCode", body)
 
 	if cmd := m.advanceGoal(done.last); cmd != nil {
 		return m, cmd
@@ -434,6 +444,52 @@ func turnNotifyBody(last *message.Message) string {
 		return text[:maxLen-3] + "..."
 	}
 	return text
+}
+
+// turnNotifyBodyFromMessages falls back to the most recent tool result when a
+// turn ends without final assistant prose. That keeps the desktop notification
+// useful for simple file-creation tasks where the tool output already contains
+// the absolute path or verification detail the user needs.
+func turnNotifyBodyFromMessages(messages []message.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		switch msg.Role {
+		case message.RoleAssistant:
+			if body := turnNotifyBody(&msg); body != "Turn complete" {
+				return body
+			}
+		case message.RoleTool:
+			if body := toolResultSummary(&msg); body != "" {
+				return body
+			}
+		}
+	}
+	return ""
+}
+
+// toolResultSummary returns the first line of the most recent tool result, or
+// "" when the message does not carry one. The notification body stays one line
+// long, while the CLI fallback can use the full tool result content.
+func toolResultSummary(msg *message.Message) string {
+	if msg == nil || msg.Role != message.RoleTool {
+		return ""
+	}
+	for _, block := range msg.Content {
+		if result, ok := block.(message.ToolResultBlock); ok && result.Content != "" {
+			return firstLine(result.Content)
+		}
+		if result, ok := block.(*message.ToolResultBlock); ok && result.Content != "" {
+			return firstLine(result.Content)
+		}
+	}
+	return ""
+}
+
+func firstLine(text string) string {
+	if nl := strings.IndexByte(text, '\n'); nl >= 0 {
+		text = text[:nl]
+	}
+	return strings.TrimSpace(text)
 }
 
 // friendlyRunError converts a turn error into a message the user can act on. A

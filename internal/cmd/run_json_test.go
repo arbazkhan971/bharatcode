@@ -154,6 +154,35 @@ func TestRunJSONWithOutputLastMessage(t *testing.T) {
 	require.Equal(t, "JSON and file.", string(data))
 }
 
+func TestRunOutputLastMessageFallsBackToToolResult(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.ToolUseEndEvent{
+				ID:    "call-1",
+				Name:  "write",
+				Input: json.RawMessage(`{"path":"notes/new.txt","content":"hello\n"}`),
+			},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 4, OutputTokens: 2}},
+		},
+		{
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 2, OutputTokens: 1}},
+		},
+	}}
+	restore := installFakeApp(t, provider)
+	defer restore()
+
+	outPath := filepath.Join(t.TempDir(), "last.txt")
+	stdout, stderr, err := executeRoot(t, "run", "--quiet", "--output-last-message", outPath, "create a file")
+	require.NoError(t, err)
+	require.Empty(t, stderr)
+
+	data, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "created ")
+	require.Contains(t, string(data), "notes/new.txt")
+	require.Equal(t, string(data)+"\n", stdout)
+}
+
 func TestNewRunEventMapsEveryKind(t *testing.T) {
 	assistant := &message.Message{
 		Role:    message.RoleAssistant,

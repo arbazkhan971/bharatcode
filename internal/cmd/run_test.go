@@ -12,6 +12,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
 	dbsqlc "github.com/arbazkhan971/bharatcode/internal/db/sqlc"
+	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -70,6 +71,27 @@ func TestPrintRunSummaryPrintsOnData(t *testing.T) {
 
 	line := strings.TrimRight(buf.String(), "\n")
 	require.Contains(t, line, "Tokens: 800 in, 200 out")
+}
+
+func TestPrintChangedFilesPrintsAbsoluteUniquePaths(t *testing.T) {
+	const sid = "changed-files-session"
+	_, database := newTestLedger(t)
+	createTestSession(t, database, sid)
+	tracker := filetracker.NewTracker(database, nil)
+	path := filepath.Join(t.TempDir(), "index.html")
+
+	_, err := tracker.RecordWrite(context.Background(), sid, path, nil, []byte("<html></html>"))
+	require.NoError(t, err)
+	_, err = tracker.RecordWrite(context.Background(), sid, path, []byte("<html></html>"), []byte("<!doctype html>"))
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	printChangedFiles(context.Background(), &buf, tracker, sid)
+
+	out := buf.String()
+	require.Contains(t, out, "Changed files:")
+	require.Contains(t, out, "- "+path)
+	require.Equal(t, 1, strings.Count(out, path), "repeated writes to the same file should be listed once")
 }
 
 // TestRunQuietFlagSuppressesSummary verifies that --quiet prevents any summary

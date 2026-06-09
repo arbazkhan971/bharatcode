@@ -61,6 +61,52 @@ func TestRun_CancelledContext_RestoresTerminal(t *testing.T) {
 	require.Empty(t, out.String())
 }
 
+func TestShouldDisableRenderer(t *testing.T) {
+	cases := []struct {
+		name     string
+		headless string
+		ci       string
+		term     string
+		want     bool
+	}{
+		{
+			name: "interactive terminal",
+			term: "xterm-256color",
+			want: false,
+		},
+		{
+			name:     "explicit headless override",
+			headless: "1",
+			term:     "xterm-256color",
+			want:     true,
+		},
+		{
+			name: "ci environment",
+			ci:   "true",
+			term: "xterm-256color",
+			want: true,
+		},
+		{
+			name: "dumb terminal",
+			term: "dumb",
+			want: true,
+		},
+		{
+			name: "empty term",
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BHARATCODE_HEADLESS", tc.headless)
+			t.Setenv("CI", tc.ci)
+			t.Setenv("TERM", tc.term)
+			require.Equal(t, tc.want, shouldDisableRenderer())
+		})
+	}
+}
+
 func TestPermissionDialog_BlocksInput(t *testing.T) {
 	t.Parallel()
 

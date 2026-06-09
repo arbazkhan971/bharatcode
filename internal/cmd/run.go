@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/app"
+	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -96,7 +98,7 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("loading response: %w", err)
 			}
-			response := lastAssistantText(messages)
+			response := finalRunOutput(messages)
 
 			if outputLastMessage != "" {
 				if err := os.WriteFile(outputLastMessage, []byte(response), 0o644); err != nil {
@@ -105,6 +107,7 @@ func newRunCmd() *cobra.Command {
 			}
 			if !jsonStream {
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), response)
+				printChangedFiles(cmd.Context(), cmd.OutOrStdout(), application.FileTracker, s.ID)
 			}
 
 			if !quiet {
@@ -189,6 +192,42 @@ func formatRunSummary(sum ledger.Summary) string {
 	return s
 }
 
+// printChangedFiles prints a short, deduplicated absolute-path summary of the
+// files the run touched. It keeps the final CLI output useful for file-creation
+// tasks without forcing the user to dig through the transcript.
+func printChangedFiles(ctx context.Context, w io.Writer, tracker *filetracker.Tracker, sessionID string) {
+	if tracker == nil || sessionID == "" {
+		return
+	}
+	changes, err := tracker.ChangesForSession(ctx, sessionID)
+	if err != nil || len(changes) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(changes))
+	paths := make([]string, 0, len(changes))
+	for _, ch := range changes {
+		if ch.Path == "" {
+			continue
+		}
+		if _, ok := seen[ch.Path]; ok {
+			continue
+		}
+		seen[ch.Path] = struct{}{}
+		paths = append(paths, ch.Path)
+	}
+	if len(paths) == 0 {
+		return
+	}
+
+	sort.Strings(paths)
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Changed files:")
+	for _, path := range paths {
+		_, _ = fmt.Fprintf(w, "- %s\n", path)
+	}
+}
+
 // runJSON drives loop while streaming each agent.Event to stdout as one JSON
 // object per line, flushing after every line. It subscribes to the agent bus
 // before the run starts so no event is missed, and drains all buffered events
@@ -265,6 +304,33 @@ func lastAssistantText(messages []message.Message) string {
 			}
 		}
 		return strings.Join(parts, "")
+	}
+	return ""
+}
+
+// finalRunOutput prefers the last assistant text, but falls back to the last
+// tool result when a turn ends after a simple file-writing tool. That keeps the
+// headless completion output useful even when the model does not add a prose
+// closing line of its own.
+func finalRunOutput(messages []message.Message) string {
+	if text := strings.TrimSpace(lastAssistantText(messages)); text != "" {
+		return text
+	}
+	return lastToolResultText(messages)
+}
+
+// lastToolResultText returns the raw content of the most recent tool result in
+// the transcript, or "" when none exists.
+func lastToolResultText(messages []message.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		for _, block := range messages[i].Content {
+			if result, ok := block.(message.ToolResultBlock); ok && result.Content != "" {
+				return result.Content
+			}
+			if result, ok := block.(*message.ToolResultBlock); ok && result.Content != "" {
+				return result.Content
+			}
+		}
 	}
 	return ""
 }

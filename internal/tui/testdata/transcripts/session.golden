@@ -1,0 +1,14 @@
+BharatCode  session <UUID>
+started <TIMESTAMP>
+› build me a todo app
+<SPINNER> working <DUR>
+<SPINNER> working <DUR>
+Bash(go test ./...)
+  ran in <PATH>  (<DUR>)
+ok  github.com/example/todo  <DUR>
+Done — the todo app is built and its tests pass.
+
+Changed files:
+- <PATH> (created)
+- <PATH> (created)
+Verification: build/test passed.

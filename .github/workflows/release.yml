@@ -39,17 +39,17 @@ jobs:
   # GitHub Releases, so the release assets must be present before npm publishes.
   # The npm version is kept in sync with the tag in npm/package.json at bump time.
   #
-  # Auth is npm Trusted Publishing (OIDC): GitHub Actions proves its identity to
-  # the npm registry via a short-lived OIDC token, so NO npm token is created,
-  # stored, or rotated. A one-time link in the npm package settings (Trusted
-  # Publisher -> this repo + this workflow) authorizes it. The id-token:write
-  # permission below is what lets the runner mint that OIDC token.
+  # Auth is the NPM_TOKEN repository secret — a granular access token (read+write
+  # on bharatcode-cli, "bypass 2FA" enabled) that the package's publish policy
+  # requires. setup-node's registry-url writes an .npmrc that reads the token from
+  # NODE_AUTH_TOKEN, so the publish step only needs to set that env var. (OIDC /
+  # Trusted Publishing was tried first but the registry rejected it for this
+  # already-token-published package; the stored token is the reliable path.)
   npm-publish:
     needs: goreleaser
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,11 +59,6 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-
-      # Trusted Publishing / OIDC needs npm >= 11.5.1; the Node 22 runner ships an
-      # older npm, so upgrade to the latest before publishing.
-      - name: Upgrade npm to an OIDC-capable version
-        run: npm install -g npm@latest
 
       - name: Verify package version matches the tag
         working-directory: npm
@@ -76,8 +71,11 @@ jobs:
           fi
           echo "Publishing bharatcode-cli@$PKG_VERSION"
 
-      # No NODE_AUTH_TOKEN: OIDC handles auth. --provenance attaches a signed
-      # build-provenance attestation linking the package to this workflow run.
-      - name: Publish to npm (Trusted Publishing / OIDC)
+      # NODE_AUTH_TOKEN authenticates the publish via the .npmrc setup-node wrote.
+      # No --provenance: a signed build-provenance attestation requires the OIDC
+      # id-token, which this token-auth path does not mint.
+      - name: Publish to npm
         working-directory: npm
-        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

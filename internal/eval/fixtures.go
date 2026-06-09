@@ -94,3 +94,136 @@ func last(s []int) int {
 }
 `)
 }
+
+// -------- codex-parity fixtures --------
+//
+// These seed small, recurring scaffolds the agent is asked to build or repair.
+// The eval tools are hermetic (no real file I/O), so a fixture only needs to
+// establish enough starting state for the task prompt to make sense; the
+// parity metrics are derived from the scripted edits and verification calls.
+
+// fixtureTodoApp seeds an empty project skeleton for a todo CLI app.
+func fixtureTodoApp(dir string) error {
+	if err := writeGoMod(dir, "example/todoapp"); err != nil {
+		return err
+	}
+	return writeFile(dir, "main.go",
+		`package main
+
+func main() {}
+`)
+}
+
+// fixtureCalculator seeds an empty project skeleton for a calculator.
+func fixtureCalculator(dir string) error {
+	if err := writeGoMod(dir, "example/calculator"); err != nil {
+		return err
+	}
+	return writeFile(dir, "main.go",
+		`package main
+
+func main() {}
+`)
+}
+
+// fixtureNotesApp seeds an empty project skeleton for a notes app.
+func fixtureNotesApp(dir string) error {
+	if err := writeGoMod(dir, "example/notesapp"); err != nil {
+		return err
+	}
+	return writeFile(dir, "main.go",
+		`package main
+
+func main() {}
+`)
+}
+
+// fixtureQuizApp seeds an empty project skeleton for a quiz app.
+func fixtureQuizApp(dir string) error {
+	if err := writeGoMod(dir, "example/quizapp"); err != nil {
+		return err
+	}
+	return writeFile(dir, "main.go",
+		`package main
+
+func main() {}
+`)
+}
+
+// fixtureGoBug seeds a Go package with a failing sum() helper to repair.
+func fixtureGoBug(dir string) error {
+	if err := writeGoMod(dir, "example/gobug"); err != nil {
+		return err
+	}
+	if err := writeFile(dir, "sum.go",
+		`package gobug
+
+// sum should add a and b, but the operator is wrong.
+func sum(a, b int) int {
+	return a - b
+}
+`); err != nil {
+		return err
+	}
+	return writeFile(dir, "sum_test.go",
+		`package gobug
+
+import "testing"
+
+func TestSum(t *testing.T) {
+	if sum(2, 3) != 5 {
+		t.Fatalf("sum(2,3) = %d, want 5", sum(2, 3))
+	}
+}
+`)
+}
+
+// fixtureNodeBug seeds a small Node project with a failing test to repair.
+func fixtureNodeBug(dir string) error {
+	if err := writeFile(dir, "package.json",
+		`{
+  "name": "node-bug",
+  "version": "1.0.0",
+  "scripts": { "test": "node --test" }
+}
+`); err != nil {
+		return err
+	}
+	if err := writeFile(dir, "sum.js",
+		`function sum(a, b) {
+  return a - b;
+}
+
+module.exports = { sum };
+`); err != nil {
+		return err
+	}
+	return writeFile(dir, "sum.test.js",
+		`const test = require("node:test");
+const assert = require("node:assert");
+const { sum } = require("./sum");
+
+test("sum adds two numbers", () => {
+  assert.strictEqual(sum(2, 3), 5);
+});
+`)
+}
+
+// fixtureFrontendBuild seeds a small frontend project whose build the agent is
+// asked to repair and then verify with the build command.
+func fixtureFrontendBuild(dir string) error {
+	if err := writeFile(dir, "package.json",
+		`{
+  "name": "frontend-build",
+  "version": "1.0.0",
+  "scripts": { "build": "vite build" }
+}
+`); err != nil {
+		return err
+	}
+	return writeFile(dir, "src/main.js",
+		`import { greeting } from "./missing";
+
+document.body.textContent = greeting;
+`)
+}

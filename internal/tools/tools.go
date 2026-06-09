@@ -57,6 +57,23 @@ func IsReadOnly(t Tool) bool {
 	return false
 }
 
+// ShortDescription returns a one-line summary of a tool's description: the
+// leading non-blank line of Description(), trimmed. Tool descriptions are
+// written as a short summary line followed by an optional multi-line manual,
+// so the first line alone tells the model what the tool does without the full
+// usage docs. Callers that assemble a system prompt for a focused task use this
+// to advertise less-relevant tools by their summary while reserving the full
+// manual for the tools the task is likely to need, keeping input tokens down
+// without hiding any tool's existence. The full manual remains available to the
+// model through the tool's JSON schema the provider always sends.
+func ShortDescription(t Tool) string {
+	desc := strings.TrimSpace(t.Description())
+	if i := strings.IndexByte(desc, '\n'); i >= 0 {
+		desc = strings.TrimSpace(desc[:i])
+	}
+	return desc
+}
+
 // Result is the value returned to the agent loop after a tool runs.
 type Result struct {
 	Content  string         `json:"content"`

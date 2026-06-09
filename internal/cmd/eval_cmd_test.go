@@ -23,6 +23,7 @@ func TestEvalListCommand(t *testing.T) {
 	require.Contains(t, out, "DESCRIPTION")
 	// At least one suite is listed.
 	require.Contains(t, out, "go-fix")
+	require.Contains(t, out, "codex-parity")
 }
 
 func TestEvalRunSuitesText(t *testing.T) {
@@ -81,4 +82,5 @@ func TestEvalCmdListFlag(t *testing.T) {
 	require.NoError(t, err)
 	out := buf.String()
 	require.Contains(t, out, "go-fix")
+	require.Contains(t, out, "codex-parity")
 }

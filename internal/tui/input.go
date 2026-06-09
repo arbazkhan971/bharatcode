@@ -4,7 +4,54 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 	"github.com/charmbracelet/bubbles/v2/help"
 	"github.com/charmbracelet/bubbles/v2/textarea"
+	tea "github.com/charmbracelet/bubbletea/v2"
 )
+
+// isSubmitKey reports whether a key press should submit the prompt — true for
+// the carriage-return Enter (\r), the keypad Enter, and the line-feed (\n)
+// forms that PTY automation commonly sends, so a driver that "presses Enter" by
+// writing either newline byte submits consistently.
+//
+// Why this exists: a terminal in raw mode reports the keyboard's Enter as CR
+// (\r, KeyEnter), which the main key switch already routes to submitInput. But
+// some PTY drivers write a bare line-feed (\n) for Enter; ultraviolet's input
+// decoder turns that byte into Ctrl+J (rune 'j' + ModCtrl), not KeyEnter, so it
+// would otherwise fall through unhandled and never submit. Ctrl+J has been the
+// "line feed = Enter" equivalent since teletypes (and in readline), so mapping
+// it — plus a synthetic bare '\n' code — onto submit is both correct and what
+// automation expects. A bare LF code (0x0a) is included for drivers that inject
+// the rune directly rather than through the byte decoder.
+//
+// This predicate is the canonical spec of the Enter forms the input dispatch
+// accepts; the dispatch in handleKey must consult it before its msg.String()
+// switch so the Ctrl+J/bare-LF forms (whose String() is "ctrl+j"/"\n", not
+// "enter") reach submitInput instead of falling through to the default case and
+// being dropped. The accepted set is deliberately the same set the runtime
+// recognizes once wired — CR Enter, keypad Enter, Ctrl+J, and the synthetic LF
+// code — so predicate and dispatch never disagree about whether a key submits.
+//
+// The Alt modifier is excluded: Alt+Enter is the multi-line newline binding, so
+// it must not be treated as a submit. Other modifiers on the Enter codes
+// (Shift, Ctrl) are NOT treated as submits here: the runtime switch matches
+// those as their own chords ("ctrl+enter"/"shift+enter"), which it does not
+// route to submit, so accepting them in the predicate would make the spec and
+// the dispatch disagree. Keeping the predicate to the plain newline forms keeps
+// the two in lockstep.
+func isSubmitKey(msg tea.KeyPressMsg) bool {
+	switch msg.Code {
+	case tea.KeyEnter, tea.KeyKpEnter, '\n':
+		// CR (\r/KeyEnter), keypad Enter, or a synthetic line-feed code submit only
+		// when unmodified; a modifier turns Enter into a distinct chord the runtime
+		// handles (or ignores) separately — Alt+Enter is the multi-line newline.
+		return msg.Mod == 0
+	case 'j':
+		// A line-feed byte (\n) decodes to Ctrl+J; treat exactly that chord as
+		// Enter so a PTY driver that writes \n submits the same as one that writes
+		// \r. Any other modifier mix (e.g. Alt+J) is a different key, not a submit.
+		return msg.Mod == tea.ModCtrl
+	}
+	return false
+}
 
 // newPromptInput builds the prompt textarea in the activity-stream style: a
 // "› " prompt glyph, the muted discovery placeholder, no line numbers, and

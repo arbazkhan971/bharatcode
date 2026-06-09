@@ -19,6 +19,7 @@ type Suite struct {
 func BuiltinSuites() []Suite {
 	return []Suite{
 		GoFixSuite(),
+		CodexParitySuite(),
 	}
 }
 

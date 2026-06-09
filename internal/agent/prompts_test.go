@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/stretchr/testify/require"
 )
 
@@ -273,4 +274,146 @@ func renderInWorkdir(t *testing.T, workdir string) string {
 	out, err := renderPrompt(context.Background(), "coder", "", newFakeRegistry(), nil)
 	require.NoError(t, err)
 	return out
+}
+
+func TestIsSmallTaskPrompt(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"write a CLI", "write a CLI that prints the current time", true},
+		{"create a script", "create a Python script to rename files in a folder", true},
+		{"generate", "generate a Dockerfile for a Go service", true},
+		{"make", "make a hello-world web server in Go", true},
+		{"leading whitespace and case", "  Create a Makefile with a build target", true},
+		{"empty", "", false},
+		{"no leading verb", "the parser is broken, please look into it", false},
+		{"verb not first", "I would like you to write a function", false},
+		{"refactor cue disqualifies", "write a refactor for the existing parser", false},
+		{"codebase cue disqualifies", "create a summary of this codebase", false},
+		{"fix cue disqualifies", "fix the broken build", false},
+		{"too long", "write a service that " + strings.Repeat("does many things and ", 40), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, isSmallTaskPrompt(tc.text))
+		})
+	}
+}
+
+func TestDirectoryIsEmptyish(t *testing.T) {
+	// A truly empty directory qualifies.
+	require.True(t, directoryIsEmptyish(t.TempDir()))
+
+	// A missing/unreadable directory is treated as empty: no existing code.
+	require.True(t, directoryIsEmptyish(filepath.Join(t.TempDir(), "no-such-dir")))
+
+	// A directory holding only incidental entries (VCS metadata, an editor
+	// config, a README) still counts as empty — none is project source.
+	onlyIgnored := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(onlyIgnored, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(onlyIgnored, "README.md"), []byte("# x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(onlyIgnored, ".gitignore"), []byte("bin/"), 0o644))
+	require.True(t, directoryIsEmptyish(onlyIgnored))
+
+	// A directory with real source is not empty.
+	withSource := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(withSource, "main.go"), []byte("package main"), 0o644))
+	require.False(t, directoryIsEmptyish(withSource))
+}
+
+func TestBuildSmallTaskPrompt(t *testing.T) {
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "write", desc: "Write a file to disk."})
+	registry.Register(&recordingTool{name: "bash", desc: "Run a shell command.\nUse for builds and tests."})
+	registry.Register(&recordingTool{name: "grep", desc: "Search files.\nFull regex manual the small task does not need."})
+
+	prompt := buildSmallTaskPrompt(registry.List())
+
+	// A core tool with a one-line description renders inline after the bullet.
+	require.Contains(t, prompt, "- write: Write a file to disk.")
+
+	// A core tool (bash) carries its full manual — the tools a from-scratch
+	// generation needs keep their usage docs, so the second line survives.
+	require.Contains(t, prompt, "- bash:")
+	require.Contains(t, prompt, "Use for builds and tests.")
+
+	// A non-core tool (grep) is advertised by its one-line summary only; the
+	// rest of its manual is trimmed so the small task does not carry it.
+	require.Contains(t, prompt, "- grep: Search files.")
+	require.NotContains(t, prompt, "Full regex manual the small task does not need.")
+
+	// It keeps a tight engineering policy and a verification status line.
+	require.Contains(t, prompt, "Be concise.")
+	require.Contains(t, prompt, "Verified")
+	require.Contains(t, prompt, "Skipped (no_test_command)")
+
+	// It deliberately drops the full coder doctrine's heavy sections.
+	require.NotContains(t, prompt, "### Verification policy")
+	require.NotContains(t, prompt, "Operational contract")
+}
+
+// TestRunUsesSmallTaskPromptForEmptyDirGeneration asserts that a short
+// from-scratch generation request in an empty workspace swaps the full coder
+// prompt for the concise small-task prompt on the provider call.
+func TestRunUsesSmallTaskPromptForEmptyDirGeneration(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "write", desc: "Write a file to disk."})
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{llm.DeltaTextEvent{Text: "Done."}, llm.EndEvent{}},
+	}}
+
+	const fullPrompt = "FULL-CODER-DOCTRINE: ### Verification policy and much more"
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		SystemPrompt: fullPrompt,
+		WorkDir:      t.TempDir(), // empty workspace
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("write a hello-world web server in Go")))
+
+	require.Len(t, provider.reqs, 1)
+	sent := provider.reqs[0].SystemPrompt
+	// The concise small-task prompt was used in place of the full doctrine.
+	require.NotContains(t, sent, fullPrompt)
+	require.Contains(t, sent, "empty or nearly empty directory")
+	require.Contains(t, sent, "- write: Write a file to disk.")
+}
+
+// TestRunKeepsFullPromptForComplexTask asserts that a repo-aware request leaves
+// the full coder prompt untouched even in an empty directory.
+func TestRunKeepsFullPromptForComplexTask(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "write", desc: "Write a file to disk."})
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{llm.DeltaTextEvent{Text: "Done."}, llm.EndEvent{}},
+	}}
+
+	const fullPrompt = "FULL-CODER-DOCTRINE-MARKER"
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		SystemPrompt: fullPrompt,
+		WorkDir:      t.TempDir(),
+	})
+	// "refactor" is a complex cue, so even in an empty dir the small path is declined.
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("refactor the parser to be table-driven")))
+
+	require.Len(t, provider.reqs, 1)
+	require.Contains(t, provider.reqs[0].SystemPrompt, fullPrompt)
 }

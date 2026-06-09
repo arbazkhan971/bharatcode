@@ -173,6 +173,130 @@ func TestRunnerMarksTaskFailedWhenCheckFails(t *testing.T) {
 	require.Equal(t, "intentional failure", res.Reason)
 }
 
+// ---- codex-parity suite ----
+
+func TestCodexParitySuiteShape(t *testing.T) {
+	suite := eval.CodexParitySuite()
+	require.Equal(t, "codex-parity", suite.Name)
+	require.NotEmpty(t, suite.Description)
+	require.Len(t, suite.Tasks, 7)
+
+	// Expected recurring task set.
+	want := map[string]bool{
+		"todo-app": false, "calculator": false, "notes-app": false,
+		"quiz-app": false, "go-bug-fix": false, "node-test-fix": false,
+		"frontend-build": false,
+	}
+	seen := map[string]bool{}
+	for _, task := range suite.Tasks {
+		require.NotEmpty(t, task.ID, "task missing ID")
+		require.NotEmpty(t, task.Goal, "task %s missing Goal", task.ID)
+		require.NotEmpty(t, task.Script, "task %s has empty script", task.ID)
+		require.NotNil(t, task.Fixture, "task %s must have a Fixture", task.ID)
+		require.False(t, seen[task.ID], "duplicate task ID: %s", task.ID)
+		seen[task.ID] = true
+		_, ok := want[task.ID]
+		require.True(t, ok, "unexpected task ID: %s", task.ID)
+		want[task.ID] = true
+	}
+	for id, found := range want {
+		require.True(t, found, "missing expected parity task: %s", id)
+	}
+}
+
+func TestCodexParityFixturesSeedFiles(t *testing.T) {
+	for _, task := range eval.CodexParitySuite().Tasks {
+		task := task
+		t.Run(task.ID, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, task.Fixture(dir), "fixture for %s must succeed", task.ID)
+		})
+	}
+}
+
+// RunCodexParity must produce a stable, all-passing quality signal offline, with
+// every task reporting changed files, a verification command, tokens, and time.
+func TestRunCodexParitySignalStable(t *testing.T) {
+	ctx := context.Background()
+	runner := eval.Runner{MaxSteps: 12}
+
+	report, err := runner.RunCodexParity(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "codex-parity", report.SuiteName)
+	require.Equal(t, 7, report.TotalTasks)
+	require.Equal(t, 7, report.Passed, "all parity tasks must pass; report: %+v", report.Tasks)
+	require.Equal(t, 0, report.Failed)
+	require.Equal(t, 7, report.Verified, "every parity task must verify its work")
+	require.InDelta(t, 100.0, report.PassPercent, 0.01)
+	require.Greater(t, report.TotalTokens, 0)
+
+	for _, m := range report.Tasks {
+		require.True(t, m.Passed, "task %s failed: %s", m.TaskID, m.Reason)
+		require.NotEmpty(t, m.ChangedFiles, "task %s reported no changed files", m.TaskID)
+		require.True(t, m.Verified, "task %s did not verify", m.TaskID)
+		require.NotEmpty(t, m.Verification, "task %s missing verification command", m.TaskID)
+		require.Greater(t, m.TotalTokens, 0, "task %s reported no tokens", m.TaskID)
+		require.Equal(t, m.InputTokens+m.OutputTokens, m.TotalTokens)
+		require.Greater(t, m.Steps, 0, "task %s recorded no steps", m.TaskID)
+		require.GreaterOrEqual(t, int64(m.Elapsed), int64(0))
+	}
+}
+
+// The signal must be deterministic: the same metrics on every run (token totals,
+// changed files, verification, pass/fail) so it can gate CI.
+func TestRunCodexParityIsDeterministic(t *testing.T) {
+	ctx := context.Background()
+	runner := eval.Runner{MaxSteps: 12}
+
+	a, err := runner.RunCodexParity(ctx)
+	require.NoError(t, err)
+	b, err := runner.RunCodexParity(ctx)
+	require.NoError(t, err)
+
+	require.Equal(t, a.Passed, b.Passed)
+	require.Equal(t, a.Verified, b.Verified)
+	require.Equal(t, a.TotalTokens, b.TotalTokens)
+	require.Len(t, a.Tasks, len(b.Tasks))
+	for i := range a.Tasks {
+		require.Equal(t, a.Tasks[i].TaskID, b.Tasks[i].TaskID)
+		require.Equal(t, a.Tasks[i].Passed, b.Tasks[i].Passed)
+		require.Equal(t, a.Tasks[i].ChangedFiles, b.Tasks[i].ChangedFiles)
+		require.Equal(t, a.Tasks[i].Verification, b.Tasks[i].Verification)
+		require.Equal(t, a.Tasks[i].TotalTokens, b.Tasks[i].TotalTokens)
+	}
+}
+
+func TestRunCodexParityReportSerialisable(t *testing.T) {
+	report, err := eval.Runner{MaxSteps: 12}.RunCodexParity(context.Background())
+	require.NoError(t, err)
+	bz, err := json.Marshal(report)
+	require.NoError(t, err)
+	s := string(bz)
+	require.Contains(t, s, `"suite":"codex-parity"`)
+	require.Contains(t, s, `"changed_files"`)
+	require.Contains(t, s, `"verification"`)
+	require.Contains(t, s, `"total_tokens"`)
+	require.Contains(t, s, `"elapsed_ns"`)
+}
+
+// Per-task metric derivation: the frontend-build task touches two files and
+// verifies with the build command.
+func TestFrontendBuildMetrics(t *testing.T) {
+	report, err := eval.Runner{MaxSteps: 12}.RunCodexParity(context.Background())
+	require.NoError(t, err)
+
+	var fe *eval.ParityMetrics
+	for i := range report.Tasks {
+		if report.Tasks[i].TaskID == "frontend-build" {
+			fe = &report.Tasks[i]
+			break
+		}
+	}
+	require.NotNil(t, fe, "frontend-build task must be present")
+	require.ElementsMatch(t, []string{"src/greeting.js", "src/main.js"}, fe.ChangedFiles)
+	require.Contains(t, fe.Verification, "npm run build")
+}
+
 // ---- custom task: no script produces default-pass ----
 
 func TestRunnerDefaultPassWhenNoCheck(t *testing.T) {

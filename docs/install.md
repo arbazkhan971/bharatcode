@@ -113,5 +113,39 @@ check is skipped in offline mode and for unstamped builds (such as
 
 ```sh
 bharatcode version
-bharatcode doctor   # checks runtime, config, and provider API keys
+bharatcode doctor   # checks runtime, config, provider API keys, and ChatGPT sign-in
 ```
+
+`bharatcode doctor` reports each check as `[OK]` or `[WARN]` (warnings are
+non-fatal and never block startup). When a
+ChatGPT provider is enabled in your config it also shows the **ChatGPT
+subscription** line — `signed in as <account> on the <plan> plan`, or a warning
+telling you to run `bharatcode auth chatgpt` if you are not yet signed in. See
+[Signing in with ChatGPT](#signing-in-with-chatgpt-experimental) below.
+
+## Signing in with ChatGPT (experimental)
+
+If you have a ChatGPT subscription you can use it in place of an API key. This is
+experimental, relies on undocumented endpoints, and is intended for personal
+single-account use only:
+
+```sh
+bharatcode auth chatgpt            # OAuth (PKCE) sign-in; opens your browser
+bharatcode auth chatgpt --status   # show the signed-in account, plan, and token state
+bharatcode auth chatgpt --logout   # remove the stored credentials
+```
+
+## Headless / CI runs
+
+`BHARATCODE_HEADLESS=1` forces the interactive TUI onto a quiet, non-rendering
+path so PTY captures and CI logs do not accumulate live-redraw noise. BharatCode
+also picks this path automatically when `CI` is set or the terminal is `dumb`:
+
+```sh
+BHARATCODE_HEADLESS=1 bharatcode   # quiet, non-rendering TUI for PTY/CI captures
+```
+
+The variable only gates the interactive TUI's renderer; `bharatcode run` is
+already non-interactive (it never starts a renderer) and ends with a `Changed
+files:` block listing every path it created, modified, or deleted during the run,
+regardless of `BHARATCODE_HEADLESS`.

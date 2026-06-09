@@ -38,11 +38,28 @@ import (
 	"github.com/charmbracelet/bubbles/v2/viewport"
 	tea "github.com/charmbracelet/bubbletea/v2"
 	"github.com/charmbracelet/lipgloss/v2"
+	"golang.org/x/term"
 )
 
 const (
 	minWidth  = 80
 	minHeight = 24
+)
+
+// spinnerQuietFPS is the spinner frame rate used when output is captured rather
+// than interactive (see shouldQuietRedraw). At ~2fps the glyph still advances so
+// tool progress reads as "working" on replay, but a long turn emits a small
+// fraction of the frames the native 12fps would, keeping the capture compact.
+const spinnerQuietFPS = time.Second / 2
+
+// tickInterval is the cadence of the uptime/status timer. A real interactive
+// terminal ticks once a second so the status bar's elapsed/uptime readouts stay
+// live; a captured session ticks far more slowly (quietTickInterval) because
+// each tick repaints the whole screen in the recording, and second-granularity
+// uptime is not worth that frame cost on replay.
+const (
+	tickInterval      = time.Second
+	quietTickInterval = 5 * time.Second
 )
 
 // inputPlaceholder is the muted hint shown on an empty, focused prompt. It
@@ -138,6 +155,28 @@ func envTruthy(name string) bool {
 	default:
 		return true
 	}
+}
+
+// shouldQuietRedraw reports whether the live renderer is running but output is
+// being captured rather than driving an interactive terminal — a PTY recording
+// (`script`, asciinema), a piped capture, or a test harness. In that case the
+// renderer is still active (shouldDisableRenderer is false, e.g. TERM is set),
+// so a turn's 12fps spinner and the per-second uptime tick would otherwise
+// repaint the whole screen dozens of times a second, ballooning the capture
+// with frames the eventual reader cannot perceive as motion. Detecting a
+// non-terminal stdout lets the model slow those timers and dedupe the status
+// bar without affecting a genuine interactive session. The fully headless path
+// is excluded (it has no renderer to feed); an explicit BHARATCODE_QUIET_REDRAW
+// forces the mode on for testing and for users who pipe the TUI through a
+// recorder that still reports a TTY.
+func shouldQuietRedraw() bool {
+	if shouldDisableRenderer() {
+		return false
+	}
+	if envTruthy("BHARATCODE_QUIET_REDRAW") {
+		return true
+	}
+	return !term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 func validateDependencies(deps Dependencies) error {
@@ -240,6 +279,22 @@ type model struct {
 	tabFirstPrompt string
 	goal           string
 	quitting       bool
+
+	// quietRedraw trims redraw churn when the live renderer is active but output
+	// is being captured (a non-interactive stdout that is not fully headless —
+	// e.g. a PTY recording, `script`, or a test harness). In that mode the
+	// per-second uptime tick is slowed and the status bar is only re-emitted when
+	// its rendered line actually changes, so a long-running turn does not flood
+	// the capture with byte-identical frames. It is false for a real interactive
+	// terminal (whose renderer already diffs frames) and for the fully headless
+	// path (which has no renderer to feed), so on-screen behavior is unchanged.
+	quietRedraw bool
+	// statusUnchangedFrames counts consecutive renders whose status line was
+	// byte-identical to the previous one (via statusbar.Bar.RenderIfChanged). It
+	// is a diagnostic/observability counter the redraw-churn tests assert on to
+	// prove that, in quiet-redraw mode, a stable status bar stops being treated
+	// as fresh output. It only advances when quietRedraw is set.
+	statusUnchangedFrames int
 
 	// Agent run state.
 	running bool
@@ -447,6 +502,15 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 		sessionID:         sessionID,
 		workspaceRoot:     workingDir(),
 		copyToClipboard:   systemClipboardCopy,
+		quietRedraw:       shouldQuietRedraw(),
+	}
+	// In a captured (non-interactive) session the smooth 12fps spinner is pure
+	// noise — the recording's reader sees a static frame, not motion — so slow it
+	// to spinnerQuietFPS. The glyph still advances, so tool progress stays visible
+	// when the capture is replayed, but the per-second frame count drops sharply.
+	// A real interactive terminal keeps the spinner's native FPS for smooth motion.
+	if m.quietRedraw {
+		m.streamSpinner.Spinner.FPS = spinnerQuietFPS
 	}
 	if continueSession != nil {
 		m.sessionPersisted = true
@@ -480,7 +544,7 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 // a turn is launched (startRun/continueRun batch its first Tick alongside the
 // run command) so it does not leak a 12fps timer while the session is idle.
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.waitLedger(), m.waitPermission(), m.ensureListening(), tick())
+	return tea.Batch(m.waitLedger(), m.waitPermission(), m.ensureListening(), m.tick())
 }
 
 // Update applies one Bubble Tea message.
@@ -533,7 +597,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.now = time.Time(msg)
 		m.status.Now = m.now
-		return m, tick()
+		return m, m.tick()
 	case ledgerSummaryMsg:
 		m.footer.ApplySummary(rootledger.Summary(msg))
 		return m, nil
@@ -1493,10 +1557,31 @@ func (m *model) renderMain() string {
 	zones = append(zones,
 		chatView,
 		inputPanel,
-		m.status.Render(m.width),
+		m.statusLine(),
 		m.footer.Render(m.width),
 	)
 	return lipgloss.JoinVertical(lipgloss.Left, zones...)
+}
+
+// statusLine renders the status bar for the current frame. In quiet-redraw mode
+// it routes through statusbar.Bar.RenderIfChanged and tracks how many
+// consecutive frames left the bar byte-identical, so the redraw-churn tests can
+// confirm a stable status bar is recognised as unchanged rather than re-emitted
+// fresh every tick. The returned line is identical either way (the bar still
+// occupies its row in the composite); the dedup signal lets a captured session
+// recognise that a per-second uptime tick produced no new status content. An
+// interactive terminal keeps the plain Render path so the counter never moves.
+func (m *model) statusLine() string {
+	if !m.quietRedraw {
+		return m.status.Render(m.width)
+	}
+	line, changed := m.status.RenderIfChanged(m.width)
+	if changed {
+		m.statusUnchangedFrames = 0
+	} else {
+		m.statusUnchangedFrames++
+	}
+	return line
 }
 
 // activeModelIsSubscription reports whether the active model's provider bills a
@@ -1829,8 +1914,16 @@ func (m *model) waitPermission() tea.Cmd {
 	}
 }
 
-func tick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+// tick schedules the next uptime/status timer message. The interval is the
+// model's tickInterval (one second) for an interactive terminal and the slower
+// quietTickInterval for a captured session, where a per-second repaint of the
+// whole screen is the dominant source of redraw noise.
+func (m *model) tick() tea.Cmd {
+	interval := tickInterval
+	if m.quietRedraw {
+		interval = quietTickInterval
+	}
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }

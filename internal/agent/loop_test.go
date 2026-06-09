@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/hooks"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -1286,3 +1288,303 @@ type readOnlyRecordingTool struct {
 }
 
 func (r *readOnlyRecordingTool) IsReadOnly() bool { return true }
+
+// ─── T10: policy-driven post-write verification ──────────────────────────────
+
+// goModWorkDir creates a temp directory containing a go.mod so
+// DiscoverVerifyCommands proposes `go test ./...` for it, returning the path.
+func goModWorkDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, dir, "go.mod", "module example.com/app\n\ngo 1.24\n")
+	return dir
+}
+
+// TestPolicyVerifyRunsAfterSimpleAppGeneration asserts that with the default
+// (strict) verification policy and a discoverable command, a successful write
+// triggers verification automatically — no per-file hook required — and the
+// passing command is surfaced in the tool result so the final answer can report
+// it.
+func TestPolicyVerifyRunsAfterSimpleAppGeneration(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "write", result: "wrote main.go"})
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{toolCall("c1", "write", `{"path":"main.go","content":"package main"}`), llm.EndEvent{}},
+		{llm.DeltaTextEvent{Text: "Done."}, llm.EndEvent{}},
+	}}
+
+	runner := &captureVerifyRunner{script: []verifyOutcome{{output: "ok", err: nil}}}
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		VerifyRunner: runner,
+		WorkDir:      goModWorkDir(t),
+		// No VerifyHooks and no Verification override: the strict default policy
+		// must require verification on a source edit.
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("write a hello-world app")))
+
+	require.Len(t, runner.calls, 1, "policy verification must run exactly once")
+	require.Equal(t, "go test ./...", runner.calls[0].command)
+
+	tr := toolResultFor(t, repo, ctx, sessionID, "c1")
+	require.False(t, tr.IsError, "passing verification must not mark the result an error")
+	require.Contains(t, tr.Content, "go test ./...", "the verify command must surface in the result")
+}
+
+// TestPolicyVerifyFailureFedBackAndTriggersFix asserts that a failed
+// verification is injected as an IsError tool result (so the model fixes), then
+// after the model re-edits the verification runs again and passes.
+func TestPolicyVerifyFailureFedBackAndTriggersFix(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "write", result: "wrote main.go"})
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		// First edit — verification will fail.
+		{toolCall("c1", "write", `{"path":"main.go","content":"package main\nbroken"}`), llm.EndEvent{}},
+		// Model reacts to the failure with a fix — verification will pass.
+		{toolCall("c2", "write", `{"path":"main.go","content":"package main"}`), llm.EndEvent{}},
+		// Final reply.
+		{llm.DeltaTextEvent{Text: "Fixed and verified."}, llm.EndEvent{}},
+	}}
+
+	runner := &captureVerifyRunner{script: []verifyOutcome{
+		{output: "./main.go:2:1: syntax error", err: errors.New("exit status 1")},
+		{output: "ok", err: nil},
+	}}
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		VerifyRunner: runner,
+		WorkDir:      goModWorkDir(t),
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("write an app")))
+
+	require.Len(t, runner.calls, 2, "verification must run once per edit")
+
+	// First edit's result must carry the failure so the model saw it.
+	failed := toolResultFor(t, repo, ctx, sessionID, "c1")
+	require.True(t, failed.IsError, "failed verification must be an error result")
+	require.Contains(t, failed.Content, "verification failed")
+	require.Contains(t, failed.Content, "syntax error")
+
+	// Second edit's result must be a clean pass.
+	fixed := toolResultFor(t, repo, ctx, sessionID, "c2")
+	require.False(t, fixed.IsError, "fixed edit must verify cleanly")
+}
+
+// TestPolicyVerifyAttemptsAreCapped asserts that a model stuck re-editing a
+// change that never verifies does not loop forever: verification stops running
+// once MaxVerifyAttempts is reached, and the loop still terminates cleanly.
+func TestPolicyVerifyAttemptsAreCapped(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "write", result: "wrote main.go"})
+
+	// The model keeps editing; every verification fails. Provide more edit turns
+	// than the cap so the cap — not the script — is what stops verification.
+	scripts := make([][]llm.Event, 0, 6)
+	for i := 0; i < 5; i++ {
+		// Distinct content each turn so the loop detector does not trip before the
+		// verify cap does — we are exercising the cap, not loop detection.
+		input := fmt.Sprintf(`{"path":"main.go","content":"still broken %d"}`, i)
+		scripts = append(scripts, []llm.Event{
+			toolCall(fmt.Sprintf("c%d", i+1), "write", input),
+			llm.EndEvent{},
+		})
+	}
+	scripts = append(scripts, []llm.Event{llm.DeltaTextEvent{Text: "Giving up; explaining."}, llm.EndEvent{}})
+	provider := &scriptProvider{scripts: scripts}
+
+	// Always-failing verifier; script long enough that the cap, not exhaustion,
+	// limits the calls.
+	outcomes := make([]verifyOutcome, 10)
+	for i := range outcomes {
+		outcomes[i] = verifyOutcome{output: "fail", err: errors.New("exit status 1")}
+	}
+	runner := &captureVerifyRunner{script: outcomes}
+
+	loop := New(Config{
+		Name:              "coder",
+		Model:             "fake-model",
+		Provider:          provider,
+		Tools:             registry,
+		Sessions:          repo,
+		VerifyRunner:      runner,
+		WorkDir:           goModWorkDir(t),
+		MaxVerifyAttempts: 2,
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("write an app")))
+
+	require.Len(t, runner.calls, 2, "verification must stop after MaxVerifyAttempts")
+}
+
+// TestPolicyVerifyDisabledSkipsVerification asserts that a disabled policy makes
+// verification advisory only: no command is run even after a successful write.
+func TestPolicyVerifyDisabledSkipsVerification(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "write", result: "wrote main.go"})
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{toolCall("c1", "write", `{"path":"main.go","content":"package main"}`), llm.EndEvent{}},
+		{llm.DeltaTextEvent{Text: "Done."}, llm.EndEvent{}},
+	}}
+
+	runner := &captureVerifyRunner{}
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		VerifyRunner: runner,
+		WorkDir:      goModWorkDir(t),
+		Verification: config.VerificationConfig{Disabled: true},
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("write an app")))
+
+	require.Empty(t, runner.calls, "disabled policy must not run verification")
+}
+
+// TestPolicyVerifySkippedWhenNoCommandDiscovered asserts that a workspace with
+// no recognizable toolchain (no manifest) yields no verify command, so the
+// no_test_command skip path is taken and the original success result is kept.
+func TestPolicyVerifySkippedWhenNoCommandDiscovered(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "write", result: "wrote notes.txt"})
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{toolCall("c1", "write", `{"path":"notes.txt","content":"hi"}`), llm.EndEvent{}},
+		{llm.DeltaTextEvent{Text: "Done."}, llm.EndEvent{}},
+	}}
+
+	runner := &captureVerifyRunner{}
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		VerifyRunner: runner,
+		WorkDir:      t.TempDir(), // empty: nothing for DiscoverVerifyCommands to find
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("write notes")))
+
+	require.Empty(t, runner.calls, "no discoverable command means no verification runs")
+	tr := toolResultFor(t, repo, ctx, sessionID, "c1")
+	require.False(t, tr.IsError)
+	require.Equal(t, "wrote notes.txt", tr.Content, "original success result must be preserved")
+}
+
+// TestPolicyVerifyDoesNotRunOnReadOnlyTool asserts a non-write tool never
+// triggers policy verification even with a discoverable command.
+func TestPolicyVerifyDoesNotRunOnReadOnlyTool(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "view", result: "file contents"})
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{toolCall("c1", "view", `{"path":"main.go"}`), llm.EndEvent{}},
+		{llm.DeltaTextEvent{Text: "Read it."}, llm.EndEvent{}},
+	}}
+
+	runner := &captureVerifyRunner{}
+	loop := New(Config{
+		Name:         "coder",
+		Model:        "fake-model",
+		Provider:     provider,
+		Tools:        registry,
+		Sessions:     repo,
+		VerifyRunner: runner,
+		WorkDir:      goModWorkDir(t),
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("read the file")))
+
+	require.Empty(t, runner.calls, "read-only tools must not trigger policy verification")
+}
+
+// TestPerFileHookVerifyTakesPrecedenceOverPolicy asserts that when a
+// user-declared per-file verify_command handles the edit, the policy-driven path
+// does not also run — verification happens exactly once, via the hook.
+func TestPerFileHookVerifyTakesPrecedenceOverPolicy(t *testing.T) {
+	ctx := context.Background()
+	repo := testRepo(t)
+	sessionID := testSession(t, repo)
+
+	registry := newFakeRegistry()
+	registry.Register(&recordingTool{name: "edit", result: "edited"})
+
+	provider := &scriptProvider{scripts: [][]llm.Event{
+		{toolCall("c1", "edit", `{"path":"main.go","old_string":"x","new_string":"y"}`), llm.EndEvent{}},
+		{llm.DeltaTextEvent{Text: "Done."}, llm.EndEvent{}},
+	}}
+
+	runner := &captureVerifyRunner{script: []verifyOutcome{{output: "", err: nil}}}
+	loop := New(Config{
+		Name:     "coder",
+		Model:    "fake-model",
+		Provider: provider,
+		Tools:    registry,
+		Sessions: repo,
+		VerifyHooks: &fakeVerifyHookSource{specs: []hooks.VerifySpec{
+			{Command: "make check", Timeout: 5 * time.Second},
+		}},
+		VerifyRunner: runner,
+		WorkDir:      goModWorkDir(t),
+	})
+	require.NoError(t, loop.Run(ctx, sessionID, userMessage("edit the file")))
+
+	require.Len(t, runner.calls, 1, "verification must run once, via the per-file hook")
+	require.Equal(t, "make check", runner.calls[0].command, "the hook command must win over policy discovery")
+}
+
+// TestVerifyTriggerForPathClassification asserts the path→trigger mapping that
+// gates which edits the policy requires verification for.
+func TestVerifyTriggerForPathClassification(t *testing.T) {
+	cases := []struct {
+		path string
+		want config.VerificationTrigger
+	}{
+		{"main.go", config.VerifyTriggerSourceEdit},
+		{"internal/app/server.go", config.VerifyTriggerSourceEdit},
+		{"go.mod", config.VerifyTriggerPackageManifest},
+		{"package.json", config.VerifyTriggerPackageManifest},
+		{"Cargo.toml", config.VerifyTriggerPackageManifest},
+		{"Makefile", config.VerifyTriggerTestOrBuildFile},
+		{"loop_test.go", config.VerifyTriggerTestOrBuildFile},
+		{"app.spec.ts", config.VerifyTriggerTestOrBuildFile},
+		{"", config.VerifyTriggerSourceEdit},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, verifyTriggerForPath(tc.path), "path %q", tc.path)
+	}
+}

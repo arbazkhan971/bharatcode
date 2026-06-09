@@ -127,3 +127,50 @@ jobs:
         # though the full windows build above is non-blocking.
         if: matrix.goos == 'windows'
         run: go build ./internal/shell ./internal/lsp
+
+  # Codex-parity release gate. Guards the behaviour the parity work shipped — a
+  # clean transcript, quiet-but-visible tool activity, file/verification-aware
+  # final answers, and "don't claim done without verifying" — so a release
+  # branch cannot regress it unnoticed. Every step here is offline and
+  # deterministic; the full checklist (and the manual, post-tag brew/npm smokes)
+  # lives in docs/release/codex-parity.md. Linux-only: the checks are
+  # OS-independent, so one runner keeps the gate fast.
+  release-gate:
+    name: codex-parity release gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Parity eval subset (T15)
+        # Runs only the Codex-parity tasks from eval.CodexParitySuite() via the
+        # Go API (the suite is not yet on the `bharatcode eval` CLI — see
+        # docs/evals/codex-parity.md). verifiedBuildCheck fails any task that did
+        # not both edit a file and run a build/test, so this is the machine gate
+        # for "don't claim done without verifying". -count=1 disables the cache.
+        run: go test ./internal/eval/ -run 'CodexParity|FrontendBuild' -count=1 -v
+
+      - name: Build CLI for smoke checks
+        run: go build -o bharatcode .
+
+      - name: UX smoke (T16)
+        # Guards the redraw flood, the "Changed files:" summary, the doctor
+        # ChatGPT status line, and clean exits. Provider-dependent checks skip
+        # (not fail) when no provider is reachable, so this is green offline.
+        run: scripts/ux-smoke.sh ./bharatcode
+
+      - name: Install-method smoke (source + npm launcher)
+        # Source install end to end; npm launcher only parse-checks the shim and
+        # downloader (the full npm path needs published release assets — see
+        # docs/release/codex-parity.md). Homebrew is post-tag and manual.
+        run: |
+          go install .
+          "$(go env GOPATH)/bin/bharatcode" version
+          node --check npm/bin/bharatcode.js
+          node --check npm/install.js

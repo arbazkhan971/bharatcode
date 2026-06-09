@@ -173,6 +173,55 @@ var ErrLoopDetected = errors.New("loop detected: 3 identical tool calls in a row
 | `task` | read-only subset (`view`, `grep`, `glob`, `ls`, `diagnostics`, `web_fetch`, `web_search`) | A subagent the `coder` can spawn for focused searches without polluting its own context. |
 | user-defined | per `config.Agents[].tools` | Loaded from config; same dependency surface as built-ins. |
 
+### Verification policy
+
+BharatCode formalizes *when verification is required* and *when it may be
+skipped* so the agent never reports unverified work as done. The policy is
+encoded as data in `config.VerificationConfig` (root config field
+`verification`) and rendered into the `coder` system prompt, so the config and
+the prompt cannot drift.
+
+Verification is REQUIRED before a turn may be reported done whenever the turn
+produced a change in one of these classes (`config.VerificationTrigger`):
+
+| Trigger | Fires when |
+|---|---|
+| `source_edit` | a write-class tool (write, edit, multiedit, patch, rename) changed a source file |
+| `generated_artifact` | a generated frontend artifact (build output, bundled asset, compiled stylesheet) was produced or changed |
+| `package_manifest` | a package manifest (go.mod, package.json, pyproject.toml, Cargo.toml, …) was touched |
+| `test_or_build_file` | a test file or a build/CI file (Makefile, Dockerfile, `*_test.*`, workflow YAML) was touched |
+
+Verification may be SKIPPED only for one of these sanctioned reasons
+(`config.VerificationSkipReason`); any other excuse is not a sanctioned skip:
+
+| Skip reason | Allowed when |
+|---|---|
+| `no_test_command` | the project exposes no test, build, or lint command to run |
+| `dependency_unavailable` | an external dependency needed to verify is unavailable (toolchain not installed, service down, credentials absent) |
+| `user_opted_out` | the user explicitly asked not to run tests, the build, or the linter |
+
+The policy is ON by default: a zero `VerificationConfig` (the value an omitted
+`verification` block produces) selects the strict default set of triggers and
+the standard skip reasons. `VerificationConfig.Disabled` makes verification
+advisory only. The struct is intentionally pure and side-effect-free so the
+policy is testable in isolation:
+
+```go
+// VerificationConfig encodes when verification is required and which skip
+// reasons are sanctioned. All methods are pure.
+func (v VerificationConfig) RequiresVerification(t VerificationTrigger) bool
+func (v VerificationConfig) SkipAllowed(r VerificationSkipReason) bool
+func (v VerificationConfig) Triggers() []VerificationTrigger
+func (v VerificationConfig) SkipReasons() []VerificationSkipReason
+func (v VerificationConfig) Validate() error // rejects unknown triggers/reasons
+```
+
+Because the same vocabulary drives the prompt, the `coder` template requires the
+final response on any turn that changed something to end with exactly one
+verification status: **Verified** (commands run and result observed),
+**Failed** (verification ran but did not pass), or **Skipped (`<reason>`)**
+naming one of the sanctioned skip reasons.
+
 ### Subfiles
 
 - `internal/agent/loop.go` — the `Loop` struct, `Run`, `Interrupt`, the inner step-by-step driver.

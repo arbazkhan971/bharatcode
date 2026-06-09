@@ -3,7 +3,9 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -135,18 +138,6 @@ func renderPrompt(ctx context.Context, agentName, promptOverride string, registr
 	if err != nil {
 		return "", fmt.Errorf("getting working directory: %w", err)
 	}
-	source := promptOverride
-	if strings.TrimSpace(source) == "" {
-		name := "coder"
-		if agentName == "task" {
-			name = "task"
-		}
-		data, err := templateFS.ReadFile("templates/" + name + ".md.tpl")
-		if err != nil {
-			return "", fmt.Errorf("reading prompt template: %w", err)
-		}
-		source = string(data)
-	}
 
 	data := PromptData{
 		Workdir:            workdir,
@@ -159,6 +150,97 @@ func renderPrompt(ctx context.Context, agentName, promptOverride string, registr
 		Tools:              promptTools(registry.List()),
 		FileTrackerSummary: fileSummary(tracker),
 	}
+
+	// Assemble the static body — instructions, tool descriptions, skills and
+	// recipes — once per config and reuse it across turns. Everything that
+	// feeds the body is folded into the cache key (see staticBodyKey), so a
+	// config or profile change that alters the prompt produces a different key
+	// and misses the cache, while a repeated turn under the same config hits
+	// it and skips the template parse and directory scans.
+	assembled, err := renderStaticBody(ctx, agentName, promptOverride, workdir, data)
+	if err != nil {
+		return "", err
+	}
+
+	// Append the environment block last, after the cached static body, so the
+	// volatile workdir/date/git lines sit at the very tail of the prompt and
+	// the prefix above them stays cache-stable across turns. The environment
+	// block is intentionally not part of the cached body — it changes every
+	// turn — so it is rendered fresh on each call.
+	env, err := renderTemplate("environment", environmentTemplate, data)
+	if err != nil {
+		return "", err
+	}
+	return assembled + "\n\n" + env, nil
+}
+
+// staticBodyCache memoizes the assembled static prompt body keyed by a hash of
+// the inputs that determine it. It lets repeated turns in one session reuse the
+// instructions/tool/skills/recipes blocks instead of re-parsing the template
+// and re-scanning the skill and recipe directories on every provider call,
+// which also keeps the body's bytes identical so a cache-aware provider can
+// serve it from its own prompt cache rather than re-billing it. The cache is
+// process-wide and bounded only by the number of distinct configs seen in a
+// run; correctness is preserved because any change to the config or active
+// profile that alters the body also alters the key (see staticBodyKey).
+var staticBodyCache sync.Map // staticBodyKey -> string
+
+// staticBodyKey identifies a cached static prompt body. Every field that can
+// change the rendered body is present so that a config or profile change
+// invalidates the entry by missing the cache rather than serving stale text.
+type staticBodyKey struct {
+	agent      string // agent name selects the coder vs task template
+	override   string // explicit prompt override, when the config supplies one
+	workdir    string // roots instruction/skill/recipe discovery
+	toolsSig   string // hash of the active tool set (name, description, schema)
+	skillDirs  string // skill search roots, so a profile that swaps them invalidates
+	recipeDirs string // recipe search roots, so a profile that swaps them invalidates
+}
+
+// renderStaticBody returns the assembled static prompt body — the template
+// output plus the project-instructions, skills and recipes sections — caching
+// it per config so repeated turns avoid the template parse and directory scans.
+// The trailing environment block is deliberately excluded; the caller appends
+// it fresh because it carries per-turn volatile state.
+func renderStaticBody(ctx context.Context, agentName, promptOverride, workdir string, data PromptData) (string, error) {
+	key := staticBodyKey{
+		agent:      agentName,
+		override:   promptOverride,
+		workdir:    workdir,
+		toolsSig:   toolsSignature(data.Tools),
+		skillDirs:  strings.Join(skillSearchDirs(workdir), string(os.PathListSeparator)),
+		recipeDirs: strings.Join(recipeSearchDirs(workdir), string(os.PathListSeparator)),
+	}
+	if cached, ok := staticBodyCache.Load(key); ok {
+		return cached.(string), nil
+	}
+
+	body, err := assembleStaticBody(ctx, agentName, promptOverride, workdir, data)
+	if err != nil {
+		return "", err
+	}
+	staticBodyCache.Store(key, body)
+	return body, nil
+}
+
+// assembleStaticBody renders the static prompt body from scratch: the agent
+// template followed by the project-instructions, skills and recipes sections.
+// It performs the template parse and the instruction/skill/recipe scans, and is
+// the cache-miss path behind renderStaticBody.
+func assembleStaticBody(ctx context.Context, agentName, promptOverride, workdir string, data PromptData) (string, error) {
+	source := promptOverride
+	if strings.TrimSpace(source) == "" {
+		name := "coder"
+		if agentName == "task" {
+			name = "task"
+		}
+		raw, err := templateFS.ReadFile("templates/" + name + ".md.tpl")
+		if err != nil {
+			return "", fmt.Errorf("reading prompt template: %w", err)
+		}
+		source = string(raw)
+	}
+
 	base, err := renderTemplate("system", source, data)
 	if err != nil {
 		return "", err
@@ -193,13 +275,21 @@ func renderPrompt(ctx context.Context, agentName, promptOverride string, registr
 		assembled = injectRecipes(assembled, reg.Summaries())
 	}
 
-	// Append the environment block last, after the volatile instructions
-	// and skills, so workdir/date sit at the very tail of the prompt.
-	env, err := renderTemplate("environment", environmentTemplate, data)
-	if err != nil {
-		return "", err
+	return assembled, nil
+}
+
+// toolsSignature returns a stable hash of the active tool set so the static-body
+// cache key changes whenever a tool is added, removed, renamed, or has its
+// description or schema edited — any of which alters the rendered tool block.
+// The tools are folded into the hash in their listed order; the same registry
+// returns tools in the same order across turns, so an unchanged tool set yields
+// the same signature and a cache hit.
+func toolsSignature(tools []ToolInfo) string {
+	h := sha256.New()
+	for _, t := range tools {
+		fmt.Fprintf(h, "%s\x00%s\x00%s\x00", t.Name, t.Description, t.Schema)
 	}
-	return assembled + "\n\n" + env, nil
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // renderTemplate parses and executes a single prompt template with the
@@ -433,6 +523,204 @@ func promptTools(list []tools.Tool) []ToolInfo {
 		})
 	}
 	return out
+}
+
+// smallTaskSystemPrompt is the concise system prompt used for small tasks —
+// scaffolding a one-file app or a short file-generation request in an empty or
+// near-empty directory. It deliberately omits the full coder doctrine: the
+// long verification-policy block, the repo-aware instruction chain, and the
+// skills/recipes catalog all carry overhead that a from-scratch generation
+// does not need. What remains is a tight engineering policy plus the live tool
+// list, so the input-token cost of a simple "write me an X" turn drops
+// materially while the agent still knows how to write correct files and report
+// a verification status. Complex repo edits stay on the full coder prompt.
+const smallTaskSystemPrompt = `You are BharatCode's coding agent, generating files in an empty or nearly empty directory. The task is small and self-contained: create the files the user asked for, correctly and completely, with no scaffolding they did not request.
+
+## Tools
+
+You have the following tools available. The tools this kind of task usually
+needs carry their full usage docs; the rest are listed by a one-line summary to
+save space. Every tool's complete argument schema is in its tool definition, so
+call any tool whose summary fits — read its schema there if you need the detail.
+%s
+Other custom tools may be exposed at runtime; use whatever is available.
+
+## Policy
+
+- Be concise. This output is read in a terminal: lead with the result and skip preamble.
+- Write complete, runnable files. Do not leave TODOs or stub bodies unless the user asked for a sketch.
+- Follow idiomatic conventions for the language and toolchain you are generating.
+- Read a file before you edit it; never edit blind.
+- Do not add comments unless the user asks or the logic is genuinely non-obvious.
+- Keep the change minimal — only the files the request implies, nothing extra.
+
+## Verifying
+
+- After you generate the files, verify them with the project's own tooling when one exists (build, run, or test). If nothing runnable exists yet, say so.
+- Never claim the result works unless you observed it work. End a turn that produced files with one status line:
+  - **Verified** — name the command you ran and the result.
+  - **Failed** — what failed and what you are doing about it.
+  - **Skipped (no_test_command)** — there is no build, run, or test command to execute.
+
+Text wrapped in <system-reminder> tags carries operational instructions from the harness and overrides any conflicting guidance here.`
+
+// smallTaskCoreTools names the tools a short, from-scratch generation actually
+// reaches for: writing and editing files and running the build/test that
+// verifies them. Only these carry their full usage manual in the small-task
+// prompt; every other tool is advertised by its one-line summary. The model
+// still sees the full argument schema for any tool through the provider's tool
+// definitions, so trimming the prose manual here costs no tool-call accuracy —
+// it just keeps a simple "write me an X" turn from carrying every tool's docs.
+var smallTaskCoreTools = map[string]struct{}{
+	"write":     {},
+	"edit":      {},
+	"multiedit": {},
+	"view":      {},
+	"bash":      {},
+	"ls":        {},
+}
+
+// buildSmallTaskPrompt renders the concise small-task system prompt over the
+// supplied tool list. The tools a from-scratch generation is likely to need
+// (smallTaskCoreTools) carry their full markdown manual; every other tool is
+// advertised by its one-line summary (tools.ShortDescription) so the prompt
+// lists the whole tool set without paying for every tool's docs. The full JSON
+// schemas reach the model through the provider's tool definitions regardless,
+// so a summarized tool stays callable. It returns the rendered prompt ready to
+// be used as the base system prompt for a small-task turn.
+func buildSmallTaskPrompt(list []tools.Tool) string {
+	var b strings.Builder
+	for _, t := range list {
+		if _, core := smallTaskCoreTools[t.Name()]; core {
+			full := strings.TrimSpace(t.Description())
+			// A one-line manual sits inline after the bullet; a multi-line manual
+			// is indented as a block under it so the markdown stays visually
+			// attached to its tool name without spilling out of the list.
+			if strings.IndexByte(full, '\n') < 0 {
+				fmt.Fprintf(&b, "- %s: %s\n", t.Name(), full)
+			} else {
+				fmt.Fprintf(&b, "- %s:\n%s\n", t.Name(), indentToolDoc(full))
+			}
+			continue
+		}
+		fmt.Fprintf(&b, "- %s: %s\n", t.Name(), tools.ShortDescription(t))
+	}
+	return fmt.Sprintf(smallTaskSystemPrompt, strings.TrimRight(b.String(), "\n"))
+}
+
+// indentToolDoc indents every line of a tool's full description by two spaces so
+// the manual reads as a block nested under its "- <name>:" bullet. A blank line
+// is left blank rather than padded with trailing whitespace.
+func indentToolDoc(doc string) string {
+	lines := strings.Split(doc, "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		lines[i] = "  " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// smallTaskPromptCue is the upper bound (in runes) on a user request that can
+// still qualify as a "small task". Beyond this length the request carries
+// enough detail that the full coder doctrine is worth its tokens, so the small
+// path is declined.
+const smallTaskPromptCue = 600
+
+// smallTaskVerbs are the leading action verbs that mark a from-scratch
+// file-generation request ("write a CLI that…", "create a script to…"). The
+// match is on the first word so a request that merely mentions one of these
+// verbs deeper in a longer instruction does not trip the small path.
+var smallTaskVerbs = map[string]struct{}{
+	"write":     {},
+	"create":    {},
+	"generate":  {},
+	"make":      {},
+	"build":     {},
+	"scaffold":  {},
+	"implement": {},
+	"add":       {},
+}
+
+// smallTaskComplexCues are substrings whose presence in the request signals a
+// repo-aware edit rather than a clean-slate generation. Any one of them
+// disqualifies the small path even in an empty directory, because the request
+// is about changing or reasoning over existing code rather than producing a
+// new file from nothing.
+var smallTaskComplexCues = []string{
+	"refactor", "debug", "fix the", "fix a", "investigate", "trace",
+	"existing", "codebase", "repository", "migrate", "test suite",
+}
+
+// isSmallTaskPrompt reports whether the user's request looks like a short,
+// self-contained file-generation prompt: it opens with a generation verb, is
+// not longer than smallTaskPromptCue runes, and carries none of the
+// complex-edit cues that mark a repo-aware change. It is one half of the
+// small-task decision; the caller also requires an empty-ish working directory
+// (see directoryIsEmptyish) before switching to the concise prompt.
+func isSmallTaskPrompt(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	if len([]rune(trimmed)) > smallTaskPromptCue {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	for _, cue := range smallTaskComplexCues {
+		if strings.Contains(lower, cue) {
+			return false
+		}
+	}
+	first := lower
+	if i := strings.IndexFunc(lower, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' }); i >= 0 {
+		first = lower[:i]
+	}
+	_, ok := smallTaskVerbs[first]
+	return ok
+}
+
+// directoryIsEmptyish reports whether dir holds no files that a coding agent
+// would treat as existing project state. A handful of incidental entries — VCS
+// metadata, OS cruft, an editor config — do not count as a project, so a
+// directory holding only those still qualifies as empty for small-task
+// purposes. A missing or unreadable directory is treated as empty: there is
+// no existing code to reason over. A directory with real source or manifest
+// files is not empty.
+func directoryIsEmptyish(dir string) bool {
+	if dir == "" {
+		dir = "."
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if _, skip := smallTaskIgnoredEntries[e.Name()]; skip {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// smallTaskIgnoredEntries names directory entries that do not constitute
+// existing project state, so a directory holding only these still counts as
+// empty for small-task detection.
+var smallTaskIgnoredEntries = map[string]struct{}{
+	".git":          {},
+	".gitignore":    {},
+	".DS_Store":     {},
+	".bharatcode":   {},
+	".idea":         {},
+	".vscode":       {},
+	"AGENTS.md":     {},
+	"CLAUDE.md":     {},
+	"LICENSE":       {},
+	"README.md":     {},
+	"Thumbs.db":     {},
+	".editorconfig": {},
 }
 
 func gitBranch(ctx context.Context, workdir string) string {

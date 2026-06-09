@@ -54,6 +54,16 @@ type Bar struct {
 	// user writing a long message can see their approximate token footprint
 	// before sending — without opening a dialog.
 	InputTokens string
+
+	// lastRendered caches the most recent Render output keyed by the width it
+	// was produced for, so RenderIfChanged can report whether a redraw would
+	// emit a byte-identical line. Used to drop unchanged status frames from
+	// captured PTYs (where every per-second uptime tick would otherwise re-emit
+	// the whole bar). It is unexported so the cache stays an internal detail of
+	// the bar; callers that always want a fresh line keep calling Render.
+	lastRendered string
+	lastWidth    int
+	rendered     bool
 }
 
 // segment is one " · "-joined field of the status line paired with the priority
@@ -178,6 +188,27 @@ func (b Bar) Render(width int) string {
 	}
 
 	return b.Theme.Status.Render(strings.Join(styledParts, styledSep))
+}
+
+// RenderIfChanged renders the bar and reports whether the result differs from
+// the line produced by the previous RenderIfChanged call at the same width. A
+// caller redrawing on a timer can use changed==false to skip re-emitting a
+// byte-identical status line — the dominant source of redraw noise in a
+// captured PTY, where each per-second uptime tick would otherwise repaint the
+// whole bar even though nothing the user can act on moved. The first call (and
+// any call at a new width, where the styled widths shift) always reports
+// changed==true so the bar is drawn at least once. A real terminal's renderer
+// already diffs frames, so this only trims output on the non-rendering/capture
+// path; behavior on screen is identical either way.
+func (b *Bar) RenderIfChanged(width int) (line string, changed bool) {
+	line = b.Render(width)
+	if b.rendered && b.lastWidth == width && b.lastRendered == line {
+		return line, false
+	}
+	b.lastRendered = line
+	b.lastWidth = width
+	b.rendered = true
+	return line, true
 }
 
 // fitSegments joins segs with " · " in their given (display) order, dropping the

@@ -60,8 +60,10 @@ BharatCode is a terminal-based AI pair programmer in the same class as Claude Co
 **Workflow & control**
 - SQLite-backed sessions with `--continue` resume
 - `--profile` config overlays (swap entire presets per task or repo)
-- `bharatcode run --json` (NDJSON) for CI and automation
-- `bharatcode doctor` health check
+- `bharatcode run --json` (NDJSON) for CI and automation; non-JSON `run` prints a `Changed files:` summary after workspace edits
+- `bharatcode doctor` health check (config, providers, LSP, and ChatGPT sign-in)
+- `BHARATCODE_HEADLESS=1` to force the quiet, non-rendering path for scripts and PTY captures
+- Verify-before-done agent: it runs the project's own tests/build/lint and ends each change with an explicit **Verified / Failed / Skipped** status
 - Permission engine: ask / allow / deny, with once / session / project / forever scopes and read-only / auto / full approval modes (plus `--yolo`)
 - Shell-backed lifecycle hooks (PreToolUse, PostToolUse, SessionStart, …)
 - INR cost ledger with budget enforcement
@@ -99,15 +101,39 @@ bharatcode --provider lmstudio --model qwen2.5-coder-32b-instruct
 
 ```sh
 bharatcode --continue                       # resume your most recent session
-bharatcode doctor                           # diagnose config / provider / LSP setup
+bharatcode doctor                           # diagnose config / provider / LSP / ChatGPT sign-in
+bharatcode doctor --check-provider          # make a tiny live provider request
 bharatcode run --json "fix the failing test in ./pkg/auth"   # NDJSON event stream for CI
+bharatcode eval --suite codex-parity        # offline Codex-parity benchmark
+BHARATCODE_HEADLESS=1 bharatcode           # quiet, non-rendering TUI for PTY/CI captures
 ```
+
+Every non-JSON `bharatcode run` that edits the workspace finishes by printing a
+`Changed files:` block listing each path it created, modified, or deleted — so a CI
+step or reviewer can see the blast radius at a glance. The agent also verifies
+before it reports: after a code change it runs the project's own test, build, and
+lint commands and ends the turn with an explicit **Verified**, **Failed**, or
+**Skipped (&lt;reason&gt;)** status rather than claiming success on unverified work.
 
 And inside the TUI, kick off bounded autonomous work:
 
 ```
 /goal make the auth package tests pass
 ```
+
+### Sign in with ChatGPT (experimental)
+
+If you have a ChatGPT subscription, you can drive a model with it instead of an API
+key. This is experimental and for personal single-account use only:
+
+```sh
+bharatcode auth chatgpt            # OAuth (PKCE) sign-in via your browser
+bharatcode auth chatgpt --status   # show the signed-in account, plan, and token state
+bharatcode auth chatgpt --logout   # remove the stored credentials
+```
+
+Once signed in, `bharatcode doctor` reports the ChatGPT subscription status alongside
+the rest of your environment.
 
 ---
 

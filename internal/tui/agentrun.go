@@ -2,8 +2,10 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -417,6 +419,14 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	_ = m.notifications.Notify("BharatCode", body)
 
+	// Append a compact local completion summary so the user sees exactly which
+	// files the turn changed and how they were verified — without scrolling the
+	// transcript or reading any log. The summary is suppressed when the assistant's
+	// own prose already named every changed path (no duplication) and the prose was
+	// non-empty; an empty final answer always yields the summary so a silent
+	// file-creation turn still ends with useful completion text.
+	m.appendCompletionSummary(done.last)
+
 	if cmd := m.advanceGoal(done.last); cmd != nil {
 		return m, cmd
 	}
@@ -490,6 +500,215 @@ func firstLine(text string) string {
 		text = text[:nl]
 	}
 	return strings.TrimSpace(text)
+}
+
+// appendCompletionSummary appends a compact local summary turn at the end of a
+// successful turn when the session changed files the assistant did not already
+// name. The summary lists each unmentioned path verbatim plus a one-line
+// verification status, so a TUI user reads exactly what changed and how it was
+// checked without opening any log or scrolling the transcript.
+//
+// It is a no-op when no file tracker or session is wired, when no files changed,
+// or when the assistant's prose already named every changed path (avoiding a
+// duplicate echo of paths the model itself reported). An empty final assistant
+// message, however, always produces the summary — that is the silent
+// file-creation turn where the model returned no closing prose and the user would
+// otherwise see no completion text at all.
+func (m *model) appendCompletionSummary(last *message.Message) {
+	if m.deps.FileTracker == nil || !m.sessionPersisted || m.sessionID == "" {
+		return
+	}
+	changed, err := m.deps.FileTracker.ChangedFiles(m.ctx, m.sessionID)
+	if err != nil || len(changed) == 0 {
+		return
+	}
+
+	// A path counts as "already mentioned" when its absolute path or basename
+	// appears anywhere the user can already read it: the assistant's prose this
+	// turn, or any earlier summary already in the transcript. Matching against the
+	// whole visible transcript also dedupes across turns, so a file changed in turn
+	// one is not re-listed in turn two's summary.
+	prose := strings.TrimSpace(assistantText(last))
+	seen := prose + "\n" + m.chat.TranscriptText()
+	unmentioned := unmentionedPaths(changed, seen)
+
+	// When the model's prose already named every changed file there is nothing the
+	// summary would add, so stay quiet — unless the prose was empty, in which case
+	// the summary is the only completion text the user gets.
+	if len(unmentioned) == 0 && prose != "" {
+		return
+	}
+	if len(unmentioned) == 0 {
+		// Empty prose but every path already surfaced earlier (e.g. via a prior
+		// summary): fall back to listing all changed files so the silent turn still
+		// closes with the paths it touched.
+		unmentioned = changed
+	}
+
+	summary := completionSummaryText(unmentioned, m.verificationStatus())
+	if summary == "" {
+		return
+	}
+	id := m.assistantStreamID()
+	m.chat.FinishStream(id)
+	m.chat.Reindex(id)
+	m.chat.Append(message.Message{
+		ID:      m.nextToolTurnID(),
+		Role:    message.RoleAssistant,
+		Content: []message.ContentBlock{message.TextBlock{Text: summary}},
+	})
+}
+
+// unmentionedPaths returns the subset of paths whose absolute form and basename
+// are both absent from seen, preserving the input order. A path the assistant
+// already named — by full path or by file name — is dropped so the summary never
+// echoes what the prose (or an earlier summary) already showed the user.
+func unmentionedPaths(paths []string, seen string) []string {
+	var out []string
+	for _, p := range paths {
+		if strings.Contains(seen, p) || strings.Contains(seen, filepath.Base(p)) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// completionSummaryText formats the closing summary: a short lead line, the exact
+// changed paths one per line, and a verification status line. It returns "" only
+// when there are no paths to report (the caller already guarantees at least one).
+func completionSummaryText(paths []string, verify string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	noun := "file"
+	if len(paths) > 1 {
+		noun = "files"
+	}
+	fmt.Fprintf(&b, "Updated %d %s:\n", len(paths), noun)
+	for _, p := range paths {
+		fmt.Fprintf(&b, "- %s\n", p)
+	}
+	if verify != "" {
+		b.WriteString(verify)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// verificationStatus derives a one-line note on whether the turn verified its
+// own work, read from the session's recorded tool activity. It pairs each
+// build/test command with its result and reports the strongest signal: a failure
+// if any verification command failed, a pass if at least one succeeded and none
+// failed, or a "not verified" hint when no build/test ran at all. The hint keeps
+// the agent honest — it never lets a file-changing turn read as done when nothing
+// confirmed the change compiles or passes.
+func (m *model) verificationStatus() string {
+	if m.deps.Sessions == nil {
+		return ""
+	}
+	msgs, err := m.deps.Sessions.Messages(m.ctx, m.sessionID)
+	if err != nil {
+		return ""
+	}
+	return verificationFromMessages(msgs)
+}
+
+// verificationFromMessages scans messages for verification commands (build/test/
+// lint/vet runs) and their results, returning a one-line status. It walks in
+// order so a tool-use block's command can be paired with the tool-result block
+// that follows it. An empty string means no file-changing turn detail to add.
+func verificationFromMessages(msgs []message.Message) string {
+	ran, passed, failed := false, false, false
+	for i := range msgs {
+		for _, block := range msgs[i].Content {
+			use, ok := block.(message.ToolUseBlock)
+			if !ok || !isVerificationCommand(use.Name, use.Input) {
+				continue
+			}
+			ran = true
+			if ok, isErr := toolResultOutcome(msgs[i+1:], use.ID); ok {
+				if isErr {
+					failed = true
+				} else {
+					passed = true
+				}
+			}
+		}
+	}
+	switch {
+	case failed:
+		return "Verification: a build/test command failed — review before relying on this."
+	case passed:
+		return "Verification: build/test passed."
+	case ran:
+		return "Verification: build/test ran (outcome not captured)."
+	default:
+		return "Verification: not run — changes are unverified."
+	}
+}
+
+// isVerificationCommand reports whether a tool call is a build/test/lint check
+// worth surfacing in the completion summary's verification line. It matches the
+// common Go verification commands inside a shell tool's "command" argument, plus
+// any dedicated build/test tool by name, so the status reflects whether the turn
+// actually confirmed its own work.
+func isVerificationCommand(name string, input json.RawMessage) bool {
+	switch strings.ToLower(name) {
+	case "bash", "shell", "exec", "run":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(input, &args); err != nil {
+			return false
+		}
+		cmd := strings.ToLower(args.Command)
+		for _, needle := range []string{"go build", "go test", "go vet", "golangci-lint", "make test", "make build"} {
+			if strings.Contains(cmd, needle) {
+				return true
+			}
+		}
+		return false
+	case "test", "build", "lint", "check":
+		return true
+	default:
+		return false
+	}
+}
+
+// toolResultOutcome finds the tool-result block answering useID among the blocks
+// that follow it and reports whether it was found and whether it errored. The
+// IsError flag is the loop's own success signal; when it is unset the result text
+// is scanned for a failing-build/test marker so a non-zero exit reported only in
+// the body (some shells return output rather than a flagged error) still counts
+// as a failure.
+func toolResultOutcome(rest []message.Message, useID string) (found, isErr bool) {
+	for i := range rest {
+		for _, block := range rest[i].Content {
+			res, ok := block.(message.ToolResultBlock)
+			if !ok || (useID != "" && res.ToolUseID != useID) {
+				continue
+			}
+			if res.IsError || looksLikeFailure(res.Content) {
+				return true, true
+			}
+			return true, false
+		}
+	}
+	return false, false
+}
+
+// looksLikeFailure reports whether tool-result text reads as a failed build or
+// test even when the result was not flagged IsError — a guard for shells that
+// surface a non-zero exit only in the captured output.
+func looksLikeFailure(out string) bool {
+	low := strings.ToLower(out)
+	for _, marker := range []string{"build failed", "test failed", "--- fail", "\nfail\t", "exit status 1", "exit status 2"} {
+		if strings.Contains(low, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // friendlyRunError converts a turn error into a message the user can act on. A

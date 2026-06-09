@@ -306,3 +306,82 @@ func TestInputTokensSegment_Priority(t *testing.T) {
 	require.Contains(t, narrow, "~128 tok", "input tokens must outlast turn tokens on a narrow bar")
 	require.NotContains(t, narrow, " in · ", "turn tokens must be shed before input tokens")
 }
+
+// TestRenderIfChanged_UnchangedFrameNotReemitted asserts that re-rendering an
+// unchanged bar at the same width reports changed==false, so a caller redrawing
+// on a timer can skip re-emitting a byte-identical status line — the dominant
+// source of redraw noise in a captured PTY, where each per-second uptime tick
+// would otherwise repaint the whole bar. The first render always reports
+// changed (so the bar is drawn at least once), and the returned line is always
+// the same string Render would produce.
+func TestRenderIfChanged_UnchangedFrameNotReemitted(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := &Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+
+	first, changed := bar.RenderIfChanged(160)
+	require.True(t, changed, "the first render must report changed so the bar draws once")
+	require.Equal(t, bar.Render(160), first, "RenderIfChanged must return the same line Render would")
+
+	// An identical frame (no field moved, same width) must report unchanged so
+	// the caller can drop the redraw.
+	_, changed = bar.RenderIfChanged(160)
+	require.False(t, changed, "a byte-identical frame must report unchanged")
+
+	// Repeated identical frames keep reporting unchanged — the per-second idle
+	// tick must not re-emit a stable bar.
+	for i := 0; i < 5; i++ {
+		_, changed = bar.RenderIfChanged(160)
+		require.False(t, changed, "a stable bar must keep reporting unchanged on every tick")
+	}
+}
+
+// TestRenderIfChanged_ContentChangeReemits asserts that a real content change
+// (a field moving, e.g. the working spinner appearing or the uptime advancing
+// to a new whole-second readout) reports changed==true, so live tool progress
+// is never suppressed even while the bar is being deduped on idle ticks.
+func TestRenderIfChanged_ContentChangeReemits(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := &Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+
+	_, changed := bar.RenderIfChanged(160)
+	require.True(t, changed, "the first render reports changed")
+	_, changed = bar.RenderIfChanged(160)
+	require.False(t, changed, "an unchanged second render reports unchanged")
+
+	// A turn starting surfaces the working segment — a genuine content change
+	// that must re-emit so progress is visible.
+	bar.Working = "⠙ working 3s"
+	_, changed = bar.RenderIfChanged(160)
+	require.True(t, changed, "a new working segment must report changed")
+	_, changed = bar.RenderIfChanged(160)
+	require.False(t, changed, "the bar is stable again once the segment is drawn")
+
+	// The uptime advancing to a new readout is also a content change.
+	bar.Now = start.Add(90 * time.Second)
+	_, changed = bar.RenderIfChanged(160)
+	require.True(t, changed, "an advanced uptime readout must report changed")
+}
+
+// TestRenderIfChanged_WidthChangeReemits asserts that the same fields rendered
+// at a new width report changed==true, because the styled widths (and any
+// priority-drop or truncation) shift with the window — so a resize is never
+// suppressed as a no-op redraw.
+func TestRenderIfChanged_WidthChangeReemits(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(100, 0)
+	bar := &Bar{Theme: styles.Default(), Model: "m", Agent: "a", SessionID: "id", StartedAt: start, Now: start}
+
+	_, changed := bar.RenderIfChanged(160)
+	require.True(t, changed, "the first render reports changed")
+	_, changed = bar.RenderIfChanged(160)
+	require.False(t, changed, "an unchanged render at the same width reports unchanged")
+
+	// A new width must re-emit even though no field moved.
+	_, changed = bar.RenderIfChanged(40)
+	require.True(t, changed, "a width change must report changed")
+}

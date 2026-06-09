@@ -410,6 +410,15 @@ var (
 	nxTestRe = regexp.MustCompile(`\bnx\s+test\b|\bnx\s+run\b[^&|;]*:test\b`)
 )
 
+// RecognizesTestCommand reports whether command invokes a test runner this
+// package knows how to parse failures from. It is the exported view of
+// classifyTestRunner, letting callers outside this package (e.g. verification
+// command discovery) confirm that a candidate command's output will be
+// understood downstream before proposing it.
+func RecognizesTestCommand(command string) bool {
+	return classifyTestRunner(command) != runnerNone
+}
+
 // classifyTestRunner inspects the command string for a known test-runner
 // invocation. Matching is lowercased and tolerant of wrappers (env prefixes,
 // &&-chains, flags), but uses word boundaries for the command-name runners to

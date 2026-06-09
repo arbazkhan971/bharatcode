@@ -14,18 +14,178 @@ import (
 // snake_case names. Slice fields preserve insertion order; merge
 // semantics are documented per-field on the merge() method.
 type Config struct {
-	Providers   []Provider    `json:"providers"`
-	Models      []Model       `json:"models"`
-	Permissions PermConfig    `json:"permissions"`
-	Agents      []Agent       `json:"agents"`
-	Hooks       []Hook        `json:"hooks"`
-	MCP         []MCPServer   `json:"mcp"`
-	LSP         []LSPServer   `json:"lsp"`
-	Ledger      LedgerConfig  `json:"ledger"`
-	Options     Options       `json:"options"`
-	Sandbox     SandboxConfig `json:"sandbox"`
-	Cache       CacheConfig   `json:"cache"`
-	Routing     RoutingConfig `json:"routing"`
+	Providers    []Provider         `json:"providers"`
+	Models       []Model            `json:"models"`
+	Permissions  PermConfig         `json:"permissions"`
+	Agents       []Agent            `json:"agents"`
+	Hooks        []Hook             `json:"hooks"`
+	MCP          []MCPServer        `json:"mcp"`
+	LSP          []LSPServer        `json:"lsp"`
+	Ledger       LedgerConfig       `json:"ledger"`
+	Options      Options            `json:"options"`
+	Sandbox      SandboxConfig      `json:"sandbox"`
+	Cache        CacheConfig        `json:"cache"`
+	Routing      RoutingConfig      `json:"routing"`
+	Verification VerificationConfig `json:"verification"`
+}
+
+// VerificationTrigger names a class of change that, when produced during a
+// turn, makes verification REQUIRED before the agent may report the work done.
+// The values are the policy's stable vocabulary: they are encoded into the
+// agent system prompt and surface in the final response when verification is
+// claimed, so they double as documentation and as the testable contract.
+type VerificationTrigger string
+
+const (
+	// VerifyTriggerSourceEdit fires when a write-class tool (write, edit,
+	// multiedit, patch, rename) changes a source file.
+	VerifyTriggerSourceEdit VerificationTrigger = "source_edit"
+	// VerifyTriggerGeneratedArtifact fires when a generated frontend artifact
+	// (a build output, a bundled asset, a compiled stylesheet) is produced or
+	// changed.
+	VerifyTriggerGeneratedArtifact VerificationTrigger = "generated_artifact"
+	// VerifyTriggerPackageManifest fires when a package manifest (go.mod,
+	// package.json, pyproject.toml, Cargo.toml, and the like) is touched.
+	VerifyTriggerPackageManifest VerificationTrigger = "package_manifest"
+	// VerifyTriggerTestOrBuildFile fires when a test file or a build/CI file
+	// (Makefile, Dockerfile, a *_test.go, a workflow YAML) is touched.
+	VerifyTriggerTestOrBuildFile VerificationTrigger = "test_or_build_file"
+)
+
+// VerificationSkipReason enumerates the ONLY reasons the agent may skip
+// verification on a turn that would otherwise require it. Any other excuse is
+// not a sanctioned skip and the work must not be reported as done. The reasons
+// are part of the prompt contract and are echoed verbatim into the final
+// response as "skipped (<reason>)".
+type VerificationSkipReason string
+
+const (
+	// SkipNoTestCommand is allowed when the project exposes no test, build, or
+	// lint command to run (no manifest target, no recognizable toolchain).
+	SkipNoTestCommand VerificationSkipReason = "no_test_command"
+	// SkipDependencyUnavailable is allowed when an external dependency required
+	// to verify is unavailable (toolchain not installed, network or service
+	// down, credentials absent).
+	SkipDependencyUnavailable VerificationSkipReason = "dependency_unavailable"
+	// SkipUserOptedOut is allowed when the user explicitly asked not to run
+	// tests, the build, or the linter for this change.
+	SkipUserOptedOut VerificationSkipReason = "user_opted_out"
+)
+
+// VerificationConfig encodes BharatCode's verification policy: when verifying a
+// change is REQUIRED, and which reasons may justify skipping it. The policy is
+// data, not prose, so it is explicit and testable; the agent system prompt
+// renders the same rules so the model and the config never drift.
+//
+// The policy is ON by default: a zero VerificationConfig (the value an omitted
+// "verification" block produces) selects the strict default set of triggers and
+// the standard skip reasons. Set Disabled to make verification advisory only —
+// the agent is still asked to verify but nothing depends on the trigger/skip
+// vocabulary.
+type VerificationConfig struct {
+	// Disabled turns the policy off. It defaults to false, so verification is
+	// required by default; set true to make verification advisory rather than a
+	// reported contract.
+	Disabled bool `json:"disabled,omitempty"`
+	// RequiredTriggers lists the change classes that make verification
+	// required. Empty selects the built-in default set (every trigger), so a
+	// config that omits the field gets the strict policy.
+	RequiredTriggers []VerificationTrigger `json:"required_triggers,omitempty"`
+	// AllowedSkipReasons lists the skip reasons the policy sanctions. Empty
+	// selects the built-in default set (every reason), so a config that omits
+	// the field gets the standard escape hatches.
+	AllowedSkipReasons []VerificationSkipReason `json:"allowed_skip_reasons,omitempty"`
+}
+
+// defaultVerificationTriggers is the strict default: every change class
+// requires verification.
+var defaultVerificationTriggers = []VerificationTrigger{
+	VerifyTriggerSourceEdit,
+	VerifyTriggerGeneratedArtifact,
+	VerifyTriggerPackageManifest,
+	VerifyTriggerTestOrBuildFile,
+}
+
+// defaultVerificationSkipReasons is the default allow-list of skip reasons.
+var defaultVerificationSkipReasons = []VerificationSkipReason{
+	SkipNoTestCommand,
+	SkipDependencyUnavailable,
+	SkipUserOptedOut,
+}
+
+// Triggers returns the effective set of change classes that require
+// verification: the configured RequiredTriggers, or the strict default set
+// when none are configured.
+func (v VerificationConfig) Triggers() []VerificationTrigger {
+	if len(v.RequiredTriggers) == 0 {
+		return append([]VerificationTrigger(nil), defaultVerificationTriggers...)
+	}
+	return append([]VerificationTrigger(nil), v.RequiredTriggers...)
+}
+
+// SkipReasons returns the effective allow-list of skip reasons: the configured
+// AllowedSkipReasons, or the default set when none are configured.
+func (v VerificationConfig) SkipReasons() []VerificationSkipReason {
+	if len(v.AllowedSkipReasons) == 0 {
+		return append([]VerificationSkipReason(nil), defaultVerificationSkipReasons...)
+	}
+	return append([]VerificationSkipReason(nil), v.AllowedSkipReasons...)
+}
+
+// RequiresVerification reports whether a change of class t obliges the agent to
+// verify before reporting the work done. When the policy is disabled it always
+// returns false.
+func (v VerificationConfig) RequiresVerification(t VerificationTrigger) bool {
+	if v.Disabled {
+		return false
+	}
+	for _, want := range v.Triggers() {
+		if want == t {
+			return true
+		}
+	}
+	return false
+}
+
+// SkipAllowed reports whether r is a sanctioned reason to skip verification
+// under this policy.
+func (v VerificationConfig) SkipAllowed(r VerificationSkipReason) bool {
+	for _, want := range v.SkipReasons() {
+		if want == r {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate reports the first inconsistency in the verification policy, or nil
+// when it is internally consistent. It rejects unknown triggers and unknown
+// skip reasons so a typo in config surfaces explicitly rather than silently
+// weakening the policy. It is a self-contained validator, suitable for the
+// package-level Validate to call and for tests to exercise directly.
+func (v VerificationConfig) Validate() error {
+	known := map[VerificationTrigger]bool{
+		VerifyTriggerSourceEdit:        true,
+		VerifyTriggerGeneratedArtifact: true,
+		VerifyTriggerPackageManifest:   true,
+		VerifyTriggerTestOrBuildFile:   true,
+	}
+	for i, t := range v.RequiredTriggers {
+		if !known[t] {
+			return fmt.Errorf("invalid verification trigger %q at /verification/required_triggers/%d", t, i)
+		}
+	}
+	knownReasons := map[VerificationSkipReason]bool{
+		SkipNoTestCommand:         true,
+		SkipDependencyUnavailable: true,
+		SkipUserOptedOut:          true,
+	}
+	for i, r := range v.AllowedSkipReasons {
+		if !knownReasons[r] {
+			return fmt.Errorf("invalid verification skip reason %q at /verification/allowed_skip_reasons/%d", r, i)
+		}
+	}
+	return nil
 }
 
 // CacheConfig toggles the LLM response cache that serves repeated,

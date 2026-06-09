@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -86,6 +87,11 @@ func newRunCmd() *cobra.Command {
 				loop.SetModel(modelName, provider)
 			}
 
+			var before workspaceSnapshot
+			if !jsonStream {
+				before = snapshotWorkspace(projectPath)
+			}
+
 			if jsonStream {
 				if err := runJSON(cmd, application, loop, s.ID, prompt); err != nil {
 					return err
@@ -107,7 +113,7 @@ func newRunCmd() *cobra.Command {
 			}
 			if !jsonStream {
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), response)
-				printChangedFiles(cmd.Context(), cmd.OutOrStdout(), application.FileTracker, s.ID)
+				printChangedFiles(cmd.Context(), cmd.OutOrStdout(), application.FileTracker, s.ID, diffWorkspace(projectPath, before))
 			}
 
 			if !quiet {
@@ -193,38 +199,146 @@ func formatRunSummary(sum ledger.Summary) string {
 }
 
 // printChangedFiles prints a short, deduplicated absolute-path summary of the
-// files the run touched. It keeps the final CLI output useful for file-creation
-// tasks without forcing the user to dig through the transcript.
-func printChangedFiles(ctx context.Context, w io.Writer, tracker *filetracker.Tracker, sessionID string) {
-	if tracker == nil || sessionID == "" {
-		return
+// files the run touched, each tagged with an operation label
+// (created/modified/deleted). It keeps the final CLI output useful for
+// file-creation tasks without forcing the user to dig through the transcript.
+type fileChange struct {
+	path  string
+	label string
+}
+
+func printChangedFiles(ctx context.Context, w io.Writer, tracker *filetracker.Tracker, sessionID string, fallback []fileChange) {
+	labels := map[string]string{}
+	if tracker != nil && sessionID != "" {
+		changes, err := tracker.ChangesForSession(ctx, sessionID)
+		if err == nil {
+			for _, ch := range changes {
+				if ch.Path == "" {
+					continue
+				}
+				labels[ch.Path] = mergeChangeLabel(labels[ch.Path], ch.Op)
+			}
+		}
 	}
-	changes, err := tracker.ChangesForSession(ctx, sessionID)
-	if err != nil || len(changes) == 0 {
+	for _, ch := range fallback {
+		if ch.path == "" {
+			continue
+		}
+		if _, exists := labels[ch.path]; !exists {
+			labels[ch.path] = ch.label
+		}
+	}
+	if len(labels) == 0 {
 		return
 	}
 
-	seen := make(map[string]struct{}, len(changes))
-	paths := make([]string, 0, len(changes))
-	for _, ch := range changes {
-		if ch.Path == "" {
-			continue
-		}
-		if _, ok := seen[ch.Path]; ok {
-			continue
-		}
-		seen[ch.Path] = struct{}{}
-		paths = append(paths, ch.Path)
+	paths := make([]string, 0, len(labels))
+	for path := range labels {
+		paths = append(paths, path)
 	}
+	sort.Strings(paths)
+	printChangedFileList(w, paths, labels)
+}
+
+func printChangedFileList(w io.Writer, paths []string, labels map[string]string) {
 	if len(paths) == 0 {
 		return
 	}
 
-	sort.Strings(paths)
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Changed files:")
 	for _, path := range paths {
-		_, _ = fmt.Fprintf(w, "- %s\n", path)
+		if label := labels[path]; label != "" {
+			_, _ = fmt.Fprintf(w, "- %s (%s)\n", path, label)
+		} else {
+			_, _ = fmt.Fprintf(w, "- %s\n", path)
+		}
+	}
+}
+
+type workspaceFile struct {
+	size    int64
+	modTime time.Time
+}
+
+type workspaceSnapshot map[string]workspaceFile
+
+func snapshotWorkspace(root string) workspaceSnapshot {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
+	snap := workspaceSnapshot{}
+	_ = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", ".bharatcode":
+				if path != absRoot {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		snap[path] = workspaceFile{size: info.Size(), modTime: info.ModTime()}
+		return nil
+	})
+	return snap
+}
+
+func diffWorkspace(root string, before workspaceSnapshot) []fileChange {
+	if before == nil {
+		return nil
+	}
+	after := snapshotWorkspace(root)
+	if after == nil {
+		return nil
+	}
+	var changes []fileChange
+	for path, next := range after {
+		prev, existed := before[path]
+		switch {
+		case !existed:
+			changes = append(changes, fileChange{path: path, label: "created"})
+		case prev.size != next.size || !prev.modTime.Equal(next.modTime):
+			changes = append(changes, fileChange{path: path, label: "modified"})
+		}
+	}
+	for path := range before {
+		if _, exists := after[path]; !exists {
+			changes = append(changes, fileChange{path: path, label: "deleted"})
+		}
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].path < changes[j].path })
+	return changes
+}
+
+// mergeChangeLabel folds a new operation into the running label for a path.
+// prev is "" on the first change for that path. A delete always wins (it is
+// the file's net state), a create is preserved through later edits, and an
+// edit only sets the label when the file was not already created in this run.
+func mergeChangeLabel(prev string, op filetracker.Operation) string {
+	switch op {
+	case filetracker.OpCreate:
+		return "created"
+	case filetracker.OpDelete:
+		return "deleted"
+	case filetracker.OpEdit:
+		if prev == "created" {
+			return prev
+		}
+		return "modified"
+	default:
+		if prev != "" {
+			return prev
+		}
+		return string(op)
 	}
 }
 

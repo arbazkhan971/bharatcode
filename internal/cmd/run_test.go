@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,12 +87,88 @@ func TestPrintChangedFilesPrintsAbsoluteUniquePaths(t *testing.T) {
 	require.NoError(t, err)
 
 	var buf bytes.Buffer
-	printChangedFiles(context.Background(), &buf, tracker, sid)
+	printChangedFiles(context.Background(), &buf, tracker, sid, nil)
 
 	out := buf.String()
 	require.Contains(t, out, "Changed files:")
 	require.Contains(t, out, "- "+path)
 	require.Equal(t, 1, strings.Count(out, path), "repeated writes to the same file should be listed once")
+	// A file created then edited within the run is still reported as created.
+	require.Contains(t, out, "- "+path+" (created)")
+}
+
+// TestPrintChangedFilesLabelsOperations verifies that each path is tagged with
+// the operation label that matches its net effect on the run: a fresh write is
+// "created", an in-place edit of a pre-existing file is "modified", and a
+// removal is "deleted".
+func TestPrintChangedFilesLabelsOperations(t *testing.T) {
+	const sid = "changed-files-ops-session"
+	_, database := newTestLedger(t)
+	createTestSession(t, database, sid)
+	tracker := filetracker.NewTracker(database, nil)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	created := filepath.Join(dir, "created.txt")
+	modified := filepath.Join(dir, "modified.txt")
+	deleted := filepath.Join(dir, "deleted.txt")
+
+	// created: nil old content -> create.
+	_, err := tracker.RecordWrite(ctx, sid, created, nil, []byte("new"))
+	require.NoError(t, err)
+	// modified: non-nil old + non-nil new -> edit of a pre-existing file.
+	_, err = tracker.RecordWrite(ctx, sid, modified, []byte("before"), []byte("after"))
+	require.NoError(t, err)
+	// deleted: non-nil old + nil new -> delete.
+	_, err = tracker.RecordWrite(ctx, sid, deleted, []byte("gone"), nil)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	printChangedFiles(ctx, &buf, tracker, sid, nil)
+
+	out := buf.String()
+	require.Contains(t, out, "- "+created+" (created)")
+	require.Contains(t, out, "- "+modified+" (modified)")
+	require.Contains(t, out, "- "+deleted+" (deleted)")
+}
+
+// TestPrintChangedFilesCreateThenDeleteNetsDeleted verifies that a file created
+// and later removed within the same run collapses to a single "deleted" line.
+func TestPrintChangedFilesCreateThenDeleteNetsDeleted(t *testing.T) {
+	const sid = "changed-files-create-delete-session"
+	_, database := newTestLedger(t)
+	createTestSession(t, database, sid)
+	tracker := filetracker.NewTracker(database, nil)
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "scratch.tmp")
+
+	_, err := tracker.RecordWrite(ctx, sid, path, nil, []byte("temp"))
+	require.NoError(t, err)
+	_, err = tracker.RecordWrite(ctx, sid, path, []byte("temp"), nil)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	printChangedFiles(ctx, &buf, tracker, sid, nil)
+
+	out := buf.String()
+	require.Contains(t, out, "- "+path+" (deleted)")
+	require.Equal(t, 1, strings.Count(out, path), "a created-then-deleted file should be listed once")
+}
+
+func TestDiffWorkspaceDetectsUntrackedShellCreatedFile(t *testing.T) {
+	dir := t.TempDir()
+	before := snapshotWorkspace(dir)
+	path := filepath.Join(dir, "smoke.txt")
+	require.NoError(t, os.WriteFile(path, []byte("ok"), 0o644))
+
+	changes := diffWorkspace(dir, before)
+	require.Equal(t, []fileChange{{path: path, label: "created"}}, changes)
+
+	var buf bytes.Buffer
+	printChangedFiles(context.Background(), &buf, nil, "session", changes)
+	out := buf.String()
+	require.Contains(t, out, "Changed files:")
+	require.Contains(t, out, "- "+path+" (created)")
 }
 
 // TestRunQuietFlagSuppressesSummary verifies that --quiet prevents any summary

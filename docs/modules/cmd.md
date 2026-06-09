@@ -31,6 +31,7 @@ func newRootCmd() *cobra.Command       // default: opens TUI in cwd
 func newRunCmd() *cobra.Command        // bharatcode run "<prompt>"
 func newLoginCmd() *cobra.Command      // bharatcode login <provider>
 func newLogoutCmd() *cobra.Command     // bharatcode logout <provider>
+func newAuthCmd() *cobra.Command       // bharatcode auth chatgpt (OAuth/PKCE, experimental)
 func newModelsCmd() *cobra.Command     // bharatcode models [switch <id>]
 func newSessionsCmd() *cobra.Command   // bharatcode sessions <list|show|delete>
 func newStatsCmd() *cobra.Command      // bharatcode stats
@@ -48,6 +49,7 @@ func newVersionCmd() *cobra.Command    // bharatcode version
 | `bharatcode run "<prompt>"` | Headless single-prompt run, prints assistant response, exits. Flags: `--model`, `--agent`, `--yolo`, future `--json`. | Assistant text on stdout; stderr empty on success; exit 0. |
 | `bharatcode login <provider>` | Interactive OAuth flow for providers that support it (Anthropic, OpenAI). Stores token in OS keyring. | Prints `Logged in to <provider>` to stdout; exit 0. |
 | `bharatcode logout <provider>` | Remove stored token from keyring. | Prints `Logged out of <provider>` to stdout; exit 0 even if no token. |
+| `bharatcode auth chatgpt` | Experimental "Sign in with ChatGPT" OAuth (PKCE): opens a browser, runs a loopback callback server, and stores subscription tokens so the `chatgpt` provider can use the user's own plan. Flags: `--status`, `--logout`. | Prints `Signed in to ChatGPT as <account> on the <plan> plan` and the access-token state; `--logout` prints `Signed out of ChatGPT.`; exit 0. |
 | `bharatcode models` | Print all configured providers and their models. | Aligned table: `PROVIDER  MODEL  CONTEXT  INPUT$/MTOK  OUTPUT$/MTOK`. |
 | `bharatcode models switch <model>` | Set default model in user config. | Prints `Default model set to <id>`; exit 0. |
 | `bharatcode sessions list` | List sessions in current project. | Table: `ID  TITLE  UPDATED  MESSAGES  COST(₹)`; empty project prints `no sessions` to stderr, exit 0. |
@@ -154,3 +156,32 @@ Deferred or intentionally narrow in this pass:
   deferred.
 - Table tests assert the aligned table contract directly; no golden
   `testdata/models_table.txt` snapshot is committed yet.
+
+### Behavior added after the first pass
+
+- **`auth` command group (`auth.go`).** Holds OAuth-based sign-in flows that do
+  not fit `login`'s token-paste model. Its only subcommand today is the
+  experimental `auth chatgpt`, which runs a browser-based OAuth (PKCE) flow via
+  `llm.LoginChatGPT`, then prints the signed-in identity and token expiry.
+  `--status` calls `llm.ChatGPTStatus` and `--logout` calls `llm.LogoutChatGPT`.
+  It is deliberately scoped to personal single-account use and depends on
+  undocumented OpenAI endpoints, so it carries an EXPERIMENTAL banner.
+- **`doctor` ChatGPT status.** When a `chatgpt` provider is enabled in the
+  loaded config, `doctor` adds a **ChatGPT subscription** line reporting the
+  sign-in state: `[OK] ... signed in as <email> on the <plan> plan`, or
+  `[WARN] ... not signed in (run 'bharatcode auth chatgpt')`. An expired access
+  token is noted as `(will refresh on next use)`. The check is skipped entirely
+  when no chatgpt provider is enabled, since the credential file is irrelevant
+  then.
+- **`run` changed-file summary.** A non-interactive `bharatcode run` (both the
+  human-formatted and `--json` paths) ends by printing a `Changed files:` block
+  derived from the file tracker's `ChangesForSession`. Each path is labelled
+  `created`, `modified`, or `deleted` — a path's change history is collapsed to
+  its net effect (e.g. created-then-deleted nets out as deleted). Nothing is
+  printed when the run touched no files.
+- **Headless / quiet rendering.** The root TUI dispatch consults the TUI's
+  renderer gate: `BHARATCODE_HEADLESS=1` (or `CI`, or a `dumb`/unset `TERM`)
+  forces the non-rendering Bubble Tea program so scripts and PTY captures do not
+  accumulate redraw noise; `BHARATCODE_QUIET_REDRAW` slows the spinner and
+  dedupes the status bar when output is captured but still reports a TTY. (The
+  gate itself lives in `internal/tui`; `cmd` only triggers the launch.)

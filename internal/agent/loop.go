@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/hooks"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
@@ -27,6 +29,15 @@ import (
 )
 
 const defaultMaxSteps = 50
+
+// defaultMaxVerifyAttempts caps how many times a single Run will run the
+// policy-driven verification command and feed a failure back to the model. The
+// cap exists purely to stop a model that cannot fix the failure from looping the
+// verify→fix→verify cycle forever; once it is hit the loop stops re-verifying
+// and lets the turn proceed so the model can explain the unresolved failure
+// rather than the run hanging. Per-file hook verifiers (runVerifyCommands) are
+// not bounded by this: they always run because they are user-declared.
+const defaultMaxVerifyAttempts = 3
 
 // planModePrompt is appended to the system prompt while the Loop runs in plan
 // mode. It frames a phased, read-only investigation-then-design workflow as a
@@ -230,6 +241,25 @@ type Config struct {
 	// inject a deterministic fake to control verify outcomes without forking
 	// real subprocesses.
 	VerifyRunner verifyRunner
+	// Verification carries BharatCode's verification policy: which change
+	// classes oblige the agent to verify before reporting work done. The zero
+	// value (an omitted "verification" block) selects the strict default — every
+	// write-class edit requires verification — so post-write verification is on
+	// by default. Set Disabled in the policy to make it advisory only. The policy
+	// only takes effect when a verify command can be discovered for the workspace
+	// (see WorkDir); when none is found the edit is left to the per-file hook
+	// verifiers or to the model.
+	Verification config.VerificationConfig
+	// WorkDir is the repo root scanned by DiscoverVerifyCommands to find the
+	// command that verifies a change (go test ./..., npm run build, …). When
+	// empty it defaults to the current directory. It is also the working
+	// directory the discovered command runs in.
+	WorkDir string
+	// MaxVerifyAttempts caps how many policy-driven verify→fix cycles a single
+	// Run performs before it stops re-verifying and lets the model explain an
+	// unresolved failure. A non-positive value selects defaultMaxVerifyAttempts.
+	// It does not bound user-declared per-file hook verifiers.
+	MaxVerifyAttempts int
 	// ToolAuditor, when set, records every tool invocation in the append-only
 	// audit log. It is nil by default, leaving tool auditing off — the
 	// non-breaking default. The app wires an audit-backed logger here so the
@@ -307,6 +337,13 @@ type Loop struct {
 	// runs, so no further synchronization is needed.
 	activeModel string
 
+	// verifyAttempts counts how many times the policy-driven verification
+	// command has run in the current Run. It is reset at the top of Run and read
+	// and written only on the (single-threaded) Run goroutine — Run holds runMu
+	// for its whole duration and rejects concurrent runs — so it needs no
+	// synchronization. It bounds the verify→fix→verify cycle at MaxVerifyAttempts.
+	verifyAttempts int
+
 	// planMode reports whether the Loop is currently restricted to read-only
 	// tools and prompted to produce a plan. It is initialised from cfg.PlanMode
 	// and cleared by Approve. It is atomic because Approve may be called from a
@@ -332,6 +369,17 @@ type Loop struct {
 	// messages have scrolled out of the conversation. It is read on the provider
 	// call path and written by Run, so a mutex guards it.
 	goalFrameText string
+
+	// smallMu guards smallTaskPrompt.
+	smallMu sync.Mutex
+	// smallTaskPrompt holds the concise system prompt used when the turn is a
+	// small task — a short file-generation request in an empty or near-empty
+	// directory (see prompts.go). It is rendered once at the top of Run when the
+	// detection fires and is empty otherwise; framedSystemPrompt substitutes it
+	// for cfg.SystemPrompt so a simple "write me an X" turn does not pay for the
+	// full coder doctrine. It is read on the provider call path and written by
+	// Run, so a mutex guards it.
+	smallTaskPrompt string
 }
 
 // New constructs a Loop from cfg.
@@ -787,6 +835,18 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	// compaction has dropped that message from the working history.
 	l.setGoalFrame(firstUserGoal(history))
 
+	// On the session's first turn, decide whether this is a small task — a
+	// short file-generation request in an empty or near-empty workspace — and
+	// if so render the concise system prompt for it. The choice is made once,
+	// from the opening request and the directory state before any files are
+	// written, and then held for the session: a follow-up turn must not flip to
+	// the full coder prompt just because the first turn scaffolded files into
+	// the (previously empty) directory. Complex repo edits leave the small
+	// prompt empty and keep the full coder doctrine.
+	if len(history) == appended {
+		l.resolveSmallTask(history)
+	}
+
 	history = l.applyCompaction(history)
 
 	// Resolve which model serves this turn BEFORE fitting history, so the whole
@@ -804,6 +864,9 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	}
 
 	detector := &loopDetector{}
+	// Reset the per-Run policy-verification counter so each turn gets a fresh
+	// budget of verify→fix cycles.
+	l.verifyAttempts = 0
 
 	for step := 0; step < l.cfg.MaxSteps; step++ {
 		// On the final allowed step, switch to the tools-disabled handoff turn:
@@ -932,6 +995,17 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 				// message from the write itself. When verification is not configured
 				// (the common case), verifyResult is nil and result is unchanged.
 				if verifyResult := l.runVerifyCommands(runCtx, call, result); verifyResult != nil {
+					result = *verifyResult
+				}
+
+				// Policy-driven verification: when no user-declared per-file verifier
+				// governs this edit and the change class requires verification,
+				// discover the project's own check (go test ./..., npm run build, …),
+				// run it, and fold success or failure into the result so simple app
+				// generation verifies automatically and a failure is fed back to the
+				// model. runPolicyVerify defers to per-file verifiers and is bounded
+				// by MaxVerifyAttempts so the verify→fix cycle cannot loop forever.
+				if verifyResult := l.runPolicyVerify(runCtx, call, result); verifyResult != nil {
 					result = *verifyResult
 				}
 			}
@@ -1171,10 +1245,48 @@ func (l *Loop) systemPrompt() string {
 // re-injected goal.
 func (l *Loop) framedSystemPrompt() string {
 	base := l.cfg.SystemPrompt
+	if small := l.smallTask(); small != "" {
+		// Small-task mode swaps the full coder doctrine for the concise prompt,
+		// trimming the input tokens a simple from-scratch generation does not need.
+		base = small
+	}
 	if goal := l.goalFrame(); goal != "" {
 		base += goalFrameHeader + goal + goalFrameFooter
 	}
 	return base
+}
+
+// smallTask returns the concise small-task system prompt when the current Run
+// is operating in small-task mode, or "" otherwise.
+func (l *Loop) smallTask() string {
+	l.smallMu.Lock()
+	defer l.smallMu.Unlock()
+	return l.smallTaskPrompt
+}
+
+// resolveSmallTask decides whether the current turn is a small task and, when
+// it is, renders and stores the concise system prompt framedSystemPrompt uses
+// in place of the full coder doctrine. A small task is a short, from-scratch
+// file-generation request (isSmallTaskPrompt) issued in an empty or near-empty
+// workspace (directoryIsEmptyish); both conditions must hold. The decision is
+// declined for the read-only task agent, which already runs its own lean
+// exploration prompt, and for any turn whose configured system prompt is empty
+// (nothing to trim). When the conditions do not hold the small prompt is left
+// empty, so the turn keeps the full coder prompt unchanged.
+func (l *Loop) resolveSmallTask(history []message.Message) {
+	l.smallMu.Lock()
+	defer l.smallMu.Unlock()
+	l.smallTaskPrompt = ""
+	if l.name == "task" || l.cfg.SystemPrompt == "" {
+		return
+	}
+	if !isSmallTaskPrompt(firstUserGoal(history)) {
+		return
+	}
+	if !directoryIsEmptyish(l.workDir()) {
+		return
+	}
+	l.smallTaskPrompt = buildSmallTaskPrompt(l.cfg.Tools.List())
 }
 
 // goalFrame returns the captured active-goal text, or "" when none has been set.
@@ -1573,6 +1685,173 @@ func (l *Loop) runVerifyCommands(ctx context.Context, call pendingToolCall, resu
 		)
 	}
 	return nil
+}
+
+// runPolicyVerify is the policy-driven counterpart to runVerifyCommands: it
+// runs after a successful write-class tool that no user-declared per-file
+// verifier handled, and applies BharatCode's verification policy (the T8
+// Verification config) to decide whether the change must be verified. When it
+// must, it discovers the project's own check (T9 DiscoverVerifyCommands —
+// `go test ./...`, `npm run build`, …), runs it, and folds the outcome into the
+// tool result so the verification command and its result reach the model and
+// the transcript.
+//
+// On a verify failure it returns an IsError result carrying the command and its
+// output so the model sees the failure and re-edits. On success it returns a
+// non-error result whose content appends a "Verified" line naming the command,
+// so the final answer can report exactly what was run. It returns nil — leaving
+// the original result untouched — whenever verification does not apply: a
+// non-write or failed tool, a tool that did not signal a verify-needing change,
+// a disabled policy or a change class the policy does not gate, no discoverable
+// command for the workspace, or an exhausted attempt budget. The budget
+// (MaxVerifyAttempts) bounds the verify→fix→verify cycle so a model that cannot
+// fix the failure does not loop forever.
+func (l *Loop) runPolicyVerify(ctx context.Context, call pendingToolCall, result tools.Result) *tools.Result {
+	if !l.writeProducedChange(call, result) {
+		return nil
+	}
+
+	path := callPath(call)
+
+	// A user-declared per-file verify_command already governs this edit
+	// (runVerifyCommands ran it, pass or fail). Defer to it rather than running a
+	// second, discovered command, so verification happens exactly once.
+	if l.cfg.VerifyHooks != nil && len(l.cfg.VerifyHooks.MatchingVerifiers(path)) > 0 {
+		return nil
+	}
+
+	trigger := verifyTriggerForPath(path)
+	if !l.cfg.Verification.RequiresVerification(trigger) {
+		return nil
+	}
+
+	// Stop re-verifying once the budget is spent so the verify→fix cycle cannot
+	// loop forever; the model still gets to explain the unresolved failure on the
+	// next turn since the original (success) result is left in place.
+	if l.verifyAttempts >= l.maxVerifyAttempts() {
+		slog.Info("Policy verification budget exhausted; skipping further verification",
+			slog.Int("attempts", l.verifyAttempts),
+		)
+		return nil
+	}
+
+	command := l.discoverVerifyCommand()
+	if command == "" {
+		// Nothing recognizable to run: this is the sanctioned no_test_command
+		// skip. Leave the edit to the model rather than fabricating a check.
+		return nil
+	}
+
+	runner := l.cfg.VerifyRunner
+	if runner == nil {
+		runner = execVerifyRunner{}
+	}
+	l.verifyAttempts++
+
+	output, err := runner.RunVerify(ctx, command, l.workDir(), 0)
+	if err != nil {
+		slog.Info("Policy verification failed",
+			slog.String("command", command),
+			slog.Int("attempt", l.verifyAttempts),
+			slog.String("error", err.Error()),
+		)
+		content := fmt.Sprintf("verification failed:\n$ %s\n%s\nerror: %s\nFix the change and re-run; the edit is not done until verification passes.",
+			command, output, err.Error())
+		return &tools.Result{Content: content, IsError: true}
+	}
+
+	slog.Debug("Policy verification passed", slog.String("command", command))
+	// Surface the command in the (successful) result so the model can report it
+	// verbatim in the final answer. The original success content is preserved.
+	content := strings.TrimRight(result.Content, "\n")
+	if content != "" {
+		content += "\n\n"
+	}
+	content += "Verified: $ " + command + " (passed)"
+	verified := result
+	verified.Content = content
+	return &verified
+}
+
+// writeProducedChange reports whether call is a successful write-class tool run
+// that should be considered for verification. It honors the tool's explicit
+// VerifyNeeded signal when set, and falls back to the writeClassTools name map
+// so verification still triggers for tools that have not yet adopted the field.
+func (l *Loop) writeProducedChange(call pendingToolCall, result tools.Result) bool {
+	if result.IsError {
+		return false
+	}
+	if result.VerifyNeeded {
+		return true
+	}
+	_, ok := writeClassTools[call.Name]
+	return ok
+}
+
+// discoverVerifyCommand returns the highest-confidence verify command for the
+// workspace, or "" when nothing recognizable was found. DiscoverVerifyCommands
+// returns candidates sorted by descending confidence, so the first is the best.
+func (l *Loop) discoverVerifyCommand() string {
+	candidates := DiscoverVerifyCommands(l.workDir())
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0].Command
+}
+
+// workDir returns the repo root used for verify discovery and command
+// execution, defaulting to the current directory when unconfigured.
+func (l *Loop) workDir() string {
+	if l.cfg.WorkDir == "" {
+		return "."
+	}
+	return l.cfg.WorkDir
+}
+
+// maxVerifyAttempts returns the configured cap on policy-driven verify→fix
+// cycles, defaulting to defaultMaxVerifyAttempts for a non-positive value.
+func (l *Loop) maxVerifyAttempts() int {
+	if l.cfg.MaxVerifyAttempts > 0 {
+		return l.cfg.MaxVerifyAttempts
+	}
+	return defaultMaxVerifyAttempts
+}
+
+// callPath extracts the "path" argument from a tool call's JSON input, or ""
+// when the input has no path. It mirrors the inline decode used by the file-edit
+// hooks so the verification path classifier sees the same path they do.
+func callPath(call pendingToolCall) string {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(call.Input, &args); err != nil {
+		return ""
+	}
+	return args.Path
+}
+
+// verifyTriggerForPath classifies an edited file path into the verification
+// trigger that governs it. The mapping mirrors the policy vocabulary: package
+// manifests and test/build files have their own classes, and everything else a
+// write-class tool produces is treated as a source edit. An empty path falls
+// back to source_edit so an unattributed change is still gated by the default
+// policy rather than silently escaping it.
+func verifyTriggerForPath(path string) config.VerificationTrigger {
+	base := strings.ToLower(filepath.Base(path))
+	switch base {
+	case "go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml",
+		"yarn.lock", "cargo.toml", "cargo.lock", "pyproject.toml", "setup.py",
+		"setup.cfg", "requirements.txt", "gemfile", "go.work":
+		return config.VerifyTriggerPackageManifest
+	case "makefile", "dockerfile":
+		return config.VerifyTriggerTestOrBuildFile
+	}
+	if strings.HasSuffix(base, "_test.go") ||
+		strings.HasSuffix(base, ".test.ts") || strings.HasSuffix(base, ".test.js") ||
+		strings.HasSuffix(base, ".spec.ts") || strings.HasSuffix(base, ".spec.js") {
+		return config.VerifyTriggerTestOrBuildFile
+	}
+	return config.VerifyTriggerSourceEdit
 }
 
 func textMessage(sessionID string, role message.Role, text string) message.Message {

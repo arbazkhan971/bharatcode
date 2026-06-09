@@ -314,7 +314,10 @@ func newAgentHarness(t *testing.T, provider llm.Provider) *agentHarness {
 		Bus:         bus,
 		Permission:  perm,
 		Ledger:      rootledger.New(database, &cfg.Ledger, cfg.Models, ledgerBus),
-		FileTracker: &filetracker.Tracker{},
+		// A real tracker backed by the test database so the completion-summary
+		// path (handleRunDone -> ChangedFiles) reads a genuine, empty change set
+		// instead of panicking on a Tracker with no backing store.
+		FileTracker: filetracker.NewTracker(database, nil),
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -804,4 +807,134 @@ func TestHandleRunDone_NoDoubleReport(t *testing.T) {
 
 	rendered := plainText(m.chat.Render(200))
 	require.NotContains(t, rendered, "[error:", "handleRunDone must not duplicate an inline-reported error")
+}
+
+// --- completion summary (T7) ---------------------------------------------
+
+// trackedModel returns a model wired to a real session repo and a real file
+// tracker that share one test database, plus the persisted session id. The
+// completion-summary path (appendCompletionSummary -> ChangedFiles, and the
+// verification scan -> Sessions.Messages) reads genuine rows this way rather than
+// a stub, so a recorded write and a recorded tool result both surface.
+func trackedModel(t *testing.T) (*model, string) {
+	t.Helper()
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "summary.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = database.Close() })
+	repo := session.NewRepo(database)
+	s := &session.Session{Title: "summary", Model: "fake-model", Agent: "coder"}
+	require.NoError(t, repo.Create(context.Background(), s))
+
+	m := newSizedModel(t)
+	m.deps.Sessions = repo
+	m.deps.FileTracker = filetracker.NewTracker(database, nil)
+	m.sessionID = s.ID
+	m.sessionPersisted = true
+	return m, s.ID
+}
+
+// TestAppendCompletionSummary_ListsUnmentionedPaths asserts that when a turn
+// changed a file the assistant never named, the closing summary lists the exact
+// path and a verification line, so a TUI user reads the output path without any
+// log.
+func TestAppendCompletionSummary_ListsUnmentionedPaths(t *testing.T) {
+	m, sid := trackedModel(t)
+	path := filepath.Join(t.TempDir(), "notes", "new.txt")
+	_, err := m.deps.FileTracker.RecordWrite(context.Background(), sid, path, nil, []byte("hi"))
+	require.NoError(t, err)
+
+	m.appendCompletionSummary(&message.Message{
+		Role:    message.RoleAssistant,
+		Content: []message.ContentBlock{message.TextBlock{Text: "Done."}},
+	})
+
+	rendered := plainText(m.chat.Render(200))
+	require.Contains(t, rendered, path, "the exact changed path must reach the transcript")
+	require.Contains(t, rendered, "Updated 1 file", "the summary must lead with the change count")
+	require.Contains(t, rendered, "not run", "no build/test ran, so the summary must flag the change as unverified")
+}
+
+// TestAppendCompletionSummary_SuppressedWhenProseNamesPath asserts the summary
+// stays quiet when the assistant's own prose already named the changed file —
+// the path is not echoed a second time.
+func TestAppendCompletionSummary_SuppressedWhenProseNamesPath(t *testing.T) {
+	m, sid := trackedModel(t)
+	path := filepath.Join(t.TempDir(), "main.go")
+	_, err := m.deps.FileTracker.RecordWrite(context.Background(), sid, path, nil, []byte("package main"))
+	require.NoError(t, err)
+
+	// Seed the visible transcript with the assistant prose that named the file,
+	// then pass that same message as the turn's final answer.
+	last := &message.Message{
+		Role:    message.RoleAssistant,
+		Content: []message.ContentBlock{message.TextBlock{Text: "I created " + path + " for you."}},
+	}
+	m.chat.Stream("a-final", "I created "+path+" for you.")
+	m.chat.FinishStream("a-final")
+
+	before := plainText(m.chat.Render(200))
+	m.appendCompletionSummary(last)
+	after := plainText(m.chat.Render(200))
+
+	require.Equal(t, before, after, "the summary must not echo a path the prose already named")
+	require.NotContains(t, after, "Updated 1 file", "no summary block should be appended")
+}
+
+// TestAppendCompletionSummary_EmptyProseStillSummarizes asserts that a silent
+// file-creation turn — the assistant returned no closing prose — still ends with
+// useful completion text naming the changed path.
+func TestAppendCompletionSummary_EmptyProseStillSummarizes(t *testing.T) {
+	m, sid := trackedModel(t)
+	path := filepath.Join(t.TempDir(), "out.txt")
+	_, err := m.deps.FileTracker.RecordWrite(context.Background(), sid, path, nil, []byte("data"))
+	require.NoError(t, err)
+
+	m.appendCompletionSummary(&message.Message{Role: message.RoleAssistant})
+
+	rendered := plainText(m.chat.Render(200))
+	require.Contains(t, rendered, path, "an empty final answer must still surface the changed path")
+	require.Contains(t, rendered, "Updated 1 file")
+}
+
+// TestVerificationFromMessages covers the build/test status derivation across the
+// pass, fail, and not-run cases the summary's verification line reports.
+func TestVerificationFromMessages(t *testing.T) {
+	t.Parallel()
+
+	bashCall := func(id, cmd string) message.Message {
+		return message.Message{Role: message.RoleAssistant, Content: []message.ContentBlock{
+			message.ToolUseBlock{ID: id, Name: "bash", Input: json.RawMessage(`{"command":"` + cmd + `"}`)},
+		}}
+	}
+	result := func(id, out string, isErr bool) message.Message {
+		return message.Message{Role: message.RoleTool, Content: []message.ContentBlock{
+			message.ToolResultBlock{ToolUseID: id, Content: out, IsError: isErr},
+		}}
+	}
+
+	// No verification command at all.
+	require.Contains(t, verificationFromMessages([]message.Message{bashCall("c1", "ls")}), "not run")
+
+	// A passing build.
+	pass := []message.Message{bashCall("c1", "go build ./..."), result("c1", "ok", false)}
+	require.Contains(t, verificationFromMessages(pass), "passed")
+
+	// A failing test, flagged by IsError.
+	fail := []message.Message{bashCall("c1", "go test ./..."), result("c1", "FAIL", true)}
+	require.Contains(t, verificationFromMessages(fail), "failed")
+
+	// A failure surfaced only in the body (non-zero exit echoed, not flagged).
+	bodyFail := []message.Message{bashCall("c1", "go test ./..."), result("c1", "--- FAIL: TestX\nexit status 1", false)}
+	require.Contains(t, verificationFromMessages(bodyFail), "failed")
+}
+
+// TestUnmentionedPaths asserts a path is dropped when the seen text names it by
+// full path or by basename, and kept otherwise, preserving order.
+func TestUnmentionedPaths(t *testing.T) {
+	t.Parallel()
+
+	paths := []string{"/repo/a.go", "/repo/b.go", "/repo/c.go"}
+	got := unmentionedPaths(paths, "I edited /repo/a.go and touched b.go")
+	require.Equal(t, []string{"/repo/c.go"}, got, "named paths (by full path or basename) must be dropped, the rest kept in order")
+	require.Nil(t, unmentionedPaths(paths, "/repo/a.go /repo/b.go /repo/c.go"), "all-named yields nil")
 }

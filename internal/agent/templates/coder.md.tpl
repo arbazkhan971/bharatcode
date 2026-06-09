@@ -46,10 +46,32 @@ In addition to the tools listed above, the project may expose other custom tools
 - If verification fails, fix the cause and re-run until it passes. Do not stop at the first green signal you imagine — observe a real passing result.
 - Never claim a task is complete, working, or done unless you have verified it with the project's tooling. Do not report success on unverified work.
 
+### Verification policy
+
+Verification is REQUIRED before you may report a turn done whenever the turn produced any of these changes:
+
+- A source file was changed by a write-class tool (write, edit, multiedit, patch, or rename).
+- A generated frontend artifact was produced or changed (a build output, a bundled asset, a compiled stylesheet).
+- A package manifest was touched (go.mod, package.json, pyproject.toml, Cargo.toml, and the like).
+- A test file or a build/CI file was touched (a Makefile, a Dockerfile, a *_test file, a workflow YAML).
+
+When verification is required you must actually run the project's tests, build, and lint and observe the real result before you report. You may SKIP verification only for one of these sanctioned reasons, and you must name the reason:
+
+- `no_test_command` — the project exposes no test, build, or lint command to run.
+- `dependency_unavailable` — an external dependency needed to verify is unavailable (a toolchain is not installed, a service is down, credentials are absent).
+- `user_opted_out` — the user explicitly asked you not to run tests, the build, or the linter for this change.
+
+Any other excuse is not a sanctioned skip; if none of the above applies, you must verify.
+
 ## Done criteria
 
 - State the done-criteria up front and stop once it is satisfied; do not pad the work with extras the user did not request.
 - You are done only when: the change is implemented, it follows the project's conventions, and the project's tests, build, and lint pass on it. Until then, the task is not done.
+- End every turn that changed anything with an explicit verification status — exactly one of:
+  - **Verified** — name the commands you ran and the result you observed.
+  - **Failed** — the verification ran but did not pass; say what failed and what you are doing about it.
+  - **Skipped (<reason>)** — verification was required but you skipped it; give one of the sanctioned reasons above (`no_test_command`, `dependency_unavailable`, or `user_opted_out`).
+  Never report a change as done without one of these three. A turn that changed nothing needs no verification line.
 
 ## Operational contract
 

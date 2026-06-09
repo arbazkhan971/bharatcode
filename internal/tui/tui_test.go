@@ -61,6 +61,107 @@ func TestRun_CancelledContext_RestoresTerminal(t *testing.T) {
 	require.Empty(t, out.String())
 }
 
+// frameReplayModel feeds a fixed sequence of pre-rendered frames to a Bubble Tea
+// renderer, one per frameTickMsg, so a test can exercise the renderer in
+// isolation without standing up the real program's Init (whose ledger/agent
+// subscriptions panic against the stub deps). Its View returns the frame the
+// last tick selected, so a live renderer must repaint on every tick while the
+// no-op renderer must emit nothing — the exact per-frame property under test.
+type frameReplayModel struct {
+	frames []string
+	at     int
+}
+
+type frameTickMsg struct{}
+
+func (m frameReplayModel) Init() tea.Cmd { return nil }
+
+func (m frameReplayModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(frameTickMsg); ok && m.at < len(m.frames)-1 {
+		m.at++
+	}
+	return m, nil
+}
+
+func (m frameReplayModel) View() tea.View {
+	if len(m.frames) == 0 {
+		return tea.NewView("")
+	}
+	return tea.NewView(m.frames[m.at])
+}
+
+// replayFrames drives the renderer over the recorded frames and returns the
+// bytes it wrote. The frames are replayed via Send before Quit so each one is
+// processed in order; WithInput(nil) keeps the program from blocking on a TTY.
+func replayFrames(t *testing.T, frames []string, opts ...tea.ProgramOption) int {
+	t.Helper()
+	var out bytes.Buffer
+	base := []tea.ProgramOption{tea.WithInput(nil), tea.WithOutput(&out)}
+	p := tea.NewProgram(frameReplayModel{frames: frames}, append(base, opts...)...)
+	go func() {
+		for range frames {
+			p.Send(frameTickMsg{})
+		}
+		// Give the renderer a moment to flush the queued frames before tearing
+		// the program down, then quit so Run returns.
+		time.Sleep(50 * time.Millisecond)
+		p.Quit()
+	}()
+	_, err := p.Run()
+	require.NoError(t, err, "replay program must exit cleanly")
+	return out.Len()
+}
+
+// TestHeadlessRenderer_StaysQuiet locks in the property that the headless path
+// (tea.WithoutRenderer, selected by shouldDisableRenderer) suppresses per-frame
+// redraws: no matter how many uptime ticks fire, a no-op renderer writes nothing
+// to its output while a live renderer repaints each changed frame.
+//
+// It proves this by capturing real TUI frames — the same 80x24 transcript the
+// live program would draw, sampled across a dozen uptime ticks so each frame
+// differs (the status bar's "up Ns" advances) — and replaying that genuine frame
+// sequence through two renderers. The real model is driven synchronously here
+// (newModel + WindowSizeMsg + tickMsg Updates) rather than through program.Run()
+// because Init's ledger/agent subscriptions panic against the stub deps; the
+// synchronous tick path renders cleanly. Replaying real, changing frames (not a
+// placeholder) is what makes the assertion meaningful: a live renderer has
+// something to repaint every tick, so the no-op renderer staying at zero bytes
+// is a true suppression, and re-wiring the live renderer into the headless path
+// would make the WithoutRenderer byte count blow past the threshold.
+func TestHeadlessRenderer_StaysQuiet(t *testing.T) {
+	t.Parallel()
+
+	// Capture genuine TUI frames across a run of uptime ticks. Each tick advances
+	// the status bar's uptime, so the frames differ and a renderer has fresh
+	// content to draw on every one — surfacing per-frame redraw noise if any leaks.
+	m := newModel(context.Background(), testDeps())
+	_, _ = m.Update(tea.WindowSizeMsg{Width: minWidth, Height: minHeight})
+	const ticks = 12
+	frames := make([]string, 0, ticks)
+	for i := 1; i <= ticks; i++ {
+		_, _ = m.Update(tickMsg(m.startedAt.Add(time.Duration(i) * time.Second)))
+		frames = append(frames, m.viewString())
+	}
+	require.Greater(t, len(frames), 1, "the uptime ticker must produce multiple frames to replay")
+	require.NotEqual(t, frames[0], frames[len(frames)-1],
+		"successive uptime ticks must change the frame so a live renderer has redraws to suppress")
+
+	// The no-op renderer (the headless path) must stay quiet; the live renderer,
+	// fed the same changing frames, must write strictly more. Asserting the delta —
+	// not just a low absolute count — is what proves WithoutRenderer is doing the
+	// suppressing rather than the capture simply being empty. (The live renderer
+	// diffs frames and repaints only the changed "up Ns" region, so its volume is
+	// modest, but it is non-zero on every changed frame; the quiet path is zero.)
+	quietBytes := replayFrames(t, frames, tea.WithoutRenderer())
+	liveBytes := replayFrames(t, frames)
+
+	const maxHeadlessBytes = 256
+	require.LessOrEqual(t, quietBytes, maxHeadlessBytes,
+		"the no-op renderer must stay quiet across %d frames, got %d bytes", ticks, quietBytes)
+	require.Greater(t, liveBytes, quietBytes,
+		"the live renderer must draw the changing frames, proving the quiet path is suppressing real per-frame output")
+}
+
 func TestShouldDisableRenderer(t *testing.T) {
 	cases := []struct {
 		name     string

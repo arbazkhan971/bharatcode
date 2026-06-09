@@ -180,6 +180,20 @@ func build(p palette) Theme {
 	}
 }
 
+// DefaultForBackground returns the theme that matches the terminal's detected
+// background: the Light theme on a light terminal (dark text on paper) and the
+// dark Default on a dark one. The TUI uses this at startup instead of always
+// picking Default(), so assistant prose and chrome render at full contrast on
+// either background rather than, say, the dark theme's light-grey body text
+// washing out on a white terminal. Detection failures fall back to dark, the
+// default coding surface, matching how the activity-stream primitives resolve.
+func DefaultForBackground() Theme {
+	if hasDarkBackground {
+		return Default()
+	}
+	return Light()
+}
+
 // Default returns BharatCode's default dark terminal theme: warm tricolor on a
 // warm near-black ground.
 func Default() Theme {

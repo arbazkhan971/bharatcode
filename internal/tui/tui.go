@@ -348,7 +348,11 @@ type model struct {
 }
 
 func newModel(ctx context.Context, deps Dependencies) *model {
-	theme := styles.Default()
+	// Pick the theme from the terminal's actual background so assistant prose and
+	// chrome render at full contrast on both light and dark terminals, rather than
+	// always using the dark theme (whose light-grey body text washes out on a
+	// light terminal).
+	theme := styles.DefaultForBackground()
 	now := time.Now()
 	modelName, agentName := initialIdentity(deps.Cfg)
 	sessionID := "new"

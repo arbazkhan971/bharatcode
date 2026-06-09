@@ -303,9 +303,10 @@ func SearchLinesRe(text string, re *regexp.Regexp) []int {
 	return matches
 }
 
-// Render returns the rendered activity-stream transcript for width. Turns are
-// separated by a soft dotted rule so the eye can tell where one turn ends and
-// the next begins without the heavy visual weight of a solid full-width line.
+// Render returns the rendered transcript for width. The transcript flows like
+// Codex's: each turn is a marker-led block of plain, full-contrast content with
+// no surrounding frame, and turns are separated by a single blank line so the
+// conversation reads as one continuous stream rather than a stack of boxes.
 func (l *List) Render(width int) string {
 	if width < 1 {
 		width = 1
@@ -316,14 +317,12 @@ func (l *List) Render(width int) string {
 		if !renderable(&l.items[i]) {
 			// A finished turn with no visible content (e.g. an assistant bubble that
 			// produced only tool calls and never any prose) is skipped so it leaves
-			// no empty framed bubble in the transcript.
+			// no empty gap in the transcript.
 			continue
 		}
 		if wrote {
-			// A blank line, a faint dotted rule, and a blank line create generous
-			// breathing room between turns without a heavy solid separator.
-			b.WriteString("\n")
-			b.WriteString(styles.SoftRule(width))
+			// One blank line between turns — the quiet breathing room a flowing
+			// transcript uses, with no rule or frame to break the stream.
 			b.WriteString("\n\n")
 		}
 		b.WriteString(l.renderItem(i, width))
@@ -367,60 +366,53 @@ func (l *List) renderItem(idx int, width int) string {
 
 	// A turn whose body reads as a tool or command action ("tool: edit", a
 	// "$ go test" command line, or a tool-role result) renders in the command
-	// style: a bold action-verb header and its output indented under a muted
-	// connector, with long output elided and added/removed lines tinted. The
-	// block uses UserBlock chrome (muted left bar) since tool/command turns are
-	// not assistant prose and shouldn't claim the saffron accent.
+	// style: a bold action-verb header and its output indented two columns beneath
+	// it, with long output elided and added/removed lines tinted. It flows unframed
+	// in the stream — the bullet and verb already mark it as activity.
 	if verb, rest, ok := commandTurn(it); ok {
-		raw := renderCommandTurn(header, verb, rest, width, l.diffViewer)
 		it.cachedWidth = width
-		it.cachedBody = applyTurnBlock(it.role, raw, width)
+		it.cachedBody = renderCommandTurn(header, verb, rest, width, l.diffViewer)
 		return it.cachedBody
 	}
 
 	// Render assistant prose as markdown once it is complete. While a message
 	// is still streaming we keep the fast plain wrap so each delta does not pay
 	// the cost of a full markdown re-render (and to avoid flicker on partial,
-	// not-yet-valid markdown). Markdown content is rendered within the block
-	// width minus the left bar + padding so it clips within the frame.
+	// not-yet-valid markdown). The markdown flows directly under the header at the
+	// full pane width — no frame, no indent — so the assistant's answer reads as
+	// plain prose the way Codex shows it.
 	if l.md != nil && it.role == message.RoleAssistant && !it.streaming && it.body != "" {
-		// Reserve 2 columns for the left bar + padding drawn by AssistantBlock.
-		if rendered, ok := l.md.Render(it.body, width-2); ok {
-			body := strings.TrimRight(rendered, "\n")
-			raw := header + "\n" + body
+		if rendered, ok := l.md.Render(it.body, width); ok {
+			// glamour right-pads every line to the wrap width with trailing spaces;
+			// strip that padding so each prose line ends at its last visible glyph and
+			// the answer flows naturally instead of dragging a tail of blank cells.
+			body := strings.TrimRight(trimLineTrailing(rendered), "\n")
 			it.cachedWidth = width
-			it.cachedBody = applyTurnBlock(it.role, raw, width)
+			it.cachedBody = header + "\n" + body
 			return it.cachedBody
 		}
 	}
 
-	body := wrap(it.body, width-4)
+	// Plain-text fallback: streaming assistant prose, or any turn when markdown is
+	// disabled. The body renders at full contrast directly under the header with no
+	// frame. The assistant body sits flush at the full pane width so the live
+	// stream and the finished markdown (also flush) occupy the same column and the
+	// turn does not visibly shift when streaming ends; a user turn is inset two
+	// columns, the gentle hang-indent that sets the prompt echo apart from the
+	// model's flush answer.
+	indentPrefix := ""
+	contentW := width
+	if it.role != message.RoleAssistant {
+		indentPrefix = "  "
+		contentW = width - 2
+	}
+	body := styles.Primary.Render(wrap(it.body, contentW))
 	if it.streaming {
-		body += " ▌"
+		body += styles.Accent.Render(" ▌")
 	}
-	raw := header + "\n" + indent(body, "  ")
 	it.cachedWidth = width
-	it.cachedBody = applyTurnBlock(it.role, raw, width)
+	it.cachedBody = header + "\n" + indent(body, indentPrefix)
 	return it.cachedBody
-}
-
-// applyTurnBlock wraps the rendered turn body in the role-appropriate left-bar
-// block style: saffron AccentBar + slight indent for assistant, muted faint bar
-// for user/tool turns. The block gives every turn a framed left edge so the
-// reader instantly tells who is speaking. width is the available pane width;
-// the block sets its own width so the left bar clips with the pane.
-func applyTurnBlock(role message.Role, body string, width int) string {
-	// The left border + padding takes 2 columns; leave the rest for content.
-	contentW := width - 2
-	if contentW < 1 {
-		contentW = 1
-	}
-	switch role {
-	case message.RoleAssistant:
-		return styles.AssistantBlock.Width(contentW).Render(body)
-	default:
-		return styles.UserBlock.Width(contentW).Render(body)
-	}
 }
 
 // itemHeader returns the bullet-led header line for a turn: an accent bullet, a
@@ -482,11 +474,17 @@ func verbForTool(name string) string {
 	}
 }
 
+// subOutputIndent is the two-space hang the output of a tool/command turn sits
+// under, aligned beneath the bullet+verb header. It replaces the old "└ "
+// connector so tool output reads as a clean indented block in the flowing
+// transcript rather than a boxed sub-region.
+const subOutputIndent = "  "
+
 // renderCommandTurn renders a tool/command turn: the bullet header with the bold
-// verb appended, then the output indented under a muted "└" connector. Long
-// output is elided to its head with a faint "… +N lines" hint, and added/removed
-// lines are tinted so a diff in the output reads at a glance. Empty output
-// renders the header alone.
+// verb appended, then the output indented two columns beneath it. Long output is
+// elided to its head with a faint "… +N lines" hint, and added/removed lines are
+// tinted so a diff in the output reads at a glance. Empty output renders the
+// header alone.
 //
 // A body tagged with DiffMarker is a pre-built unified diff for an edit/write: it
 // is rendered through viewer (line numbers, intra-line word emphasis, red/green
@@ -511,26 +509,25 @@ func renderCommandTurn(header, verb, rest string, width int, viewer *diff.Viewer
 		return b.String()
 	}
 
-	indentW := width - 4
+	indentW := width - len(subOutputIndent)
 	for _, line := range elide(strings.Split(out, "\n"), subOutputElideOver, subOutputHead) {
 		b.WriteString("\n")
-		b.WriteString(styles.Connector())
-		b.WriteString(" ")
+		b.WriteString(subOutputIndent)
 		b.WriteString(styleOutputLine(line, indentW))
 	}
 	return b.String()
 }
 
-// renderDiffTurn draws a unified diff under a tool turn's header, indented under
-// the same muted connector the plain sub-output uses so an inline edit diff sits
-// in the activity stream like any other tool output. The diff is rendered with
-// line numbers and red/green tinting through viewer at the indented width so it
-// clips to the pane exactly as the /diff command does, then elided past the
-// shared line cap with the same "… +N lines" hint so a sprawling rewrite does not
-// bury the conversation. A nil viewer (no theme yet) or an empty patch falls back
-// to the plain per-line styler, which still tints +/- lines.
+// renderDiffTurn draws a unified diff under a tool turn's header, indented two
+// columns beneath it so an inline edit diff sits in the flowing transcript like
+// any other tool output. The diff is rendered with line numbers and red/green
+// tinting through viewer at the indented width so it clips to the pane exactly as
+// the /diff command does, then elided past the shared line cap with the same
+// "… +N lines" hint so a sprawling rewrite does not bury the conversation. A nil
+// viewer (no theme yet) or an empty patch falls back to the plain per-line
+// styler, which still tints +/- lines.
 func renderDiffTurn(head, patch string, width int, viewer *diff.Viewer) string {
-	indentW := width - 4
+	indentW := width - len(subOutputIndent)
 	if indentW < 1 {
 		indentW = 1
 	}
@@ -553,8 +550,7 @@ func renderDiffTurn(head, patch string, width int, viewer *diff.Viewer) string {
 	b.WriteString(head)
 	for _, line := range elide(lines, subOutputElideOver, subOutputHead) {
 		b.WriteString("\n")
-		b.WriteString(styles.Connector())
-		b.WriteString(" ")
+		b.WriteString(subOutputIndent)
 		if isElisionHint(line) {
 			// elide inserts the hint as plain text; draw it faint like other elisions.
 			b.WriteString(styles.Faint.Render(line))
@@ -649,6 +645,36 @@ func flatten(msg message.Message) string {
 		return msg.CreatedAt.Format(time.RFC3339)
 	}
 	return strings.Join(parts, "\n")
+}
+
+// trailingPadRe matches the run of trailing padding glamour appends to right-pad
+// a rendered line to the wrap width. glamour emits each padding cell as a styled
+// space — an SGR escape, one space, then a reset — so the run is one or more such
+// units, allowing for bare spaces too. Each stripped unit must contain an actual
+// space (the trailing `[0-9;]*m \x1b\[0m`/space alternatives) so a content line
+// ending in a colored glyph and its closing reset is never matched.
+var trailingPadRe = regexp.MustCompile(`(?:\x1b\[[0-9;]*m \x1b\[0m| |\x1b\[[0-9;]*m )+$`)
+
+// danglingSGRRe reports a line that, after padding removal, ends in a non-reset
+// SGR escape — i.e. its closing reset got stripped along with the padding, so the
+// line's color would bleed onto the next. Such a line gets a reset re-appended.
+var danglingSGRRe = regexp.MustCompile(`\x1b\[(?:[1-9][0-9;]*)?m$`)
+
+// trimLineTrailing removes glamour's full-width right-padding from every line of
+// s so each line ends at its last visible glyph and the transcript flows
+// naturally. Line structure and the visible content of each line (with its
+// color) are preserved; when stripping the padding also removes a line's closing
+// reset, a reset is re-appended so color never bleeds past the line.
+func trimLineTrailing(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		stripped := trailingPadRe.ReplaceAllString(line, "")
+		if danglingSGRRe.MatchString(stripped) {
+			stripped += "\x1b[0m"
+		}
+		lines[i] = stripped
+	}
+	return strings.Join(lines, "\n")
 }
 
 func wrap(s string, width int) string {

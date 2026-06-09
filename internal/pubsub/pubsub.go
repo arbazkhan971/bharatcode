@@ -86,6 +86,53 @@ func (t *Topic[T]) Publish(ctx context.Context, event T) {
 	}
 }
 
+// PublishBlocking delivers event to every active subscriber with
+// back-pressure rather than loss: for each subscriber whose buffer is
+// full it waits for room instead of dropping, so an event published
+// this way is never silently lost. Delivery is bounded by ctx — if
+// ctx.Done fires while waiting on a full subscriber that subscriber is
+// skipped (its DropCount is incremented and a warn is logged), so a
+// stalled or vanished reader can never block the producer forever.
+// Subscribers are served sequentially while the topic read lock is
+// held, so PublishBlocking should carry only the low-frequency,
+// must-not-drop events (terminal turn transitions, permission
+// requests); the lossy Publish remains the hot path for token deltas.
+// If the topic has been closed PublishBlocking is a no-op.
+func (t *Topic[T]) PublishBlocking(ctx context.Context, event T) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if t.closed {
+		return
+	}
+
+	for chPtr := range t.subs {
+		// Fast path: deliver without blocking when the buffer has room. Only
+		// fall back to the ctx-bounded wait when the buffer is momentarily full,
+		// so a keeping-up subscriber never pays for the select-with-Done arm.
+		select {
+		case *chPtr <- event:
+			continue
+		default:
+		}
+		select {
+		case *chPtr <- event:
+		case <-ctx.Done():
+			t.dropCount.Add(1)
+			eventStr := util.Truncate(fmt.Sprintf("%+v", event), 200)
+			slog.WarnContext(
+				ctx, "Must-deliver event dropped because context ended while subscriber buffer was full",
+				"topic", t.name,
+				"event", eventStr,
+			)
+		}
+	}
+}
+
 // Subscribe registers a new subscriber and returns a receive-only
 // channel that delivers every subsequent Publish, plus a cancel
 // function that unregisters the subscriber and closes the channel.

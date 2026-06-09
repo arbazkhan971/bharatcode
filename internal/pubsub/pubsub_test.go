@@ -127,6 +127,101 @@ func TestSlowSubscriberDrops(t *testing.T) {
 	require.Equal(t, uint64(96), topic.DropCount())
 }
 
+// TestPublishBlockingNoDropUnderBackpressure registers one subscriber with a
+// small buffer, has it read slowly, and asserts PublishBlocking delivers every
+// event in order with zero drops — the must-deliver guarantee Publish lacks.
+func TestPublishBlockingNoDropUnderBackpressure(t *testing.T) {
+	topic := pubsub.NewTopic[int]("must_deliver", 2)
+	defer topic.Close()
+
+	ch, cancel := topic.Subscribe()
+	defer cancel()
+
+	const numEvents = 100
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctx := context.Background()
+		for i := 0; i < numEvents; i++ {
+			topic.PublishBlocking(ctx, i)
+		}
+	}()
+
+	// Read slowly: the buffer (2) is far smaller than the event count, so the
+	// producer must block in PublishBlocking and would drop with plain Publish.
+	for i := 0; i < numEvents; i++ {
+		select {
+		case val := <-ch:
+			require.Equal(t, i, val)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Timeout waiting for must-deliver event %d", i)
+		}
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PublishBlocking producer did not finish")
+	}
+	require.Equal(t, uint64(0), topic.DropCount(), "PublishBlocking must not drop")
+}
+
+// TestPublishBlockingContextBoundsWait asserts PublishBlocking never blocks the
+// producer forever on a stalled subscriber: while it is parked on a full buffer,
+// cancelling ctx unblocks it and the stalled event is counted as dropped. ctx is
+// live when the call starts (so the early ctx.Err short-circuit does not apply)
+// and is cancelled concurrently while the producer is parked.
+func TestPublishBlockingContextBoundsWait(t *testing.T) {
+	topic := pubsub.NewTopic[int]("must_deliver_bounded", 1)
+	defer topic.Close()
+
+	// A subscriber that never reads, so its buffer fills immediately.
+	_, cancel := topic.Subscribe()
+	defer cancel()
+
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+
+	topic.PublishBlocking(context.Background(), 1) // fills the 1-slot buffer
+
+	// Deadlock guard: a blocked PublishBlocking would never reach the assertion.
+	timer := time.AfterFunc(2*time.Second, func() {
+		panic("TestPublishBlockingContextBoundsWait blocked - back-pressure not ctx-bounded!")
+	})
+	defer timer.Stop()
+
+	// The buffer is full and stays full, so this call parks in the ctx-bounded
+	// wait. Schedule the cancel slightly in the future so ctx is unambiguously
+	// live when PublishBlocking is entered (defeating the early ctx.Err
+	// short-circuit) and only fires once the producer is parked.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		topic.PublishBlocking(ctx, 2)
+	}()
+	time.AfterFunc(10*time.Millisecond, cancelCtx)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PublishBlocking did not return after context cancellation")
+	}
+	require.Equal(t, uint64(1), topic.DropCount(), "the un-deliverable event must be counted as dropped")
+}
+
+// TestPublishBlockingAfterClose asserts PublishBlocking is a no-op on a closed
+// topic, mirroring Publish.
+func TestPublishBlockingAfterClose(t *testing.T) {
+	topic := pubsub.NewTopic[int]("blocking_after_close", 10)
+	_, cancel := topic.Subscribe()
+	defer cancel()
+
+	topic.Close()
+	initialDropCount := topic.DropCount()
+	topic.PublishBlocking(context.Background(), 42)
+	require.Equal(t, initialDropCount, topic.DropCount())
+}
+
 // TestCloseIdempotent calls Close() twice and asserts the second call is a
 // no-op.
 func TestCloseIdempotent(t *testing.T) {

@@ -335,12 +335,18 @@ func newAgentHarness(t *testing.T, provider llm.Provider) *agentHarness {
 	// on a nil backing store.
 	ledgerBus := pubsub.NewTopic[rootledger.Summary]("tui_ledger_test", 16)
 	t.Cleanup(ledgerBus.Close)
+
+	// Build the fake workspace that fans agent events from bus into the
+	// consolidated UIEvent channel the TUI subscribes to via Workspace.Subscribe.
+	ws := newFakeWorkspace(context.Background(), bus, loop, perm, repo)
+	t.Cleanup(ws.close)
+
 	deps := Dependencies{
 		Agent:       loop,
 		Coordinator: coord,
 		Sessions:    repo,
 		Cfg:         cfg,
-		Bus:         bus,
+		Workspace:   ws,
 		Permission:  perm,
 		Ledger:      rootledger.New(database, &cfg.Ledger, cfg.Models, ledgerBus),
 		// A real tracker backed by the test database so the completion-summary
@@ -522,8 +528,10 @@ func (h *agentHarness) drain(t *testing.T, done func() bool) {
 		select {
 		case ev := <-h.model.eventCh:
 			// Feed the event through the real Update path; drop the listen
-			// command it returns since drain reads m.eventCh itself.
-			_, _ = h.model.Update(agentEventMsg(ev))
+			// command it returns since drain reads m.eventCh itself. Map the
+			// consolidated UIEvent onto its Bubble Tea message exactly as the
+			// live listenAgent path does, so the genuine demux runs.
+			_, _ = h.model.Update(uiEventMsg(ev))
 		case msg := <-h.msgCh:
 			_, next := h.model.Update(msg)
 			if next != nil {

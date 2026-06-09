@@ -13,7 +13,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
+	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 )
 
 func TestNew_DefaultConfig_NoAPIKeys_Succeeds(t *testing.T) {
@@ -31,6 +33,7 @@ func TestNew_DefaultConfig_NoAPIKeys_Succeeds(t *testing.T) {
 	require.NotNil(t, a.Cfg)
 	require.NotNil(t, a.DB)
 	require.NotNil(t, a.Bus)
+	require.NotNil(t, a.UI)
 	require.NotNil(t, a.LLM)
 	require.NotNil(t, a.Sessions)
 	require.NotNil(t, a.Ledger)
@@ -48,6 +51,47 @@ func TestNew_DefaultConfig_NoAPIKeys_Succeeds(t *testing.T) {
 	require.NoError(t, err)
 	_, err = provider.Stream(ctx, llm.Request{Model: "deepseek-chat"})
 	require.ErrorIs(t, err, llm.ErrAuth)
+}
+
+// TestNew_WiresUIStreamFanIn asserts New connects the bus's UI-bound source
+// topics into app.UI: a permission request and a terminal agent event published
+// on the bus arrive on the single consolidated stream the TUI subscribes to. It
+// guards the P1b wiring (not just the FanIn helper, which uievent_test covers in
+// isolation) so a future refactor that drops the FanIn call is caught here.
+func TestNew_WiresUIStreamFanIn(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	setAppEnv(t, tempDir)
+
+	a, err := New(ctx, Options{ProjectDir: tempDir})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, a.Close(context.Background()))
+	})
+
+	ch, cancel := a.UI.Subscribe()
+	t.Cleanup(cancel)
+
+	// A permission request is must-deliver, so it survives the fan-in regardless
+	// of buffer pressure; a terminal agent event likewise.
+	reply := make(chan pubsub.PermissionDecision, 1)
+	a.Bus.Permission.Publish(ctx, pubsub.PermissionRequest{Tool: "edit", Reply: reply})
+	a.Bus.Agent.Publish(ctx, agent.Event{Kind: agent.EventTurnFinished, SessionID: "s1"})
+
+	var sawPermission, sawTurnFinished bool
+	for i := 0; i < 2; i++ {
+		ev := recvUIEvent(t, ch)
+		switch ev.Kind {
+		case UIEventPermission:
+			require.Equal(t, "edit", ev.Permission.Tool)
+			sawPermission = true
+		case UIEventAgent:
+			require.Equal(t, agent.EventTurnFinished, ev.Agent.Kind)
+			sawTurnFinished = true
+		}
+	}
+	require.True(t, sawPermission, "permission request must reach the consolidated stream")
+	require.True(t, sawTurnFinished, "agent event must reach the consolidated stream")
 }
 
 func TestClose_FastPath_UnderDeadline(t *testing.T) {

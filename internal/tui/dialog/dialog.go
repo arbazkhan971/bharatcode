@@ -75,6 +75,13 @@ func (s *Stack) Render(width int) string {
 type Permission struct {
 	Theme styles.Theme
 	Req   pubsub.PermissionRequest
+	// Grant and Deny answer the request through the workspace seam rather than
+	// the dialog sending on Req.Reply itself, keeping the Reply-channel handshake
+	// behind the seam that owns it. When either is nil the dialog falls back to
+	// sending the decision directly on Req.Reply, preserving the standalone
+	// behavior for callers that construct the dialog without the seam.
+	Grant func()
+	Deny  func()
 }
 
 // ID returns the stable dialog id.
@@ -91,14 +98,24 @@ func (p *Permission) Render(width int) string {
 	return p.Theme.Modal.Render(body)
 }
 
-// HandleKey processes permission prompt keys.
+// HandleKey processes permission prompt keys. Approval and denial go through the
+// Grant/Deny callbacks (the workspace seam) when set, and fall back to a direct
+// send on Req.Reply otherwise so the dialog stays usable on its own.
 func (p *Permission) HandleKey(msg tea.KeyPressMsg) (bool, bool) {
 	switch strings.ToLower(msg.String()) {
 	case "y":
-		p.Req.Reply <- pubsub.PermissionDecision{Approved: true}
+		if p.Grant != nil {
+			p.Grant()
+		} else {
+			p.Req.Reply <- pubsub.PermissionDecision{Approved: true}
+		}
 		return true, true
 	case "n", "esc":
-		p.Req.Reply <- pubsub.PermissionDecision{Approved: false}
+		if p.Deny != nil {
+			p.Deny()
+		} else {
+			p.Req.Reply <- pubsub.PermissionDecision{Approved: false}
+		}
 		return true, true
 	default:
 		return true, false

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
+	"github.com/arbazkhan971/bharatcode/internal/app"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/identity"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
@@ -33,6 +34,12 @@ const queuedPrefix = "[queued] "
 
 // agentEventMsg carries a single agent.Event into the Bubble Tea update loop.
 type agentEventMsg agent.Event
+
+// noticeMsg carries an out-of-band UI notice (an app.Notice) that arrived on the
+// consolidated stream. Surfacing it as its own message keeps the demux in
+// listenAgent total over every UIEvent kind, so a future producer reaching the
+// UI through the single stream needs no new subscription.
+type noticeMsg app.Notice
 
 // runDoneMsg signals that loop.Run has fully returned for a turn. It is emitted
 // after the agent loop releases its run mutex, so it is safe to start the next
@@ -223,23 +230,28 @@ func lastAssistantMessage(ctx context.Context, repo *session.Repo, sessionID str
 	return nil
 }
 
-// ensureListening subscribes to the agent bus exactly once and returns a
-// command that reads the next agent event. Subsequent calls reuse the existing
+// ensureListening subscribes to the consolidated UI event stream exactly once,
+// through the workspace seam, and returns a command that reads the next event.
+// The single stream carries agent transitions, permission requests, and notices,
+// so this one subscription replaces the former separate agent-bus and
+// permission-topic subscriptions. Subsequent calls reuse the existing
 // subscription so no buffered events are lost.
 func (m *model) ensureListening() tea.Cmd {
 	if m.eventCh == nil {
-		ch, cancel := m.deps.Bus.Subscribe()
+		ch, cancel := m.deps.Workspace.Subscribe()
 		m.eventCh = ch
 		m.eventCancel = cancel
 	}
 	return m.listenAgent()
 }
 
-// listenAgent returns a command that blocks until one agent event arrives on
-// the established subscription channel, then delivers it as a message. The
+// listenAgent returns a command that blocks until one event arrives on the
+// established consolidated subscription, then demultiplexes it into the matching
+// Bubble Tea message: an agent transition becomes agentEventMsg, a permission
+// request becomes permissionRequestMsg, and a notice becomes noticeMsg. The
 // Update handler re-issues this command after each event so the channel is
-// drained continuously without re-subscribing (which would drop buffered
-// events and leave the TUI deaf after the first event).
+// drained continuously without re-subscribing (which would drop buffered events
+// and leave the TUI deaf after the first event).
 func (m *model) listenAgent() tea.Cmd {
 	ch := m.eventCh
 	ctx := m.ctx
@@ -254,8 +266,26 @@ func (m *model) listenAgent() tea.Cmd {
 			if !ok {
 				return nil
 			}
-			return agentEventMsg(ev)
+			return uiEventMsg(ev)
 		}
+	}
+}
+
+// uiEventMsg maps one consolidated app.UIEvent onto the Bubble Tea message the
+// Update loop already handles, by switching on the event kind. Keeping the demux
+// here (rather than three separate subscriptions) is the whole point of the
+// consolidated stream: a single Subscribe feeds agent, permission, and notice
+// handling. An unknown kind yields a nil message, which Bubble Tea ignores.
+func uiEventMsg(ev app.UIEvent) tea.Msg {
+	switch ev.Kind {
+	case app.UIEventAgent:
+		return agentEventMsg(ev.Agent)
+	case app.UIEventPermission:
+		return permissionRequestMsg(ev.Permission)
+	case app.UIEventNotice:
+		return noticeMsg(ev.Notice)
+	default:
+		return nil
 	}
 }
 

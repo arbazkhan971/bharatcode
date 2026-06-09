@@ -334,7 +334,8 @@ type Loop struct {
 	// the top of Run (from the configured Router, or cfg.Model when no Router is
 	// set) and read by every per-step provider call so the whole turn uses one
 	// model. Run holds runMu for its entire duration and rejects concurrent
-	// runs, so no further synchronization is needed.
+	// runs, so the per-step reads need no further synchronization; the write and
+	// the lock-light ActiveModel/SetModel accessors coordinate through modelMu.
 	activeModel string
 
 	// verifyAttempts counts how many times the policy-driven verification
@@ -478,6 +479,17 @@ func (l *Loop) Provider() llm.Provider {
 	l.modelMu.RLock()
 	defer l.modelMu.RUnlock()
 	return l.cfg.Provider
+}
+
+// ActiveModel returns the model id the Loop is currently bound to. Like
+// Provider it takes only the modelMu read lock (never runMu), so it is safe to
+// call from any goroutine — including while a turn is in flight — and reflects
+// the latest SetModel call. It is the read companion to SetModel, letting a UI
+// seam report the active model without tracking the swaps itself.
+func (l *Loop) ActiveModel() string {
+	l.modelMu.RLock()
+	defer l.modelMu.RUnlock()
+	return l.activeModel
 }
 
 // Steer queues text as a steering message for the in-flight Run. When a Run is
@@ -855,7 +867,15 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	// user message, which is present pre-fit and is guaranteed to survive a fit,
 	// so deciding here yields the same choice as deciding post-fit. With no
 	// Router this is exactly cfg.Model, preserving prior behavior.
-	l.activeModel = l.resolveTurnModel(history)
+	//
+	// Resolve first, then publish the result under modelMu — the same lock
+	// SetModel/Provider/ActiveModel use — so a status-bar reader calling
+	// ActiveModel() mid-turn observes the swap without a data race. runMu still
+	// serializes turns, so this only coordinates with the lock-light readers.
+	turnModel := l.resolveTurnModel(history)
+	l.modelMu.Lock()
+	l.activeModel = turnModel
+	l.modelMu.Unlock()
 
 	history, err = l.fitHistory(runCtx, history)
 	if err != nil {

@@ -76,6 +76,7 @@ type App struct {
 	DB          *db.DB
 	Audit       *audit.Store
 	Bus         *Bus
+	UI          *UIStream
 	LLM         *llm.Registry
 	Sessions    *session.Repo
 	Ledger      *ledger.Ledger
@@ -94,6 +95,12 @@ type App struct {
 	// released on Close rather than leaking for the process lifetime. nil when
 	// logging targets stderr.
 	logFile *os.File
+
+	// workDir is the resolved, absolute project root the App was constructed
+	// against (the --project-dir flag or os.Getwd). It is captured once at New
+	// and surfaced read-only via WorkDir so a UI seam can report the working
+	// directory without re-deriving it.
+	workDir string
 
 	rootCtx    context.Context
 	cancelRoot context.CancelFunc
@@ -155,10 +162,14 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	rollback := func(cause error) (*App, error) {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
 		defer closeCancel()
+		// Cancel the root context before tearing subsystems down, mirroring the
+		// steady-state Close path. Any ctx-bound worker — notably a UI fan-in pump
+		// blocked delivering a must-deliver event — observes the cancellation and
+		// exits, so a close step that waits on such a worker cannot stall.
+		cancel()
 		if err := closeSteps(closeCtx, closers, logger); err != nil {
 			return nil, fmt.Errorf("%w; rollback: %v", cause, err)
 		}
-		cancel()
 		return nil, cause
 	}
 	// Register the diagnostics log handle first so it is closed last during
@@ -170,6 +181,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	if err != nil {
 		return rollback(fmt.Errorf("constructing util paths: %w", err))
 	}
+	app.workDir = projectDir
 
 	app.DB, err = db.Open(rootCtx, dbPath)
 	if err != nil {
@@ -191,6 +203,18 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	app.Bus = newBus()
 	closers = append(closers, closeStep{name: "pubsub", close: func(context.Context) error {
 		app.Bus.Close()
+		return nil
+	}})
+
+	// Consolidate every UI-bound source topic into one stream the TUI can
+	// subscribe to once. FanIn is additive — the source topics keep their direct
+	// subscribers — so this changes nothing for existing callers while giving the
+	// UI a single entry point. It is bound to rootCtx and registered to close
+	// after the bus step above, so closeSteps (which runs in reverse) tears the
+	// fan-in down before the source topics it reads from.
+	app.UI = FanIn(rootCtx, app.Bus)
+	closers = append(closers, closeStep{name: "ui_stream", close: func(context.Context) error {
+		app.UI.Close()
 		return nil
 	}})
 
@@ -331,6 +355,16 @@ func (a *App) Close(ctx context.Context) error {
 	return closeSteps(closeCtx, a.closeSteps(), a.Logger)
 }
 
+// WorkDir returns the resolved, absolute project root the App was constructed
+// against. It is the same directory the tools registry and MCP roots are scoped
+// to, exposed read-only so a UI seam can report the current working directory.
+func (a *App) WorkDir() string {
+	if a == nil {
+		return ""
+	}
+	return a.workDir
+}
+
 func newBus() *Bus {
 	return &Bus{
 		Ledger:      pubsub.NewTopic[ledger.Summary]("app_ledger", 64),
@@ -354,6 +388,9 @@ func (a *App) closeSteps() []closeStep {
 		{name: "db", close: closeDB(a.DB)},
 		{name: "audit", close: closeAudit(a.Audit)},
 		{name: "pubsub", close: closeBus(a.Bus)},
+		// Listed after pubsub so the reverse-order teardown stops the fan-in
+		// pumps before the source topics they read from are closed.
+		{name: "ui_stream", close: closeUIStream(a.UI)},
 		{name: "shell", close: closeShell(a.Shell)},
 		{name: "lsp", close: closeLSP(a.LSP)},
 		{name: "mcp", close: closeMCP(a.MCP)},
@@ -412,6 +449,16 @@ func closeShell(sh *shell.Shell) func(context.Context) error {
 func closeBus(b *Bus) func(context.Context) error {
 	return func(context.Context) error {
 		b.Close()
+		return nil
+	}
+}
+
+func closeUIStream(s *UIStream) func(context.Context) error {
+	return func(context.Context) error {
+		if s == nil {
+			return nil
+		}
+		s.Close()
 		return nil
 	}
 }

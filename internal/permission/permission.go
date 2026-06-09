@@ -234,6 +234,17 @@ func (c *Checker) SetYolo(on bool) {
 	c.yolo = on
 }
 
+// Yolo reports whether global YOLO auto-approval mode is currently on. It is the
+// read companion to SetYolo, letting a UI seam show the yolo state without
+// tracking the toggles itself. It reflects only the explicit SetYolo flag, not
+// the config-level AllowAll fallback that Check also honors, so callers asking
+// "is yolo toggled on" get the toggle's value.
+func (c *Checker) Yolo() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.yolo
+}
+
 // SetApprovalMode sets the global approval-mode policy (ReadOnly, Auto, or Full).
 func (c *Checker) SetApprovalMode(mode ApprovalMode) {
 	c.mu.Lock()

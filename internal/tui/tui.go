@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
+	"github.com/arbazkhan971/bharatcode/internal/app"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
@@ -79,8 +80,13 @@ type Dependencies struct {
 	Sessions *session.Repo
 	// Cfg is the merged user and project configuration.
 	Cfg *config.Config
-	// Bus is the in-process agent event topic the TUI subscribes to.
-	Bus *pubsub.Topic[agent.Event]
+	// Workspace is the narrow seam the TUI subscribes to and drives turns
+	// through. It exposes the single consolidated UI event stream (agent
+	// transitions, permission requests, and out-of-band notices fanned into one
+	// channel) plus the prompt/steer/interrupt and permission-decision
+	// operations, so the TUI no longer subscribes to the agent and permission
+	// topics separately or reaches into the loop and checker for those calls.
+	Workspace app.Workspace
 	// Permission is the tool-permission checker.
 	Permission *permission.Checker
 	// Ledger is the INR/USD cost ledger.
@@ -192,8 +198,8 @@ func validateDependencies(deps Dependencies) error {
 	if deps.Cfg == nil {
 		return fmt.Errorf("validating tui dependencies: config is nil")
 	}
-	if deps.Bus == nil {
-		return fmt.Errorf("validating tui dependencies: bus is nil")
+	if deps.Workspace == nil {
+		return fmt.Errorf("validating tui dependencies: workspace is nil")
 	}
 	if deps.Permission == nil {
 		return fmt.Errorf("validating tui dependencies: permission is nil")
@@ -335,7 +341,12 @@ type model struct {
 	// collisions when read-only tool calls run concurrently and their events
 	// interleave, since each appended turn is its own discrete item.
 	toolTurnSeq int
-	eventCh     <-chan agent.Event
+	// eventCh is the single consolidated UI event stream the TUI subscribes to
+	// once via the workspace seam. It carries agent-loop transitions, permission
+	// requests, and out-of-band notices as app.UIEvent values; listenAgent demuxes
+	// each into the matching Bubble Tea message. It replaces the former pair of
+	// direct subscriptions to the agent and permission topics.
+	eventCh     <-chan app.UIEvent
 	eventCancel func()
 
 	// Autonomous goal-loop state (CHANGE 2).
@@ -544,7 +555,10 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 // a turn is launched (startRun/continueRun batch its first Tick alongside the
 // run command) so it does not leak a 12fps timer while the session is idle.
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.waitLedger(), m.waitPermission(), m.ensureListening(), m.tick())
+	// Permission requests no longer need their own subscription: they arrive on
+	// the consolidated stream ensureListening subscribes to and listenAgent
+	// demuxes, so a single Subscribe feeds both agent transitions and prompts.
+	return tea.Batch(m.waitLedger(), m.ensureListening(), m.tick())
 }
 
 // Update applies one Bubble Tea message.
@@ -602,8 +616,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.footer.ApplySummary(rootledger.Summary(msg))
 		return m, nil
 	case permissionRequestMsg:
-		m.dialogs.Push(&dialog.Permission{Theme: m.theme, Req: pubsub.PermissionRequest(msg)})
-		return m, nil
+		// Answer the request through the workspace seam: the dialog's y/n keys call
+		// GrantPermission/DenyPermission, which own the Reply-channel handshake, so
+		// the TUI no longer sends on the request channel directly.
+		req := pubsub.PermissionRequest(msg)
+		m.dialogs.Push(&dialog.Permission{
+			Theme: m.theme,
+			Req:   req,
+			Grant: func() { m.deps.Workspace.GrantPermission(req, false) },
+			Deny:  func() { m.deps.Workspace.DenyPermission(req, "") },
+		})
+		// Permission requests now share the consolidated stream with agent events,
+		// so re-issue the listener here (the former standalone permission
+		// subscription did this implicitly); otherwise the stream would stop
+		// draining after a mid-turn prompt and stall the next agent transition.
+		return m, m.listenAgent()
+	case noticeMsg:
+		// An out-of-band notice from the consolidated stream. Surface it as a
+		// dismissable text dialog (the same affordance as other one-shot notices)
+		// and keep listening so the stream is never left undrained.
+		m.dialogs.Push(&dialog.Text{DialogID: "notice", Title: msg.Title, Body: msg.Body, Theme: m.theme})
+		return m, m.listenAgent()
 	case runDoneMsg:
 		return m.handleRunDone(msg)
 	case agentEventMsg:
@@ -780,14 +813,14 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// idle does Ctrl+C quit on an empty prompt; with text in the prompt it stays
 		// an interrupt (a harmless no-op when nothing is running) as before.
 		if m.running {
-			m.deps.Agent.Interrupt()
+			m.deps.Workspace.Interrupt()
 			return m, nil
 		}
 		if m.input.Len() == 0 {
 			m.quitting = true
 			return m, tea.Quit
 		}
-		m.deps.Agent.Interrupt()
+		m.deps.Workspace.Interrupt()
 		return m, nil
 	case "ctrl+r":
 		// Enter (or re-enter) reverse history search, the classic readline
@@ -1148,7 +1181,7 @@ func (m *model) submitInput() (tea.Model, tea.Cmd) {
 // the running check and Steer (a narrow race), Steer reports it was not queued
 // and the text is started as a fresh turn instead.
 func (m *model) steerRun(text string) (tea.Model, tea.Cmd) {
-	if !m.deps.Agent.Steer(text) {
+	if !m.deps.Workspace.Steer(text) {
 		return m.startRun(text)
 	}
 	m.queueCounter++
@@ -1229,7 +1262,7 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.dialogs.Push(&dialog.Text{DialogID: "budget", Title: "Budget", Body: m.footer.Render(m.width), Theme: m.theme})
 	case "/yolo":
 		m.status.Yolo = !m.status.Yolo
-		m.deps.Permission.SetYolo(m.status.Yolo)
+		m.deps.Workspace.SetYolo(m.status.Yolo)
 	case "/save":
 		m.dialogs.Push(&dialog.Text{DialogID: "save", Title: "Saved", Body: "Session save requested.", Theme: m.theme})
 	case "/quit", "/exit":
@@ -1895,22 +1928,6 @@ func (m *model) waitLedger() tea.Cmd {
 			return nil
 		}
 		return ledgerSummaryMsg(summary)
-	}
-}
-
-func (m *model) waitPermission() tea.Cmd {
-	return func() tea.Msg {
-		events, cancel := pubsub.PermissionRequests.Subscribe()
-		defer cancel()
-		select {
-		case <-m.ctx.Done():
-			return nil
-		case req, ok := <-events:
-			if !ok {
-				return nil
-			}
-			return permissionRequestMsg(req)
-		}
 	}
 }
 

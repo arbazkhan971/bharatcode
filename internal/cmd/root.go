@@ -50,7 +50,7 @@ var (
 			Coordinator:      application.Agent,
 			Sessions:         application.Sessions,
 			Cfg:              application.Cfg,
-			Bus:              application.Bus.Agent,
+			Workspace:        app.NewWorkspace(application, loop),
 			Permission:       application.Permission,
 			Ledger:           application.Ledger,
 			FileTracker:      application.FileTracker,

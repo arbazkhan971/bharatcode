@@ -101,6 +101,7 @@ bharatcode --provider lmstudio --model qwen2.5-coder-32b-instruct
 
 ```sh
 bharatcode --continue                       # resume your most recent session
+bharatcode about                            # print what BharatCode is
 bharatcode doctor                           # diagnose config / provider / LSP / ChatGPT sign-in
 bharatcode doctor --check-provider          # make a tiny live provider request
 bharatcode run --json "fix the failing test in ./pkg/auth"   # NDJSON event stream for CI

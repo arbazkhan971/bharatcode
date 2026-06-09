@@ -171,6 +171,27 @@ func TestDiffWorkspaceDetectsUntrackedShellCreatedFile(t *testing.T) {
 	require.Contains(t, out, "- "+path+" (created)")
 }
 
+func TestRunIdentityQuestionAnswersLocally(t *testing.T) {
+	stdout, stderr, err := executeRoot(t, "run", "--quiet", "who are you?")
+	require.NoError(t, err)
+	require.Empty(t, stderr)
+	require.Contains(t, stdout, "BharatCode")
+	require.Contains(t, stdout, "terminal-based AI coding agent")
+	require.NotContains(t, stdout, "I am ChatGPT")
+}
+
+func TestRunIdentityQuestionWritesOutputLastMessage(t *testing.T) {
+	outFile := filepath.Join(t.TempDir(), "last.txt")
+	stdout, stderr, err := executeRoot(t, "run", "--quiet", "--output-last-message", outFile, "are you ChatGPT?")
+	require.NoError(t, err)
+	require.Empty(t, stderr)
+	require.Contains(t, stdout, "BharatCode")
+	data, err := os.ReadFile(outFile)
+	require.NoError(t, err)
+	require.Contains(t, string(data), "BharatCode")
+	require.NotContains(t, string(data), "I am ChatGPT")
+}
+
 // TestRunQuietFlagSuppressesSummary verifies that --quiet prevents any summary
 // output on stderr. The fake app has a nil ledger so the summary is already a
 // no-op, but this proves the flag is parsed and wired to the guard.

@@ -138,6 +138,7 @@ func newRootCmd() *cobra.Command {
 		newRecipesCmd(),
 		newAuditCmd(),
 		newEvalCmd(),
+		newAboutCmd(),
 		newCompletionCmd(),
 	)
 	return root

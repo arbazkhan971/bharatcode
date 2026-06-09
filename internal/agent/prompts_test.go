@@ -146,6 +146,16 @@ func TestRenderPromptProjectInstructionsArePathTagged(t *testing.T) {
 	require.Contains(t, out, "</project_context>")
 }
 
+func TestRenderPromptIncludesIdentityGuidance(t *testing.T) {
+	workdir := t.TempDir()
+	out := renderInWorkdir(t, workdir)
+
+	require.Contains(t, out, "## Identity and product questions")
+	require.Contains(t, out, "you are BharatCode, a terminal-based AI coding agent")
+	require.Contains(t, out, "Do not claim to be OpenAI, ChatGPT, Codex CLI, Claude Code, OpenCode, or the underlying model")
+	require.Contains(t, out, "Do not call tools for a simple identity/about question")
+}
+
 // mustGetwdIn returns the realized working directory while chdir'd into
 // workdir, restoring the original directory before it returns.
 func mustGetwdIn(t *testing.T, workdir string) string {
@@ -345,6 +355,9 @@ func TestBuildSmallTaskPrompt(t *testing.T) {
 	require.NotContains(t, prompt, "Full regex manual the small task does not need.")
 
 	// It keeps a tight engineering policy and a verification status line.
+	require.Contains(t, prompt, "## Identity and product questions")
+	require.Contains(t, prompt, "you are BharatCode, a terminal-based AI coding agent")
+	require.Contains(t, prompt, "Do not claim to be OpenAI, ChatGPT, Codex CLI, Claude Code, OpenCode, or the underlying model")
 	require.Contains(t, prompt, "Be concise.")
 	require.Contains(t, prompt, "Verified")
 	require.Contains(t, prompt, "Skipped (no_test_command)")

@@ -11,6 +11,7 @@ import (
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/identity"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -96,6 +97,12 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.chat.SetRole(userStreamID, message.RoleUser)
 	m.chat.FinishStream(userStreamID)
 	m.chat.Reindex(userStreamID)
+	if answer, ok := identity.Answer(prompt); ok {
+		if err := m.appendLocalIdentityTurn(prompt, answer); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
 	m.running = true
 	m.turnStartedAt = m.now
 	m.currentActivity = ""
@@ -111,6 +118,34 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	// Re-inject the active goal as a persistent frame on every turn so the
 	// model stays anchored to it; the bubble above stays free of the frame.
 	return m.runAgent(m.frameForAgent(expanded), imgBlocks), nil
+}
+
+func (m *model) appendLocalIdentityTurn(prompt, answer string) error {
+	if m.deps.Sessions != nil && m.sessionID != "" {
+		now := time.Now().UTC()
+		if err := m.deps.Sessions.AppendMessage(m.ctx, m.sessionID, message.Message{
+			Role:      message.RoleUser,
+			Content:   []message.ContentBlock{message.TextBlock{Text: prompt}},
+			CreatedAt: now,
+		}); err != nil {
+			return fmt.Errorf("appending identity user message: %w", err)
+		}
+		if err := m.deps.Sessions.AppendMessage(m.ctx, m.sessionID, message.Message{
+			Role:      message.RoleAssistant,
+			Content:   []message.ContentBlock{message.TextBlock{Text: answer}},
+			CreatedAt: now,
+		}); err != nil {
+			return fmt.Errorf("appending identity assistant message: %w", err)
+		}
+	}
+	id := m.assistantStreamID()
+	m.chat.Stream(id, answer)
+	m.chat.SetRole(id, message.RoleAssistant)
+	m.chat.FinishStream(id)
+	m.chat.Reindex(id)
+	m.currentActivity = ""
+	m.running = false
+	return nil
 }
 
 // ensureSession creates a persisted session row the first time the user runs a

@@ -86,6 +86,35 @@ func TestSubmitInput_DrivesAgentAndStreamsToChat(t *testing.T) {
 	require.Equal(t, "please run echo", firstUserText(msgs), "user prompt must be persisted by the agent loop")
 }
 
+func TestSubmitInput_IdentityQuestionAnswersLocally(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "wrong provider answer"},
+			llm.EndEvent{},
+		},
+	}}
+
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	h.submit(t, "who are you?")
+
+	rendered := plainText(m.chat.Render(200))
+	require.Contains(t, rendered, "who are you?", "user prompt must be echoed into the chat")
+	require.Contains(t, rendered, "BharatCode", "local identity answer must name BharatCode")
+	require.Contains(t, rendered, "terminal-based AI coding agent")
+	require.NotContains(t, rendered, "wrong provider answer")
+	require.Equal(t, 0, provider.calls(), "simple identity questions must not call the provider")
+	require.False(t, m.running)
+
+	msgs, err := h.repo.Messages(context.Background(), m.sessionID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+	require.Equal(t, message.RoleUser, msgs[0].Role)
+	require.Equal(t, message.RoleAssistant, msgs[1].Role)
+	require.Contains(t, textBlocks(msgs[1]), "BharatCode")
+}
+
 // TestEditToolCall_RendersInlineUnifiedDiff is the change-D contract test: a
 // scripted edit tool call must surface in the transcript as a tinted unified
 // diff (the removed line in the old fragment, the added line in the new), led by
@@ -534,6 +563,16 @@ func firstUserText(msgs []message.Message) string {
 		}
 	}
 	return ""
+}
+
+func textBlocks(msg message.Message) string {
+	var b strings.Builder
+	for _, block := range msg.Content {
+		if tb, ok := block.(message.TextBlock); ok {
+			b.WriteString(tb.Text)
+		}
+	}
+	return b.String()
 }
 
 // --- scripted provider ---------------------------------------------------

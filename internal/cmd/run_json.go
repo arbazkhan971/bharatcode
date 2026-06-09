@@ -1,6 +1,10 @@
 package cmd
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 )
@@ -69,4 +73,19 @@ func eventMessageText(msg *message.Message) string {
 		return ""
 	}
 	return messageText(*msg)
+}
+
+func emitLocalIdentityJSON(w io.Writer, answer string) error {
+	enc := json.NewEncoder(w)
+	events := []runEvent{
+		{Type: "turn_started", Agent: "bharatcode"},
+		{Type: "llm_response", Agent: "bharatcode", Text: answer},
+		{Type: "turn_finished", Agent: "bharatcode", Text: answer},
+	}
+	for _, ev := range events {
+		if err := enc.Encode(ev); err != nil {
+			return fmt.Errorf("encoding identity event: %w", err)
+		}
+	}
+	return nil
 }

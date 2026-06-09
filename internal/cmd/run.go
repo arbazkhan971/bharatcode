@@ -14,6 +14,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/app"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
+	"github.com/arbazkhan971/bharatcode/internal/identity"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/session"
@@ -39,6 +40,18 @@ func newRunCmd() *cobra.Command {
 			prompt, err := readPrompt(cmd, args)
 			if err != nil {
 				return err
+			}
+			if answer, ok := identity.Answer(prompt); ok {
+				if jsonStream {
+					return emitLocalIdentityJSON(cmd.OutOrStdout(), answer)
+				}
+				if outputLastMessage != "" {
+					if err := os.WriteFile(outputLastMessage, []byte(answer), 0o644); err != nil {
+						return fmt.Errorf("writing last message: %w", err)
+					}
+				}
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), answer)
+				return nil
 			}
 			opts := getRootOptions(cmd)
 			application, err := buildApp(cmd.Context(), opts)

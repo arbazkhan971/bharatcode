@@ -18,6 +18,8 @@
 #      diagnosable offline.
 #   4. Clean exit — the smoke commands (version, doctor, json run) exit 0 and
 #      never hang.
+#   5. Identity — simple "who are you" prompts answer as BharatCode locally,
+#      without depending on a live provider.
 #
 # Usage:
 #   scripts/ux-smoke.sh [path-to-bharatcode-binary]
@@ -361,6 +363,18 @@ if [[ "${hl_bytes}" -le "${FLOOD_MAX_BYTES}" ]]; then
 	pass "headless TUI emitted no flood: ${hl_bytes} bytes"
 else
 	fail "headless TUI emitted ${hl_bytes} bytes (expected none — renderer should be off)"
+fi
+
+# --- Check: identity questions answer as BharatCode -------------------------
+section "identity (local answer)"
+identity_out="$(printf 'who are you?' | run_bounded "${RUN_TIMEOUT}" "${BIN}" run --quiet 2>/dev/null)"
+identity_rc=$?
+if [[ ${identity_rc} -ne 0 ]]; then
+	fail "identity run exited ${identity_rc} (expected 0)"
+elif grep -q 'BharatCode' <<<"${identity_out}" && grep -qi 'terminal-based AI coding agent' <<<"${identity_out}"; then
+	pass "identity prompt answers as BharatCode"
+else
+	fail "identity prompt did not answer as BharatCode: ${identity_out:-<empty>}"
 fi
 
 # --- Provider-gated checks --------------------------------------------------

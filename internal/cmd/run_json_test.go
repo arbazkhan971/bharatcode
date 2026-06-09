@@ -129,6 +129,21 @@ func TestRunOutputLastMessageWritesFinalText(t *testing.T) {
 	require.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 }
 
+func TestRunJSONIdentityQuestionAnswersLocally(t *testing.T) {
+	stdout, stderr, err := executeRoot(t, "run", "--json", "--quiet", "what are you?")
+	require.NoError(t, err)
+	require.Empty(t, stderr)
+
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	require.Len(t, lines, 3)
+	var response runEvent
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &response))
+	require.Equal(t, "llm_response", response.Type)
+	require.Equal(t, "bharatcode", response.Agent)
+	require.Contains(t, response.Text, "BharatCode")
+	require.NotContains(t, response.Text, "I am ChatGPT")
+}
+
 func TestRunJSONWithOutputLastMessage(t *testing.T) {
 	provider := &scriptedProvider{scripts: [][]llm.Event{
 		{

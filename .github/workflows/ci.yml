@@ -7,6 +7,13 @@ name: CI
 on:
   push:
   pull_request:
+  # Nightly PTY/TUI acceptance and manual on-demand runs. These feed the
+  # pty-acceptance job below; the everyday build/test/race jobs keep running on
+  # every push and pull_request as before.
+  schedule:
+    # 02:30 UTC nightly. Off-peak and well clear of the release cron windows.
+    - cron: "30 2 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -174,3 +181,34 @@ jobs:
           "$(go env GOPATH)/bin/bharatcode" version
           node --check npm/bin/bharatcode.js
           node --check npm/install.js
+
+  # PTY/TUI acceptance. The real terminal smoke is slow and flaky on shared
+  # runners, so it is deliberately kept off the PR path: it runs on the nightly
+  # schedule, on demand (workflow_dispatch), and on pushes to release branches
+  # so a release can't ship a broken TUI. Ordinary pushes and pull_requests
+  # skip it via the `if` below, keeping PR CI fast. Linux-only — the TUI render
+  # path is OS-independent, so one runner is enough.
+  pty-acceptance:
+    name: PTY/TUI acceptance (nightly)
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: PTY/TUI smoke (BHARATCODE_TUI_PTY_SMOKE=1)
+        # Drives the TUI through a real pseudo-terminal. Opt-in behind the env
+        # var so the default `go test ./...` stays offline and fast; -count=1
+        # disables the cache so the smoke always exercises a fresh render.
+        env:
+          BHARATCODE_TUI_PTY_SMOKE: "1"
+        run: go test ./internal/tui -run TestPTYTUI -count=1 -v

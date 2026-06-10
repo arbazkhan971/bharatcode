@@ -174,6 +174,12 @@ func (m *model) ensureSession() error {
 	m.sessionPersisted = true
 	m.status.SessionID = s.ID
 	m.footer.SessionID = s.ID
+	// Carry the yolo intent (from --yolo or a /yolo toggle made while the session
+	// was still the "new" placeholder) onto the freshly created session, so
+	// auto-approval is scoped to this real session id.
+	if m.status.Yolo && m.deps.Workspace != nil {
+		m.deps.Workspace.SetSessionYolo(s.ID, true)
+	}
 	return nil
 }
 

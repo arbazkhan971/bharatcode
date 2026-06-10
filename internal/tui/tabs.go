@@ -109,6 +109,13 @@ func (m *model) loadTab(index int) {
 	m.status.Goal = t.statusGoal
 	m.footer.SessionID = t.sessionID
 	m.footer.CostINR = t.costINR
+	// Yolo is per-session: a persisted tab reflects its session's auto-approval
+	// state; an unpersisted "new" tab carries no grant yet, so the indicator clears.
+	if m.deps.Workspace != nil && t.sessionPersisted {
+		m.status.Yolo = m.deps.Workspace.SessionYolo(t.sessionID)
+	} else {
+		m.status.Yolo = false
+	}
 }
 
 // newTab opens a fresh session tab and switches to it. The new tab starts as an

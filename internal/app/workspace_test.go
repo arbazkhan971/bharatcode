@@ -11,6 +11,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
@@ -180,6 +181,93 @@ func TestWorkspaceYoloRoundTrip(t *testing.T) {
 
 	ws.SetYolo(false)
 	require.False(t, ws.Yolo())
+}
+
+// TestWorkspaceSessionYoloPerSession asserts SetSessionYolo/SessionYolo scope
+// auto-approval to one session and never flip the global yolo switch.
+func TestWorkspaceSessionYoloPerSession(t *testing.T) {
+	ws, app, _, _ := newTestWorkspace(t)
+
+	require.False(t, ws.SessionYolo("a"))
+	ws.SetSessionYolo("a", true)
+	require.True(t, ws.SessionYolo("a"))
+	require.False(t, ws.SessionYolo("b"), "auto-approve is per-session, not global")
+	require.False(t, app.Permission.Yolo(), "per-session yolo must not flip the global flag")
+
+	// Global yolo, when set, makes every session report yolo.
+	ws.SetYolo(true)
+	require.True(t, ws.SessionYolo("b"))
+	ws.SetYolo(false)
+
+	ws.SetSessionYolo("a", false)
+	require.False(t, ws.SessionYolo("a"))
+}
+
+// TestWorkspaceSessionState asserts the live snapshot bundles model, provider,
+// cwd, per-session yolo, and the session's changed files, reading through to the
+// loop, checker, and file tracker.
+func TestWorkspaceSessionState(t *testing.T) {
+	bus := newBus()
+	ctx := context.Background()
+	ui := FanIn(ctx, bus)
+	t.Cleanup(func() {
+		ui.Close()
+		bus.Close()
+	})
+
+	database := openWorkspaceDB(t)
+	repo := session.NewRepo(database)
+	checker := permission.New(&config.Config{}, bus.Permission)
+	ftBus := pubsub.NewTopic[filetracker.Change]("ws_ft", 16)
+	t.Cleanup(func() { ftBus.Close() })
+	tracker := filetracker.NewTracker(database, ftBus)
+
+	app := &App{
+		DB:          database,
+		Bus:         bus,
+		UI:          ui,
+		Sessions:    repo,
+		Permission:  checker,
+		FileTracker: tracker,
+		workDir:     "/tmp/bc-workspace",
+	}
+	prov := &stubProvider{name: "stub", model: "stub-model", reply: "ok"}
+	loop := agent.New(agent.Config{
+		Name:     "coder",
+		Model:    "stub-model",
+		Provider: prov,
+		Tools:    tools.NewRegistry(tools.Dependencies{}),
+		Sessions: repo,
+		Bus:      bus.Agent,
+	})
+	ws := NewWorkspace(app, loop)
+
+	require.NoError(t, ws.CreateSession(ctx, &session.Session{ID: "ss1", ProjectPath: "/tmp/p", Agent: "coder"}))
+
+	st, err := ws.SessionState(ctx, "ss1")
+	require.NoError(t, err)
+	require.Equal(t, "ss1", st.SessionID)
+	require.Equal(t, "stub-model", st.Model)
+	require.Equal(t, "stub", st.Provider)
+	require.Equal(t, "/tmp/bc-workspace", st.Cwd)
+	require.False(t, st.Yolo)
+	require.Empty(t, st.ChangedFiles)
+
+	// Per-session yolo is reflected in the snapshot.
+	ws.SetSessionYolo("ss1", true)
+	st, err = ws.SessionState(ctx, "ss1")
+	require.NoError(t, err)
+	require.True(t, st.Yolo)
+
+	// A recorded write surfaces as a changed file.
+	f := filepath.Join(t.TempDir(), "a.go")
+	_, err = tracker.RecordWrite(ctx, "ss1", f, nil, []byte("package main"))
+	require.NoError(t, err)
+
+	st, err = ws.SessionState(ctx, "ss1")
+	require.NoError(t, err)
+	require.Len(t, st.ChangedFiles, 1)
+	require.Contains(t, st.ChangedFiles[0], "a.go")
 }
 
 // TestWorkspaceRunState asserts the run-state accessors read through to the live

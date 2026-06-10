@@ -119,6 +119,7 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	m.currentActivity = ""
 	m.turnToolCount = 0    // reset per-turn tool-call counter
 	m.turnErrShown = false // reset per-turn error-surfaced flag
+	m.deltaPending = 0     // no provisional delta text yet this turn
 	m.lastTurnTokens = ""  // clear previous turn's counts while the new turn runs
 	m.lastContextPct = 0   // clear previous context-window fill while the new turn runs
 	// Inline any @-file references so the model sees their contents, while the
@@ -315,10 +316,37 @@ func uiEventMsg(ev app.UIEvent) tea.Msg {
 func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 	streamID := m.assistantStreamID()
 	switch ev.Kind {
+	case agent.EventLLMStreamStart:
+		// A provider stream attempt is starting. Any un-reconciled delta text
+		// belongs to a previous attempt of this same call that failed mid-stream
+		// (the retry re-streams the response from the beginning), so rewind it
+		// before the fresh attempt's deltas arrive. Completed calls always reset
+		// deltaPending via their boundary event, so this can never eat text from
+		// an earlier, finished response.
+		if m.deltaPending > 0 {
+			m.chat.TruncateStreamTail(streamID, m.deltaPending)
+			m.deltaPending = 0
+		}
+	case agent.EventLLMDelta:
+		// Incremental assistant text: render it as it arrives. The bytes are
+		// provisional — EventLLMResponse below replaces them with the canonical
+		// full text — so count what was appended for exact rollback.
+		m.currentActivity = ""
+		if ev.Delta != "" {
+			m.chat.Stream(streamID, ev.Delta)
+			m.deltaPending += len(ev.Delta)
+		}
 	case agent.EventLLMResponse:
 		// Fresh model text means the agent is thinking again, not inside a tool;
 		// clear the activity so the status bar reverts to "working".
 		m.currentActivity = ""
+		// Replace the provisional delta text with the canonical response so the
+		// bubble is byte-identical to the recorded message even when the lossy
+		// bus dropped some deltas mid-stream.
+		if m.deltaPending > 0 {
+			m.chat.TruncateStreamTail(streamID, m.deltaPending)
+			m.deltaPending = 0
+		}
 		if text := assistantText(ev.Message); text != "" {
 			m.chat.Stream(streamID, text)
 		}
@@ -331,7 +359,11 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		// Close the assistant's prose bubble (if any) so the tool block becomes its
 		// own turn rather than merging into the surrounding text. Reindex detaches
 		// the id so the next model text after the tool opens a fresh bubble instead
-		// of re-appending to the closed one.
+		// of re-appending to the closed one. Closing the bubble commits any delta
+		// text it still holds (the canonical EventLLMResponse normally reconciled
+		// it already; if the lossy bus dropped that event the deltas are the best
+		// rendition we have), so the pending counter must not survive the close.
+		m.deltaPending = 0
 		m.chat.FinishStream(streamID)
 		m.chat.Reindex(streamID)
 		// Append the invocation as a discrete turn. A message carrying only a
@@ -381,6 +413,7 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 			}},
 		})
 	case agent.EventLoopDetected:
+		m.deltaPending = 0
 		if text := assistantText(ev.Message); text != "" {
 			m.chat.Stream(streamID, "\n"+text)
 		}
@@ -391,7 +424,11 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 			msg = friendlyRunError(ev.Err)
 		}
 		// Close any open prose bubble, then surface the failure as its own discrete
-		// notice turn rather than a bracketed marker dumped into the text.
+		// notice turn rather than a bracketed marker dumped into the text. The
+		// partial delta text above the error block (if any) stays — what arrived
+		// before the failure is information — but its pending counter must not
+		// leak into the next turn's reconciliation.
+		m.deltaPending = 0
 		m.chat.FinishStream(streamID)
 		m.chat.Reindex(streamID)
 		m.chat.Append(message.Message{
@@ -406,6 +443,7 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		// appears between the current assistant bubble and the next one.
 		m.chat.Stream(streamID, "\nContext auto-compacted — older turns summarised to free space.\n")
 	case agent.EventTurnFinished:
+		m.deltaPending = 0
 		if text := assistantText(ev.Message); text != "" {
 			m.chat.Stream(streamID, text)
 		}

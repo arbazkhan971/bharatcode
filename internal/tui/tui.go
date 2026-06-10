@@ -358,6 +358,15 @@ type model struct {
 	// event renders, letting handleRunDone cover only the error paths that
 	// return without publishing an event (which would otherwise be silent).
 	turnErrShown bool
+	// deltaPending counts the bytes appended to the assistant stream bubble by
+	// EventLLMDelta events that have not yet been reconciled against canonical
+	// text. EventLLMResponse truncates exactly this many bytes and re-appends
+	// the call's full text (healing any deltas the lossy bus dropped);
+	// EventLLMStreamStart does the same rewind when a retried provider attempt
+	// re-streams from the beginning. Bubble-closing events (tool call, turn
+	// finish, run error, loop detection) reset the counter so already-closed
+	// text is never truncated.
+	deltaPending int
 	// lastTurnTokens is the formatted token-count segment for the most recently
 	// completed turn (e.g. "1.2k in · 234 out"). It is cleared when a new turn
 	// starts and set once the turn finishes, so the bar shows idle-turn stats
@@ -1010,10 +1019,23 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		// Clear an active scrollback search so the viewport is unpinned and the
 		// "search N/M" status segment disappears, the way an editor or pager
-		// cancels its search on Esc.
+		// cancels its search on Esc. The Esc is consumed: clearing the search
+		// and clearing the prompt are separate presses.
 		if m.search.active() {
 			m.search.reset()
 			m.status.Search = m.search.statusSegment()
+			return m, nil
+		}
+		// Esc on a non-empty prompt abandons the draft — the natural escape
+		// hatch after a history recall or a half-typed prompt, matching Claude
+		// Code's prompt behavior. The text is pushed to undo (not the
+		// kill-ring) so an accidental Esc is one Ctrl+Z from restored, and the
+		// recall walk and completion cycle reset so the next ↑ starts fresh.
+		if m.focus == focusInput && m.input.Len() > 0 {
+			m.inputHistory.pushUndo(m.input.String())
+			m.setInput("")
+			m.inputHistory.resetRecall()
+			m.inputHistory.resetCompletion()
 		}
 		return m, nil
 	case "enter":
@@ -1746,7 +1768,7 @@ func (m *model) renderMain() string {
 	// placeholder (shown on an empty focused buffer), the block cursor, and
 	// word-wrap, replacing the hand-rolled renderInputArea + "▌" glyph.
 	focused := m.focus == focusInput
-	m.textInput = syncPromptInput(m.textInput, m.input.String(), m.input.Cursor(), focused, m.width)
+	m.textInput = syncPromptInput(m.textInput, m.input.String(), m.input.Cursor(), focused, m.width, m.height)
 	input := renderPromptInput(m.textInput)
 	// Surface the slash-completion menu beneath the prompt so the commands Tab
 	// would cycle through are discoverable without pressing it. It occupies one

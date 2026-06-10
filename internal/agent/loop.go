@@ -1241,6 +1241,13 @@ func (l *Loop) callProvider(ctx context.Context, history []message.Message) (mes
 		return message.Message{}, nil, nil, err
 	}
 
+	// Announce the attempt before forwarding any deltas so consumers can
+	// discard text streamed by a previous attempt of this same call (a
+	// transient failure retried by callProviderWithRetry re-streams the
+	// response from the beginning).
+	streamSessionID := sessionIDFromHistory(history)
+	l.publish(ctx, Event{SessionID: streamSessionID, AgentName: l.name, Kind: EventLLMStreamStart})
+
 	var text string
 	var calls []pendingToolCall
 	var usage *llm.Usage
@@ -1280,6 +1287,11 @@ func (l *Loop) callProvider(ctx context.Context, history []message.Message) (mes
 			switch e := ev.(type) {
 			case llm.DeltaTextEvent:
 				text += e.Text
+				// Forward the chunk so the TUI can render assistant prose as it
+				// arrives. Delivery is lossy under load by design; the
+				// EventLLMResponse published after the stream closes carries the
+				// canonical full text consumers reconcile against.
+				l.publish(ctx, Event{SessionID: streamSessionID, AgentName: l.name, Kind: EventLLMDelta, Delta: e.Text})
 			case llm.ToolUseStartEvent:
 				call := &pendingToolCall{ID: e.ID, Name: e.Name}
 				openCalls[e.ID] = call

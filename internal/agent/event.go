@@ -32,6 +32,17 @@ const (
 	// threshold. The TUI surfaces this as an inline notice so users know why
 	// the visible history shrank.
 	EventAutoCompacted
+	// EventLLMStreamStart indicates one provider stream attempt began. It is
+	// published before any EventLLMDelta of that attempt so consumers can
+	// discard text streamed by a previous failed attempt (a transient error
+	// retried by the loop re-streams the response from the beginning).
+	EventLLMStreamStart
+	// EventLLMDelta carries one incremental chunk of assistant text while the
+	// provider stream is in flight, in the Delta field. Deltas are advisory
+	// and lossy under load: the EventLLMResponse that follows carries the
+	// complete canonical text, so consumers must reconcile against it rather
+	// than rely on having seen every delta.
+	EventLLMDelta
 )
 
 // Event is published for significant agent-loop transitions.
@@ -49,7 +60,10 @@ type Event struct {
 	// that is appended to the conversation history. It is set on
 	// EventToolResult so consumers can render the output inline.
 	ToolResult string
-	Err        error
+	// Delta carries one incremental chunk of assistant text. It is set on
+	// EventLLMDelta only.
+	Delta string
+	Err   error
 }
 
 // ErrUnknownAgent is returned when a requested named agent is not configured.

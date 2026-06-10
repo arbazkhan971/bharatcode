@@ -72,13 +72,21 @@ func newModelsCmd() *cobra.Command {
 				output   float64
 			}{}, nil...)
 			for _, m := range cfg.Models {
+				// Show the effective context window: a compat override takes
+				// precedence over the catalog value, mirroring the registry's
+				// resolution, so the listing reflects what the agent will
+				// actually enforce rather than the raw config field.
+				contextWindow := m.ContextWindow
+				if m.Compat != nil && m.Compat.ContextWindow != nil && *m.Compat.ContextWindow > 0 {
+					contextWindow = *m.Compat.ContextWindow
+				}
 				models = append(models, struct {
 					provider string
 					id       string
 					context  int
 					input    float64
 					output   float64
-				}{m.Provider, m.ID, m.ContextWindow, m.InputPricePerMTokUSD, m.OutputPricePerMTokUSD})
+				}{m.Provider, m.ID, contextWindow, m.InputPricePerMTokUSD, m.OutputPricePerMTokUSD})
 			}
 			sort.Slice(models, func(i, j int) bool {
 				if models[i].provider == models[j].provider {

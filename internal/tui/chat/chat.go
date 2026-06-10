@@ -178,6 +178,33 @@ func (l *List) Stream(id string, delta string) {
 	l.items[idx].cachedBody = ""
 }
 
+// TruncateStreamTail removes the last n bytes from the identified item's body.
+// The agent-event handler uses it to reconcile provisional streamed deltas
+// against the canonical full text that arrives when the provider call
+// completes (and to rewind a failed attempt's partial text before a retry
+// re-streams it). n is clamped to the body length; n <= 0 and unknown ids are
+// no-ops. The incremental prefix cache is reset when the truncated body no
+// longer covers the cached prefix, so a stale prefix can never leak into the
+// next render.
+func (l *List) TruncateStreamTail(id string, n int) {
+	idx, ok := l.index[id]
+	if !ok || n <= 0 {
+		return
+	}
+	body := l.items[idx].body
+	if n > len(body) {
+		n = len(body)
+	}
+	l.items[idx].body = body[:len(body)-n]
+	l.items[idx].cachedWidth = 0
+	l.items[idx].cachedBody = ""
+	if l.items[idx].streamPrefixSrcLen > len(l.items[idx].body) {
+		l.items[idx].streamPrefixSrcLen = 0
+		l.items[idx].streamPrefixAnsi = ""
+		l.items[idx].streamPrefixWidth = 0
+	}
+}
+
 // SetRole overrides the role of the streamed item with the given id. Stream
 // creates items as assistant turns; the user-prompt echo uses this to relabel
 // its item as a user turn so it renders with the "user" header and accent rather

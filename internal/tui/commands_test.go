@@ -2002,8 +2002,9 @@ func TestBuildHandoffDraft_EmptySession(t *testing.T) {
 }
 
 // TestBuildHandoffDraft_IncludesAllFields asserts the assembled draft contains
-// the goal, file count, recent message text, and the editorial marker so the
-// caller can verify every structural field in isolation.
+// the goal, file count, and recent message text — and that no editorial footer
+// addressed to the user leaks into the body, since an unedited draft is sent
+// verbatim to the successor session's model.
 func TestBuildHandoffDraft_IncludesAllFields(t *testing.T) {
 	t.Parallel()
 
@@ -2017,7 +2018,31 @@ func TestBuildHandoffDraft_IncludesAllFields(t *testing.T) {
 	require.Contains(t, draft, "3", "changed-file count must appear in the draft")
 	require.Contains(t, draft, "write the tests", "recent user turn must appear in the draft")
 	require.Contains(t, draft, "tests written", "recent assistant turn must appear in the draft")
-	require.Contains(t, draft, "Review and refine", "editorial marker must appear in the draft")
+	require.NotContains(t, draft, "Review and refine",
+		"editorial guidance belongs in the Handoff dialog, not in the draft the model receives")
+}
+
+// TestBuildHandoffDraft_SkipsGoalRepeatInContext asserts a recent-context turn
+// that merely repeats the goal verbatim is dropped (a one-exchange session
+// otherwise carries the same prompt twice), while distinct turns survive.
+func TestBuildHandoffDraft_SkipsGoalRepeatInContext(t *testing.T) {
+	t.Parallel()
+
+	msgs := []message.Message{
+		{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "fix the race condition"}}},
+		{Role: message.RoleAssistant, Content: []message.ContentBlock{message.TextBlock{Text: "I found it in the scheduler"}}},
+	}
+	draft := buildHandoffDraft("fix the race condition", 0, msgs)
+
+	require.Equal(t, 1, strings.Count(draft, "fix the race condition"),
+		"the goal text must appear exactly once — on the Goal line, not again in recent context")
+	require.Contains(t, draft, "I found it in the scheduler",
+		"turns that differ from the goal must stay in recent context")
+
+	// When every sampled turn is a goal-repeat, the Recent context heading is
+	// omitted entirely rather than left dangling over nothing.
+	onlyRepeat := buildHandoffDraft("fix the race condition", 0, msgs[:1])
+	require.NotContains(t, onlyRepeat, "Recent context")
 }
 
 // TestSlashHandoff_InSlashCommands asserts /handoff appears in the completable

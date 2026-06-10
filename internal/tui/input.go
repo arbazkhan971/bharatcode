@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	"github.com/arbazkhan971/bharatcode/internal/tui/styles"
 	"github.com/charmbracelet/bubbles/v2/help"
 	"github.com/charmbracelet/bubbles/v2/textarea"
@@ -100,15 +102,48 @@ func newPromptInput() textarea.Model {
 	return ta
 }
 
+// maxPromptInputRows caps how many rows the prompt textarea may grow to when
+// the buffer holds multi-line content. Ten rows is enough to review a typical
+// prefilled draft (e.g. /handoff) without the prompt swallowing the
+// transcript; taller content scrolls inside the textarea as before.
+const maxPromptInputRows = 10
+
+// promptInputRows returns the number of rows the prompt textarea should show
+// for value inside a terminal of the given total height: the buffer's logical
+// line count, capped by maxPromptInputRows and by a third of the screen so a
+// short terminal always keeps the transcript and chrome visible. The result is
+// never less than one.
+func promptInputRows(value string, screenHeight int) int {
+	rows := strings.Count(value, "\n") + 1
+	limit := maxPromptInputRows
+	if byScreen := screenHeight / 3; byScreen < limit {
+		limit = byScreen
+	}
+	if rows > limit {
+		rows = limit
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
 // syncPromptInput mirrors the canonical prompt buffer (value) into the textarea
 // and reconciles focus and width before rendering. The model keeps value as its
 // source of truth (so history/undo/recall/completion stay authoritative); this
 // pushes the latest text and cursor-relevant state into the widget so its View
 // reflects the buffer. Focus is toggled so the cursor only shows when the prompt
-// holds focus, matching the previous "▌"-when-focused behavior.
-func syncPromptInput(ta textarea.Model, value string, cursor int, focused bool, width int) textarea.Model {
+// holds focus, matching the previous "▌"-when-focused behavior. The visible
+// height tracks the buffer's line count (see promptInputRows) so multi-line
+// content — a pasted block, an Alt+Enter prompt, a /handoff draft — is
+// reviewable rather than peeking through a one-row slot; renderMain's dynamic
+// input-panel accounting shrinks the transcript to absorb the growth.
+func syncPromptInput(ta textarea.Model, value string, cursor int, focused bool, width int, screenHeight int) textarea.Model {
 	if w := promptInputWidth(width); w > 0 {
 		ta.SetWidth(w)
+	}
+	if rows := promptInputRows(value, screenHeight); ta.Height() != rows {
+		ta.SetHeight(rows)
 	}
 	if ta.Value() != value {
 		ta.SetValue(value)

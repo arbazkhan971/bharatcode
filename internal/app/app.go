@@ -158,6 +158,12 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	if opts.LogToFile {
 		logger, logFile = newLoggerToFile(defaultLogPath(), opts.Verbose)
 	}
+	// Route package-level slog calls (ledger, agent loop, providers) through
+	// the same destination decision as app.Logger. Without this, subsystems
+	// that log via the slog default still write to stderr and corrupt the TUI
+	// (e.g. the ledger's "Recorded LLM call" printing over the status bar) even
+	// though the file-backed logger exists precisely to prevent that.
+	slog.SetDefault(logger)
 	rootCtx, cancel := context.WithCancel(ctx)
 	app := &App{
 		Logger:     logger,

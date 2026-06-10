@@ -94,6 +94,50 @@ func TestInputHistory_DraftPreservedAcrossRecall(t *testing.T) {
 	require.Equal(t, "draft text", m.input.String(), "Down restores the preserved live draft")
 }
 
+// TestEsc_ClearsPromptAndIsUndoable proves Esc abandons a non-empty prompt
+// draft (the escape hatch after a history recall or a half-typed prompt), that
+// the cleared text is one Ctrl+Z from restored, and that Esc on an empty
+// prompt stays a no-op.
+func TestEsc_ClearsPromptAndIsUndoable(t *testing.T) {
+	t.Parallel()
+	m := newSizedModel(t)
+	typeString(t, m, "half a thought")
+
+	_, _ = m.Update(keySpecial("esc", tea.KeyEscape))
+	require.Empty(t, m.input.String(), "Esc must clear the non-empty prompt")
+
+	// The clear is undoable, so an accidental Esc loses nothing.
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'z', Mod: tea.ModCtrl}))
+	require.Equal(t, "half a thought", m.input.String())
+
+	_, _ = m.Update(keySpecial("esc", tea.KeyEscape))
+	_, _ = m.Update(keySpecial("esc", tea.KeyEscape))
+	require.Empty(t, m.input.String(), "Esc on an empty prompt stays a no-op")
+}
+
+// TestEsc_ClearsRecalledEntry proves Esc ends a recall walk and empties the
+// buffer, so typing afterwards starts a fresh prompt rather than appending to
+// the recalled text (the "/handoff" + "/tabs" → "/handoff/tabs" trap).
+func TestEsc_ClearsRecalledEntry(t *testing.T) {
+	h := newAgentHarness(t, oneTurnScript(1))
+	m := h.model
+
+	submitPrompt(t, h, "first prompt")
+	_, _ = m.Update(keyUp())
+	require.Equal(t, "first prompt", m.input.String(), "test premise: Up recalls the entry")
+
+	_, _ = m.Update(keySpecial("esc", tea.KeyEscape))
+	require.Empty(t, m.input.String())
+
+	typeString(t, m, "/tabs")
+	require.Equal(t, "/tabs", m.input.String(), "fresh typing must not concatenate onto recalled text")
+
+	// The walk reset: the next Up starts from the newest entry again. The
+	// /tabs draft is preserved under it, per the draft-across-recall contract.
+	_, _ = m.Update(keyUp())
+	require.Equal(t, "first prompt", m.input.String())
+}
+
 // TestInputHistory_EditResetsRecallCursor asserts that editing the buffer ends
 // the recall walk so the next Up starts again from the most recent entry.
 func TestInputHistory_EditResetsRecallCursor(t *testing.T) {

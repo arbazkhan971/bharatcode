@@ -405,6 +405,13 @@ func runJSON(cmd *cobra.Command, application *app.App, loop *agent.Loop, session
 
 // emitEvent encodes ev as one NDJSON line and flushes it immediately.
 func emitEvent(enc *json.Encoder, out io.Writer, ev agent.Event) {
+	// The per-delta streaming kinds exist for live TUI rendering; the NDJSON
+	// stream keeps its one-canonical-llm_response-per-call contract, so they
+	// are not emitted here. Consumers that want token-level granularity can
+	// subscribe to the bus directly.
+	if ev.Kind == agent.EventLLMDelta || ev.Kind == agent.EventLLMStreamStart {
+		return
+	}
 	// json.Encoder.Encode appends a trailing newline, giving NDJSON framing.
 	_ = enc.Encode(newRunEvent(ev))
 	if flusher, ok := out.(interface{ Flush() error }); ok {

@@ -79,6 +79,38 @@ func twoModelTestConfig() string {
 }`
 }
 
+// TestModelsListShowsCompatContextOverride verifies the listing shows the
+// EFFECTIVE context window — a compat.context_window override must replace the
+// catalog value, mirroring the registry's resolution, so a user checking their
+// override sees it applied.
+func TestModelsListShowsCompatContextOverride(t *testing.T) {
+	cfg := strings.Replace(twoModelTestConfig(),
+		`      "id": "deepseek-chat",
+      "provider": "deepseek",
+      "context_window": 64000,`,
+		`      "id": "deepseek-chat",
+      "provider": "deepseek",
+      "context_window": 64000,
+      "compat": {"context_window": 99000},`,
+		1)
+	require.Contains(t, cfg, "99000", "test premise: compat block injected")
+	configPath := writeConfig(t, cfg)
+
+	stdout, stderr, err := executeRoot(t, "--config", configPath, "models")
+	require.NoError(t, err)
+	require.Empty(t, stderr)
+
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.Contains(line, "deepseek-chat") {
+			require.Contains(t, line, "99000", "compat override must be the listed context window")
+			require.NotContains(t, line, "64000")
+		}
+		if strings.Contains(line, "deepseek-reasoner") {
+			require.Contains(t, line, "64000", "model without compat keeps its catalog window")
+		}
+	}
+}
+
 func TestModelsPickPersistsSelection(t *testing.T) {
 	configPath := writeConfig(t, twoModelTestConfig())
 	require.Equal(t, "deepseek-chat", readDefaultModel(t, configPath))

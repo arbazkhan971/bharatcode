@@ -111,10 +111,12 @@ func (e UIEvent) mustDeliver() bool {
 // as still running.
 func agentEventMustDeliver(kind agent.EventKind) bool {
 	switch kind {
-	case agent.EventLLMResponse, agent.EventToolResult:
+	case agent.EventLLMResponse, agent.EventToolResult, agent.EventLLMDelta:
 		// Streaming assistant output and tool-result chunks are the dominant
 		// volume and are safe to drop occasionally — the buffer is sized for
-		// the burst and the next event supersedes a missed one.
+		// the burst and the next event supersedes a missed one. Text deltas
+		// are the highest-frequency kind of all and reconcile against the
+		// canonical EventLLMResponse, so dropping one never corrupts the view.
 		return false
 	default:
 		// Turn start/finish, the tool-call announcement, loop detection,

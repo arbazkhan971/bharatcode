@@ -610,6 +610,14 @@ func (l *Loop) compactHistory(ctx context.Context, history []message.Message) ([
 			condensed = append(condensed, latest)
 		}
 	}
+
+	// Preserve the set of files the session has read and edited as an explicit
+	// frame, so compaction never makes the agent re-read a file it already saw or
+	// clobber one it already edited. The frame is prepended (ahead of the genuine
+	// latest user message) and folds in any prior frame, so the census is durable
+	// across repeated compactions. A text-only conversation touches no files and
+	// is returned unchanged.
+	condensed = preserveTouchedFiles(history, condensed)
 	return condensed, nil
 }
 

@@ -91,3 +91,16 @@ func TestJobListOrderedNewestFirst(t *testing.T) {
 	require.NotEqual(t, -1, idxSecond)
 	require.Less(t, idxSecond, idxFirst, "newest-started job should be listed first")
 }
+
+func TestQuoteJobCommandEscapesStructureAndCapsLength(t *testing.T) {
+	cmd := "echo one\nstatus\tforged" + strings.Repeat("x", maxJobListCommandRunes+20)
+
+	got := quoteJobCommand(cmd)
+
+	require.True(t, strings.HasPrefix(got, `"`))
+	require.NotContains(t, strings.Trim(got, `"`), "\n")
+	require.NotContains(t, strings.Trim(got, `"`), "\t")
+	require.Contains(t, got, `\n`)
+	require.Contains(t, got, `\t`)
+	require.Contains(t, got, "…")
+}

@@ -60,9 +60,9 @@ func newRunCmd() *cobra.Command {
 			}
 			defer closeApp(cmd.Context(), application)
 
-			projectPath := opts.projectDir
-			if projectPath == "" {
-				projectPath = "."
+			projectPath, err := canonicalProjectPath(opts.projectDir)
+			if err != nil {
+				return err
 			}
 
 			s, err := resolveRunSession(cmd.Context(), application, projectPath,
@@ -173,7 +173,10 @@ func resolveRunSession(ctx context.Context, application *app.App, projectPath,
 			ProjectPath: projectPath,
 			Limit:       1,
 		})
-		if err == nil && len(sessions) > 0 {
+		if err != nil {
+			return nil, fmt.Errorf("resuming latest session: %w", err)
+		}
+		if len(sessions) > 0 {
 			return &sessions[0], nil
 		}
 		// No prior session: fall through and create a new one.

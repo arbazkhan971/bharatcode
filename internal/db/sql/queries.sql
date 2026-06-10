@@ -146,14 +146,13 @@ WHERE created_at >= ? AND created_at <= ?;
 -- name: GetLatestSessionByProjectPath :one
 SELECT * FROM sessions
 WHERE project_path = ?
-ORDER BY updated_at DESC
+ORDER BY updated_at DESC, created_at DESC, id DESC
 LIMIT 1;
 
 -- name: ListSessionsFiltered :many
 SELECT * FROM sessions
 WHERE (CAST(? AS TEXT) = '' OR project_path = CAST(? AS TEXT))
   AND (updated_at >= CAST(? AS INTEGER))
-ORDER BY updated_at DESC
+ORDER BY updated_at DESC, created_at DESC, id DESC
 LIMIT CASE WHEN CAST(? AS INTEGER) <= 0 THEN -1 ELSE CAST(? AS INTEGER) END;
-
 

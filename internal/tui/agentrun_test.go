@@ -462,6 +462,12 @@ func (h *agentHarness) dispatchBatchResult(msg tea.Msg) {
 // caller should loop back to re-check its stop condition.
 const listenPollTimeout = 100 * time.Millisecond
 
+// drainSettle is how long drain waits for a straggler event after the run is
+// done and the bus looks empty, before concluding the turn is fully rendered. It
+// absorbs the brief window where runDoneMsg has flipped m.running but the turn's
+// final event is still being fanned out from the broker into m.eventCh.
+const drainSettle = 50 * time.Millisecond
+
 // run executes one command (and any batched sub-commands), feeding each
 // produced message back into Update and recursively pumping the results until
 // the command chain naturally drains (a listen command finds the bus quiet).
@@ -519,7 +525,20 @@ func (h *agentHarness) drain(t *testing.T, done func() bool) {
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		if done() && len(h.model.eventCh) == 0 {
-			return
+			// The run is done and the bus looks empty — but runDoneMsg can flip
+			// m.running a hair before the turn's final event finishes fanning out
+			// from the broker into m.eventCh. Wait a brief settle for a straggler
+			// rather than concluding immediately: if one arrives, render it and
+			// keep looping; only a quiet settle ends the drain. This is monotonic —
+			// it can only render MORE of the turn's events, never fewer — so it
+			// removes the terminator race without changing any on-time outcome.
+			select {
+			case ev := <-h.model.eventCh:
+				_, _ = h.model.Update(uiEventMsg(ev))
+				continue
+			case <-time.After(drainSettle):
+				return
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("drain timed out; running=%v goalActive=%v buffered=%d",

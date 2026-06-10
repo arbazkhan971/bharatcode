@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -246,7 +247,12 @@ type model struct {
 	footer        tuiledger.Footer
 	status        statusbar.Bar
 	notifications *notification.FocusAware
-	input         strings.Builder
+	// input is the canonical prompt buffer. It is a cursor-aware line editor (see
+	// lineEditor) rather than a bare strings.Builder, so the prompt supports
+	// mid-line editing — word navigation, the Emacs kill-ring, and cursor-relative
+	// insert/delete — while keeping the builder-compatible surface the rest of the
+	// model already drives it through.
+	input lineEditor
 	// textInput is the bubbles textarea that renders the prompt (the "› " glyph,
 	// placeholder, cursor, and word-wrap). The input buffer above remains the
 	// canonical prompt text — driving history, undo/redo, recall, completion, and
@@ -256,6 +262,11 @@ type model struct {
 	// keys is the global keymap surfaced in the footer help bar and matched in
 	// handleKey via key.Matches.
 	keys keyMap
+	// autocomplete is the composed completion source for the prompt: slash
+	// commands, gitignore-aware @-file references, and @-mentions, ranked by the
+	// scored fuzzy matcher. It is rebuilt by rebuildAutocomplete whenever the
+	// command set or workspace root changes.
+	autocomplete *autocomplete
 	// help renders the muted footer help bar from keys.
 	help help.Model
 	// streamSpinner animates the MiniDot braille glyph while the agent is
@@ -544,6 +555,10 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	// after the fact.
 	m.inputHistory.setDynamicCommands(dynamicSlashNames(m.deps))
 	m.inputHistory.setDynamicDescriptions(dynamicSlashDescriptions(m.deps))
+	// Build the composed autocomplete source — slash commands, gitignore-aware
+	// @-file references, and @-mentions — over the freshly wired command set and
+	// workspace root, so the prompt has one place to ask "what completes here?".
+	m.rebuildAutocomplete()
 	// Seed the single default tab from the freshly wired active state. With one
 	// tab the tab bar stays hidden, so the default render is unchanged.
 	m.initTabs()
@@ -660,7 +675,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == focusInput {
 			s := string(msg)
 			m.inputHistory.pushUndo(m.input.String())
-			m.input.WriteString(s)
+			m.input.insert(s)
 			m.inputHistory.resetRecall()
 			m.inputHistory.resetCompletion()
 		}
@@ -961,7 +976,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// benefits from structure. Mirrors Shift+Enter in Claude Code / goose.
 		if m.focus == focusInput {
 			m.inputHistory.pushUndo(m.input.String())
-			m.input.WriteByte('\n')
+			m.input.insert("\n")
 			m.inputHistory.resetRecall()
 			m.inputHistory.resetCompletion()
 		}
@@ -980,39 +995,112 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "ctrl+y":
-		// Redo reinstates the most recently undone edit, the standard counterpart
-		// to Ctrl+Z. It is a no-op when there is nothing to redo (no prior undo,
-		// or a new edit has already cleared the redo history).
+		// Ctrl+Y first redoes the most recently undone edit, the standard
+		// counterpart to Ctrl+Z. With nothing to redo it falls through to the
+		// kill-ring yank (the Emacs C-y), inserting the most recent kill at the
+		// cursor — so the one chord serves both the redo a typist expects and the
+		// paste-from-kill-ring an Emacs user reaches for. Redo takes precedence so
+		// the established undo/redo behavior is unchanged whenever a redo is pending.
 		if restored, ok := m.inputHistory.redoInput(m.input.String()); ok {
 			m.setInput(restored)
+			m.inputHistory.resetRecall()
+			m.inputHistory.resetCompletion()
+			return m, nil
+		}
+		if m.focus == focusInput {
+			m.inputHistory.pushUndo(m.input.String())
+			if m.input.yank() {
+				m.inputHistory.resetRecall()
+				m.inputHistory.resetCompletion()
+			}
+		}
+		return m, nil
+	case "alt+y":
+		// Alt+Y is yank-pop (the Emacs M-y): right after a Ctrl+Y yank it replaces
+		// the just-yanked text with the next older kill-ring entry, cycling the ring
+		// on repeated presses. It is inert except immediately after a yank.
+		if m.focus == focusInput {
+			m.inputHistory.pushUndo(m.input.String())
+			if m.input.yankPop() {
+				m.inputHistory.resetRecall()
+				m.inputHistory.resetCompletion()
+			}
+		}
+		return m, nil
+	case "left":
+		// Move the cursor one rune toward the start of the prompt, so the input
+		// supports mid-line editing rather than only end-of-line appends.
+		if m.focus == focusInput {
+			m.input.left()
+		}
+		return m, nil
+	case "right":
+		if m.focus == focusInput {
+			m.input.right()
+		}
+		return m, nil
+	case "ctrl+e":
+		// Jump the cursor to the end of the prompt (the readline end-of-line key);
+		// Ctrl+A is taken by the agent picker, so end-of-line is the one offered.
+		if m.focus == focusInput {
+			m.input.end()
+		}
+		return m, nil
+	case "alt+b":
+		// Move the cursor back one word (the Emacs backward-word, M-b), stepping over
+		// punctuation and whitespace to the previous word's first rune.
+		if m.focus == focusInput {
+			m.input.wordLeft()
+		}
+		return m, nil
+	case "alt+f":
+		// Move the cursor forward one word (the Emacs forward-word, M-f).
+		if m.focus == focusInput {
+			m.input.wordRight()
+		}
+		return m, nil
+	case "alt+d":
+		// Kill the word forward from the cursor into the kill-ring (the Emacs
+		// kill-word, M-d). Consecutive kills accumulate so they yank back together.
+		if m.focus == focusInput {
+			m.inputHistory.pushUndo(m.input.String())
+			m.input.killWordForward()
+			m.inputHistory.resetRecall()
+			m.inputHistory.resetCompletion()
+		}
+		return m, nil
+	case "alt+k":
+		// Kill from the cursor to the end of the line into the kill-ring. The Emacs
+		// kill-line is C-k, but Ctrl+K opens the command palette here, so the
+		// word-edit binding moves to Alt+K; the kill-ring semantics are unchanged.
+		if m.focus == focusInput {
+			m.inputHistory.pushUndo(m.input.String())
+			m.input.killLineForward()
 			m.inputHistory.resetRecall()
 			m.inputHistory.resetCompletion()
 		}
 		return m, nil
 	case "backspace":
-		s := m.input.String()
-		if s != "" {
-			m.inputHistory.pushUndo(s)
-			r := []rune(s)
-			m.input.Reset()
-			m.input.WriteString(string(r[:len(r)-1]))
+		if m.input.Len() != 0 {
+			m.inputHistory.pushUndo(m.input.String())
+			m.input.backspace()
 		}
 		// Editing the buffer cancels any recall walk and completion cycle.
 		m.inputHistory.resetRecall()
 		m.inputHistory.resetCompletion()
 		return m, nil
 	case "ctrl+u":
-		// Clear the whole prompt in one stroke, the readline "delete to start of
-		// line" binding. The input is an append-only buffer (no cursor), so there
-		// is nothing before a cursor to spare — Ctrl+U wipes it entirely, sparing
-		// the user from holding Backspace to discard a long mistyped prompt the way
-		// Claude Code and opencode let one clear the line. It is a no-op on an empty
-		// buffer and, like Backspace, cancels any recall walk and completion cycle.
+		// Clear the whole prompt in one stroke, the readline "delete line" binding,
+		// sparing the user from holding Backspace to discard a long mistyped prompt
+		// the way Claude Code and opencode let one clear the line. The cleared text
+		// is saved to the kill-ring so an accidental Ctrl+U can be yanked back. It is
+		// a no-op on an empty buffer and, like Backspace, cancels any recall walk and
+		// completion cycle.
 		if m.input.Len() == 0 {
 			return m, nil
 		}
 		m.inputHistory.pushUndo(m.input.String())
-		m.input.Reset()
+		m.input.killWholeLine()
 		m.inputHistory.resetRecall()
 		m.inputHistory.resetCompletion()
 		return m, nil
@@ -1021,23 +1109,21 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// between Backspace (one character) and Ctrl+U (the whole line) — so a user
 		// can discard a single mistyped word without holding Backspace, matching the
 		// word-delete editing Claude Code and opencode support at the prompt. The
-		// append-only buffer has no cursor, so "word" means the last one. It is a
+		// removed word is saved to the kill-ring so it can be yanked back. It is a
 		// no-op on an empty buffer and, like the other edits, cancels any recall walk
 		// and completion cycle.
-		s := m.input.String()
-		if s == "" {
+		if m.input.Len() == 0 {
 			return m, nil
 		}
-		m.inputHistory.pushUndo(s)
-		m.input.Reset()
-		m.input.WriteString(deleteLastWord(s))
+		m.inputHistory.pushUndo(m.input.String())
+		m.input.killWordBackwardUnix()
 		m.inputHistory.resetRecall()
 		m.inputHistory.resetCompletion()
 		return m, nil
 	default:
 		if msg.Key().Text != "" {
 			m.inputHistory.pushUndo(m.input.String())
-			m.input.WriteString(msg.Key().Text)
+			m.input.insert(msg.Key().Text)
 			// Typing cancels any recall walk and completion cycle.
 			m.inputHistory.resetRecall()
 			m.inputHistory.resetCompletion()
@@ -1131,8 +1217,64 @@ func deleteLastWord(s string) string {
 // setInput replaces the input buffer with s. It is used by Tab completion,
 // which manages its own cycle state and so must not reset it here.
 func (m *model) setInput(s string) {
-	m.input.Reset()
-	m.input.WriteString(s)
+	m.input.setText(s)
+}
+
+// rebuildAutocomplete (re)constructs the composed completion source from the
+// current command set and workspace root. It is called at startup and whenever
+// the dynamic command set changes, so the slash provider always reflects the
+// recipes and custom prompts currently loaded. The mention roster is the
+// configured agent names, so "@" completes both workspace files and agents.
+func (m *model) rebuildAutocomplete() {
+	m.autocomplete = newAutocomplete(
+		newSlashProvider(m.inputHistory.candidates(), slashCompletionDescriptions(&m.inputHistory)),
+		newFileProvider(m.workspaceRoot),
+		newMentionProvider(m.mentionRoster()),
+	)
+}
+
+// suggestCompletions returns the merged, ranked completions for the current
+// prompt buffer and the rune offset where a chosen candidate splices in, via the
+// composed autocomplete source. It returns a nil slice and start -1 when nothing
+// completes the buffer. The composer is built lazily so a model constructed
+// without rebuildAutocomplete (e.g. a bare test fixture) still answers.
+func (m *model) suggestCompletions() (cands []Candidate, start int) {
+	if m.autocomplete == nil {
+		m.rebuildAutocomplete()
+	}
+	return m.autocomplete.suggest(m.input.String())
+}
+
+// mentionRoster returns the names offered as @-mentions: the configured agent
+// names. It is empty when no agents are configured, leaving "@" to complete
+// files only.
+func (m *model) mentionRoster() []string {
+	if m.deps.Cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(m.deps.Cfg.Agents))
+	for _, a := range m.deps.Cfg.Agents {
+		if a.Name != "" {
+			names = append(names, a.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// slashCompletionDescriptions returns a description map keyed by "/name" for the
+// slash autocomplete provider: the built-in command glosses merged with any
+// dynamic recipe and custom-prompt descriptions, so a completed command carries
+// the same one-line gloss the palette and slash hint show.
+func slashCompletionDescriptions(s *inputState) map[string]string {
+	out := make(map[string]string, len(slashCommandDescriptions)+len(s.dynamicDescriptions))
+	for k, v := range slashCommandDescriptions {
+		out[k] = v
+	}
+	for k, v := range s.dynamicDescriptions {
+		out[k] = v
+	}
+	return out
 }
 
 // setInputForRecall replaces the input buffer with a recalled history entry.
@@ -1144,7 +1286,7 @@ func (m *model) setInputForRecall(s string) {
 }
 
 func (m *model) submitInput() (tea.Model, tea.Cmd) {
-	text := strings.TrimSpace(m.input.String())
+	text := m.input.trimmedValue()
 	m.input.Reset()
 	// Record the submission for Up/Down recall and reset navigation, even for
 	// slash commands, mirroring shell history. record ignores blank text.
@@ -1502,7 +1644,7 @@ func (m *model) renderMain() string {
 	// placeholder (shown on an empty focused buffer), the block cursor, and
 	// word-wrap, replacing the hand-rolled renderInputArea + "▌" glyph.
 	focused := m.focus == focusInput
-	m.textInput = syncPromptInput(m.textInput, m.input.String(), focused, m.width)
+	m.textInput = syncPromptInput(m.textInput, m.input.String(), m.input.Cursor(), focused, m.width)
 	input := renderPromptInput(m.textInput)
 	// Surface the slash-completion menu beneath the prompt so the commands Tab
 	// would cycle through are discoverable without pressing it. It occupies one

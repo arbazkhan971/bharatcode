@@ -106,16 +106,18 @@ func newPromptInput() textarea.Model {
 // pushes the latest text and cursor-relevant state into the widget so its View
 // reflects the buffer. Focus is toggled so the cursor only shows when the prompt
 // holds focus, matching the previous "▌"-when-focused behavior.
-func syncPromptInput(ta textarea.Model, value string, focused bool, width int) textarea.Model {
+func syncPromptInput(ta textarea.Model, value string, cursor int, focused bool, width int) textarea.Model {
 	if w := promptInputWidth(width); w > 0 {
 		ta.SetWidth(w)
 	}
 	if ta.Value() != value {
 		ta.SetValue(value)
-		// Keep the cursor at the end of the buffer; the append-only model has no
-		// interior cursor, so end-of-input matches where edits land.
-		ta.CursorEnd()
 	}
+	// Position the textarea cursor to mirror the editor's interior cursor, so
+	// word-navigation and mid-line kills/yanks show the caret where edits will
+	// land rather than always at the end. cursor is a rune offset into value;
+	// place() converts it to the textarea's (row, column).
+	placeTextareaCursor(&ta, value, cursor)
 	if focused {
 		if !ta.Focused() {
 			ta.Focus()
@@ -131,6 +133,40 @@ func syncPromptInput(ta textarea.Model, value string, focused bool, width int) t
 		ta.Placeholder = ""
 	}
 	return ta
+}
+
+// placeTextareaCursor moves the textarea's caret to the rune offset cursor into
+// value, converting the flat offset to the (row, column) the textarea addresses.
+// It walks the widget to the top-left, steps down to the target row, then sets
+// the column — the public textarea API exposes only relative row moves and an
+// absolute column set, so the move is composed from those. A cursor past the end
+// clamps to the final character, matching the editor's own clamping.
+func placeTextareaCursor(ta *textarea.Model, value string, cursor int) {
+	runes := []rune(value)
+	if cursor > len(runes) {
+		cursor = len(runes)
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	row, col := 0, 0
+	for i := 0; i < cursor; i++ {
+		if runes[i] == '\n' {
+			row++
+			col = 0
+		} else {
+			col++
+		}
+	}
+	// Walk to the first row, then descend to the target row. CursorUp/CursorDown
+	// clamp at the ends, so over-stepping is safe.
+	for i := 0; i < ta.LineCount(); i++ {
+		ta.CursorUp()
+	}
+	for i := 0; i < row; i++ {
+		ta.CursorDown()
+	}
+	ta.SetCursorColumn(col)
 }
 
 // promptInputWidth derives the textarea's content width from the terminal width,

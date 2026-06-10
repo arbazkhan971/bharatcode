@@ -422,12 +422,22 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 // handleRunDone is invoked once a turn's loop.Run has fully returned. It closes
 // the assistant bubble, clears running state, and drives the autonomous goal
 // loop (CHANGE 2) when one is active. A run error aborts any goal loop.
+//
+// Sequencing note: runDoneMsg can be delivered to the Bubble Tea loop a
+// hair before the turn's final agent events (EventLLMResponse, EventTurnFinished)
+// have been dispatched from m.eventCh. Reindexing the assistant stream ID here
+// would detach it from the chat index, causing any straggler event to open a
+// fresh (duplicate) assistant bubble. We intentionally do NOT Reindex the
+// assistant stream after closing it: the per-turn suffix in assistantStreamID
+// already ensures the next turn opens a new bubble, so Reindex is redundant and
+// its only effect is to break the straggler invariant. A late delta folds
+// correctly into the existing finished item via the normal Stream path.
 func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	m.running = false
 	m.turnStartedAt = time.Time{}
 	m.currentActivity = ""
 	m.chat.FinishStream(m.assistantStreamID())
-	m.chat.Reindex(m.assistantStreamID())
+	// Do NOT Reindex here — see sequencing note in the function comment.
 	// Surface the turn's token counts (and per-turn USD cost when pricing is
 	// configured) in the status bar once the turn is done. The counts live on
 	// the last assistant message's Usage field, populated by the provider's
@@ -476,9 +486,9 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 			// Close any open prose bubble, then surface the failure as its own
 			// discrete notice turn — mirroring the EventRunError path above —
 			// rather than dumping a marker into the assistant text.
+			// Reindex is intentionally omitted here (see handleRunDone comment).
 			id := m.assistantStreamID()
 			m.chat.FinishStream(id)
-			m.chat.Reindex(id)
 			m.chat.Append(message.Message{
 				ID:      m.nextToolTurnID(),
 				Role:    message.RoleTool,
@@ -641,7 +651,10 @@ func (m *model) appendCompletionSummary(last *message.Message) {
 	}
 	id := m.assistantStreamID()
 	m.chat.FinishStream(id)
-	m.chat.Reindex(id)
+	// Reindex is intentionally omitted here (see handleRunDone comment): the
+	// next turn's assistantStreamID has a different suffix, so no Reindex is
+	// needed to give it a fresh bubble, and omitting it keeps the straggler
+	// invariant intact.
 	m.chat.Append(message.Message{
 		ID:      m.nextToolTurnID(),
 		Role:    message.RoleAssistant,

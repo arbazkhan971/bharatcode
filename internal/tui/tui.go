@@ -667,10 +667,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the TUI no longer sends on the request channel directly.
 		req := pubsub.PermissionRequest(msg)
 		m.dialogs.Push(&dialog.Permission{
-			Theme: m.theme,
-			Req:   req,
-			Grant: func() { m.deps.Workspace.GrantPermission(req, false) },
-			Deny:  func() { m.deps.Workspace.DenyPermission(req, "") },
+			Theme:       m.theme,
+			Req:         req,
+			Grant:       func() { m.deps.Workspace.GrantPermission(req, false) },
+			GrantAlways: func() { m.deps.Workspace.GrantPermission(req, true) },
+			Deny:        func() { m.deps.Workspace.DenyPermission(req, "") },
 		})
 		// Permission requests now share the consolidated stream with agent events,
 		// so re-issue the listener here (the former standalone permission
@@ -870,6 +871,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.input.Len() == 0 {
 			m.quitting = true
+			m.cancelEventSub()
 			return m, tea.Quit
 		}
 		m.deps.Workspace.Interrupt()
@@ -1343,6 +1345,7 @@ func (m *model) submitInput() (tea.Model, tea.Cmd) {
 		switch strings.ToLower(text) {
 		case "exit", "quit":
 			m.quitting = true
+			m.cancelEventSub()
 			return m, tea.Quit
 		}
 	}
@@ -1451,6 +1454,7 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		m.dialogs.Push(&dialog.Text{DialogID: "save", Title: "Saved", Body: "Session save requested.", Theme: m.theme})
 	case "/quit", "/exit":
 		m.quitting = true
+		m.cancelEventSub()
 		return m, tea.Quit
 	default:
 		return m.handleUnknownSlash(text)
@@ -2308,7 +2312,7 @@ func (m *model) slashHelpLines() []string {
 			lines = append(lines, "/"+e.Name+" - "+title)
 		}
 	}
-	// Append registered custom prompts (the pi-style /name slash commands) so
+	// Append registered custom prompts (the /name slash commands) so
 	// they are as discoverable as built-ins and recipes. The frontmatter
 	// description and argument hint, when present, document each command; with
 	// no description we fall back to the first line of the template.
@@ -2686,6 +2690,17 @@ func workingDir() string {
 		return ""
 	}
 	return wd
+}
+
+// cancelEventSub invokes the consolidated-event subscription cancel func stored
+// in m.eventCancel, if any, and clears it. Calling it at shutdown ensures the
+// backing goroutine the workspace's Subscribe started is not left running after
+// the Bubble Tea program exits. It is idempotent: a nil cancel is a no-op.
+func (m *model) cancelEventSub() {
+	if m.eventCancel != nil {
+		m.eventCancel()
+		m.eventCancel = nil
+	}
 }
 
 // runHeadlessForTest executes the program without terminal input or renderer.

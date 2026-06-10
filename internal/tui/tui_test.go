@@ -1377,3 +1377,147 @@ func TestKeybindings_AltEnterDocumented(t *testing.T) {
 	full := keybindingHelpBodyFiltered("")
 	require.Contains(t, full, "Alt+Enter", "/keys must document Alt+Enter")
 }
+
+// TestPermissionDialog_GrantAlways_CallsGrantAlwaysCallback asserts that pressing
+// "a" in the permission dialog invokes the GrantAlways callback (remember=true
+// path) rather than the allow-once Grant callback, so the session-scoped grant
+// store is reached when the user chooses "always allow this session".
+func TestPermissionDialog_GrantAlways_CallsGrantAlwaysCallback(t *testing.T) {
+	t.Parallel()
+
+	reply := make(chan pubsub.PermissionDecision, 1)
+
+	var grantCalled, grantAlwaysCalled bool
+	d := &dialog.Permission{
+		Req: pubsub.PermissionRequest{
+			Tool:   "bash",
+			Reason: "run something",
+			Reply:  reply,
+		},
+		Grant:       func() { grantCalled = true; reply <- pubsub.PermissionDecision{Approved: true} },
+		GrantAlways: func() { grantAlwaysCalled = true; reply <- pubsub.PermissionDecision{Approved: true} },
+		Deny:        func() { reply <- pubsub.PermissionDecision{Approved: false} },
+	}
+
+	handled, pop := d.HandleKey(keyText("a"))
+	require.True(t, handled, "key 'a' must be consumed by the dialog")
+	require.True(t, pop, "key 'a' must dismiss the dialog")
+	require.True(t, grantAlwaysCalled, "key 'a' must invoke GrantAlways (remember=true path)")
+	require.False(t, grantCalled, "key 'a' must not invoke the allow-once Grant callback")
+
+	dec := <-reply
+	require.True(t, dec.Approved, "the permission decision must be approved")
+}
+
+// TestPermissionDialog_AllowOnce_DoesNotCallGrantAlways asserts that pressing
+// "y" invokes only the allow-once Grant callback, leaving GrantAlways untouched.
+func TestPermissionDialog_AllowOnce_DoesNotCallGrantAlways(t *testing.T) {
+	t.Parallel()
+
+	reply := make(chan pubsub.PermissionDecision, 1)
+	var grantCalled, grantAlwaysCalled bool
+	d := &dialog.Permission{
+		Req: pubsub.PermissionRequest{
+			Tool:   "bash",
+			Reason: "run something",
+			Reply:  reply,
+		},
+		Grant:       func() { grantCalled = true; reply <- pubsub.PermissionDecision{Approved: true} },
+		GrantAlways: func() { grantAlwaysCalled = true; reply <- pubsub.PermissionDecision{Approved: true} },
+		Deny:        func() { reply <- pubsub.PermissionDecision{Approved: false} },
+	}
+
+	handled, pop := d.HandleKey(keyText("y"))
+	require.True(t, handled)
+	require.True(t, pop)
+	require.True(t, grantCalled, "key 'y' must invoke the allow-once Grant callback")
+	require.False(t, grantAlwaysCalled, "key 'y' must not invoke GrantAlways")
+}
+
+// TestPermissionDialog_PermissionRequestMsg_WiresGrantAlways asserts that when
+// the TUI receives a permissionRequestMsg it pushes a dialog with both Grant
+// and GrantAlways wired — so pressing "a" (always-allow) exercises the
+// remember=true code path in GrantPermission rather than the hardcoded false.
+func TestPermissionDialog_PermissionRequestMsg_WiresGrantAlways(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	reply := make(chan pubsub.PermissionDecision, 1)
+	req := pubsub.PermissionRequest{
+		Tool:   "bash",
+		Reason: "run something",
+		Reply:  reply,
+	}
+	// Deliver the permission request through the TUI's Update path.
+	_, _ = m.Update(permissionRequestMsg(req))
+
+	require.Equal(t, 1, m.dialogs.Len(), "a permission request must open the dialog")
+
+	// The rendered dialog must advertise the always-allow keybinding.
+	rendered := m.dialogs.Render(100)
+	require.Contains(t, rendered, "[a]", "dialog must show the always-allow keybinding")
+	require.Contains(t, rendered, "always this session", "dialog must label the always-allow option")
+
+	// Press "a" — the TUI fakeWorkspace.GrantPermission ignores the remember
+	// flag, but pressing "a" must still close the dialog and send an approval.
+	_, _ = m.Update(keyText("a"))
+	require.Equal(t, 0, m.dialogs.Len(), "key 'a' must dismiss the permission dialog")
+
+	select {
+	case dec := <-reply:
+		require.True(t, dec.Approved, "key 'a' must send an approving decision")
+	default:
+		t.Fatal("key 'a' must send a decision on the reply channel")
+	}
+}
+
+// TestCancelEventSub_IdempotentOnNilCancel asserts the cancelEventSub helper is
+// a no-op when no subscription has been established (eventCancel is nil), so
+// calling it at shutdown on a model that never reached Init is safe.
+func TestCancelEventSub_IdempotentOnNilCancel(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.eventCancel = nil // ensure cancel is nil
+	// Must not panic.
+	require.NotPanics(t, func() { m.cancelEventSub() })
+	require.Nil(t, m.eventCancel, "eventCancel must remain nil after a no-op cancel")
+}
+
+// TestCancelEventSub_ClearsAfterInvocation asserts that cancelEventSub invokes
+// the stored cancel function exactly once and then sets eventCancel to nil, so
+// subsequent calls are no-ops and a second Quit cannot double-cancel.
+func TestCancelEventSub_ClearsAfterInvocation(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	calls := 0
+	m.eventCancel = func() { calls++ }
+
+	m.cancelEventSub()
+	require.Equal(t, 1, calls, "cancelEventSub must invoke the cancel func once")
+	require.Nil(t, m.eventCancel, "eventCancel must be nil after cancellation")
+
+	// A second call must be a no-op (eventCancel was cleared).
+	m.cancelEventSub()
+	require.Equal(t, 1, calls, "a second cancelEventSub must not invoke the cancel func again")
+}
+
+// TestQuit_CancelsEventSub asserts that quitting via Ctrl+C (idle, empty prompt)
+// invokes cancelEventSub, so the consolidated event subscription is cleaned up at
+// shutdown and its backing goroutine does not leak.
+func TestQuit_CancelsEventSub(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	cancelled := false
+	m.eventCancel = func() { cancelled = true }
+
+	ctrlC := tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl})
+	require.Equal(t, 0, m.input.Len())
+	require.False(t, m.running)
+	_, _ = m.Update(ctrlC)
+
+	require.True(t, m.quitting, "Ctrl+C on idle empty prompt must set quitting")
+	require.True(t, cancelled, "quitting must call cancelEventSub to clean up the event subscription")
+}

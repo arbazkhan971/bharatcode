@@ -82,6 +82,13 @@ type Permission struct {
 	// behavior for callers that construct the dialog without the seam.
 	Grant func()
 	Deny  func()
+	// GrantAlways, when non-nil, is called when the user chooses "always allow
+	// for this session" (the "a" key). It should call GrantPermission with
+	// remember=true so the session-scoped grant store is exercised and the same
+	// tool+path combination is not re-prompted during the session. When nil the
+	// "a" key behaves identically to "y" (allow-once) so existing callers are
+	// unaffected.
+	GrantAlways func()
 }
 
 // ID returns the stable dialog id.
@@ -91,7 +98,13 @@ func (p *Permission) ID() string {
 
 // Render returns the permission prompt body.
 func (p *Permission) Render(width int) string {
-	body := fmt.Sprintf("Permission required\n\n%s\n\nTool: %s\n\n[y] allow  [n] deny", p.Req.Reason, p.Req.Tool)
+	var hint string
+	if p.GrantAlways != nil {
+		hint = "[y] allow once  [a] always this session  [n] deny"
+	} else {
+		hint = "[y] allow  [n] deny"
+	}
+	body := fmt.Sprintf("Permission required\n\n%s\n\nTool: %s\n\n%s", p.Req.Reason, p.Req.Tool, hint)
 	if width > 8 {
 		body = clampLines(body, width-4)
 	}
@@ -101,10 +114,23 @@ func (p *Permission) Render(width int) string {
 // HandleKey processes permission prompt keys. Approval and denial go through the
 // Grant/Deny callbacks (the workspace seam) when set, and fall back to a direct
 // send on Req.Reply otherwise so the dialog stays usable on its own.
+// "a" invokes GrantAlways (remember=true) when set, falling back to Grant so
+// the key always produces an allow decision.
 func (p *Permission) HandleKey(msg tea.KeyPressMsg) (bool, bool) {
 	switch strings.ToLower(msg.String()) {
 	case "y":
 		if p.Grant != nil {
+			p.Grant()
+		} else {
+			p.Req.Reply <- pubsub.PermissionDecision{Approved: true}
+		}
+		return true, true
+	case "a":
+		// Always-allow for this session: prefer GrantAlways (remember=true), fall
+		// back to Grant so the key never silently discards an approval.
+		if p.GrantAlways != nil {
+			p.GrantAlways()
+		} else if p.Grant != nil {
 			p.Grant()
 		} else {
 			p.Req.Reply <- pubsub.PermissionDecision{Approved: true}

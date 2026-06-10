@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/tui/sidebar"
@@ -107,35 +108,82 @@ func (m *model) syncPage() {
 // headerInfo assembles the top info strip for the current frame from the live
 // run state: the active model and its provider, the working directory (home
 // collapsed to "~"), the yolo affordance, and the changed-file count tracked at
-// turn end. It reads through the workspace seam for the cwd/yolo source of truth
-// and derives the provider from config so the strip stays correct after a model
-// switch.
+// turn end.
+//
+// For a persisted session it calls Workspace.SessionState once to obtain a
+// consistent snapshot — cwd, yolo, model, provider — so the strip reflects a
+// single coherent point in time rather than assembling fields from separate
+// calls that may race. For an unpersisted "new" session (empty or "new"
+// sessionID), or when the snapshot call returns an error, it falls back to the
+// piecemeal approach (m.deps.Workspace.Cwd() + m.status.Yolo) so a fresh tab
+// always renders without error.
 func (m *model) headerInfo() sidebar.Info {
 	cwd := ""
-	// Yolo is per-session: read the session-scoped flag so the header strip
-	// matches the status bar, which also uses per-session state. For a new,
-	// unpersisted session (empty sessionID or "new") no session row exists yet,
-	// so fall back to the in-memory status bar value which is kept current by
-	// the TUI's own yolo-toggle path. The global Workspace.Yolo() flag is no
-	// longer set in production, so it must not be consulted here.
+	// Start from the in-memory per-session yolo value maintained by the TUI's
+	// own toggle path. For a persisted session it will be overwritten by the
+	// SessionState snapshot below; for an unpersisted "new" session it stays as
+	// the correct fallback. The global Workspace.Yolo() flag is not consulted —
+	// it is no longer set in production and must not be used here (M3 fix).
 	yolo := m.status.Yolo
-	if m.deps.Workspace != nil {
-		// The working directory comes from the workspace seam, which owns the
-		// resolved scope the agent runs in. When the seam supplies none (a bare
-		// test double) the segment is simply omitted rather than guessing from
-		// process state, keeping the strip a faithful view of the seam.
-		cwd = m.deps.Workspace.Cwd()
-		if m.sessionID != "" && m.sessionID != "new" {
-			yolo = m.deps.Workspace.SessionYolo(m.sessionID)
+	model := m.status.Model
+	provider := m.providerName(m.status.Model)
+	changed := m.changedFiles
+
+	if m.deps.Workspace == nil {
+		return sidebar.Info{
+			Theme:    m.theme,
+			Model:    model,
+			Provider: provider,
+			Cwd:      util.ShortPath(cwd),
+			Yolo:     yolo,
+			Changed:  changed,
 		}
+	}
+
+	// For a persisted session, obtain a single consistent snapshot from the
+	// workspace seam. This makes the previously dead SessionState API live and
+	// guarantees that cwd, yolo, model, and provider come from one atomic read
+	// rather than several independent lookups that could interleave with an
+	// in-flight model switch or yolo toggle.
+	if m.sessionID != "" && m.sessionID != "new" {
+		if st, err := m.deps.Workspace.SessionState(context.Background(), m.sessionID); err == nil {
+			cwd = st.Cwd
+			yolo = st.Yolo
+			if st.Model != "" {
+				model = st.Model
+			}
+			if st.Provider != "" {
+				provider = st.Provider
+			}
+			if len(st.ChangedFiles) > 0 {
+				changed = len(st.ChangedFiles)
+			}
+			return sidebar.Info{
+				Theme:    m.theme,
+				Model:    model,
+				Provider: provider,
+				Cwd:      util.ShortPath(cwd),
+				Yolo:     yolo,
+				Changed:  changed,
+			}
+		}
+	}
+
+	// Fallback path: unpersisted session or SessionState returned an error.
+	// Read cwd and yolo through the individual seam methods exactly as before,
+	// so a fresh tab (empty/"new" sessionID) renders correctly.
+	cwd = m.deps.Workspace.Cwd()
+	if m.sessionID != "" && m.sessionID != "new" {
+		// SessionState errored; still try the piecemeal yolo for correctness.
+		yolo = m.deps.Workspace.SessionYolo(m.sessionID)
 	}
 	return sidebar.Info{
 		Theme:    m.theme,
-		Model:    m.status.Model,
-		Provider: m.providerName(m.status.Model),
+		Model:    model,
+		Provider: provider,
 		Cwd:      util.ShortPath(cwd),
 		Yolo:     yolo,
-		Changed:  m.changedFiles,
+		Changed:  changed,
 	}
 }
 

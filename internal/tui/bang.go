@@ -12,7 +12,7 @@ import (
 
 // bangPattern matches an inline shell-substitution token: a "!" immediately
 // followed by a backtick-delimited command, e.g. !`git status -s`. It mirrors
-// the Claude Code / pi custom-command convention where the command's standard
+// the Claude Code custom-command convention where the command's standard
 // output is spliced into the prompt before it is sent to the model, letting a
 // slash-command template embed live repository state (branch, diff, test
 // output) at invocation time rather than at authoring time. The command may

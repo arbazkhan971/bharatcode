@@ -70,14 +70,22 @@ func patchToolPaths(input json.RawMessage) []string {
 	}
 	seen := map[string]bool{}
 	var paths []string
-	for _, line := range strings.Split(args.Patch, "\n") {
-		// Unified diff new-file header: "+++ b/<path>" or "+++ <path>".
-		if !strings.HasPrefix(line, "+++ ") {
-			continue
+	// lastOldPath holds the path parsed from the most recent "--- a/<path>"
+	// header. A deletion hunk has "+++ /dev/null" as its new-file header, so
+	// the old path is the only one available to record.
+	lastOldPath := ""
+
+	addPath := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
 		}
-		rest := strings.TrimPrefix(line, "+++ ")
-		// Strip the "b/" git diff prefix when present.
-		if strings.HasPrefix(rest, "b/") {
+	}
+
+	parseDiffPath := func(prefix, line string) string {
+		rest := strings.TrimPrefix(line, prefix)
+		// Strip the "a/" or "b/" git diff prefix when present.
+		if strings.HasPrefix(rest, "a/") || strings.HasPrefix(rest, "b/") {
 			rest = rest[2:]
 		}
 		// Remove any trailing tab + timestamp that some diff generators emit.
@@ -85,13 +93,32 @@ func patchToolPaths(input json.RawMessage) []string {
 			rest = rest[:idx]
 		}
 		p := strings.TrimSpace(rest)
-		if p == "" || p == "/dev/null" {
+		if p == "/dev/null" {
+			return ""
+		}
+		return p
+	}
+
+	for _, line := range strings.Split(args.Patch, "\n") {
+		if strings.HasPrefix(line, "--- ") {
+			// Track the old-file path in case the next "+++ " is /dev/null
+			// (a deletion hunk), which would otherwise produce no path.
+			lastOldPath = parseDiffPath("--- ", line)
 			continue
 		}
-		if !seen[p] {
-			seen[p] = true
-			paths = append(paths, p)
+		if !strings.HasPrefix(line, "+++ ") {
+			continue
 		}
+		// Unified diff new-file header: "+++ b/<path>" or "+++ <path>".
+		newPath := parseDiffPath("+++ ", line)
+		if newPath != "" {
+			// Normal add or modify: record the new-file path.
+			addPath(newPath)
+		} else {
+			// "+++ /dev/null" means deletion: fall back to the old-file path.
+			addPath(lastOldPath)
+		}
+		lastOldPath = ""
 	}
 	return paths
 }

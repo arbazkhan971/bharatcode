@@ -16,6 +16,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/app"
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/extension"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
@@ -108,6 +109,14 @@ type Dependencies struct {
 	// listing. It may be nil (no MCP servers configured), in which case /mcp
 	// reports that none are connected.
 	MCP *mcp.Client
+	// Extensions is the optional extension host whose user-invokable commands
+	// are surfaced as slash commands. It may be nil (no extensions loaded), in
+	// which case the extension-command resolution step is skipped. When non-nil
+	// the host's GetCommands list is consulted after the built-in Prompts and
+	// Recipes registries but before the "Unknown command" dialog, so a command
+	// contributed by a directory extension (the only kind a user can add without
+	// recompiling) is reachable from the TUI's slash-command path.
+	Extensions *extension.Host
 	// InitialSessionID, when non-empty, causes the TUI to restore this session
 	// at startup instead of beginning a fresh one. Wired by --continue / -c to
 	// resume the most recently updated session for the current project.
@@ -1516,14 +1525,20 @@ func (m *model) handleHelp(text string) tea.Model {
 // rendered with rest spliced into {{input}} and submitted to the agent. Next
 // it tries the recipe registry: a "/name args" whose name matches a recipe
 // collects parameters interactively (for user_prompt params) and then
-// submits the rendered recipe to the agent. A name that is not in either
-// registry falls back to the unknown-command dialog.
+// submits the rendered recipe to the agent. Then it tries the extension host:
+// a "/name" that matches a command registered by a loaded extension seeds its
+// Prompt template (with args spliced into {{input}}) and submits it to the
+// agent. A name that is not in any registry falls back to the unknown-command
+// dialog.
 func (m *model) handleUnknownSlash(text string) (tea.Model, tea.Cmd) {
 	name, args := splitSlash(text)
 	if handled, model, cmd := m.handleRegistryPrompt(name, args); handled {
 		return model, cmd
 	}
 	if handled, model, cmd := m.handleRegistryRecipe(name, args); handled {
+		return model, cmd
+	}
+	if handled, model, cmd := m.handleExtensionCommand(name, args); handled {
 		return model, cmd
 	}
 	body := text
@@ -1535,6 +1550,36 @@ func (m *model) handleUnknownSlash(text string) (tea.Model, tea.Cmd) {
 	}
 	m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Unknown command", Body: body, Theme: m.theme})
 	return m, nil
+}
+
+// handleExtensionCommand looks up name in the extension host and, when found,
+// renders its Prompt template with args spliced into {{input}} and submits the
+// result to the agent. It reports whether the command was handled; an
+// unregistered name returns false so the caller can fall through to the
+// unknown-command dialog.
+func (m *model) handleExtensionCommand(name, args string) (handled bool, mod tea.Model, cmd tea.Cmd) {
+	if m.deps.Extensions == nil {
+		return false, m, nil
+	}
+	var found *extension.Command
+	for _, c := range m.deps.Extensions.GetCommands() {
+		if c.Name == name {
+			cp := c
+			found = &cp
+			break
+		}
+	}
+	if found == nil {
+		return false, m, nil
+	}
+	prompt := found.Prompt
+	if args != "" {
+		// Splice args into {{input}} the same way handleRegistryPrompt does,
+		// so extension commands can embed user-supplied text in their templates.
+		prompt = strings.ReplaceAll(prompt, "{{input}}", args)
+	}
+	mod, cmd = m.startRun(prompt)
+	return true, mod, cmd
 }
 
 // splitSlash splits a slash line "/name rest" into the command name (without
@@ -2215,10 +2260,11 @@ func emptyDefault(value string, fallback string) string {
 }
 
 // dynamicSlashNames collects the runtime slash-command names contributed by the
-// recipe and custom-prompt registries, each as a leading-slash name. Recipes
-// come first, then prompts, matching the order slashHelpLines prints them, so
-// Tab completion and the hint dropdown list them the same way /help does. It
-// backs setDynamicCommands; nil registries contribute nothing.
+// recipe and custom-prompt registries and the extension host, each as a
+// leading-slash name. Recipes come first, then prompts, then extension commands,
+// matching the order slashHelpLines prints them, so Tab completion and the hint
+// dropdown list them the same way /help does. It backs setDynamicCommands; nil
+// registries/hosts contribute nothing.
 func dynamicSlashNames(deps Dependencies) []string {
 	var names []string
 	if deps.Recipes != nil {
@@ -2231,17 +2277,23 @@ func dynamicSlashNames(deps Dependencies) []string {
 			names = append(names, "/"+p.Name)
 		}
 	}
+	if deps.Extensions != nil {
+		for _, c := range deps.Extensions.GetCommands() {
+			names = append(names, "/"+c.Name)
+		}
+	}
 	return names
 }
 
 // dynamicSlashDescriptions collects a terse one-line gloss for each
 // runtime-contributed slash command, keyed by its "/name". A recipe uses its
 // title (falling back to its description); a custom prompt uses its frontmatter
-// description (falling back to the first non-empty line of its template), the
-// same sources slashHelpLines documents — but without the argument hint so the
-// gloss stays short enough for the one-row completion menu. Commands with no
-// usable text are omitted so the menu never appends a bare "— ". It backs
-// setDynamicDescriptions; nil registries contribute nothing.
+// description (falling back to the first non-empty line of its template); an
+// extension command uses its Description field — the same sources slashHelpLines
+// documents, but without the argument hint so the gloss stays short enough for
+// the one-row completion menu. Commands with no usable text are omitted so the
+// menu never appends a bare "— ". It backs setDynamicDescriptions; nil
+// registries/hosts contribute nothing.
 func dynamicSlashDescriptions(deps Dependencies) map[string]string {
 	desc := make(map[string]string)
 	if deps.Recipes != nil {
@@ -2263,6 +2315,13 @@ func dynamicSlashDescriptions(deps Dependencies) map[string]string {
 			}
 			if gloss != "" {
 				desc["/"+p.Name] = gloss
+			}
+		}
+	}
+	if deps.Extensions != nil {
+		for _, c := range deps.Extensions.GetCommands() {
+			if c.Description != "" {
+				desc["/"+c.Name] = c.Description
 			}
 		}
 	}
@@ -2328,6 +2387,18 @@ func (m *model) slashHelpLines() []string {
 			}
 			if desc != "" {
 				label += " - " + desc
+			}
+			lines = append(lines, label)
+		}
+	}
+	// Append extension commands contributed by loaded directory extensions so
+	// they are discoverable in /help alongside built-ins, recipes, and prompts.
+	// The source field names the contributing extension for diagnostics.
+	if m.deps.Extensions != nil {
+		for _, c := range m.deps.Extensions.GetCommands() {
+			label := "/" + c.Name
+			if c.Description != "" {
+				label += " - " + c.Description
 			}
 			lines = append(lines, label)
 		}

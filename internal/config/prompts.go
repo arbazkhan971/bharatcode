@@ -26,7 +26,7 @@ const promptInputVar = "input"
 // multiple placeholders.
 var placeholderPattern = regexp.MustCompile(`\{\{(\w+)\}\}`)
 
-// dollarArgPattern matches the pi-style positional argument placeholders a
+// dollarArgPattern matches the positional-argument-style positional argument placeholders a
 // slash prompt may use. In one alternation it captures: $$ (a literal dollar
 // sign), $@ and $ARGUMENTS (the entire argument line), and $1, $2, ... (an
 // individual, 1-indexed field of the argument line). Digits are matched
@@ -240,7 +240,7 @@ var ErrPromptNotFound = fmt.Errorf("prompt not found")
 // RenderSlash renders the named prompt the way a slash invocation supplies
 // arguments: a single argLine following the prompt name (e.g. the
 // "flaky test in CI" in "/triage flaky test in CI"). Before the {{var}}
-// placeholders are interpolated, the template's pi-style positional
+// placeholders are interpolated, the template's positional-argument-style positional
 // placeholders are expanded from argLine:
 //
 //	$1, $2, ...     individual fields of argLine, split on whitespace while
@@ -261,7 +261,7 @@ func (r *PromptRegistry) RenderSlash(name, argLine string) (string, error) {
 	return renderTemplate(expanded, map[string]string{promptInputVar: argLine})
 }
 
-// expandDollarArgs substitutes the pi-style positional placeholders in
+// expandDollarArgs substitutes the positional-argument-style positional placeholders in
 // template using argLine. See RenderSlash for the placeholder grammar. The
 // argument line is split into fields once and shared across all positional
 // references; unmatched indices expand to the empty string so a template that

@@ -39,7 +39,7 @@ const mentionTrailingPunct = ".,:;!?)]}"
 // regular files inside root and appends their contents to the prompt as an
 // "[Attached files]" section. The original text is preserved verbatim so the
 // user's @mention stays visible; the model additionally receives the file
-// bodies as context, matching the @-file behavior of goose, opencode, and pi.
+// bodies as context, matching the @-file behavior of goose and opencode.
 //
 // Image files (PNG/JPEG/GIF/WebP) are returned as ImageBlocks rather than
 // fenced text so vision-capable models can inspect them directly. A compact

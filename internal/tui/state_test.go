@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/app"
@@ -145,16 +146,20 @@ func TestModalFocus_DialogConsumesKeysAwayFromInput(t *testing.T) {
 }
 
 // TestHeaderInfo_YoloUsesPerSessionState asserts the header info strip reads
-// the per-session yolo flag rather than the global (now-dead) Workspace.Yolo()
-// flag. This covers the M3 fix: the header must match the status bar, which
-// already uses the per-session path.
+// the per-session yolo flag (m.status.Yolo) rather than the global (now-dead)
+// Workspace.Yolo() flag. This covers the M3 fix: the header must match the
+// status bar, which is updated by loadTab/restoreSession via SessionYolo.
+//
+// m.status.Yolo is the canonical per-session yolo field; loadTab and
+// restoreSession populate it from Workspace.SessionYolo so it is always
+// session-scoped. headerInfo reads m.status.Yolo directly — no per-render DB
+// call — so the header stays correct at zero query cost.
 func TestHeaderInfo_YoloUsesPerSessionState(t *testing.T) {
 	t.Parallel()
 
 	m := newSizedModel(t)
 
-	// With a "new" / no session the header must track m.status.Yolo because
-	// there is no persisted session row to look up.
+	// With a "new" / no session the header must track m.status.Yolo.
 	m.sessionID = "new"
 	m.status.Yolo = false
 	require.False(t, m.headerInfo().Yolo,
@@ -164,126 +169,120 @@ func TestHeaderInfo_YoloUsesPerSessionState(t *testing.T) {
 	require.True(t, m.headerInfo().Yolo,
 		"header yolo must reflect status.Yolo for an unpersisted session")
 
-	// Once a sessionID is set (persisted), headerInfo must call SessionYolo and
-	// the global Workspace.Yolo() must not be consulted. The fakeWorkspace
-	// reports SessionYolo=false by default, so the header must be false even
-	// though status.Yolo is still true.
+	// For a persisted session, m.status.Yolo is set by loadTab/restoreSession
+	// from Workspace.SessionYolo — so it already holds the per-session value.
+	// headerInfo must return whatever m.status.Yolo holds, never Workspace.Yolo().
 	m.sessionID = "sess-abc-123"
-	m.status.Yolo = true // status bar says yolo…
-	// fakeWorkspace has no session-level yolo set → SessionYolo returns false
+	m.sessionPersisted = true
+	m.status.Yolo = false // as loadTab would set it via SessionYolo (no grant)
 	require.False(t, m.headerInfo().Yolo,
-		"header yolo must use SessionYolo (not status.Yolo or global Yolo) for a persisted session")
+		"header yolo must match m.status.Yolo (per-session) for a persisted session")
+
+	m.status.Yolo = true // as loadTab would set it after a /yolo grant
+	require.True(t, m.headerInfo().Yolo,
+		"header yolo must follow m.status.Yolo when the session has the grant")
 }
 
-// snapshotWorkspace wraps fakeWorkspace and lets tests inject a controlled
-// SessionState snapshot and a distinct Cwd() return. It is used to prove that
-// headerInfo reads from the SessionState snapshot rather than the individual
-// Cwd() and SessionYolo() methods.
-type snapshotWorkspace struct {
+// countingWorkspace wraps fakeWorkspace and counts calls to SessionState. It
+// is used to prove that headerInfo never calls SessionState during rendering —
+// the regression guard for the per-render DB query bug.
+type countingWorkspace struct {
 	*fakeWorkspace
-	// snapshotCwd is returned by SessionState.Cwd so it can differ from cwdVal.
-	snapshotCwd string
-	// cwdVal is returned by Cwd() — deliberately different from snapshotCwd so
-	// the test can detect which path headerInfo took.
+	// sessionStateCalls is incremented atomically on every SessionState call.
+	sessionStateCalls atomic.Int64
+	// cwdVal is returned by Cwd() so tests can verify headerInfo uses it.
 	cwdVal string
-	// snapshotModel and snapshotProvider are returned by SessionState.
-	snapshotModel    string
-	snapshotProvider string
 }
 
-// Cwd returns the cwdVal, which is intentionally distinct from the snapshot Cwd
-// so tests can confirm headerInfo did not call Cwd() directly.
-func (sw *snapshotWorkspace) Cwd() string { return sw.cwdVal }
+// Cwd returns cwdVal so tests can assert the header shows the correct cwd.
+func (cw *countingWorkspace) Cwd() string { return cw.cwdVal }
 
-// SessionState returns a snapshot with the controlled fields injected.
-func (sw *snapshotWorkspace) SessionState(_ context.Context, sessionID string) (app.SessionState, error) {
-	return app.SessionState{
-		SessionID: sessionID,
-		Cwd:       sw.snapshotCwd,
-		Model:     sw.snapshotModel,
-		Provider:  sw.snapshotProvider,
-		Yolo:      sw.fakeWorkspace.SessionYolo(sessionID),
-	}, nil
+// SessionState increments the call counter and delegates to fakeWorkspace.
+// Any non-zero count during headerInfo calls is a regression.
+func (cw *countingWorkspace) SessionState(ctx context.Context, sessionID string) (app.SessionState, error) {
+	cw.sessionStateCalls.Add(1)
+	return cw.fakeWorkspace.SessionState(ctx, sessionID)
 }
 
-// TestHeaderInfo_UsesSessionStateSnapshot proves that for a persisted session
-// headerInfo calls Workspace.SessionState once and uses its fields (Cwd, Model,
-// Provider, Yolo) rather than the individual Cwd() and SessionYolo() accessors.
-// The snapshotWorkspace intentionally returns different values from Cwd() and
-// SessionState.Cwd so the test can distinguish the two paths.
-func TestHeaderInfo_UsesSessionStateSnapshot(t *testing.T) {
+// TestHeaderInfo_NoSessionStateCallPerRender is the regression guard: it
+// proves that headerInfo never calls Workspace.SessionState, regardless of
+// session state. Per-render DB queries (SQLite ChangedFiles) were the
+// regression; all fields must come from in-memory cache.
+func TestHeaderInfo_NoSessionStateCallPerRender(t *testing.T) {
 	t.Parallel()
 
 	deps := testDeps()
-	sw := &snapshotWorkspace{
-		fakeWorkspace:    deps.Workspace.(*fakeWorkspace),
-		snapshotCwd:      "/snapshot/workspace",
-		cwdVal:           "/piecemeal/workspace",
-		snapshotModel:    "snapshot-model",
-		snapshotProvider: "snapshot-provider",
+	cw := &countingWorkspace{
+		fakeWorkspace: deps.Workspace.(*fakeWorkspace),
+		cwdVal:        "/project/root",
 	}
-	deps.Workspace = sw
+	deps.Workspace = cw
 
 	m := newModel(context.Background(), deps)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 
-	// For an unpersisted "new" session, headerInfo must fall back to the
-	// piecemeal path (Cwd()), not the snapshot path.
+	// Unpersisted "new" session — multiple headerInfo calls must not touch SessionState.
 	m.sessionID = "new"
-	info := m.headerInfo()
-	require.Equal(t, "/piecemeal/workspace", info.Cwd,
-		"unpersisted session: headerInfo must use Cwd() fallback, not the snapshot")
-
-	// For a persisted session, headerInfo must use the SessionState snapshot.
-	// The snapshot Cwd ("/snapshot/workspace") is distinct from Cwd()
-	// ("/piecemeal/workspace"), so the assertion distinguishes the two paths.
-	m.sessionID = "sess-snapshot-test"
-	info = m.headerInfo()
-	require.Equal(t, "/snapshot/workspace", info.Cwd,
-		"persisted session: headerInfo must use SessionState.Cwd, not the piecemeal Cwd()")
-	require.Equal(t, "snapshot-model", info.Model,
-		"persisted session: headerInfo must use SessionState.Model when non-empty")
-	require.Equal(t, "snapshot-provider", info.Provider,
-		"persisted session: headerInfo must use SessionState.Provider when non-empty")
-}
-
-// TestHeaderInfo_SessionStateFallbackOnNewSession verifies that for a "new"
-// (unpersisted) session, headerInfo does not call SessionState and instead
-// uses the piecemeal Cwd() and status.Yolo fallback values, so a fresh tab
-// renders correctly before any session row exists.
-func TestHeaderInfo_SessionStateFallbackOnNewSession(t *testing.T) {
-	t.Parallel()
-
-	deps := testDeps()
-	sw := &snapshotWorkspace{
-		fakeWorkspace:    deps.Workspace.(*fakeWorkspace),
-		snapshotCwd:      "/should/not/appear",
-		cwdVal:           "/correct/fallback",
-		snapshotModel:    "should-not-appear",
-		snapshotProvider: "should-not-appear",
-	}
-	deps.Workspace = sw
-
-	m := newModel(context.Background(), deps)
-	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-
-	// Empty sessionID is also treated as unpersisted.
-	m.sessionID = ""
+	m.sessionPersisted = false
 	m.status.Yolo = true
-	info := m.headerInfo()
-	require.Equal(t, "/correct/fallback", info.Cwd,
-		"empty sessionID: headerInfo must use the Cwd() fallback")
-	require.True(t, info.Yolo,
-		"empty sessionID: headerInfo must use status.Yolo for the yolo flag")
+	for i := 0; i < 5; i++ {
+		info := m.headerInfo()
+		require.Equal(t, "/project/root", info.Cwd,
+			"headerInfo must use Workspace.Cwd() for the working directory")
+		require.True(t, info.Yolo,
+			"headerInfo must reflect m.status.Yolo for an unpersisted session")
+	}
+	require.Zero(t, cw.sessionStateCalls.Load(),
+		"headerInfo must not call SessionState for an unpersisted session")
 
-	// "new" sessionID is the other unpersisted sentinel.
-	m.sessionID = "new"
+	// Persisted session — the regression case: multiple headerInfo calls (as
+	// renderMain + headerExtraRows produce per frame) must not query the DB.
+	m.sessionID = "sess-render-test"
+	m.sessionPersisted = true
 	m.status.Yolo = false
-	info = m.headerInfo()
-	require.Equal(t, "/correct/fallback", info.Cwd,
-		"new sessionID: headerInfo must use the Cwd() fallback")
-	require.False(t, info.Yolo,
-		"new sessionID: headerInfo must use status.Yolo for the yolo flag")
+	m.changedFiles = 3
+	cw.sessionStateCalls.Store(0) // reset counter for this sub-case
+	for i := 0; i < 10; i++ {
+		info := m.headerInfo()
+		require.Equal(t, "/project/root", info.Cwd,
+			"persisted session: headerInfo must use Workspace.Cwd(), not SessionState")
+		require.False(t, info.Yolo,
+			"persisted session: headerInfo must use m.status.Yolo (per-session), not SessionState")
+		require.Equal(t, 3, info.Changed,
+			"persisted session: headerInfo must use the cached m.changedFiles count")
+	}
+	require.Zero(t, cw.sessionStateCalls.Load(),
+		"headerInfo must not call SessionState on every render — this is the regression guard")
+}
+
+// TestHeaderInfo_CwdAndChangedReflectCachedState verifies that the cwd and
+// changed-file count rendered by headerInfo match the cheap in-memory sources:
+// Workspace.Cwd() for the directory and m.changedFiles (refreshed at turn end
+// by refreshChangedCount) for the file count.
+func TestHeaderInfo_CwdAndChangedReflectCachedState(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	cw := &countingWorkspace{
+		fakeWorkspace: deps.Workspace.(*fakeWorkspace),
+		cwdVal:        "/my/project",
+	}
+	deps.Workspace = cw
+
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	m.sessionID = "sess-cache-test"
+	m.sessionPersisted = true
+	m.changedFiles = 7
+
+	info := m.headerInfo()
+	require.Equal(t, "/my/project", info.Cwd,
+		"headerInfo cwd must come from Workspace.Cwd()")
+	require.Equal(t, 7, info.Changed,
+		"headerInfo changed count must come from the cached m.changedFiles field")
+	require.Zero(t, cw.sessionStateCalls.Load(),
+		"headerInfo must not call SessionState when reading cached fields")
 }
 
 // TestModalFocus_PermissionRoutesThroughSeam proves a permission request arriving

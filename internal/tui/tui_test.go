@@ -16,6 +16,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/extension"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	rootledger "github.com/arbazkhan971/bharatcode/internal/ledger"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
@@ -628,6 +629,173 @@ func TestSlashHelp_MentionsProviderSetup(t *testing.T) {
 	require.Contains(t, body, "bharatcode login", "/help must mention the login command for setting a key")
 	require.Contains(t, body, "API key", "/help must mention setting an API key")
 	require.Contains(t, body, "/exit", "/help must document the /exit alias")
+}
+
+// newExtensionHost builds a *extension.Host pre-loaded with a single command
+// for use in TUI tests. It is a helper shared by the extension-command suite.
+func newExtensionHost(t *testing.T, name, description, prompt string) *extension.Host {
+	t.Helper()
+	h := extension.NewHost(nil)
+	err := h.RegisterCommand(extension.Command{
+		Name:        name,
+		Description: description,
+		Prompt:      prompt,
+	})
+	require.NoError(t, err)
+	return h
+}
+
+// TestExtensionCommand_HandledLookupOnly asserts the extension-command lookup
+// stage: handleUnknownSlash must not push an "Unknown command" error when the
+// name is registered in the extension host, proving the extension lookup
+// intercepts the command before the fallback dialog fires. The model is marked
+// sessionPersisted so ensureSession does not touch the stub session repo.
+func TestExtensionCommand_HandledLookupOnly(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Extensions = newExtensionHost(t, "extcmd", "an extension command", "run the extension task")
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	// Mark the session as already persisted so ensureSession returns immediately
+	// without hitting the stub session repo (which has no DB). launchTurn then
+	// returns a run command; startRun batches it but does not execute it
+	// synchronously, so no agent round-trip is triggered.
+	m.sessionPersisted = true
+	m.sessionID = "test-session"
+
+	// A registered name: handleUnknownSlash must not reach the unknown-command
+	// dialog branch.
+	m.handleUnknownSlash("/extcmd")
+	require.False(t, m.dialogs.Contains("error"),
+		"a registered extension command must not produce any error dialog (including Unknown command)")
+}
+
+// TestExtensionCommand_UnregisteredReturnsFalse asserts that handleExtensionCommand
+// returns handled=false for a name not in the extension host, so the caller
+// falls through to the unknown-command dialog. This tests the lookup function
+// in isolation via a name known to produce no startRun dispatch (handled=false
+// returns immediately, no session DB needed).
+func TestExtensionCommand_UnregisteredReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Extensions = newExtensionHost(t, "extcmd", "an extension command", "run the extension task")
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// handled=false path: no startRun is called, so no DB panic.
+	handled, _, _ := m.handleExtensionCommand("nosuchcommand", "")
+	require.False(t, handled,
+		"handleExtensionCommand must return handled=false for a name not in the extension host")
+}
+
+// TestExtensionCommand_NilHostReturnsFalse asserts that a nil Extensions dep
+// returns handled=false without panicking, matching how nil Prompts and Recipes
+// are handled in handleRegistryPrompt and handleRegistryRecipe. The handled=false
+// path does not call startRun so no session DB is needed.
+func TestExtensionCommand_NilHostReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	// deps.Extensions is nil by default from testDeps().
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	require.NotPanics(t, func() {
+		handled, _, _ := m.handleExtensionCommand("anything", "")
+		require.False(t, handled,
+			"a nil extension host must return handled=false without panicking")
+	})
+}
+
+// TestExtensionCommand_UnknownDialogForMissingName asserts that handleUnknownSlash
+// produces the "Unknown command" dialog for a name absent from all registries
+// (including extensions), so the extension lookup does not change the fallback
+// behaviour for genuinely unrecognized commands.
+func TestExtensionCommand_UnknownDialogForMissingName(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Extensions = newExtensionHost(t, "extcmd", "an extension command", "run the extension task")
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// Call handleUnknownSlash directly; a name absent from all registries must
+	// produce the Unknown command dialog with that exact title.
+	m.handleUnknownSlash("/nosuchcommand")
+	require.True(t, m.dialogs.Contains("error"),
+		"a name absent from all registries must push an error dialog")
+	rendered := m.dialogs.Render(120)
+	require.Contains(t, rendered, "Unknown command",
+		"the error dialog for an absent name must be titled 'Unknown command'")
+}
+
+// TestExtensionCommand_KnownNameSkipsUnknownDialog asserts that handleUnknownSlash
+// does NOT push the "Unknown command" dialog when the name matches an extension
+// command. The model is marked sessionPersisted so ensureSession does not touch
+// the stub session repo, allowing startRun to proceed to a run command without
+// panicking.
+func TestExtensionCommand_KnownNameSkipsUnknownDialog(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Extensions = newExtensionHost(t, "extcmd", "an extension command", "run the extension task")
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	// Mark the session as already persisted so ensureSession does not hit the DB.
+	m.sessionPersisted = true
+	m.sessionID = "test-session"
+
+	m.handleUnknownSlash("/extcmd")
+	// No dialog must be pushed (startRun returns a command, not an error, since
+	// ensureSession succeeded).
+	require.Equal(t, 0, m.dialogs.Len(),
+		"a registered extension command must not push any dialog")
+}
+
+// TestExtensionCommand_AppearsInSlashHelp asserts that extension commands show
+// up in the /help listing so they are discoverable alongside built-ins, recipes,
+// and custom prompts.
+func TestExtensionCommand_AppearsInSlashHelp(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Extensions = newExtensionHost(t, "myext", "does something useful", "some prompt")
+	m := newModel(context.Background(), deps)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	body := strings.Join(m.slashHelpLines(), "\n")
+	require.Contains(t, body, "/myext",
+		"extension commands must appear in the /help listing")
+	require.Contains(t, body, "does something useful",
+		"the extension command description must appear in the /help listing")
+}
+
+// TestExtensionCommand_AppearsInDynamicNames asserts that extension commands
+// are returned by dynamicSlashNames so they appear in Tab completion and the
+// slash-hint dropdown alongside recipes and custom prompts.
+func TestExtensionCommand_AppearsInDynamicNames(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Extensions = newExtensionHost(t, "myext", "does something useful", "some prompt")
+	names := dynamicSlashNames(deps)
+	require.Contains(t, names, "/myext",
+		"extension commands must appear in the Tab-completion name list")
+}
+
+// TestExtensionCommand_AppearsInDynamicDescriptions asserts that extension
+// commands contribute their description to dynamicSlashDescriptions so the
+// one-row completion menu can show a gloss alongside the command name.
+func TestExtensionCommand_AppearsInDynamicDescriptions(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Extensions = newExtensionHost(t, "myext", "does something useful", "some prompt")
+	desc := dynamicSlashDescriptions(deps)
+	require.Equal(t, "does something useful", desc["/myext"],
+		"extension command description must appear in the completion gloss map")
 }
 
 // TestScrollStatus_SurfacesInStatusBar drives the rendered view: at rest the

@@ -920,7 +920,7 @@ func (m *model) handleRegistryPrompt(name string, args string) (handled bool, mo
 	}
 	// Splice in any !`cmd` inline shell substitutions so the template can embed
 	// live repository state (git status, branch, test output) at invocation
-	// time, matching Claude Code / pi custom-command behaviour.
+	// time, matching Claude Code custom-command behaviour.
 	rendered = expandBangCommands(rendered, m.runBangCommand)
 	model, cmd = m.startRun(rendered)
 	return true, model, cmd

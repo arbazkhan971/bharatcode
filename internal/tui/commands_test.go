@@ -921,7 +921,7 @@ func TestSlashRegistryPrompt_RendersAndSubmits(t *testing.T) {
 		"the rendered prompt (with args spliced into {{input}}) must reach the agent loop")
 }
 
-// TestSlashRegistryPrompt_ExpandsPositionalArgs asserts that pi-style
+// TestSlashRegistryPrompt_ExpandsPositionalArgs asserts that positional-argument-style
 // positional placeholders ($1, $2, $@) in a registered prompt are expanded
 // from the slash argument line and the result reaches the agent loop.
 func TestSlashRegistryPrompt_ExpandsPositionalArgs(t *testing.T) {

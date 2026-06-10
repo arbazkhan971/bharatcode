@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/tui/sidebar"
@@ -105,78 +104,34 @@ func (m *model) syncPage() {
 	}
 }
 
-// headerInfo assembles the top info strip for the current frame from the live
-// run state: the active model and its provider, the working directory (home
-// collapsed to "~"), the yolo affordance, and the changed-file count tracked at
-// turn end.
+// headerInfo assembles the top info strip for the current frame from cached
+// fields: the active model and its provider, the working directory (home
+// collapsed to "~"), the yolo affordance, and the changed-file count.
 //
-// For a persisted session it calls Workspace.SessionState once to obtain a
-// consistent snapshot — cwd, yolo, model, provider — so the strip reflects a
-// single coherent point in time rather than assembling fields from separate
-// calls that may race. For an unpersisted "new" session (empty or "new"
-// sessionID), or when the snapshot call returns an error, it falls back to the
-// piecemeal approach (m.deps.Workspace.Cwd() + m.status.Yolo) so a fresh tab
-// always renders without error.
+// All fields are read from in-memory state — no database or workspace call is
+// made in this path. The changed-file count is refreshed at turn end by
+// refreshChangedCount; cwd is a cheap static read via Workspace.Cwd(); the
+// per-session yolo flag is maintained in m.status.Yolo and kept correct by
+// loadTab, restoreSession, and the /yolo toggle, each of which calls
+// Workspace.SessionYolo when a session is set — preserving the M3 per-session
+// correctness without querying the DB on every render frame.
 func (m *model) headerInfo() sidebar.Info {
+	// cwd is a static field on the workspace (the directory the process was
+	// scoped to at startup); reading it per-render is fine — no I/O occurs.
 	cwd := ""
-	// Start from the in-memory per-session yolo value maintained by the TUI's
-	// own toggle path. For a persisted session it will be overwritten by the
-	// SessionState snapshot below; for an unpersisted "new" session it stays as
-	// the correct fallback. The global Workspace.Yolo() flag is not consulted —
-	// it is no longer set in production and must not be used here (M3 fix).
+	if m.deps.Workspace != nil {
+		cwd = m.deps.Workspace.Cwd()
+	}
+
+	// m.status.Yolo is the canonical per-session yolo flag for the active tab.
+	// It is set by loadTab (tab switch), restoreSession (session restore), and
+	// the /yolo toggle — each reading Workspace.SessionYolo so the value is
+	// always session-scoped, never the dead global Workspace.Yolo().
 	yolo := m.status.Yolo
 	model := m.status.Model
 	provider := m.providerName(m.status.Model)
 	changed := m.changedFiles
 
-	if m.deps.Workspace == nil {
-		return sidebar.Info{
-			Theme:    m.theme,
-			Model:    model,
-			Provider: provider,
-			Cwd:      util.ShortPath(cwd),
-			Yolo:     yolo,
-			Changed:  changed,
-		}
-	}
-
-	// For a persisted session, obtain a single consistent snapshot from the
-	// workspace seam. This makes the previously dead SessionState API live and
-	// guarantees that cwd, yolo, model, and provider come from one atomic read
-	// rather than several independent lookups that could interleave with an
-	// in-flight model switch or yolo toggle.
-	if m.sessionID != "" && m.sessionID != "new" {
-		if st, err := m.deps.Workspace.SessionState(context.Background(), m.sessionID); err == nil {
-			cwd = st.Cwd
-			yolo = st.Yolo
-			if st.Model != "" {
-				model = st.Model
-			}
-			if st.Provider != "" {
-				provider = st.Provider
-			}
-			if len(st.ChangedFiles) > 0 {
-				changed = len(st.ChangedFiles)
-			}
-			return sidebar.Info{
-				Theme:    m.theme,
-				Model:    model,
-				Provider: provider,
-				Cwd:      util.ShortPath(cwd),
-				Yolo:     yolo,
-				Changed:  changed,
-			}
-		}
-	}
-
-	// Fallback path: unpersisted session or SessionState returned an error.
-	// Read cwd and yolo through the individual seam methods exactly as before,
-	// so a fresh tab (empty/"new" sessionID) renders correctly.
-	cwd = m.deps.Workspace.Cwd()
-	if m.sessionID != "" && m.sessionID != "new" {
-		// SessionState errored; still try the piecemeal yolo for correctness.
-		yolo = m.deps.Workspace.SessionYolo(m.sessionID)
-	}
 	return sidebar.Info{
 		Theme:    m.theme,
 		Model:    model,

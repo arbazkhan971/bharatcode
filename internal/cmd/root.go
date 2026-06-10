@@ -56,6 +56,7 @@ var (
 			FileTracker:      application.FileTracker,
 			Logger:           application.Logger,
 			MCP:              application.MCP,
+			Extensions:       application.Extensions,
 			InitialSessionID: initialSessionID,
 			Yolo:             application.StartupYolo(),
 		})

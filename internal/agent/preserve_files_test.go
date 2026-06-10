@@ -189,7 +189,9 @@ func TestPatchToolPathsExtractsPaths(t *testing.T) {
 	require.Nil(t, patchToolPaths([]byte(`{"path":"/some/file.go"}`)))
 	// An empty patch returns nil.
 	require.Nil(t, patchToolPaths([]byte(`{"patch":""}`)))
-	// /dev/null is filtered out (deletions only).
+	// A deletion hunk (+++ /dev/null) must record the old-file path from the
+	// preceding "--- a/<path>" header, so the deleted file is counted in the
+	// preserved-files census.
 	devNull := `--- a/old.go
 +++ /dev/null
 @@ -1 +0,0 @@
@@ -197,7 +199,60 @@ func TestPatchToolPathsExtractsPaths(t *testing.T) {
 `
 	devNullJSON, err := json.Marshal(map[string]string{"patch": devNull})
 	require.NoError(t, err)
-	require.Nil(t, patchToolPaths(devNullJSON))
+	require.Equal(t, []string{"old.go"}, patchToolPaths(devNullJSON))
+}
+
+// TestPatchToolPathsDeletion asserts that a deletion hunk — where the new-file
+// header is "+++ /dev/null" — records the old path from the "--- a/<path>"
+// header, and that a mixed diff containing both modifications and a deletion
+// captures all affected paths without duplicates.
+func TestPatchToolPathsDeletion(t *testing.T) {
+	// Pure deletion: only the old-file path must appear.
+	delOnly := `--- a/pkg/removed.go
++++ /dev/null
+@@ -1,3 +0,0 @@
+-package pkg
+-
+-// deleted
+`
+	delOnlyJSON, err := json.Marshal(map[string]string{"patch": delOnly})
+	require.NoError(t, err)
+	require.Equal(t, []string{"pkg/removed.go"}, patchToolPaths(delOnlyJSON),
+		"pure deletion must record old-file path")
+
+	// Mixed: one modify hunk followed by one deletion hunk in the same patch.
+	mixed := `--- a/pkg/kept.go
++++ b/pkg/kept.go
+@@ -1,2 +1,3 @@
+ package pkg
++// updated
+--- a/pkg/gone.go
++++ /dev/null
+@@ -1,2 +0,0 @@
+-package pkg
+-// removed
+`
+	mixedJSON, err := json.Marshal(map[string]string{"patch": mixed})
+	require.NoError(t, err)
+	paths := patchToolPaths(mixedJSON)
+	require.Equal(t, []string{"pkg/kept.go", "pkg/gone.go"}, paths,
+		"mixed patch must collect both modified and deleted file paths")
+
+	// Deletion inside the touchedFiles pipeline: the deleted file should be
+	// collected in the edited set so it survives compaction.
+	patchJSON, err := json.Marshal(map[string]string{"patch": delOnly})
+	require.NoError(t, err)
+	history := []message.Message{{
+		Role: message.RoleAssistant,
+		Content: []message.ContentBlock{message.ToolUseBlock{
+			ID:    "patch-del",
+			Name:  "patch",
+			Input: patchJSON,
+		}},
+	}}
+	_, edited := touchedFiles(history)
+	require.Contains(t, edited, "pkg/removed.go",
+		"deleted file path must appear in the edited census")
 }
 
 // TestTouchedFiles_PatchToolCollectsEdits verifies that a patch tool call's

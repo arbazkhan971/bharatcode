@@ -100,7 +100,10 @@ func newRootCmd() *cobra.Command {
 			// screen. Gated to the interactive path so non-interactive commands
 			// and tests never trigger a network self-replace.
 			maybeAutoUpdate(ctx, application, opts, cmd.ErrOrStderr())
-			initialSessionID := resolveInitialSession(ctx, application, opts)
+			initialSessionID, err := resolveInitialSession(ctx, application, opts)
+			if err != nil {
+				return err
+			}
 			if err := runTUI(ctx, application, initialSessionID); err != nil {
 				return fmt.Errorf("running tui: %w", err)
 			}
@@ -147,26 +150,26 @@ func newRootCmd() *cobra.Command {
 }
 
 // resolveInitialSession returns the ID of the most recently updated session for
-// the current project when --continue / -c is set, or "" otherwise. A failure
-// to list sessions is silently ignored; the TUI starts fresh in that case.
-func resolveInitialSession(ctx context.Context, application *app.App, opts *rootOptions) string {
+// the current project when --continue / -c is set, or "" otherwise.
+func resolveInitialSession(ctx context.Context, application *app.App, opts *rootOptions) (string, error) {
 	if !opts.continueSession || application == nil || application.Sessions == nil {
-		return ""
+		return "", nil
 	}
-	projectPath := opts.projectDir
-	if projectPath == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			projectPath = cwd
-		}
+	projectPath, err := canonicalProjectPath(opts.projectDir)
+	if err != nil {
+		return "", err
 	}
 	sessions, err := application.Sessions.List(ctx, session.ListFilter{
 		ProjectPath: projectPath,
 		Limit:       1,
 	})
-	if err != nil || len(sessions) == 0 {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("resuming latest session: %w", err)
 	}
-	return sessions[0].ID
+	if len(sessions) == 0 {
+		return "", nil
+	}
+	return sessions[0].ID, nil
 }
 
 func buildApp(ctx context.Context, opts *rootOptions) (*app.App, error) {

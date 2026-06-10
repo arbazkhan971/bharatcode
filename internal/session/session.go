@@ -261,6 +261,9 @@ func (r *Repo) Search(ctx context.Context, query string) ([]Session, error) {
 // its UpdatedAt. Other mutable fields are left unchanged. Returns ErrNotFound
 // if no session has that id.
 func (r *Repo) SetTitle(ctx context.Context, id, title string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	existing, err := r.Get(ctx, id)
 	if err != nil {
 		return fmt.Errorf("setting session title: %w", err)
@@ -306,6 +309,9 @@ func (r *Repo) Update(ctx context.Context, s *Session) error {
 	if s == nil {
 		return fmt.Errorf("updating session: session is nil")
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	existing, err := r.Get(ctx, s.ID)
 	if err != nil {
 		return fmt.Errorf("updating session: %w", err)

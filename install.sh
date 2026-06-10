@@ -78,4 +78,5 @@ case ":$PATH:" in
   *) echo "Note: $INSTALL_DIR is not on your PATH. Add it, e.g.:"
      echo "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.profile && . ~/.profile" ;;
 esac
-"$INSTALL_DIR/$BINARY" version || true
+"$INSTALL_DIR/$BINARY" version >/dev/null || err "installed binary failed validation"
+"$INSTALL_DIR/$BINARY" version

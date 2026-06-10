@@ -303,6 +303,26 @@ func TestClientStartsAndDiscoversToolsAndResources(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestRefreshRejectsInvalidRemoteToolSchema(t *testing.T) {
+	client := &Client{}
+	server := &Server{
+		name:   "bad",
+		cfg:    ServerConfig{Name: "bad", Transport: TransportStdio, Command: []string{"server"}},
+		logger: slog.Default(),
+	}
+	remote := &fakeRemote{
+		tools: []mcpsdk.Tool{{
+			Name:           "broken",
+			RawInputSchema: json.RawMessage(`{"type":"object"`),
+		}},
+	}
+
+	err := client.refresh(context.Background(), server, remote)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid input schema")
+}
+
 func TestToolRunPermissionDeniedDoesNotCallServer(t *testing.T) {
 	remote := &fakeRemote{tools: []mcpsdk.Tool{{Name: "danger", RawInputSchema: json.RawMessage(`{"type":"object"}`)}}}
 	withFakeConnector(t, func(context.Context, ServerConfig) (remoteClient, error) {

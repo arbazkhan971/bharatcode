@@ -36,6 +36,23 @@ func getRootOptions(cmd *cobra.Command) *rootOptions {
 	return &rootOptions{}
 }
 
+func canonicalProjectPath(projectDir string) (string, error) {
+	project := projectDir
+	if project == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("getting current directory: %w", err)
+		}
+		project = cwd
+	}
+	project = util.ExpandPath(project)
+	abs, err := filepath.Abs(project)
+	if err != nil {
+		return "", fmt.Errorf("resolving project directory %q: %w", projectDir, err)
+	}
+	return filepath.Clean(abs), nil
+}
+
 func executeCommand(ctx context.Context, cmd *cobra.Command) error {
 	if cmd.Context() == nil {
 		cmd.SetContext(ctx)

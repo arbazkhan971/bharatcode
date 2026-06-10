@@ -688,7 +688,13 @@ func (l *Loop) maybeAutoCompact(ctx context.Context, sessionID string, history [
 		return
 	}
 	fillPct := float64(inputTokens) / float64(window)
-	if fillPct < threshold {
+	// A silent overflow — the provider accepted the request but reported input
+	// tokens at or beyond the window — means the context is effectively full even
+	// if the configured fill threshold was not reached (some providers truncate
+	// rather than error). Force a compaction in that case so the next turn does
+	// not keep operating against a silently-clipped history.
+	silent := llm.IsSilentOverflow(inputTokens, 0, "", window)
+	if fillPct < threshold && !silent {
 		return
 	}
 	condensed, err := l.compactHistory(ctx, history)

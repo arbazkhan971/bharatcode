@@ -118,6 +118,11 @@ type openAIFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	// Strict, when non-nil and true, requests strict JSON schema adherence for
+	// the function's parameters. Required by some providers (Azure OpenAI, some
+	// OpenRouter upstreams) that 400 without it; omitted by default so the
+	// baseline OpenAI path is unchanged.
+	Strict *bool `json:"strict,omitempty"`
 }
 
 type openAIStreamChunk struct {

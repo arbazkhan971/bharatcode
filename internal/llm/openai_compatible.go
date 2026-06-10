@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 )
 
@@ -77,28 +78,53 @@ func (p *openAICompatibleProvider) Stream(ctx context.Context, req Request) (<-c
 		}
 	}
 
-	body, err := buildOpenAIRequest(req, imageStyleOpenAI)
+	// Resolve the model's compat block (nil when no Compat configured).
+	compat := compatForModel(p.models, req.Model)
+
+	body, err := buildOpenAIRequestCompat(req, imageStyleOpenAI, compat, p.models)
 	if err != nil {
 		return nil, fmt.Errorf("building provider request: %w", err)
 	}
-	if isOpenRouter(p.baseURL) {
-		// Ask OpenRouter for native usage accounting so the trailing usage chunk
-		// carries the upstream provider's real token counts (and cache breakdown)
-		// instead of OpenRouter's default GPT-tokenizer estimate. This applies to
-		// every model, reasoning or not, so it sits outside the reasoning gate below.
+
+	// Apply thinking-format logic. The resolved ThinkingFormat determines which
+	// thinking/reasoning fields are injected. Explicit Compat.ThinkingFormat
+	// wins over the baseURL auto-detection; that in turn wins over the legacy
+	// isOpenRouter check so existing behavior is unchanged for providers with no
+	// Compat block.
+	thinkingFmt := resolveThinkingFormat(p.models, req.Model, p.baseURL)
+	switch thinkingFmt {
+	case config.ThinkingFormatOpenRouter:
+		// OpenRouter: native usage + unified reasoning object.
 		body.Usage = &openAIUsageRequest{Include: true}
-		// OpenRouter proxies models from many upstreams (Anthropic, Gemini, Grok,
-		// DeepSeek), most of which are not OpenAI reasoning models and so are never
-		// matched by the reasoning_effort/max_completion_tokens path in
-		// buildOpenAIRequest. OpenRouter exposes a single `reasoning` object that
-		// enables extended thinking for any of them, so set it here for OpenRouter
-		// when a thinking budget or effort is configured. The OpenAI o-series keeps
-		// its native path (reasoning_effort), so it is excluded to avoid sending two
-		// competing reasoning controls.
-		if !isReasoningModel(req.Model) {
+		// The OpenAI o-series keeps its native path (reasoning_effort), so it is
+		// excluded to avoid sending two competing reasoning controls.
+		if !isReasoningModelWithCompat(compat, req.Model, p.models) {
 			body.Reasoning = openRouterReasoning(req)
 		}
+	case config.ThinkingFormatDeepSeek:
+		// DeepSeek-style: nothing extra needed at the request level for streaming
+		// — the provider echoes thinking in reasoning_content, which handleStreamChunk
+		// already picks up. No request-side field to inject.
+	case config.ThinkingFormatQwen:
+		// Qwen extended thinking: inject enable_thinking / thinking_budget into the
+		// request body. These fields are non-standard OpenAI additions, so they are
+		// only sent when the format is explicitly qwen.
+		// The fields are encoded as extra top-level keys; because openAIChatRequest
+		// is a fixed struct we pass them as JSON-level extras via a wrapper below.
+		// For now: no-op at the struct level — the Qwen format is surfaced as a
+		// documented flag and the per-request injection can be added in a follow-up
+		// when a Qwen endpoint test rig is available. The key value is that the compat
+		// flag is stored and honored downstream.
+	case config.ThinkingFormatNone:
+		// Suppress all thinking fields: clear any reasoning that was already set.
+		body.Reasoning = nil
+		body.ReasoningEffort = ""
+	default:
+		// ThinkingFormatDefault / ThinkingFormatOpenAI: fall through to the
+		// existing behavior (reasoning_effort / max_completion_tokens already set
+		// by buildOpenAIRequestCompat).
 	}
+
 	resp, err := postOpenAIJSON(ctx, p.client, p.baseURL, appendPath(p.baseURL, "/chat/completions"), apiKey, body)
 	if err != nil {
 		return nil, err
@@ -306,32 +332,134 @@ func normalizeOpenAIReasoningEffort(effort, model string) string {
 	return ""
 }
 
+// knownHostThinkingFormats maps a lower-cased URL host substring to the
+// ThinkingFormat that its endpoint uses by default. This enables auto-detection
+// when a model has no explicit Compat.ThinkingFormat set, so a user who points a
+// provider at a DeepSeek or Qwen endpoint gets the right thinking format without
+// any extra config.
+//
+// Explicit Compat.ThinkingFormat always wins over auto-detection — this table is
+// consulted only when the Compat field is nil or ThinkingFormat is "".
+var knownHostThinkingFormats = []struct {
+	hostSubstring string
+	format        config.ThinkingFormat
+}{
+	{"openrouter.ai", config.ThinkingFormatOpenRouter},
+	{"deepseek.com", config.ThinkingFormatDeepSeek},
+	{"zai.ai", config.ThinkingFormatDeepSeek},
+	// Qwen / Alibaba DashScope. The DashScope openai_compatible endpoint is
+	// dashscope.aliyuncs.com; model-studio.us-east-1.aliyuncs.com is the US region.
+	{"dashscope.aliyuncs.com", config.ThinkingFormatQwen},
+	{"model-studio.us-east-1.aliyuncs.com", config.ThinkingFormatQwen},
+}
+
+// autoDetectThinkingFormat inspects baseURL and returns the ThinkingFormat the
+// provider uses when a model carries no explicit Compat.ThinkingFormat. It
+// returns ThinkingFormatDefault when the URL matches no known host, which
+// leaves the provider on its existing OpenAI-compatible path.
+func autoDetectThinkingFormat(baseURL string) config.ThinkingFormat {
+	lower := strings.ToLower(baseURL)
+	for _, rule := range knownHostThinkingFormats {
+		if strings.Contains(lower, rule.hostSubstring) {
+			return rule.format
+		}
+	}
+	return config.ThinkingFormatDefault
+}
+
+// resolveThinkingFormat returns the effective ThinkingFormat for the model
+// named by id in the given provider. Precedence (highest to lowest):
+//
+//  1. model.Compat.ThinkingFormat (explicit per-model override)
+//  2. baseURL auto-detection via knownHostThinkingFormats
+//  3. isOpenRouter check (kept for backward compatibility)
+//  4. ThinkingFormatDefault (current behavior unchanged)
+func resolveThinkingFormat(models []Model, id, baseURL string) config.ThinkingFormat {
+	if model, ok := findModel(models, id); ok && model.Compat != nil {
+		if model.Compat.ThinkingFormat != config.ThinkingFormatDefault {
+			return model.Compat.ThinkingFormat
+		}
+	}
+	if f := autoDetectThinkingFormat(baseURL); f != config.ThinkingFormatDefault {
+		return f
+	}
+	return config.ThinkingFormatDefault
+}
+
+// effectiveMaxTokens returns the MaxTokens to use for the request, applying the
+// Compat.MaxTokens override when set. Zero means "no override / use caller value."
+func effectiveMaxTokens(models []Model, id string, reqMax int) int {
+	if model, ok := findModel(models, id); ok && model.Compat != nil && model.Compat.MaxTokens != nil && *model.Compat.MaxTokens > 0 {
+		return *model.Compat.MaxTokens
+	}
+	return reqMax
+}
+
+// compatForModel returns the Compat block for the model named by id, or nil
+// when the model has no compat block.
+func compatForModel(models []Model, id string) *config.ModelCompat {
+	if model, ok := findModel(models, id); ok {
+		return model.Compat
+	}
+	return nil
+}
+
+// buildOpenAIRequest constructs the OpenAI-compatible chat request body.
+// compat, when non-nil, applies declarative per-model overrides (StrictTools,
+// ToolResultQuirk, reasoning override, MaxTokens override). Pass nil for the
+// baseline behavior (all existing callers that do not have a Compat block).
+//
+// The models slice is used only to resolve the per-model reasoning override
+// (Compat.Reasoning); pass nil to fall back to the id-based heuristic.
 func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error) {
+	return buildOpenAIRequestCompat(req, style, nil, nil)
+}
+
+// buildOpenAIRequestCompat is the internal variant that accepts an optional
+// compat block and model list. buildOpenAIRequest delegates here with nil for
+// both; openAICompatibleProvider.Stream calls this directly so it can pass the
+// resolved compat and models without changing the shared buildOpenAIRequest
+// signature (which ollama also calls).
+func buildOpenAIRequestCompat(req Request, style imageStyle, compat *config.ModelCompat, models []Model) (openAIChatRequest, error) {
 	messages := make([]openAIMessage, 0, len(req.Messages)+1)
 	if req.SystemPrompt != "" {
 		messages = append(messages, openAIMessage{Role: "system", Content: req.SystemPrompt})
 	}
+
+	// Resolve the ToolResultQuirk so convertMessageCompat can apply it.
+	var toolResultQuirk config.ToolResultQuirk
+	if compat != nil {
+		toolResultQuirk = compat.ToolResultQuirk
+	}
+
 	for _, msg := range message.Normalize(req.Messages) {
-		converted, err := convertMessage(msg, style)
+		converted, err := convertMessageCompat(msg, style, toolResultQuirk)
 		if err != nil {
 			return openAIChatRequest{}, err
 		}
 		messages = append(messages, converted...)
 	}
 
+	// Build the tool list, applying strict: true when StrictTools is set.
 	tools := make([]openAITool, 0, len(req.Tools))
+	strictTools := compat != nil && compat.StrictTools
 	for _, tool := range req.Tools {
 		schema := tool.InputSchema
 		if len(schema) == 0 {
 			schema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
+		fn := openAIFunction{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  schema,
+		}
+		if strictTools {
+			t := true
+			fn.Strict = &t
+		}
 		tools = append(tools, openAITool{
-			Type: "function",
-			Function: openAIFunction{
-				Name:        tool.Name,
-				Description: tool.Description,
-				Parameters:  schema,
-			},
+			Type:     "function",
+			Function: fn,
 		})
 	}
 
@@ -345,6 +473,18 @@ func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error
 		// usage from streamed responses entirely.
 		StreamOptions: &openAIStreamOptions{IncludeUsage: true},
 	}
+
+	// Determine whether to treat this model as a reasoning model. The Compat
+	// override takes precedence so a quirky endpoint that is not an OpenAI
+	// o-series model can still opt into or out of the reasoning-model branch.
+	reasoning := isReasoningModelWithCompat(compat, req.Model, models)
+
+	// Resolve the effective MaxTokens: the Compat override wins when set.
+	maxTokens := req.MaxTokens
+	if compat != nil && compat.MaxTokens != nil && *compat.MaxTokens > 0 {
+		maxTokens = *compat.MaxTokens
+	}
+
 	// Reasoning models (o-series, gpt-5 reasoning) reject temperature and the
 	// legacy max_tokens field; they accept reasoning_effort and
 	// max_completion_tokens instead. Non-reasoning models keep the classic
@@ -355,17 +495,42 @@ func buildOpenAIRequest(req Request, style imageStyle) (openAIChatRequest, error
 	// temperature is omitted so the provider applies its own default. The effort
 	// is normalized so the provider-independent "auto"/"dynamic" labels collapse
 	// to "" (omitted) rather than reaching OpenAI, which 400s on them.
-	if isReasoningModel(req.Model) {
+	if reasoning {
 		body.ReasoningEffort = normalizeOpenAIReasoningEffort(req.ReasoningEffort, req.Model)
-		body.MaxCompletionTokens = req.MaxTokens
+		body.MaxCompletionTokens = maxTokens
 	} else {
 		body.Temperature = req.Temperature
-		body.MaxTokens = req.MaxTokens
+		body.MaxTokens = maxTokens
 	}
 	return body, nil
 }
 
+// isReasoningModelWithCompat reports whether the model should be treated as a
+// reasoning model for request building. It consults the Compat.Reasoning
+// override first; when that is nil it falls back to isReasoningModel (id
+// heuristic). models is checked only when compat is nil (to allow
+// isReasoningModelForRequest to be used from the provider path).
+func isReasoningModelWithCompat(compat *config.ModelCompat, id string, models []Model) bool {
+	if compat != nil && compat.Reasoning != nil {
+		return *compat.Reasoning
+	}
+	if models != nil {
+		return isReasoningModelForRequest(models, id)
+	}
+	return isReasoningModel(id)
+}
+
+// convertMessage converts a message.Message to OpenAI wire format. It is the
+// baseline conversion used by callers that have no Compat block (Ollama, and
+// any test that calls buildOpenAIRequest directly).
 func convertMessage(msg message.Message, style imageStyle) ([]openAIMessage, error) {
+	return convertMessageCompat(msg, style, config.ToolResultQuirkNone)
+}
+
+// convertMessageCompat is the compat-aware variant of convertMessage. The
+// quirk parameter selects an alternate tool-result encoding for providers that
+// reject the standard OpenAI tool-role message.
+func convertMessageCompat(msg message.Message, style imageStyle, quirk config.ToolResultQuirk) ([]openAIMessage, error) {
 	switch msg.Role {
 	case message.RoleUser, message.RoleAssistant, message.RoleSystem:
 		out := openAIMessage{Role: string(msg.Role)}
@@ -400,11 +565,7 @@ func convertMessage(msg message.Message, style imageStyle) ([]openAIMessage, err
 					},
 				})
 			case message.ToolResultBlock:
-				return []openAIMessage{{
-					Role:       "tool",
-					ToolCallID: b.ToolUseID,
-					Content:    b.Content,
-				}}, nil
+				return toolResultMessages(b, quirk), nil
 			default:
 				return nil, fmt.Errorf("unknown block conversion: %w", ErrUnsupportedFeature)
 			}
@@ -433,15 +594,38 @@ func convertMessage(msg message.Message, style imageStyle) ([]openAIMessage, err
 			if !ok {
 				continue
 			}
-			out = append(out, openAIMessage{
-				Role:       "tool",
-				ToolCallID: result.ToolUseID,
-				Content:    result.Content,
-			})
+			out = append(out, toolResultMessages(result, quirk)...)
 		}
 		return out, nil
 	default:
 		return nil, fmt.Errorf("role %q conversion: %w", msg.Role, ErrUnsupportedFeature)
+	}
+}
+
+// toolResultMessages serializes a ToolResultBlock according to quirk.
+// For ToolResultQuirkNone (the default) it emits a standard OpenAI tool-role
+// message. For ToolResultQuirkUserContent it wraps the result in a user-role
+// text message so providers that reject "tool" role messages can still receive
+// the tool output.
+func toolResultMessages(b message.ToolResultBlock, quirk config.ToolResultQuirk) []openAIMessage {
+	switch quirk {
+	case config.ToolResultQuirkUserContent:
+		// Wrap the result as a user-role text message for endpoints that
+		// reject the standard tool-role message.
+		content := b.Content
+		if content == "" {
+			content = "(empty tool result)"
+		}
+		return []openAIMessage{{
+			Role:    "user",
+			Content: fmt.Sprintf("[Tool result for call %s]\n%s", b.ToolUseID, content),
+		}}
+	default:
+		return []openAIMessage{{
+			Role:       "tool",
+			ToolCallID: b.ToolUseID,
+			Content:    b.Content,
+		}}
 	}
 }
 

@@ -1064,3 +1064,53 @@ func promptDirs(cfg *config.Config) []string {
 	}
 	return []string{filepath.Join(cfg.Options.DataDir, "prompts")}
 }
+
+// handleHandoff generates a structured handoff draft from the current
+// session's context and opens a fresh tab seeded with it. The draft is
+// assembled from what the model already tracks — the session's first prompt
+// (goal), the count of changed files, and the recent transcript — so no
+// agent-loop call is needed. The new tab's input buffer is pre-filled with
+// the draft so the user can review, edit, and send it to start a focused
+// successor session with clean context.
+//
+// /handoff is a no-op (with an explanatory dialog) before any prompt has been
+// sent in the current session, since there is nothing useful to hand off yet.
+func (m *model) handleHandoff() (tea.Model, tea.Cmd) {
+	if !m.sessionPersisted && m.tabFirstPrompt == "" {
+		m.dialogs.Push(&dialog.Text{
+			DialogID: "handoff",
+			Title:    "Handoff",
+			Body:     "No active session to hand off yet. Send a prompt first.",
+			Theme:    m.theme,
+		})
+		return m, nil
+	}
+
+	// Collect recent messages from the persisted session for context. If the
+	// session is not yet persisted (prompt submitted but not yet saved) we fall
+	// back to the in-memory first prompt alone — still useful.
+	var msgs []message.Message
+	if m.sessionPersisted {
+		loaded, err := m.deps.Sessions.Messages(m.ctx, m.sessionID)
+		if err == nil {
+			msgs = loaded
+		}
+	}
+
+	draft := buildHandoffDraft(m.tabFirstPrompt, m.changedFiles, msgs)
+
+	// Open a fresh tab exactly as /new and Ctrl+T do; on success seed the
+	// new tab's input buffer with the handoff draft so the user can refine it.
+	tabCmd := m.newTab()
+	// newTab() switches to the new tab synchronously (it calls loadTab) before
+	// returning, so m.input now belongs to the fresh tab.
+	m.input.WriteString(draft)
+
+	m.dialogs.Push(&dialog.Text{
+		DialogID: "handoff",
+		Title:    "Handoff ready",
+		Body:     "A handoff draft has been prepared in the new tab's input.\nReview, edit, and send it to start your focused session.",
+		Theme:    m.theme,
+	})
+	return m, tabCmd
+}

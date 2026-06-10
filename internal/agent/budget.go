@@ -812,3 +812,110 @@ func estimateTextTokens(s string) int {
 	}
 	return n
 }
+
+// cutPointByTokenBudget selects the split index in history such that the kept
+// tail occupies at most tokenBudget tokens, while respecting turn boundaries:
+// a tool result (user-role message carrying ToolResultBlock) is never kept
+// without its immediately preceding tool-call (assistant-role message that
+// references it). The returned index is the first message to keep verbatim,
+// i.e. history[:idx] is the dropped prefix and history[idx:] is the kept
+// tail. A return of 0 means the entire history must be kept (budget is too
+// small to drop anything useful); len(history) would mean nothing is kept
+// (never returned — at least one message is preserved).
+//
+// The algorithm works backwards from the end: accumulate messages until the
+// budget is exhausted or the beginning is reached, then walk forward past any
+// "orphaned" tool result at the cut boundary so no ToolResultBlock is stranded
+// without its preceding ToolUseBlock assistant turn.
+//
+// NOTE on loop.go wiring: replace the newDropAndMarkCompactor(keepRecent) or
+// newLLMSummaryCompactor(provider, model, keepRecent) calls in loop.go's
+// defaultCompactor method with token-budget variants. The one-liner is:
+//
+//	idx := cutPointByTokenBudget(history, budget)
+//	tail, dropped := history[idx:], history[:idx]
+//
+// where budget is fitBudget(contextWindow, systemPrompt) and tail / dropped
+// replace the current keepRecent-based split.
+func cutPointByTokenBudget(history []message.Message, tokenBudget int) int {
+	if len(history) == 0 {
+		return 0
+	}
+
+	// Walk backwards, accumulating token cost, until the budget is used up.
+	total := 0
+	cutIdx := len(history) // start: keep nothing
+	for i := len(history) - 1; i >= 0; i-- {
+		t := estimateMessageTokens(history[i])
+		if total+t > tokenBudget && cutIdx < len(history) {
+			// We would exceed the budget if we included history[i].
+			break
+		}
+		total += t
+		cutIdx = i
+	}
+
+	// Safety: always keep at least one message.
+	if cutIdx >= len(history) {
+		return len(history) - 1
+	}
+
+	// Advance past any orphaned tool result at the cut point. A tool result is
+	// a user-role message whose content contains a ToolResultBlock. Its partner
+	// tool-use turn is the assistant message immediately before it; stranding
+	// the tool result without that turn would produce a malformed provider
+	// request. Advance cutIdx forward until we land on a message that is not a
+	// dangling tool result.
+	for cutIdx < len(history) && hasToolResult(history[cutIdx]) {
+		cutIdx++
+	}
+	if cutIdx >= len(history) {
+		// Every remaining message is a tool result — keep at least the last one.
+		return len(history) - 1
+	}
+	return cutIdx
+}
+
+// usageAnchoredTokenEstimate estimates the total token cost of history using
+// the last assistant message's provider-reported InputTokens as an authoritative
+// anchor, then adds estimated costs for messages appended after that anchor.
+// This is more accurate than estimating every message from scratch (the
+// len/4 heuristic), because the anchor token count already reflects actual
+// provider tokenization for everything up to that assistant turn.
+//
+// When no assistant message with reported usage exists, it falls back to
+// estimating the whole history with the len/4 heuristic (same as historyTokens).
+//
+// NOTE on loop.go wiring: in maybeAutoCompact, replace:
+//
+//	l.maybeAutoCompact(runCtx, sessionID, history, usage.InputTokens)
+//
+// (which already passes the provider-reported count from the latest turn) with
+// the same call — the provider's inputTokens IS the anchor value. The function
+// below is intended for callers that must estimate WITHOUT a fresh provider
+// response, e.g. when reloading a session from disk and deciding whether to
+// re-compact before the first turn.
+func usageAnchoredTokenEstimate(history []message.Message) int {
+	// Find the last assistant message that carries a Usage record.
+	anchorIdx := -1
+	anchorTokens := 0
+	for i := len(history) - 1; i >= 0; i-- {
+		m := history[i]
+		if m.Role == message.RoleAssistant && m.Usage != nil && m.Usage.InputTokens > 0 {
+			anchorIdx = i
+			anchorTokens = m.Usage.InputTokens
+			break
+		}
+	}
+	if anchorIdx < 0 {
+		// No anchor: fall back to full heuristic estimation.
+		return historyTokens(history)
+	}
+	// Estimate only the messages strictly after the anchor (those arrived after
+	// the provider last reported tokens) and add them to the anchor count.
+	trailing := 0
+	for i := anchorIdx + 1; i < len(history); i++ {
+		trailing += estimateMessageTokens(history[i])
+	}
+	return anchorTokens + trailing
+}

@@ -7,11 +7,146 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/db/sqlc"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 )
+
+// CompactionDetails carries the structured metadata stored inside an
+// EntryCompaction node's Summary field (JSON-encoded). Keeping the text
+// summary and the first-kept anchor together in one row avoids a separate
+// side table while still letting CompactedContext reconstruct the effective
+// context deterministically on load.
+type CompactionDetails struct {
+	// SummaryText is the condensed checkpoint produced at compaction time
+	// (the text that replaced the dropped prefix). It is prepended verbatim
+	// when reconstructing the context.
+	SummaryText string `json:"summary_text"`
+	// FirstKeptMsgID is the ID of the first message in the verbatim kept tail.
+	// Messages from this ID onward (inclusive, in session order) form the tail
+	// returned by CompactedContext.
+	FirstKeptMsgID string `json:"first_kept_msg_id"`
+}
+
+// compactionSummaryKey is the JSON field used to detect whether a Summary
+// column is a CompactionDetails blob or plain text in legacy/other entries.
+// We check for it before unmarshalling so non-compaction entries with free
+// text in Summary are never mis-parsed.
+const compactionSummaryKey = `"summary_text"`
+
+// RecordCompaction persists a compaction event as a durable EntryCompaction
+// node in the session tree. parentID is the entry that immediately precedes
+// the compaction (the tail of the current linear chain); pass nil to root the
+// node at the session root (rare but valid for the very first compaction on
+// a session with no earlier explicit entries). summary is the structured
+// checkpoint text produced by the Compactor; firstKeptMsgID is the ID of the
+// first message in the verbatim kept tail. The two values together let
+// CompactedContext reconstruct the effective in-memory context on reload
+// without re-running the summarizer.
+//
+// The returned entry carries the generated ID and timestamp.
+func (r *Repo) RecordCompaction(ctx context.Context, sessionID string, parentID *string, summary string, firstKeptMsgID string) (*Entry, error) {
+	details := CompactionDetails{
+		SummaryText:    summary,
+		FirstKeptMsgID: firstKeptMsgID,
+	}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		return nil, fmt.Errorf("recording compaction for session %s: marshalling details: %w", sessionID, err)
+	}
+	return r.AddEntry(ctx, &Entry{
+		SessionID: sessionID,
+		ParentID:  parentID,
+		Type:      EntryCompaction,
+		Summary:   string(encoded),
+	})
+}
+
+// CompactedContext reconstructs the effective in-memory context for sessionID
+// from its most recent EntryCompaction node, returning:
+//
+//   - summaryMsgs: a single synthetic message whose text is the stored
+//     checkpoint summary (ready to be prepended to the provider history).
+//   - keptMsgs: the verbatim tail of on-disk messages starting from (and
+//     including) the first-kept message recorded at compaction time.
+//
+// When no EntryCompaction has been recorded for the session, both slices are
+// nil and no error is returned — the caller should treat nil, nil as "no
+// persisted compaction; load full history as normal".
+//
+// The reconstruction is deterministic: two callers on the same session state
+// always produce identical output, making it safe to call after a restart.
+func (r *Repo) CompactedContext(ctx context.Context, sessionID string) (summaryMsgs, keptMsgs []message.Message, err error) {
+	entries, err := r.Entries(ctx, sessionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reconstructing compacted context for session %s: %w", sessionID, err)
+	}
+
+	// Find the most recent EntryCompaction entry (entries are oldest-first).
+	var latest *Entry
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type == EntryCompaction {
+			e := entries[i]
+			latest = &e
+			break
+		}
+	}
+	if latest == nil {
+		// No compaction recorded yet.
+		return nil, nil, nil
+	}
+
+	// Decode the stored details. A Summary that does not contain the JSON key
+	// is a legacy plain-text summary written before this feature existed; fall
+	// back to treating the whole Summary as the summary text with no kept tail.
+	var details CompactionDetails
+	if strings.Contains(latest.Summary, compactionSummaryKey) {
+		if err := json.Unmarshal([]byte(latest.Summary), &details); err != nil {
+			return nil, nil, fmt.Errorf("reconstructing compacted context for session %s: decoding compaction details: %w", sessionID, err)
+		}
+	} else {
+		// Legacy plain-text summary: reconstruct with summary only, no kept tail.
+		details.SummaryText = latest.Summary
+	}
+
+	// Build the synthetic summary message.
+	summaryMsg := message.Message{
+		SessionID: sessionID,
+		Role:      message.RoleUser,
+		Content:   []message.ContentBlock{message.TextBlock{Text: details.SummaryText}},
+		CreatedAt: latest.CreatedAt,
+	}
+	summaryMsgs = []message.Message{summaryMsg}
+
+	// If no first-kept anchor was recorded (legacy or empty-tail case), return
+	// only the summary with an empty kept tail.
+	if details.FirstKeptMsgID == "" {
+		return summaryMsgs, nil, nil
+	}
+
+	// Load the on-disk messages and find the kept tail starting at the anchor.
+	allMsgs, err := r.Messages(ctx, sessionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reconstructing compacted context for session %s: loading messages: %w", sessionID, err)
+	}
+	anchorIdx := -1
+	for i, m := range allMsgs {
+		if m.ID == details.FirstKeptMsgID {
+			anchorIdx = i
+			break
+		}
+	}
+	if anchorIdx < 0 {
+		// The anchor message no longer exists (e.g. was deleted). Return the
+		// summary only so the caller has something useful rather than an error.
+		return summaryMsgs, nil, nil
+	}
+
+	keptMsgs = append([]message.Message(nil), allMsgs[anchorIdx:]...)
+	return summaryMsgs, keptMsgs, nil
+}
 
 // EntryType classifies a node in a session's history tree. A session's flat
 // message list is the spine of a conversation, but a session can branch: the

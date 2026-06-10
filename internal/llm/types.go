@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/message"
 )
 
@@ -95,6 +96,11 @@ type Model struct {
 	// Request.Thinking for this model when positive; providers gate it by model
 	// id, so it is harmless on a non-thinking model.
 	ThinkingBudget int `json:"thinking_budget,omitempty"`
+	// Compat carries declarative per-model compatibility flags sourced from the
+	// config, threaded through NewRegistry so capability checks and request
+	// builders can consult them. Nil means "no overrides; use heuristics."
+	// It reuses the config type directly to avoid a parallel definition.
+	Compat *config.ModelCompat `json:"compat,omitempty"`
 }
 
 // Usage records provider-reported token counts.

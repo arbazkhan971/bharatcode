@@ -50,6 +50,7 @@ var slashCommandDescriptions = map[string]string{
 	"/tab":         "open or switch session tabs",
 	"/tabs":        "list open tabs",
 	"/fork":        "branch the current session",
+	"/handoff":     "transfer to a fresh focused session with a context summary",
 	"/rename":      "rename the current session",
 	"/diff":        "show the latest edit diff",
 	"/revert":      "undo this session's file changes",

@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -381,6 +382,189 @@ func TestRepo_ImplicitTree_AppendThenGetPathAndBranch(t *testing.T) {
 	require.Len(t, sub, 2)
 	require.Equal(t, e1ID, sub[0].ID)
 	require.Equal(t, e2ID, sub[1].ID)
+}
+
+// ---------------------------------------------------------------------------
+// Persistent-compaction tests (RecordCompaction + CompactedContext)
+// ---------------------------------------------------------------------------
+
+// TestRecordCompaction_WritesEntryCompactionNode verifies that RecordCompaction
+// persists an EntryCompaction node whose Summary decodes back to the stored
+// summary text and first-kept anchor.
+func TestRecordCompaction_WritesEntryCompactionNode(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	s := makeSession("compact-record-1", "/p", "CompactionRecord")
+	require.NoError(t, repo.Create(ctx, s))
+
+	// Append two messages so we have something to anchor on.
+	require.NoError(t, repo.AppendMessage(ctx, s.ID, makeTextMsg(message.RoleUser, "first")))
+	require.NoError(t, repo.AppendMessage(ctx, s.ID, makeTextMsg(message.RoleAssistant, "reply")))
+	msgs, err := repo.Messages(ctx, s.ID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2)
+
+	const summaryText = "[compacted history]\n\n## Goal\ntest goal\n\n## Next Steps\nstep1"
+	firstKeptID := msgs[1].ID // keep the assistant reply
+
+	entry, err := repo.RecordCompaction(ctx, s.ID, nil, summaryText, firstKeptID)
+	require.NoError(t, err)
+	require.NotEmpty(t, entry.ID)
+	require.Equal(t, session.EntryCompaction, entry.Type)
+
+	// The raw entry Summary must be parseable as CompactionDetails.
+	details := decodeCompactionSummary(t, entry.Summary)
+	require.Equal(t, summaryText, details.SummaryText)
+	require.Equal(t, firstKeptID, details.FirstKeptMsgID)
+
+	// It must appear in the entries list.
+	entries, err := repo.Entries(ctx, s.ID)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, session.EntryCompaction, entries[0].Type)
+}
+
+// TestCompactedContext_SummaryPlusKeptTailOrder verifies that after recording a
+// compaction, CompactedContext returns the summary message first followed by
+// the verbatim kept-tail messages in session order.
+func TestCompactedContext_SummaryPlusKeptTailOrder(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	s := makeSession("compact-ctx-1", "/p", "CompactionContext")
+	require.NoError(t, repo.Create(ctx, s))
+
+	// Seed: user + assistant + user + assistant. We will "compact" the first
+	// two and anchor the tail at msgs[2].
+	texts := []string{"q1", "a1", "q2", "a2"}
+	roles := []message.Role{
+		message.RoleUser, message.RoleAssistant,
+		message.RoleUser, message.RoleAssistant,
+	}
+	for i, text := range texts {
+		require.NoError(t, repo.AppendMessage(ctx, s.ID, makeTextMsg(roles[i], text)))
+	}
+	msgs, err := repo.Messages(ctx, s.ID)
+	require.NoError(t, err)
+	require.Len(t, msgs, 4)
+
+	const summaryText = "[compacted history]\n\n## Goal\nkeep tail"
+	firstKeptID := msgs[2].ID // tail = msgs[2], msgs[3]
+
+	_, err = repo.RecordCompaction(ctx, s.ID, nil, summaryText, firstKeptID)
+	require.NoError(t, err)
+
+	summaryMsgs, keptMsgs, err := repo.CompactedContext(ctx, s.ID)
+	require.NoError(t, err)
+
+	// Exactly one summary message.
+	require.Len(t, summaryMsgs, 1)
+	require.Equal(t, message.RoleUser, summaryMsgs[0].Role)
+	require.Contains(t, textOf(t, summaryMsgs[0]), summaryText)
+
+	// Two kept messages in order.
+	require.Len(t, keptMsgs, 2)
+	require.Equal(t, "q2", textOf(t, keptMsgs[0]))
+	require.Equal(t, "a2", textOf(t, keptMsgs[1]))
+}
+
+// TestCompactedContext_SurvivesFreshLoad simulates a session reload: a
+// compaction is recorded in one Repo instance, then a second Repo opened on
+// the same DB reconstructs the context identically. This proves the
+// compaction survives the in-memory lifecycle and that context reconstruction
+// is deterministic across restarts.
+func TestCompactedContext_SurvivesFreshLoad(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+	repo1 := session.NewRepo(database)
+
+	s := makeSession("compact-reload-1", "/p", "ReloadTest")
+	require.NoError(t, repo1.Create(ctx, s))
+
+	require.NoError(t, repo1.AppendMessage(ctx, s.ID, makeTextMsg(message.RoleUser, "ancient")))
+	require.NoError(t, repo1.AppendMessage(ctx, s.ID, makeTextMsg(message.RoleAssistant, "ancient-reply")))
+	require.NoError(t, repo1.AppendMessage(ctx, s.ID, makeTextMsg(message.RoleUser, "kept-user")))
+	require.NoError(t, repo1.AppendMessage(ctx, s.ID, makeTextMsg(message.RoleAssistant, "kept-reply")))
+
+	msgs1, err := repo1.Messages(ctx, s.ID)
+	require.NoError(t, err)
+	require.Len(t, msgs1, 4)
+
+	const summaryText = "[compacted history]\n\n## Goal\nreload test goal"
+	// Keep the last two messages verbatim.
+	_, err = repo1.RecordCompaction(ctx, s.ID, nil, summaryText, msgs1[2].ID)
+	require.NoError(t, err)
+
+	// --- Simulate a restart: open a second Repo on the same database. ---
+	repo2 := session.NewRepo(database)
+
+	summaryMsgs, keptMsgs, err := repo2.CompactedContext(ctx, s.ID)
+	require.NoError(t, err)
+
+	require.Len(t, summaryMsgs, 1, "reloaded summary must have one message")
+	require.Contains(t, textOf(t, summaryMsgs[0]), summaryText)
+
+	require.Len(t, keptMsgs, 2, "reloaded kept tail must have two messages")
+	require.Equal(t, "kept-user", textOf(t, keptMsgs[0]))
+	require.Equal(t, "kept-reply", textOf(t, keptMsgs[1]))
+
+	// The full on-disk messages are untouched (compaction is in-tree, not destructive).
+	allMsgs, err := repo2.Messages(ctx, s.ID)
+	require.NoError(t, err)
+	require.Len(t, allMsgs, 4, "disk messages must be unchanged after compaction recording")
+}
+
+// TestCompactedContext_NoCompactionReturnsNil verifies that a session with no
+// EntryCompaction returns nil, nil and no error.
+func TestCompactedContext_NoCompactionReturnsNil(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	s := makeSession("compact-nil-1", "/p", "NoCompact")
+	require.NoError(t, repo.Create(ctx, s))
+	require.NoError(t, repo.AppendMessage(ctx, s.ID, makeTextMsg(message.RoleUser, "hello")))
+
+	summaryMsgs, keptMsgs, err := repo.CompactedContext(ctx, s.ID)
+	require.NoError(t, err)
+	require.Nil(t, summaryMsgs)
+	require.Nil(t, keptMsgs)
+}
+
+// TestRecordCompaction_WithParentEntry verifies that RecordCompaction correctly
+// chains when a parentID is supplied, i.e. the compaction node is not a root.
+func TestRecordCompaction_WithParentEntry(t *testing.T) {
+	ctx := context.Background()
+	repo := session.NewRepo(openTestDB(t))
+
+	s := makeSession("compact-parent-1", "/p", "WithParent")
+	require.NoError(t, repo.Create(ctx, s))
+	require.NoError(t, repo.AppendMessage(ctx, s.ID, makeTextMsg(message.RoleUser, "q1")))
+	msgs, err := repo.Messages(ctx, s.ID)
+	require.NoError(t, err)
+
+	// An explicit message entry first.
+	msgID := msgs[0].ID
+	parentEntry, err := repo.AddEntry(ctx, &session.Entry{
+		SessionID: s.ID,
+		Type:      session.EntryMessage,
+		RefID:     &msgID,
+	})
+	require.NoError(t, err)
+
+	parentID := parentEntry.ID
+	entry, err := repo.RecordCompaction(ctx, s.ID, &parentID, "summary", msgs[0].ID)
+	require.NoError(t, err)
+	require.Equal(t, parentID, *entry.ParentID)
+}
+
+// decodeCompactionSummary is a test-local helper that unmarshals a
+// CompactionDetails from the raw Summary string of an EntryCompaction node.
+func decodeCompactionSummary(t *testing.T, summary string) session.CompactionDetails {
+	t.Helper()
+	var d session.CompactionDetails
+	require.NoError(t, json.Unmarshal([]byte(summary), &d), "CompactionDetails must decode from entry Summary")
+	return d
 }
 
 // TestRepo_ImplicitTree_ForkFromEntry verifies that ForkFromEntry works on a

@@ -60,6 +60,25 @@ type item struct {
 	createdAt   time.Time
 	cachedWidth int
 	cachedBody  string
+
+	// Incremental streaming render cache. While a message is being streamed
+	// we split the body into a "stable prefix" (source bytes whose markdown
+	// structure is provably closed) and a short "tail". The stable prefix is
+	// rendered once with glamour and its ANSI output kept here; on each new
+	// delta we only re-render the short tail and prepend the cached prefix
+	// ANSI, so glamour never processes the whole growing body on every flush.
+	//
+	// streamPrefixSrcLen is the byte length of the source text that was used
+	// to produce streamPrefixAnsi; it advances monotonically as the stable
+	// boundary moves forward. streamPrefixWidth is the render width at which
+	// streamPrefixAnsi was produced; a terminal resize resets both.
+	//
+	// These fields are zeroed on FinishStream (where a single canonical full
+	// render replaces them) and on any cache-invalidating call (SetRole,
+	// EnableMarkdown, etc.).
+	streamPrefixSrcLen int
+	streamPrefixAnsi   string
+	streamPrefixWidth  int
 }
 
 // New constructs an empty chat list.
@@ -80,6 +99,9 @@ func (l *List) EnableMarkdown(style string) {
 	for i := range l.items {
 		l.items[i].cachedWidth = 0
 		l.items[i].cachedBody = ""
+		l.items[i].streamPrefixSrcLen = 0
+		l.items[i].streamPrefixAnsi = ""
+		l.items[i].streamPrefixWidth = 0
 	}
 }
 
@@ -93,6 +115,9 @@ func (l *List) EnableDiff(theme styles.Theme) {
 	for i := range l.items {
 		l.items[i].cachedWidth = 0
 		l.items[i].cachedBody = ""
+		l.items[i].streamPrefixSrcLen = 0
+		l.items[i].streamPrefixAnsi = ""
+		l.items[i].streamPrefixWidth = 0
 	}
 }
 
@@ -145,6 +170,10 @@ func (l *List) Stream(id string, delta string) {
 	}
 	l.items[idx].body += delta
 	l.items[idx].streaming = true
+	// Invalidate only the top-level cache; the incremental prefix cache
+	// (streamPrefixAnsi / streamPrefixSrcLen) is left intact so renderItem
+	// can reuse the already-rendered stable portion and only re-render the
+	// short tail that follows it.
 	l.items[idx].cachedWidth = 0
 	l.items[idx].cachedBody = ""
 }
@@ -158,6 +187,9 @@ func (l *List) SetRole(id string, role message.Role) {
 		l.items[idx].role = role
 		l.items[idx].cachedWidth = 0
 		l.items[idx].cachedBody = ""
+		l.items[idx].streamPrefixSrcLen = 0
+		l.items[idx].streamPrefixAnsi = ""
+		l.items[idx].streamPrefixWidth = 0
 	}
 }
 
@@ -167,6 +199,12 @@ func (l *List) FinishStream(id string) {
 		l.items[idx].streaming = false
 		l.items[idx].cachedWidth = 0
 		l.items[idx].cachedBody = ""
+		// Clear the incremental streaming prefix cache: the next renderItem
+		// call will perform a canonical full glamour render of the finished
+		// message and store that in cachedBody instead.
+		l.items[idx].streamPrefixSrcLen = 0
+		l.items[idx].streamPrefixAnsi = ""
+		l.items[idx].streamPrefixWidth = 0
 	}
 }
 
@@ -383,12 +421,35 @@ func (l *List) renderItem(idx int, width int) string {
 		return it.cachedBody
 	}
 
+	// Incremental streaming markdown render. When a markdown renderer is
+	// configured and the message is still streaming, attempt to render only the
+	// short "tail" after a stable prefix boundary rather than re-rendering the
+	// whole growing body on every delta. If the body has advanced past the
+	// previously cached prefix boundary, extend the cached prefix first. If no
+	// safe boundary exists (e.g. an open code fence spans the whole message),
+	// fall through to the plain-text path below — correctness before speed.
+	//
+	// The output of the incremental path is byte-identical to a full glamour
+	// render of the whole body because: (a) the stable prefix is closed
+	// markdown (no open constructs), so its rendered ANSI cannot change as the
+	// tail grows; (b) the tail is rendered alone by the same glamour renderer;
+	// (c) both halves are trimmed with the same trimLineTrailing pass before
+	// concatenation. When the message finishes streaming, FinishStream clears
+	// these fields and the canonical full render below takes over.
+	if l.md != nil && it.role == message.RoleAssistant && it.streaming && it.body != "" {
+		if body, ok := l.renderStreamingMD(it, header, width); ok {
+			return body
+		}
+		// No safe boundary found → fall through to plain-text path.
+	}
+
 	// Render assistant prose as markdown once it is complete. While a message
-	// is still streaming we keep the fast plain wrap so each delta does not pay
-	// the cost of a full markdown re-render (and to avoid flicker on partial,
-	// not-yet-valid markdown). The markdown flows directly under the header at the
-	// full pane width — no frame, no indent — so the assistant's answer reads as
-	// plain prose the way Codex shows it.
+	// is still streaming and no stable prefix was found above, we keep the
+	// fast plain wrap so each delta does not pay the cost of a full markdown
+	// re-render (and to avoid flicker on partial, not-yet-valid markdown). The
+	// markdown flows directly under the header at the full pane width — no
+	// frame, no indent — so the assistant's answer reads as plain prose the
+	// way Codex shows it.
 	if l.md != nil && it.role == message.RoleAssistant && !it.streaming && it.body != "" {
 		if rendered, ok := l.md.Render(it.body, width); ok {
 			// glamour right-pads every line to the wrap width with trailing spaces;
@@ -421,6 +482,75 @@ func (l *List) renderItem(idx int, width int) string {
 	it.cachedWidth = width
 	it.cachedBody = header + "\n" + indent(body, indentPrefix)
 	return it.cachedBody
+}
+
+// renderStreamingMD attempts an incremental markdown render for a streaming
+// assistant item. It returns the full rendered bubble string and ok=true when
+// a safe stable-prefix boundary was found. It returns ("", false) when no safe
+// boundary exists, signalling the caller to fall back to the plain-text path.
+//
+// Incremental strategy:
+//  1. Find the stable prefix boundary (last "\n\n" not inside an open fence).
+//  2. If the cached prefix already covers that boundary at the same width,
+//     reuse the cached ANSI and only re-render the short tail.
+//  3. If the boundary has advanced (more text is now provably stable), render
+//     the new prefix with glamour, cache it, then render only the tail.
+//  4. Concatenate cachedPrefixAnsi + renderedTailAnsi, strip trailing padding,
+//     add the streaming cursor, and store the result in cachedBody.
+func (l *List) renderStreamingMD(it *item, header string, width int) (string, bool) {
+	boundary := stablePrefixBoundary(it.body)
+	if boundary == 0 {
+		// No safe boundary: the whole body has open constructs or no blank
+		// lines yet. Signal the caller to fall through to plain-text.
+		return "", false
+	}
+
+	prefixSrc := it.body[:boundary]
+	tailSrc := it.body[boundary:]
+
+	// Determine whether the cached prefix is still valid.
+	prefixHit := it.streamPrefixWidth == width &&
+		it.streamPrefixSrcLen == boundary &&
+		it.streamPrefixAnsi != ""
+
+	var prefixAnsi string
+	if prefixHit {
+		// Reuse the already-rendered stable portion — no glamour call needed.
+		prefixAnsi = it.streamPrefixAnsi
+	} else {
+		// Render the new (or first) prefix with glamour and cache it.
+		rendered, ok := l.md.Render(prefixSrc, width)
+		if !ok {
+			return "", false
+		}
+		prefixAnsi = trimLineTrailing(rendered)
+		it.streamPrefixSrcLen = boundary
+		it.streamPrefixAnsi = prefixAnsi
+		it.streamPrefixWidth = width
+	}
+
+	// Render the short tail. If the tail is empty (boundary == len(body))
+	// there is nothing to render after the prefix.
+	tailAnsi := ""
+	if len(tailSrc) > 0 {
+		rendered, ok := l.md.Render(tailSrc, width)
+		if !ok {
+			// Tail render failed; fall back to plain text for the whole bubble
+			// rather than emitting a half-rendered message.
+			return "", false
+		}
+		tailAnsi = trimLineTrailing(rendered)
+	}
+
+	// Concatenate prefix and tail, strip any double trailing newlines that
+	// glamour may leave at the join point, and append the streaming cursor.
+	combined := strings.TrimRight(prefixAnsi+tailAnsi, "\n")
+	combined += styles.Accent.Render(" ▌")
+
+	result := header + "\n" + combined
+	it.cachedWidth = width
+	it.cachedBody = result
+	return result, true
 }
 
 // itemHeader returns the bullet-led header line for a turn: an accent bullet, a

@@ -1823,3 +1823,230 @@ func TestSubmitInput_AltEnterKeepsMultilineIntact(t *testing.T) {
 	require.Equal(t, "first line\nsecond line", m.input.String(),
 		"the multi-line buffer must accumulate across Alt+Enter")
 }
+
+// --- /handoff tests ---
+
+// TestSlashHandoff_NoSession_ShowsGuidance asserts /handoff before any prompt
+// has been sent surfaces an explanatory dialog rather than panicking or opening
+// an empty tab.
+func TestSlashHandoff_NoSession_ShowsGuidance(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	require.False(t, m.sessionPersisted)
+	require.Empty(t, m.tabFirstPrompt)
+
+	h.submitSlash(t, "/handoff")
+
+	require.True(t, m.dialogs.Contains("handoff"), "/handoff must surface a guard dialog with no session")
+	body := plainText(m.dialogs.Render(200))
+	require.Contains(t, body, "No active session", "guard dialog must explain there is nothing to hand off yet")
+}
+
+// TestSlashHandoff_Resolves asserts /handoff is a recognized command (not
+// "unknown command") once a session has been started.
+func TestSlashHandoff_Resolves(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "understood"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// Establish a real session so the guard passes.
+	h.submit(t, "implement the feature")
+	h.drain(t, func() bool { return !m.running })
+
+	h.submitSlash(t, "/handoff")
+
+	require.False(t, m.dialogs.Contains("error"),
+		"/handoff must not fall through to the unknown-command dialog")
+}
+
+// TestSlashHandoff_ProducesNonEmptyDraftWithGoal is the core contract test:
+// /handoff on an active session must produce a non-empty handoff draft that
+// contains the session's first prompt (goal) and appears in the new tab's input
+// buffer so the user can review and send it.
+func TestSlashHandoff_ProducesNonEmptyDraftWithGoal(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	const firstPrompt = "refactor the auth module to use JWTs"
+	h.submit(t, firstPrompt)
+	h.drain(t, func() bool { return !m.running })
+
+	tabsBefore := len(m.tabs)
+	h.submitSlash(t, "/handoff")
+
+	// A new tab must have opened.
+	require.Equal(t, tabsBefore+1, len(m.tabs),
+		"/handoff must open a fresh tab for the successor session")
+
+	// The new tab's input buffer must contain a non-empty handoff draft.
+	draft := m.input.String()
+	require.NotEmpty(t, draft, "the new tab's input must be pre-filled with the handoff draft")
+
+	// The draft must reference the original goal.
+	require.Contains(t, draft, firstPrompt,
+		"the handoff draft must embed the session's first prompt as the goal")
+
+	// The draft must carry structural markers so the user knows it is a draft.
+	require.Contains(t, draft, "Handoff", "draft must carry a Handoff heading")
+	require.Contains(t, draft, "Next steps", "draft must include a Next steps placeholder")
+}
+
+// TestSlashHandoff_DraftContainsChangedFilesCount asserts the handoff draft
+// includes the changed-file count when the session modified files, giving the
+// successor session a quick scope signal.
+func TestSlashHandoff_DraftContainsChangedFilesCount(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	h.submit(t, "add the login endpoint")
+	h.drain(t, func() bool { return !m.running })
+
+	// Simulate the session having touched some files.
+	m.changedFiles = 5
+
+	h.submitSlash(t, "/handoff")
+
+	draft := m.input.String()
+	require.Contains(t, draft, "5",
+		"the handoff draft must mention the changed-file count")
+}
+
+// TestSlashHandoff_OpensNewTab asserts /handoff switches to a new tab so the
+// original session remains intact and the handoff starts fresh.
+func TestSlashHandoff_OpensNewTab(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "ok"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	h.submit(t, "bootstrap the project")
+	h.drain(t, func() bool { return !m.running })
+
+	originalSession := m.sessionID
+	tabsBefore := len(m.tabs)
+
+	h.submitSlash(t, "/handoff")
+
+	require.Equal(t, tabsBefore+1, len(m.tabs),
+		"/handoff must open exactly one new tab")
+	require.NotEqual(t, originalSession, m.sessionID,
+		"the new tab must have a fresh session id, not the original one")
+}
+
+// TestSlashHandoff_DraftContainsRecentContext asserts the handoff draft
+// samples recent transcript turns so the successor can see the current state
+// without loading the full history.
+func TestSlashHandoff_DraftContainsRecentContext(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// Seed a session whose transcript has known user and assistant turns.
+	s := &session.Session{Title: "Context test", Model: "fake-model", Agent: "coder"}
+	require.NoError(t, h.repo.Create(context.Background(), s))
+	require.NoError(t, h.repo.AppendMessage(context.Background(), s.ID, message.Message{
+		Role:    message.RoleUser,
+		Content: []message.ContentBlock{message.TextBlock{Text: "fix the race condition"}},
+	}))
+	require.NoError(t, h.repo.AppendMessage(context.Background(), s.ID, message.Message{
+		Role:    message.RoleAssistant,
+		Content: []message.ContentBlock{message.TextBlock{Text: "I found it in the scheduler"}},
+	}))
+
+	m.sessionID = s.ID
+	m.sessionPersisted = true
+	m.tabFirstPrompt = "fix the race condition"
+
+	h.submitSlash(t, "/handoff")
+
+	draft := m.input.String()
+	require.Contains(t, draft, "fix the race condition",
+		"the handoff draft must include the user's message from the transcript")
+	require.Contains(t, draft, "I found it in the scheduler",
+		"the handoff draft must include the assistant's recent reply")
+}
+
+// TestBuildHandoffDraft_EmptySession returns a non-empty skeleton even when
+// both the first prompt and the message list are empty, so the function never
+// produces a blank output.
+func TestBuildHandoffDraft_EmptySession(t *testing.T) {
+	t.Parallel()
+
+	draft := buildHandoffDraft("", 0, nil)
+	require.NotEmpty(t, draft, "buildHandoffDraft must always return a non-empty string")
+	require.Contains(t, draft, "Handoff", "the skeleton must carry the Handoff heading")
+	require.Contains(t, draft, "Next steps", "the skeleton must include the Next steps placeholder")
+}
+
+// TestBuildHandoffDraft_IncludesAllFields asserts the assembled draft contains
+// the goal, file count, recent message text, and the editorial marker so the
+// caller can verify every structural field in isolation.
+func TestBuildHandoffDraft_IncludesAllFields(t *testing.T) {
+	t.Parallel()
+
+	msgs := []message.Message{
+		{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "write the tests"}}},
+		{Role: message.RoleAssistant, Content: []message.ContentBlock{message.TextBlock{Text: "tests written"}}},
+	}
+	draft := buildHandoffDraft("migrate to Postgres", 3, msgs)
+
+	require.Contains(t, draft, "migrate to Postgres", "goal must appear in the draft")
+	require.Contains(t, draft, "3", "changed-file count must appear in the draft")
+	require.Contains(t, draft, "write the tests", "recent user turn must appear in the draft")
+	require.Contains(t, draft, "tests written", "recent assistant turn must appear in the draft")
+	require.Contains(t, draft, "Review and refine", "editorial marker must appear in the draft")
+}
+
+// TestSlashHandoff_InSlashCommands asserts /handoff appears in the completable
+// slash command set so Tab-completion and the slash-hint dropdown list it.
+func TestSlashHandoff_InSlashCommands(t *testing.T) {
+	t.Parallel()
+
+	found := false
+	for _, cmd := range slashCommands {
+		if cmd == "/handoff" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "/handoff must be present in slashCommands for Tab-completion")
+}
+
+// TestSlashHandoff_DocumentedInHelp asserts /handoff appears in the /help
+// listing so it is discoverable alongside /compact and /fork.
+func TestSlashHandoff_DocumentedInHelp(t *testing.T) {
+	m := newSizedModel(t)
+	lines := m.slashHelpLines()
+
+	found := false
+	for _, line := range lines {
+		if line == "/handoff" || strings.HasPrefix(line, "/handoff ") {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "/handoff must appear in slashHelpLines() output")
+}

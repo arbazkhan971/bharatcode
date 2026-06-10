@@ -56,16 +56,31 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 		if contextWindow <= 0 {
 			contextWindow = inferContextWindow(m.ID)
 		}
+		// When a Compat.ContextWindow override is present it takes precedence over
+		// both the catalog value and the heuristic, so the agent's compaction and
+		// overflow checks honor the user's explicit configuration.
+		if m.Compat != nil && m.Compat.ContextWindow != nil && *m.Compat.ContextWindow > 0 {
+			contextWindow = *m.Compat.ContextWindow
+		}
+
+		// Compat.SupportsImages, when set, overrides the catalog flag for the
+		// capability checks that gate image inputs on this model.
+		supportsImages := m.SupportsImages
+		if m.Compat != nil && m.Compat.SupportsImages != nil {
+			supportsImages = *m.Compat.SupportsImages
+		}
+
 		model := Model{
 			ID:                    m.ID,
 			Provider:              m.Provider,
 			ContextWindow:         contextWindow,
 			InputPricePerMTokUSD:  m.InputPricePerMTokUSD,
 			OutputPricePerMTokUSD: m.OutputPricePerMTokUSD,
-			SupportsImages:        m.SupportsImages,
+			SupportsImages:        supportsImages,
 			SupportsTools:         m.SupportsTools,
 			ReasoningEffort:       m.ReasoningEffort,
 			ThinkingBudget:        m.ThinkingBudget,
+			Compat:                m.Compat,
 		}
 		modelsByProvider[strings.ToLower(m.Provider)] = append(modelsByProvider[strings.ToLower(m.Provider)], model)
 		allModels = append(allModels, model)

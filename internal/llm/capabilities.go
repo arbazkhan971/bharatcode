@@ -834,6 +834,20 @@ func inferDoubaoContextWindow(lid string) (int, bool) {
 	return n * 1024, true
 }
 
+// isReasoningModelForRequest reports whether the model named by id should be
+// treated as a reasoning model for the purpose of building a request. It
+// consults the model's Compat.Reasoning override first; when that is nil it
+// falls back to the id-based isReasoningModel heuristic. This is the
+// preferred function for request builders that have access to the model list
+// (e.g. openai_compatible), while the bare isReasoningModel remains the
+// fallback for callers that only have a model id.
+func isReasoningModelForRequest(models []Model, id string) bool {
+	if model, ok := findModel(models, id); ok && model.Compat != nil && model.Compat.Reasoning != nil {
+		return *model.Compat.Reasoning
+	}
+	return isReasoningModel(id)
+}
+
 func modelSupportsTools(models []Model, id string) bool {
 	model, ok := findModel(models, id)
 	return ok && model.SupportsTools

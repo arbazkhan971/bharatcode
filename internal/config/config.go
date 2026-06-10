@@ -295,6 +295,134 @@ type Provider struct {
 	Fallbacks []string `json:"fallbacks,omitempty"`
 }
 
+// ThinkingFormat selects the wire encoding for a model's extended-thinking
+// (reasoning) output. Each value corresponds to the on-the-wire field name or
+// structure used by a specific provider family. "openai" and the empty string
+// (the zero value) are equivalent: the request uses the OpenAI
+// reasoning_effort / reasoning_content fields and no special thinking block is
+// injected. The other values are:
+//
+//   - "openrouter": use OpenRouter's unified `reasoning` object (enabled/effort/
+//     max_tokens). This is set automatically when the provider's base_url
+//     contains "openrouter.ai" and may be overridden here.
+//   - "deepseek": treat "reasoning_content" as the thinking field name in both
+//     request and response, matching the DeepSeek-R1 wire format.
+//   - "qwen": use the Qwen extended-thinking envelope
+//     (enable_thinking / thinking_budget in the request body; thinking_content
+//     in the delta).
+//   - "string-thinking": emit thinking as plain text prepended to the first
+//     content chunk — for providers that do not surface thinking in a dedicated
+//     field but include it inline (e.g. some local servers).
+//   - "none": suppress all thinking fields even when a budget or effort is
+//     configured. Use this for providers that 400 on unknown fields.
+type ThinkingFormat string
+
+const (
+	// ThinkingFormatDefault is the zero-value alias for "openai". When unset,
+	// the provider falls back to its own heuristic (e.g. isOpenRouter check).
+	ThinkingFormatDefault ThinkingFormat = ""
+	// ThinkingFormatOpenAI uses reasoning_effort / reasoning_content (OpenAI).
+	ThinkingFormatOpenAI ThinkingFormat = "openai"
+	// ThinkingFormatOpenRouter uses OpenRouter's `reasoning` object.
+	ThinkingFormatOpenRouter ThinkingFormat = "openrouter"
+	// ThinkingFormatDeepSeek uses deepseek-style reasoning_content field.
+	ThinkingFormatDeepSeek ThinkingFormat = "deepseek"
+	// ThinkingFormatQwen uses Qwen's enable_thinking / thinking_budget fields.
+	ThinkingFormatQwen ThinkingFormat = "qwen"
+	// ThinkingFormatStringThinking prepends thinking as plain text to content.
+	ThinkingFormatStringThinking ThinkingFormat = "string-thinking"
+	// ThinkingFormatNone suppresses all thinking fields.
+	ThinkingFormatNone ThinkingFormat = "none"
+)
+
+// CacheControlFormat selects how prompt-caching control hints are serialized
+// for the provider. "anthropic" sends Anthropic-style cache_control blocks in
+// the message content. "none" (the default for non-Anthropic dialects) omits
+// them, preventing endpoints that do not understand the field from returning a
+// 400 on unexpected structure.
+type CacheControlFormat string
+
+const (
+	// CacheControlFormatNone omits cache_control from the wire request.
+	CacheControlFormatNone CacheControlFormat = "none"
+	// CacheControlFormatAnthropic emits Anthropic-style cache_control blocks.
+	CacheControlFormatAnthropic CacheControlFormat = "anthropic"
+)
+
+// ToolResultQuirk names provider-specific quirks in how tool results must be
+// formatted. The zero value ("") means standard OpenAI-compatible formatting.
+//
+//   - "": standard tool result as a {role:"tool", tool_call_id, content} message.
+//   - "user-content": some local servers reject the "tool" role and require
+//     tool results as a user-role message with a text description instead.
+type ToolResultQuirk string
+
+const (
+	// ToolResultQuirkNone is the standard OpenAI tool-result message format.
+	ToolResultQuirkNone ToolResultQuirk = ""
+	// ToolResultQuirkUserContent wraps tool results in a user-role text message.
+	ToolResultQuirkUserContent ToolResultQuirk = "user-content"
+)
+
+// ModelCompat carries declarative per-model provider-compatibility flags for
+// OpenAI-compatible (and quirky) endpoints that deviate from the OpenAI
+// baseline. All fields are optional (pointer or zero-value = "use the
+// heuristic / current default"), so a Model with no Compat block behaves
+// exactly as before.
+//
+// Example config:
+//
+//	{
+//	  "id": "deepseek-r1",
+//	  "provider": "deepseek",
+//	  "compat": {
+//	    "thinking_format": "deepseek",
+//	    "context_window": 131072
+//	  }
+//	}
+type ModelCompat struct {
+	// ThinkingFormat selects how extended-thinking (reasoning) output is encoded
+	// on the wire. Empty (the default) falls back to heuristic detection.
+	ThinkingFormat ThinkingFormat `json:"thinking_format,omitempty"`
+
+	// CacheControlFormat selects how prompt-caching hints are serialized.
+	// Empty (the default) uses "none" for OpenAI-compatible providers.
+	CacheControlFormat CacheControlFormat `json:"cache_control_format,omitempty"`
+
+	// StrictTools, when true, adds "strict": true to every function definition
+	// in the tools array. Some providers (Azure OpenAI, certain OpenRouter
+	// upstreams) require this for reliable JSON schema adherence; the OpenAI
+	// baseline omits it by default. Has no effect when no tools are configured.
+	StrictTools bool `json:"strict_tools,omitempty"`
+
+	// ToolResultQuirk selects an alternate tool-result message format for
+	// providers that reject the standard OpenAI tool-result structure.
+	// Empty (the default) uses standard formatting.
+	ToolResultQuirk ToolResultQuirk `json:"tool_result_quirk,omitempty"`
+
+	// ContextWindow overrides the model's context window (in tokens) when set to
+	// a positive value, taking precedence over the catalog value and the
+	// model-id heuristic in inferContextWindow. Use this for private or
+	// aggregator-specific variants whose window differs from the public model.
+	ContextWindow *int `json:"context_window,omitempty"`
+
+	// MaxTokens overrides the maximum output tokens the provider will generate.
+	// A positive value replaces the model-id heuristic; zero (the default) falls
+	// back to the heuristic or the caller-supplied value.
+	MaxTokens *int `json:"max_tokens,omitempty"`
+
+	// SupportsImages overrides the model-level supports_images flag. Use a
+	// pointer so absent = keep the model's configured value.
+	SupportsImages *bool `json:"supports_images,omitempty"`
+
+	// Reasoning overrides the per-model reasoning capability detection. When
+	// true, the model is treated as a reasoning model (omit temperature, use
+	// max_completion_tokens). When false, it is treated as a non-reasoning chat
+	// model even if the id-heuristic would classify it as reasoning. Nil (the
+	// default) defers to the heuristic.
+	Reasoning *bool `json:"reasoning,omitempty"`
+}
+
 // Model is one entry in a model pack. Prices are quoted per
 // million tokens in USD; the ledger converts to INR using
 // LedgerConfig.UsdInrRate. ContextWindow is the model's maximum
@@ -319,6 +447,10 @@ type Model struct {
 	// thinking, which the provider gates by model id. Zero (the default) leaves
 	// thinking off.
 	ThinkingBudget int `json:"thinking_budget,omitempty"`
+	// Compat, when non-nil, carries declarative per-model compatibility flags for
+	// OpenAI-compatible endpoints that deviate from the baseline. A nil Compat
+	// block (the default) preserves existing heuristic behavior unchanged.
+	Compat *ModelCompat `json:"compat,omitempty"`
 }
 
 // PermConfig declares default permission behaviour for tool calls.

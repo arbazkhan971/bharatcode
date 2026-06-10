@@ -1435,6 +1435,8 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 		return m.handleCompact()
 	case "/fork":
 		return m.handleFork()
+	case "/handoff":
+		return m.handleHandoff()
 	case "/diff":
 		return m.handleDiff()
 	case "/status":
@@ -2338,6 +2340,7 @@ func (m *model) slashHelpLines() []string {
 		"/tabs - list open tabs",
 		"/compact - summarize older turns to shrink context",
 		"/fork - branch the current session",
+		"/handoff - transfer to a fresh focused session with a structured context summary",
 		"/rename <new title> - rename the current session",
 		"/diff - show the latest edit diff",
 		"/revert [apply|force] - undo this session's file changes (preview first, then apply)",

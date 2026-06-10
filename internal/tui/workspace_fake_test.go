@@ -31,8 +31,8 @@ import (
 // the provided bus into a consolidated UIEvent channel, mirroring what
 // app.FanIn does in production.
 type fakeWorkspace struct {
-	loop    *agent.Loop
-	perm    *permission.Checker
+	loop     *agent.Loop
+	perm     *permission.Checker
 	sessions *session.Repo
 
 	// out is the consolidated UIEvent topic the TUI subscribes to.

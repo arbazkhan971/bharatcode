@@ -24,7 +24,7 @@ const CTX = `You are implementing one task of the BharatCode "Codex-parity" plan
 END OBJECTIVE: make the TUI + conversation feel like Codex CLI — clean transcript, visible-but-quiet tool activity, concise file-aware verification-aware final answers, no claiming done without verifying.
 HARD RULES:
 - Match surrounding code style, comment density, and idioms. This is a mature Go codebase.
-- NEVER reference Crush, FSL, clean-room, or any provenance in code/comments/metadata.
+- NEVER reference any external project, prior codebase, or provenance in code/comments/metadata.
 - Module path is github.com/arbazkhan971/bharatcode.
 - Run \`cd ${REPO} && go build ./...\` and the relevant \`go test\` after editing; do not leave the tree non-compiling.
 - Only edit the files your task owns (listed below). Do NOT touch files owned by other tasks — they run concurrently.

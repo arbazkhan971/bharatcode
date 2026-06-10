@@ -17,7 +17,7 @@ const CTX = `You are implementing part of the BharatCode "stability hardening" p
 GOAL: make BharatCode release-grade for real \`bharatcode --yolo\` usage — PTY/TUI transcript acceptance, live-provider eval, provider-independent CI smoke, clean release hygiene, post-release install verification.
 HARD RULES:
 - Match surrounding code style, comment density, and Go idioms; this is a mature codebase.
-- NEVER reference Crush, FSL, clean-room, or any provenance anywhere (code/comments/metadata).
+- NEVER reference any external project, prior codebase, or provenance anywhere (code/comments/metadata).
 - Keep \`go build ./...\` green and do not break existing tests. New PTY/live tests MUST be opt-in behind their env vars (BHARATCODE_TUI_PTY_SMOKE=1, BHARATCODE_LIVE_EVAL=1) so the default \`go test ./...\` stays fast and offline.
 - Shell scripts: make them executable (chmod +x), POSIX/bash-correct, and take a binary path argument where the plan shows one.
 - Edit ONLY the files your chain owns. Other chains run concurrently in separate worktrees.

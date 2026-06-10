@@ -108,25 +108,23 @@ func (m *model) visiblePaletteEntries() []paletteEntry {
 		}
 		return out
 	}
-	q := strings.ToLower(m.paletteFilter)
-	var prefix, substr, subseq []paletteEntry
-	for _, e := range all {
-		name := strings.ToLower(e.name)
-		hay := name + " " + strings.ToLower(e.desc)
-		nameCore := strings.TrimPrefix(name, "/") // match "help" without "/"
-		switch {
-		case strings.HasPrefix(nameCore, q) || strings.HasPrefix(name, "/"+q):
-			prefix = append(prefix, e)
-		case strings.Contains(hay, q):
-			substr = append(substr, e)
-		case isSubsequence(q, hay):
-			subseq = append(subseq, e)
-		}
+	// Rank the matches with the scored fuzzy matcher (gap penalty, word-boundary
+	// reward) over each entry's "name description" haystack, so a query that lands
+	// on the command's start or word boundaries ("di" → /diff) floats above one it
+	// only threads through a description. The matched set is exactly the entries
+	// whose haystack contains the query as a subsequence — the same membership the
+	// former prefix/substring/subsequence bands produced — so only the order
+	// changes, now by relevance score rather than by coarse band.
+	haystacks := make([]string, len(all))
+	for i, e := range all {
+		haystacks[i] = e.name + " " + e.desc
 	}
-	out := make([]paletteEntry, 0, len(prefix)+len(substr)+len(subseq))
-	out = append(out, prefix...)
-	out = append(out, substr...)
-	return append(out, subseq...)
+	ranked := fuzzyRank(m.paletteFilter, haystacks)
+	out := make([]paletteEntry, 0, len(ranked))
+	for _, r := range ranked {
+		out = append(out, all[r.Index])
+	}
+	return out
 }
 
 // paletteRecentLen returns how many of the recent command names exist in the

@@ -89,7 +89,7 @@ func (t *WriteTool) Run(ctx context.Context, args json.RawMessage) (res Result, 
 		if msg := editGuard(ctx, t.deps, path, "overwriting"); msg != "" {
 			return errorResult(msg), nil
 		}
-		if !hasViewed(t.deps.SessionID, path) {
+		if !hasViewed(sessionID(ctx, t.deps), path) {
 			return errorResult("refusing to overwrite existing file that has not been viewed in this session"), nil
 		}
 		oldContent, err = os.ReadFile(path)
@@ -109,7 +109,7 @@ func (t *WriteTool) Run(ctx context.Context, args json.RawMessage) (res Result, 
 	if err := recordToolWrite(ctx, t.deps, path, oldContentOrNil(exists, oldContent), newContent); err != nil {
 		return Result{}, err
 	}
-	markViewed(t.deps.SessionID, path)
+	markViewed(sessionID(ctx, t.deps), path)
 
 	action := "created"
 	if exists {
@@ -148,7 +148,7 @@ func (t *WriteTool) checkPermission(ctx context.Context, path string, raw json.R
 	decision, err := t.deps.Permission.Check(ctx, permission.Request{
 		ToolName:  t.Name(),
 		Args:      args,
-		SessionID: t.deps.SessionID,
+		SessionID: sessionID(ctx, t.deps),
 	})
 	if err != nil {
 		return fmt.Errorf("checking permission: %w", err)

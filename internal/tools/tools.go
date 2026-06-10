@@ -115,6 +115,48 @@ type Dependencies struct {
 	Offline bool
 }
 
+// sessionIDCtxKey keys the per-run session id carried on the context. The tool
+// registry is built once at app construction, before any session exists, so a
+// static Dependencies.SessionID cannot identify the live turn. The agent loop
+// stamps the active session id onto the run context via WithSessionID, and tools
+// resolve the effective id with sessionID(ctx, deps) — preferring an explicit
+// deps.SessionID (used in tests that inject one) and otherwise reading the
+// context. This is what makes session-scoped permission grants and the
+// read-before-edit / stale-read guards actually fire in production, where the
+// registry's deps.SessionID is empty.
+type sessionIDCtxKey struct{}
+
+// WithSessionID returns a context carrying the active turn's session id so tools
+// run under it can resolve session-scoped permissions and file-tracking. The
+// agent loop calls this once at the start of each Run.
+func WithSessionID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionIDCtxKey{}, id)
+}
+
+// SessionIDFromContext returns the session id stamped by WithSessionID, or "" if
+// none is present.
+func SessionIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(sessionIDCtxKey{}).(string); ok {
+		return id
+	}
+	return ""
+}
+
+// sessionID resolves the effective session id for a tool call: an explicit
+// deps.SessionID wins (tests set it directly), otherwise the per-run id carried
+// on ctx by the agent loop. Built-in tools use this instead of deps.SessionID so
+// they work both when constructed per-session and when constructed once at app
+// startup with the id supplied at run time.
+func sessionID(ctx context.Context, deps Dependencies) string {
+	if deps.SessionID != "" {
+		return deps.SessionID
+	}
+	return SessionIDFromContext(ctx)
+}
+
 // Registry stores the available tools by name.
 type Registry struct {
 	mu    sync.RWMutex

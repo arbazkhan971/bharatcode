@@ -97,8 +97,9 @@ func (t *NotebookEditTool) Run(ctx context.Context, args json.RawMessage) (res R
 	// Guard against blind and stale edits, exactly as the edit tool does: the
 	// notebook must have been read this session, and must not have changed on
 	// disk since, so the cell numbers the model is using still line up.
-	if t.deps.FileTracker != nil && t.deps.SessionID != "" {
-		read, readErr := t.deps.FileTracker.HasRead(ctx, t.deps.SessionID, path)
+	sid := sessionID(ctx, t.deps)
+	if t.deps.FileTracker != nil && sid != "" {
+		read, readErr := t.deps.FileTracker.HasRead(ctx, sid, path)
 		if readErr != nil {
 			return errorResult(fmt.Sprintf("checking read history for %s: %v", path, readErr)), nil
 		}
@@ -108,7 +109,7 @@ func (t *NotebookEditTool) Run(ctx context.Context, args json.RawMessage) (res R
 				path,
 			)), nil
 		}
-		changed, conflictErr := t.deps.FileTracker.HasConflict(ctx, t.deps.SessionID, path)
+		changed, conflictErr := t.deps.FileTracker.HasConflict(ctx, sid, path)
 		if conflictErr != nil {
 			return errorResult(fmt.Sprintf("checking file freshness for %s: %v", path, conflictErr)), nil
 		}
@@ -158,7 +159,7 @@ func (t *NotebookEditTool) checkPermission(ctx context.Context, path string, raw
 	decision, err := t.deps.Permission.Check(ctx, permission.Request{
 		ToolName:  t.Name(),
 		Args:      args,
-		SessionID: t.deps.SessionID,
+		SessionID: sessionID(ctx, t.deps),
 	})
 	if err != nil {
 		return fmt.Errorf("checking permission: %w", err)

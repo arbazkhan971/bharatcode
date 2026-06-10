@@ -1,0 +1,85 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * BharatCode color palette — source of truth.
+ *
+ * Stored as space-separated RGB channels (not hex) so Tailwind's
+ * `rgb(var(--token) / <alpha-value>)` references support opacity modifiers.
+ * tailwind.config.ts maps each token to a semantic Tailwind color.
+ */
+:root {
+  /* Surfaces — deep near-black dark theme */
+  --bc-bg: 11 12 16; /* #0B0C10 page background */
+  --bc-bg-elevated: 16 18 24; /* #101218 */
+  --bc-surface: 22 24 32; /* #161820 cards / panels */
+  --bc-surface-hover: 30 33 43; /* #1E212B */
+  --bc-border: 38 41 54; /* #262936 */
+  --bc-border-strong: 56 60 78; /* #383C4E */
+
+  /* Foreground ramp */
+  --bc-fg: 237 239 245; /* #EDEFF5 primary text */
+  --bc-muted: 159 165 184; /* #9FA5B8 secondary text */
+  --bc-faint: 108 114 134; /* #6C7286 tertiary / captions */
+
+  /* Accents */
+  --bc-saffron: 255 153 51; /* #FF9933 India-inspired primary accent */
+  --bc-saffron-soft: 255 183 110; /* #FFB76E lighter saffron */
+  --bc-blue: 88 166 255; /* #58A6FF tech blue — links / secondary */
+  --bc-green: 63 209 144; /* #3FD190 terminal green — success */
+  --bc-india-green: 19 136 8; /* #138808 flag green — sovereignty motif */
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-bg text-fg font-sans antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Respect users who prefer reduced motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Visible, on-brand focus ring for keyboard users across the site. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-saffron/70 ring-offset-2 ring-offset-bg;
+  }
+
+  ::selection {
+    background-color: rgb(var(--bc-saffron) / 0.3);
+    color: rgb(var(--bc-fg));
+  }
+}
+
+@layer components {
+  /* Subtle dotted/grid backdrop used behind hero / terminal sections. */
+  .bc-grid-bg {
+    background-image: theme('backgroundImage.grid-faint');
+    background-size: 40px 40px;
+    background-position: center;
+    -webkit-mask-image: radial-gradient(
+      ellipse 80% 60% at 50% 0%,
+      black 40%,
+      transparent 100%
+    );
+    mask-image: radial-gradient(
+      ellipse 80% 60% at 50% 0%,
+      black 40%,
+      transparent 100%
+    );
+  }
+}

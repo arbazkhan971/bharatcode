@@ -396,7 +396,7 @@ func (t *codeActionsTool) checkPermission(ctx context.Context, raw json.RawMessa
 	decision, err := t.deps.Permission.Check(ctx, permission.Request{
 		ToolName:  t.Name(),
 		Args:      args,
-		SessionID: t.deps.SessionID,
+		SessionID: sessionID(ctx, t.deps),
 	})
 	if err != nil {
 		return fmt.Errorf("checking permission: %w", err)
@@ -408,13 +408,14 @@ func (t *codeActionsTool) checkPermission(ctx context.Context, raw json.RawMessa
 }
 
 func (t *codeActionsTool) recordWrite(ctx context.Context, path string, oldContent, newContent []byte) error {
-	if t.deps.FileTracker == nil || t.deps.SessionID == "" {
+	sid := sessionID(ctx, t.deps)
+	if t.deps.FileTracker == nil || sid == "" {
 		return nil
 	}
-	if _, err := t.deps.FileTracker.RecordWrite(ctx, t.deps.SessionID, path, oldContent, newContent); err != nil {
+	if _, err := t.deps.FileTracker.RecordWrite(ctx, sid, path, oldContent, newContent); err != nil {
 		return fmt.Errorf("recording write for %s: %w", path, err)
 	}
-	markViewed(t.deps.SessionID, path)
+	markViewed(sid, path)
 	return nil
 }
 

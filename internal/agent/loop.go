@@ -767,6 +767,12 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
+	// Stamp the active session id onto the run context so every tool call in this
+	// turn resolves it. The tool registry is built once at app startup with an
+	// empty Dependencies.SessionID, so without this the session-scoped permission
+	// grants (and the read-before-edit / stale-read guards) would never fire in
+	// production — they key off the per-turn session id, which only Run knows.
+	runCtx = tools.WithSessionID(runCtx, sessionID)
 	l.cancelMu.Lock()
 	l.cancelRun = cancel
 	l.cancelMu.Unlock()

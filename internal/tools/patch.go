@@ -174,7 +174,7 @@ func (t *PatchTool) Run(ctx context.Context, args json.RawMessage) (res Result, 
 			if err := recordToolWrite(ctx, t.deps, op.path, op.oldContent, op.newContent); err != nil {
 				return Result{}, err
 			}
-			markViewed(t.deps.SessionID, op.path)
+			markViewed(sessionID(ctx, t.deps), op.path)
 			verb := "modified"
 			if op.kind == "create" {
 				verb = "created"
@@ -219,7 +219,7 @@ func (t *PatchTool) checkPermission(ctx context.Context, raw json.RawMessage) er
 	decision, err := t.deps.Permission.Check(ctx, permission.Request{
 		ToolName:  t.Name(),
 		Args:      args,
-		SessionID: t.deps.SessionID,
+		SessionID: sessionID(ctx, t.deps),
 	})
 	if err != nil {
 		return fmt.Errorf("checking permission: %w", err)
@@ -239,11 +239,12 @@ func (t *PatchTool) checkPermission(ctx context.Context, raw json.RawMessage) er
 // describing the violation, or "" when the edit may proceed (including when no
 // FileTracker is wired, as in tests).
 func editGuard(ctx context.Context, deps Dependencies, path, action string) string {
-	if deps.FileTracker == nil || deps.SessionID == "" {
+	sid := sessionID(ctx, deps)
+	if deps.FileTracker == nil || sid == "" {
 		return ""
 	}
 	if fsext.Exists(path) {
-		read, err := deps.FileTracker.HasRead(ctx, deps.SessionID, path)
+		read, err := deps.FileTracker.HasRead(ctx, sid, path)
 		if err != nil {
 			return fmt.Sprintf("checking read history for %s: %v", path, err)
 		}
@@ -254,7 +255,7 @@ func editGuard(ctx context.Context, deps Dependencies, path, action string) stri
 			)
 		}
 	}
-	changed, err := deps.FileTracker.HasConflict(ctx, deps.SessionID, path)
+	changed, err := deps.FileTracker.HasConflict(ctx, sid, path)
 	if err != nil {
 		return fmt.Sprintf("checking file freshness for %s: %v", path, err)
 	}

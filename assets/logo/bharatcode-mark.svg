@@ -1,0 +1,28 @@
+<svg width="96" height="96" viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="BharatCode logo mark">
+  <title>BharatCode</title>
+  <!-- Rounded dark terminal tile -->
+  <rect x="2" y="2" width="92" height="92" rx="22" fill="#0E1117"/>
+  <rect x="2.5" y="2.5" width="91" height="91" rx="21.5" stroke="#23293A" stroke-width="1"/>
+  <!-- Ashoka-chakra-inspired ring in saffron: code meets India -->
+  <g transform="translate(48 48)" stroke="#FF9933" stroke-width="3" stroke-linecap="round">
+    <circle r="27" fill="none" opacity="0.35"/>
+    <!-- 12 spokes, subtle -->
+    <g opacity="0.5">
+      <line x1="0" y1="-27" x2="0" y2="-19"/>
+      <line x1="13.5" y1="-23.4" x2="9.5" y2="-16.5"/>
+      <line x1="23.4" y1="-13.5" x2="16.5" y2="-9.5"/>
+      <line x1="27" y1="0" x2="19" y2="0"/>
+      <line x1="23.4" y1="13.5" x2="16.5" y2="9.5"/>
+      <line x1="13.5" y1="23.4" x2="9.5" y2="16.5"/>
+      <line x1="0" y1="27" x2="0" y2="19"/>
+      <line x1="-13.5" y1="23.4" x2="-9.5" y2="16.5"/>
+      <line x1="-23.4" y1="13.5" x2="-16.5" y2="9.5"/>
+      <line x1="-27" y1="0" x2="-19" y2="0"/>
+      <line x1="-23.4" y1="-13.5" x2="-16.5" y2="-9.5"/>
+      <line x1="-13.5" y1="-23.4" x2="-9.5" y2="-16.5"/>
+    </g>
+  </g>
+  <!-- Terminal prompt: chevron + cursor, the core "Code" mark -->
+  <path d="M34 38 L44 48 L34 58" stroke="#4FB3FF" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="50" y="53" width="14" height="5" rx="2.5" fill="#FF9933"/>
+</svg>

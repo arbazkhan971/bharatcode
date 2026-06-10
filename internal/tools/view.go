@@ -188,12 +188,13 @@ func (t *ViewTool) viewImage(ctx context.Context, path string, size int64) (Resu
 }
 
 func (t *ViewTool) recordRead(ctx context.Context, path string) error {
-	if t.deps.FileTracker != nil && t.deps.SessionID != "" {
-		if err := t.deps.FileTracker.RecordRead(ctx, t.deps.SessionID, path); err != nil {
+	sid := sessionID(ctx, t.deps)
+	if t.deps.FileTracker != nil && sid != "" {
+		if err := t.deps.FileTracker.RecordRead(ctx, sid, path); err != nil {
 			return fmt.Errorf("recording read for %s: %w", path, err)
 		}
 	}
-	markViewed(t.deps.SessionID, path)
+	markViewed(sid, path)
 	return nil
 }
 

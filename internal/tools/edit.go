@@ -90,13 +90,14 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 
 	// Guard against blind and stale edits. Both checks live in the same
 	// FileTracker-backed regime that is always wired in real sessions.
-	if t.deps.FileTracker != nil && t.deps.SessionID != "" {
+	sid := sessionID(ctx, t.deps)
+	if t.deps.FileTracker != nil && sid != "" {
 		// Read-before-edit: refuse to edit an existing file the session has not
 		// read, so the edit targets the file's actual current contents rather
 		// than a guess. Mirrors the write tool's "view before overwrite" guard.
 		// New files (not yet on disk) fall through to the clearer read error.
 		if fsext.Exists(path) {
-			read, readErr := t.deps.FileTracker.HasRead(ctx, t.deps.SessionID, path)
+			read, readErr := t.deps.FileTracker.HasRead(ctx, sid, path)
 			if readErr != nil {
 				return errorResult(fmt.Sprintf("checking read history for %s: %v", path, readErr)), nil
 			}
@@ -109,7 +110,7 @@ func (t *EditTool) Run(ctx context.Context, args json.RawMessage) (res Result, e
 		}
 		// Stale read: if the file changed on disk since the model last read it,
 		// refuse the edit and ask for a re-read.
-		changed, conflictErr := t.deps.FileTracker.HasConflict(ctx, t.deps.SessionID, path)
+		changed, conflictErr := t.deps.FileTracker.HasConflict(ctx, sid, path)
 		if conflictErr != nil {
 			return errorResult(fmt.Sprintf("checking file freshness for %s: %v", path, conflictErr)), nil
 		}
@@ -185,7 +186,7 @@ func (t *EditTool) checkPermission(ctx context.Context, path string, raw json.Ra
 	decision, err := t.deps.Permission.Check(ctx, permission.Request{
 		ToolName:  t.Name(),
 		Args:      args,
-		SessionID: t.deps.SessionID,
+		SessionID: sessionID(ctx, t.deps),
 	})
 	if err != nil {
 		return fmt.Errorf("checking permission: %w", err)
@@ -197,14 +198,15 @@ func (t *EditTool) checkPermission(ctx context.Context, path string, raw json.Ra
 }
 
 func (t *EditTool) recordWrite(ctx context.Context, path string, oldContent, newContent []byte) error {
-	if t.deps.FileTracker == nil || t.deps.SessionID == "" {
+	sid := sessionID(ctx, t.deps)
+	if t.deps.FileTracker == nil || sid == "" {
 		return nil
 	}
-	_, err := t.deps.FileTracker.RecordWrite(ctx, t.deps.SessionID, path, oldContent, newContent)
+	_, err := t.deps.FileTracker.RecordWrite(ctx, sid, path, oldContent, newContent)
 	if err != nil {
 		return fmt.Errorf("recording write for %s: %w", path, err)
 	}
-	markViewed(t.deps.SessionID, path)
+	markViewed(sid, path)
 	return nil
 }
 

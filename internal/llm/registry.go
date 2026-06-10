@@ -95,55 +95,18 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 		client := withExtraHeaders(newRetryingClient(timeout), headers)
 		models := append([]Model(nil), modelsByProvider[name]...)
 
-		var provider Provider
-		switch p.Type {
-		case config.ProviderOpenAI:
-			baseURL := p.BaseURL
-			if baseURL == "" {
-				baseURL = "https://api.openai.com/v1"
-			}
-			provider = newOpenAICompatibleProvider(p.Name, baseURL, p.APIKeyEnv, models, client)
-		case providerOpenAIResponses:
-			baseURL := p.BaseURL
-			if baseURL == "" {
-				baseURL = "https://api.openai.com/v1"
-			}
-			provider = newOpenAIResponsesProvider(p.Name, baseURL, p.APIKeyEnv, models, client)
-		case providerCodexOAuth:
-			// Experimental: reuses the Codex CLI's local subscription token.
-			// BaseURL overrides the auth-file path for tests; empty = default.
-			provider = newCodexOAuthProvider(p.Name, models, client, p.BaseURL)
-		case providerChatGPT:
-			// Experimental: "Sign in with ChatGPT". BharatCode performs the OAuth
-			// login ('bharatcode auth chatgpt') and stores/refreshes the token
-			// itself. BaseURL overrides the auth-file path for tests; empty =
-			// default config-dir location.
-			provider = newChatGPTOAuthProvider(p.Name, models, client, p.BaseURL)
-		case config.ProviderOpenAICompatible, config.ProviderLMStudio:
-			provider = newOpenAICompatibleProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
-		case config.ProviderOllama:
-			provider = newOllamaProvider(p.Name, p.BaseURL, models, client)
-		case config.ProviderAnthropic:
-			baseURL := p.BaseURL
-			if baseURL == "" {
-				baseURL = "https://api.anthropic.com/v1"
-			}
-			provider = newAnthropicProvider(p.Name, baseURL, p.APIKeyEnv, models, client)
-		case config.ProviderGemini:
-			// An empty BaseURL falls through to the Google API default inside the
-			// provider constructor.
-			provider = newGeminiProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
-		case config.ProviderAzure:
-			// Azure OpenAI speaks the OpenAI chat-completions wire format but
-			// authenticates via the "api-key" header instead of "Authorization:
-			// Bearer". The deployment-scoped base_url encodes both the resource
-			// name and the api-version query parameter; isAzureOpenAI detects the
-			// host at request time and selects the correct auth scheme, so no
-			// additional plumbing is required here beyond routing to the compatible
-			// provider.
-			provider = newOpenAICompatibleProvider(p.Name, p.BaseURL, p.APIKeyEnv, models, client)
-		default:
+		// Construct the provider through the package-level factory registry. Every
+		// built-in type registers a Factory in factory_builtins.go, so the common
+		// providers resolve here exactly as the old type switch did, while a custom
+		// provider registered via Register plugs into the same path with no special
+		// casing. An unregistered type is an unsupported provider.
+		factory, ok := Lookup(string(p.Type))
+		if !ok {
 			return nil, fmt.Errorf("constructing provider %q: %w", p.Name, ErrUnsupportedFeature)
+		}
+		provider, err := factory(ProviderSpec{Config: p, Models: models, Client: client})
+		if err != nil {
+			return nil, fmt.Errorf("constructing provider %q: %w", p.Name, err)
 		}
 		reg.providers[name] = provider
 	}

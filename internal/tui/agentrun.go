@@ -96,6 +96,10 @@ func (m *model) launchTurn(prompt string) (tea.Cmd, error) {
 	if err := m.ensureSession(); err != nil {
 		return nil, err
 	}
+	// A turn is starting, so the shell is now a conversation: leave the landing
+	// page for chat. This is the single landing→chat transition point, covering
+	// the first prompt, goal-loop continuations, and identity answers alike.
+	m.setState(uiChat, m.focus)
 	m.turn++
 	if m.tabFirstPrompt == "" {
 		m.tabFirstPrompt = prompt
@@ -491,6 +495,11 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	// non-empty; an empty final answer always yields the summary so a silent
 	// file-creation turn still ends with useful completion text.
 	m.appendCompletionSummary(done.last)
+
+	// Refresh the cached changed-file count surfaced in the header strip. Turn end
+	// is the only point the count can move, so it is queried here rather than on
+	// every render frame.
+	m.refreshChangedCount()
 
 	if cmd := m.advanceGoal(done.last); cmd != nil {
 		return m, cmd

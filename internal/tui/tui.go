@@ -270,14 +270,23 @@ type model struct {
 	// WindowSizeMsg.
 	sessionPickerList list.Model
 	inputHistory      inputState
-	focus             focusState
-	width             int
-	height            int
-	layout            layout
-	startedAt         time.Time
-	now               time.Time
-	sessionID         string
-	sessionPersisted  bool
+	// state is the explicit page the shell is on (init/onboarding/landing/chat).
+	// It is moved only through setState, and the render path switches on it to
+	// pick the top-level layout — the landing welcome panel versus the flowing
+	// transcript — independent of focus below.
+	state uiState
+	focus focusState
+	// changedFiles caches how many files the session has modified, refreshed at
+	// turn end and surfaced in the header info strip. Caching it avoids querying
+	// the file tracker on every render frame.
+	changedFiles     int
+	width            int
+	height           int
+	layout           layout
+	startedAt        time.Time
+	now              time.Time
+	sessionID        string
+	sessionPersisted bool
 	// tabFirstPrompt is the first user prompt submitted in the active tab, used
 	// to title the tab in the /tabs listing. It mirrors the active tab's
 	// firstPrompt field the way sessionID mirrors the tab's session (see
@@ -523,11 +532,17 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 	if m.quietRedraw {
 		m.streamSpinner.Spinner.FPS = spinnerQuietFPS
 	}
+	// Start in the transient init page; the first WindowSizeMsg resolves it into
+	// onboarding, landing, or chat once a size (and the first-run check) is known.
+	// A restored --continue session already holds a conversation, so it opens
+	// directly on the chat page rather than flashing the landing panel.
+	m.state = uiInit
 	if continueSession != nil {
 		m.sessionPersisted = true
 		for _, msg := range continueMsgs {
 			m.chat.Append(msg)
 		}
+		m.state = uiChat
 	}
 	if deps.Permission != nil {
 		m.applyApprovalMode(deps.Permission.GetApprovalMode())
@@ -590,6 +605,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.onboardingChecked {
 			m.onboardingChecked = true
 			m.maybeStartOnboarding()
+		}
+		// Resolve the initial page now that a size is known. maybeStartOnboarding
+		// moves the shell to uiOnboarding when first-run setup is offered; otherwise
+		// settle the still-init shell onto landing or chat by transcript content.
+		if m.state == uiInit {
+			m.setState(m.resolvePage(), m.focus)
 		}
 		return m, nil
 	case spinner.TickMsg:
@@ -755,6 +776,12 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// collector, advance it with the submitted value (or cancellation).
 			if rpd, ok := popped.(*recipeParamDialog); ok && m.recipeCollector != nil {
 				return m.recipeCollector.advanceFromDialog(m, rpd.param.Name, rpd.result, rpd.cancelled)
+			}
+			// Dismissing the first-run onboarding dialog (esc on the menu) without
+			// completing setup leaves the onboarding page; settle onto the content
+			// page so the shell is never stranded in uiOnboarding with no dialog.
+			if popped != nil && popped.ID() == onboardingDialogID && m.state == uiOnboarding {
+				m.setState(m.resolvePage(), m.focus)
 			}
 		}
 		return m, nil
@@ -1465,10 +1492,16 @@ func (m *model) renderMain() string {
 	// boundary rather than a floating element.
 	wordmark := styles.Wordmark()
 	triRule := styles.TricolorRule(m.width)
-	header := lipgloss.JoinVertical(lipgloss.Left,
-		m.theme.Header.Render(wordmark),
-		triRule,
-	)
+	// The header info strip surfaces the at-a-glance session context — model,
+	// provider, cwd, yolo, changed-files — beneath the wordmark/rule. It is the
+	// top counterpart to the status bar (which carries live turn progress), so a
+	// glance at the top confirms what is loaded and where. It borrows one chat row.
+	infoStrip := m.headerInfo().Render(m.width)
+	headerParts := []string{m.theme.Header.Render(wordmark), triRule}
+	if infoStrip != "" {
+		headerParts = append(headerParts, infoStrip)
+	}
+	header := lipgloss.JoinVertical(lipgloss.Left, headerParts...)
 
 	// When the side panel is visible, carve its column out of the chat width
 	// here in the render rather than in computeLayout, so the persistent layout
@@ -1493,6 +1526,9 @@ func (m *model) renderMain() string {
 		chatH = max(0, chatH-1)
 	}
 	chatH = max(0, chatH-1) // header tricolor rule
+	if infoStrip != "" {
+		chatH = max(0, chatH-1) // header info strip
+	}
 	if m.filetree.visible {
 		panel := m.renderFiletree(filetreeWidth, chatH)
 		chatBody = joinPanels(panel, chatBody, filetreeWidth, chatH)
@@ -1571,7 +1607,18 @@ func (m *model) renderMain() string {
 	// m.chatScroll (clamping it to the scrollable range), so the scroll indicator
 	// is computed from it afterwards to reflect the window actually shown. The
 	// chat width sizes the viewport so over-long lines clip to the pane.
-	chatView := m.clampChat(chatBody, chatW, chatH)
+	// On the landing page the transcript is empty by definition, so show the
+	// welcome panel in the chat region instead of a blank scroll area. Any other
+	// page (chat, or an init/onboarding shell with content behind a dialog) renders
+	// the flowing transcript through the viewport.
+	var chatView string
+	if m.showLanding() {
+		m.chatScroll = 0
+		m.chatMaxScroll = 0
+		chatView = m.landingBody(chatW, chatH)
+	} else {
+		chatView = m.clampChat(chatBody, chatW, chatH)
+	}
 	m.status.Scroll = scrollStatus(m.chatScroll, m.chatMaxScroll)
 
 	// Compose the screen top-to-bottom with lipgloss.JoinVertical so each zone

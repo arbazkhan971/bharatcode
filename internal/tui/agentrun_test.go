@@ -519,7 +519,20 @@ func (h *agentHarness) drain(t *testing.T, done func() bool) {
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		if done() && len(h.model.eventCh) == 0 {
-			return
+			// The run is done and the channel looks empty, but the consolidated
+			// stream reaches m.eventCh through the workspace fan-in's pump
+			// goroutine, not directly from loop.Run. A final event can therefore
+			// still be in flight between the agent bus and m.eventCh after
+			// runDoneMsg has already flipped m.running. Give the pump one short
+			// grace window to deliver any straggler before concluding the turn is
+			// fully rendered; an event that arrives reopens the drain loop.
+			select {
+			case ev := <-h.model.eventCh:
+				_, _ = h.model.Update(uiEventMsg(ev))
+				continue
+			case <-time.After(listenPollTimeout):
+				return
+			}
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("drain timed out; running=%v goalActive=%v buffered=%d",

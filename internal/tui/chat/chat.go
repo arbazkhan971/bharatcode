@@ -181,6 +181,14 @@ func (l *List) Reindex(id string) {
 	delete(l.index, id)
 }
 
+// Len returns the number of items the list holds — finished turns and
+// in-flight streaming bubbles alike. Zero means the transcript is empty, which
+// the shell reads to decide whether to show the landing welcome panel in place
+// of a blank scroll area.
+func (l *List) Len() int {
+	return len(l.items)
+}
+
 // Clear removes visible messages.
 func (l *List) Clear() {
 	l.items = nil

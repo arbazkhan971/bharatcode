@@ -257,6 +257,15 @@ func TestBrowserErrorLinesFiltersNoise(t *testing.T) {
 // loads via the browser method and that a page with a genuine uncaught runtime
 // error is reported as a failure (not passed) by that same path.
 func TestBrowserSmokeRealBrowser(t *testing.T) {
+	// Opt-in: this drives a REAL headless browser, which is environment-fragile
+	// (a CI runner may ship a browser binary that still cannot launch headless in
+	// its sandbox — no display, missing libs, seccomp). Gating it behind an env
+	// var keeps the default `go test ./...` (and the release gate) deterministic
+	// and offline, matching the PTY/live-eval opt-in tests. Set
+	// BHARATCODE_BROWSER_SMOKE=1 to run it where a working headless browser exists.
+	if os.Getenv("BHARATCODE_BROWSER_SMOKE") != "1" {
+		t.Skip("set BHARATCODE_BROWSER_SMOKE=1 to run the real-browser smoke test")
+	}
 	bin := resolveHeadlessBrowser("")
 	if bin == "" {
 		t.Skip("no headless browser available")

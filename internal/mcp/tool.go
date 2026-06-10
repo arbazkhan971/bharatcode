@@ -62,7 +62,11 @@ func (t *toolAdapter) Run(ctx context.Context, args json.RawMessage) (tools.Resu
 	if t.perms != nil {
 		decision, err := t.perms.Check(ctx, permission.Request{
 			ToolName: t.name,
-			Args:     decoded,
+			// Carry the active turn's session id (stamped on ctx by the agent loop)
+			// so session-scoped --yolo bypasses MCP tool calls and a session grant
+			// keys under the real session rather than "".
+			SessionID: tools.SessionIDFromContext(ctx),
+			Args:      decoded,
 		})
 		if err != nil {
 			return tools.Result{Content: "permission check failed: " + err.Error(), IsError: true}, nil

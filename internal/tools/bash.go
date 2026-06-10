@@ -181,6 +181,12 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 	if t.permission != nil {
 		decision, err := t.permission.Check(ctx, permission.Request{
 			ToolName: "bash",
+			// The registry is built once at app startup with no session id, so the
+			// active turn's id is carried on the context by the agent loop. Without
+			// it, session-scoped --yolo never bypasses bash (headless run --yolo
+			// would hang on the unanswered prompt) and a session bash grant would
+			// key under "" and leak across sessions.
+			SessionID: SessionIDFromContext(ctx),
 			Args: map[string]any{
 				"command": args.Command,
 				"cmd":     args.Command,

@@ -143,6 +143,37 @@ func TestModalFocus_DialogConsumesKeysAwayFromInput(t *testing.T) {
 	require.Equal(t, 1, m.input.Len(), "the prompt accepts input once the modal is dismissed")
 }
 
+// TestHeaderInfo_YoloUsesPerSessionState asserts the header info strip reads
+// the per-session yolo flag rather than the global (now-dead) Workspace.Yolo()
+// flag. This covers the M3 fix: the header must match the status bar, which
+// already uses the per-session path.
+func TestHeaderInfo_YoloUsesPerSessionState(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+
+	// With a "new" / no session the header must track m.status.Yolo because
+	// there is no persisted session row to look up.
+	m.sessionID = "new"
+	m.status.Yolo = false
+	require.False(t, m.headerInfo().Yolo,
+		"header yolo must be false when status.Yolo is false and session is unpersisted")
+
+	m.status.Yolo = true
+	require.True(t, m.headerInfo().Yolo,
+		"header yolo must reflect status.Yolo for an unpersisted session")
+
+	// Once a sessionID is set (persisted), headerInfo must call SessionYolo and
+	// the global Workspace.Yolo() must not be consulted. The fakeWorkspace
+	// reports SessionYolo=false by default, so the header must be false even
+	// though status.Yolo is still true.
+	m.sessionID = "sess-abc-123"
+	m.status.Yolo = true // status bar says yolo…
+	// fakeWorkspace has no session-level yolo set → SessionYolo returns false
+	require.False(t, m.headerInfo().Yolo,
+		"header yolo must use SessionYolo (not status.Yolo or global Yolo) for a persisted session")
+}
+
 // TestModalFocus_PermissionRoutesThroughSeam proves a permission request arriving
 // on the consolidated stream renders as a focused modal whose y/n keys answer
 // through the workspace seam — the request's Reply channel receives the decision.

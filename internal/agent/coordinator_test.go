@@ -12,6 +12,61 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestCombinedToolsListDeduplicatesExtensionTools asserts that when an
+// extension tool shares a name with a base tool, combinedTools.List() returns
+// exactly one entry for that name — the base tool — and the extension tool is
+// silently dropped (with a warning). This prevents duplicate tool definitions
+// from reaching provider requests, which would cause 400 errors or misrouting.
+func TestCombinedToolsListDeduplicatesExtensionTools(t *testing.T) {
+	// Use a real tools.Registry so combinedTools.base accepts it.
+	// NewRegistry registers built-in tools including "bash", which is the base
+	// tool whose name we want to collide with.
+	baseReg := tools.NewRegistry(tools.Dependencies{})
+
+	// Look up the base "bash" tool's description to confirm the surviving entry
+	// is the base one, not the extension one.
+	baseBashTool, ok := baseReg.Get("bash")
+	require.True(t, ok, "base registry must contain a 'bash' tool")
+	baseBashDesc := baseBashTool.Description()
+
+	// An extension tool also named "bash" — the collision case.
+	extBash := &recordingTool{name: "bash", desc: "extension bash (must not appear)"}
+
+	// A second extension tool with a unique name must still appear.
+	extUnique := &recordingTool{name: "ext_unique", desc: "unique extension tool"}
+
+	ct := combinedTools{
+		base:  baseReg,
+		extra: []tools.Tool{extBash, extUnique},
+	}
+
+	listed := ct.List()
+
+	// Count how many tools named "bash" appear in the list.
+	var bashCount int
+	var foundBashDesc string
+	for _, tool := range listed {
+		if tool.Name() == "bash" {
+			bashCount++
+			foundBashDesc = tool.Description()
+		}
+	}
+	require.Equal(t, 1, bashCount,
+		"combinedTools.List must return exactly one tool named %q; got %d", "bash", bashCount)
+	require.Equal(t, baseBashDesc, foundBashDesc,
+		"the surviving %q tool must be the base tool, not the extension tool", "bash")
+
+	// The unique extension tool must still be present.
+	var hasUnique bool
+	for _, tool := range listed {
+		if tool.Name() == "ext_unique" {
+			hasUnique = true
+		}
+	}
+	require.True(t, hasUnique,
+		"combinedTools.List must still include extension tools that do not collide with base tools")
+}
+
 // namedProvider is a minimal fake that exposes a fixed model list. It is used
 // to prove provider selection rather than stream behaviour.
 type namedProvider struct {

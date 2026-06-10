@@ -517,12 +517,31 @@ func (r combinedTools) Get(name string) (tools.Tool, bool) {
 }
 
 func (r combinedTools) List() []tools.Tool {
+	seen := make(map[string]struct{})
 	var out []tools.Tool
 	if r.base != nil {
-		out = append(out, r.base.List()...)
+		for _, t := range r.base.List() {
+			seen[t.Name()] = struct{}{}
+			out = append(out, t)
+		}
 	}
-	out = append(out, r.mcp...)
-	out = append(out, r.extra...)
+	for _, t := range r.mcp {
+		if _, dup := seen[t.Name()]; dup {
+			continue
+		}
+		seen[t.Name()] = struct{}{}
+		out = append(out, t)
+	}
+	for _, t := range r.extra {
+		if _, dup := seen[t.Name()]; dup {
+			slog.Warn("Extension tool name collision — base/MCP tool takes precedence; extension tool skipped",
+				slog.String("tool", t.Name()),
+			)
+			continue
+		}
+		seen[t.Name()] = struct{}{}
+		out = append(out, t)
+	}
 	sort.Slice(out, func(i, j int) bool {
 		return strings.Compare(out[i].Name(), out[j].Name()) < 0
 	})

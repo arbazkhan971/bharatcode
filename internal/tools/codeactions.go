@@ -298,6 +298,17 @@ func (t *codeActionsTool) applyCodeAction(ctx context.Context, path string, orde
 		if len(edits) == 0 {
 			continue
 		}
+		// Enforce the same read-before-edit contract as edit/patch/write/rename:
+		// refuse to apply a code action that would rewrite a file the session has
+		// not read. When a code action follows an edit in the same session the file
+		// was just written, so RecordWrite already refreshed the read baseline and
+		// HasRead returns true — the guard passes. Preview writes nothing, so it is
+		// exempt (checked above with the permission guard).
+		if !preview {
+			if msg := editGuard(ctx, t.deps, p, "applying a code action to"); msg != "" {
+				return errorResult(msg), nil
+			}
+		}
 		oldContent, err := os.ReadFile(p)
 		if err != nil {
 			return Result{}, fmt.Errorf("reading file %s: %w", p, err)

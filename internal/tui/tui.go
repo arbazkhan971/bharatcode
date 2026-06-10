@@ -1682,10 +1682,10 @@ func (m *model) renderMain() string {
 	if tabBar != "" {
 		chatH = max(0, chatH-1)
 	}
-	chatH = max(0, chatH-1) // header tricolor rule
-	if infoStrip != "" {
-		chatH = max(0, chatH-1) // header info strip
-	}
+	// Deduct header rows via the shared helper so this path and chatViewportHeight
+	// always agree on the budget (the helper covers the tricolor rule and the
+	// optional info strip in one place).
+	chatH = max(0, chatH-m.headerExtraRows())
 	if m.filetree.visible {
 		panel := m.renderFiletree(filetreeWidth, chatH)
 		chatBody = joinPanels(panel, chatBody, filetreeWidth, chatH)

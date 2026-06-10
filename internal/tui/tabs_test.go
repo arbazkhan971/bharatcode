@@ -108,6 +108,45 @@ func TestTabs_SwitchPreservesSessionAndChat(t *testing.T) {
 		"the second tab's transcript survives a round trip")
 }
 
+// TestTabs_SnapshotRestoresChangedFilesAndTokens asserts that tab snapshotting
+// saves changedFiles and lastTurnTokens so a tab switch restores them correctly.
+// Without this fix, switching away and back would reset both to zero/empty
+// because snapshotTab omitted them, showing stale values from the destination
+// tab until the next turn refreshed them.
+func TestTabs_SnapshotRestoresChangedFilesAndTokens(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{
+			llm.DeltaTextEvent{Text: "done"},
+			llm.EndEvent{Usage: llm.Usage{InputTokens: 100, OutputTokens: 50}},
+		},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// Run a turn so the first tab has a real session and some accumulator state.
+	h.submit(t, "first tab work")
+	h.drain(t, func() bool { return !m.running })
+
+	// Manually set the accumulators to known values to simulate what turn-end
+	// does in production (file tracker updates changedFiles, token summary sets
+	// lastTurnTokens).
+	m.changedFiles = 3
+	m.lastTurnTokens = "100 in · 50 out"
+
+	// Open a second tab; its accumulators must be zero/empty.
+	_, cmd := m.Update(keyCtrl('t'))
+	h.run(t, cmd)
+	require.Equal(t, 0, m.changedFiles, "fresh tab starts with zero changedFiles")
+	require.Empty(t, m.lastTurnTokens, "fresh tab starts with empty lastTurnTokens")
+
+	// Switch back to the first tab and verify its values were saved.
+	_ = m.switchTab(0)
+	require.Equal(t, 3, m.changedFiles,
+		"switching back must restore changedFiles from the tab snapshot")
+	require.Equal(t, "100 in · 50 out", m.lastTurnTokens,
+		"switching back must restore lastTurnTokens from the tab snapshot")
+}
+
 // TestTabs_CycleAndClose covers the next/prev cycling, the last-tab close guard,
 // and that closing a tab returns focus to a neighbor.
 func TestTabs_CycleAndClose(t *testing.T) {

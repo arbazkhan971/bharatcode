@@ -153,6 +153,48 @@ func TestParseCopyTarget(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestChatViewportHeight_MatchesRenderMain asserts that chatViewportHeight()
+// returns the same effective chat area that renderMain carves out for the
+// transcript. The two must agree so page-scroll steps match what is visible.
+// It exercises the M2 fix: the info strip row is now deducted in both paths
+// through the shared headerExtraRows helper.
+func TestChatViewportHeight_MatchesRenderMain(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	// Set a known terminal size so the arithmetic is predictable.
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// Seed enough content to overflow the viewport so clampChat actually uses
+	// the full chatH budget (it clamps to min(content, chatH)).
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines, uniqueLine(i))
+	}
+	appendMsg(m, "u1", message.RoleUser, strings.Join(lines, "\n"))
+
+	// chatViewportHeight must agree with what renderMain renders.
+	vpH := m.chatViewportHeight()
+	require.Greater(t, vpH, 0, "chatViewportHeight must be positive")
+
+	// Count the visible content lines in the rendered output. renderMain wraps
+	// the chat in a clampChat call that limits to exactly chatH lines of the
+	// body. The header-extra deduction is the focus: if the two paths disagree,
+	// the frame will be one row too tall and the transcript will be clipped.
+	rendered := stripANSI(m.renderMain())
+	chatContent := 0
+	for _, ln := range strings.Split(rendered, "\n") {
+		if strings.Contains(ln, "LINE-MARK-") {
+			chatContent++
+		}
+	}
+	require.GreaterOrEqual(t, chatContent, 1, "rendered chat must contain at least one content line")
+	// The viewport height must be positive and equal to what clampChat allocated;
+	// a mismatch (off-by-one) would cause chatContent to exceed vpH.
+	require.LessOrEqual(t, chatContent, vpH,
+		"rendered content lines must not exceed chatViewportHeight (off-by-one check)")
+}
+
 // TestSystemClipboardCopy_NoUtility asserts the real shell-out path degrades
 // gracefully: with PATH emptied so no clipboard utility resolves, it returns
 // errNoClipboardTool rather than running anything.

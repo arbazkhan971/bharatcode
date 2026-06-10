@@ -178,6 +178,41 @@ func TestSlashSessions_RestoresChosenSession(t *testing.T) {
 	require.NotContains(t, rendered, "add a flag", "the unchosen session's transcript must not be shown")
 }
 
+// TestRestoreSession_SyncsPageAndClearsAccumulators asserts that restoreSession
+// calls syncPage (so a non-empty restored session lands on uiChat, not the
+// landing page) and resets per-tab accumulators (tabFirstPrompt, changedFiles,
+// lastTurnTokens) so stale values from the previous tab do not leak into the
+// newly loaded session. This covers the minor fix.
+func TestRestoreSession_SyncsPageAndClearsAccumulators(t *testing.T) {
+	provider := &scriptedProvider{}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	// Seed a real session so restoreSession has something to load.
+	sessID := seedSession(t, h.repo, "Restore target", "a message for the restore test")
+
+	// Pollute the accumulators to verify they are cleared.
+	m.tabFirstPrompt = "stale first prompt"
+	m.changedFiles = 7
+	m.lastTurnTokens = "99 tok"
+
+	// Perform the restore.
+	cmd := m.restoreSession(sessID)
+	h.run(t, cmd)
+
+	require.Equal(t, sessID, m.sessionID, "restoreSession must set the active session id")
+
+	// After restoring a session with messages the page must be chat, not landing.
+	require.Equal(t, uiChat, m.state,
+		"restoreSession must call syncPage so a non-empty session shows the chat page")
+
+	// Accumulators must be cleared so the previous tab's values do not pollute
+	// the header / status bar for the restored session.
+	require.Empty(t, m.tabFirstPrompt, "tabFirstPrompt must be reset on restore")
+	require.Equal(t, 0, m.changedFiles, "changedFiles must be reset on restore")
+	require.Empty(t, m.lastTurnTokens, "lastTurnTokens must be reset on restore")
+}
+
 // TestSlashSessions_TypeToFilterNarrowsAndRestores asserts the session picker
 // supports live type-to-filter: typing narrows the visible rows by title, the
 // cursor is bounded to the filtered set, and enter restores the matching

@@ -116,10 +116,18 @@ func (t *formatTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 	if !isInsideWorkDir(path, t.deps.WorkDir) {
 		return errorResult("path is outside the workspace: " + path), nil
 	}
-	// A preview writes nothing, so it does not need write permission.
+	// A preview writes nothing, so it does not need write permission or the
+	// read-before-edit guard.
 	if !args.Preview {
 		if err := t.checkPermission(ctx, path, raw); err != nil {
 			return errorResult(err.Error()), nil
+		}
+		// Enforce the same read-before-edit contract as edit/patch/write/rename: refuse
+		// to format (i.e. rewrite) a file the session has not read. When format is
+		// auto-invoked after an edit the file was just written, so RecordWrite already
+		// refreshed the read baseline and HasRead returns true — the guard passes.
+		if msg := editGuard(ctx, t.deps, path, "formatting"); msg != "" {
+			return errorResult(msg), nil
 		}
 	}
 

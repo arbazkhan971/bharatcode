@@ -573,11 +573,23 @@ func (m *model) restoreSession(id string) tea.Cmd {
 	// Reset the session-scoped spend; the ledger bus repopulates it for the
 	// restored session as fresh summaries arrive.
 	m.footer.CostINR = 0
+	// Reset per-tab accumulators so the restored session starts clean: the
+	// first-prompt title and changed-file marker from the previous tab must not
+	// carry over, and lastTurnTokens from a prior session's run should not be
+	// shown in the header of the newly loaded one.
+	m.tabFirstPrompt = ""
+	m.changedFiles = 0
+	m.lastTurnTokens = ""
 
 	m.chat.Clear()
 	for _, msg := range msgs {
 		m.chat.Append(msg)
 	}
+	// Re-derive the content page now that the transcript has been loaded: a
+	// session with messages should move to chat (not stay on the landing page
+	// with its "new session" welcome panel). This mirrors what loadTab does
+	// after a tab switch restores state.
+	m.syncPage()
 	// Refresh the ledger footer for the newly active session. The summary
 	// command is best-effort and returns nil on error, so a quiet or
 	// unavailable ledger never blocks the switch; live ledger-bus events keep

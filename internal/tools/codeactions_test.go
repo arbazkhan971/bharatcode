@@ -14,6 +14,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// organizeImportsEdit builds a simple Organize-Imports code action that rewrites
+// the first line of path, used by guard tests to trigger an actual write.
+func organizeImportsEdit(path string) lsp.CodeAction {
+	return lsp.CodeAction{
+		Title: "Organize Imports",
+		Kind:  "source.organizeImports",
+		Edit: lsp.WorkspaceEdit{
+			Changes: map[string][]lsp.TextEdit{path: {{
+				Range:   lsp.Range{Start: lsp.Position{Line: 0, Character: 0}, End: lsp.Position{Line: 0, Character: 12}},
+				NewText: "package widget",
+			}}},
+		},
+	}
+}
+
 type fakeCodeActions struct {
 	actions []lsp.CodeAction
 	err     error
@@ -837,4 +852,87 @@ func TestCodeActionsRejectsMalformedJSON(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.IsError)
 	require.Contains(t, result.Content, "invalid codeactions arguments")
+}
+
+// TestCodeActionsApplyRefusesUnreadFile asserts that applying a code action that
+// would rewrite a file the session has never read is rejected — the same
+// read-before-edit contract enforced by edit/patch/write/rename.
+func TestCodeActionsApplyRefusesUnreadFile(t *testing.T) {
+	const sid = "ca-guard-unread"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, sid)
+	src := &fakeCodeActions{actions: []lsp.CodeAction{organizeImportsEdit(path)}}
+	tool := &codeActionsTool{
+		source:  src,
+		workDir: dir,
+		deps:    Dependencies{WorkDir: dir, FileTracker: tracker, SessionID: sid},
+	}
+
+	// File has NOT been read — the guard must refuse the apply.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError, "expected read-before-edit refusal, got: %s", result.Content)
+	require.Contains(t, result.Content, "has not been read in this session")
+
+	// The file on disk must be unchanged.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package main\n", string(got))
+}
+
+// TestCodeActionsApplyAllowsFileReadInSession asserts that applying a code action
+// succeeds after the file has been read in the session.
+func TestCodeActionsApplyAllowsFileReadInSession(t *testing.T) {
+	const sid = "ca-guard-read"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, sid)
+	// Record a read so the guard is satisfied.
+	require.NoError(t, tracker.RecordRead(context.Background(), sid, path))
+
+	src := &fakeCodeActions{actions: []lsp.CodeAction{organizeImportsEdit(path)}}
+	tool := &codeActionsTool{
+		source:  src,
+		workDir: dir,
+		deps:    Dependencies{WorkDir: dir, FileTracker: tracker, SessionID: sid},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "expected apply to succeed after read; got: %s", result.Content)
+	require.Contains(t, result.Content, `applied "Organize Imports"`)
+}
+
+// TestCodeActionsPreviewBypassesReadGuard asserts that a preview invocation is
+// not blocked by the read-before-edit guard: it writes nothing.
+func TestCodeActionsPreviewBypassesReadGuard(t *testing.T) {
+	const sid = "ca-guard-preview"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, sid)
+	// File has NOT been read — preview must still succeed.
+	src := &fakeCodeActions{actions: []lsp.CodeAction{organizeImportsEdit(path)}}
+	tool := &codeActionsTool{
+		source:  src,
+		workDir: dir,
+		deps:    Dependencies{WorkDir: dir, FileTracker: tracker, SessionID: sid},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "main.go", "line": 1, "apply": 1, "preview": true,
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "preview should not be blocked by read guard; got: %s", result.Content)
+	require.Contains(t, result.Content, "preview")
 }

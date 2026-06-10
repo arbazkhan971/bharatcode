@@ -197,6 +197,16 @@ func (m *model) ensureSession() error {
 // imgBlocks carries any inline images collected from @-mention resolution; they
 // are appended to the user message's content so vision-capable models can
 // inspect them. A nil or empty slice produces a plain text-only message.
+//
+// NOTE(M1): This path drives the agent via m.deps.Agent.Run directly, bypassing
+// the Workspace.Prompt seam (which routes through agent.SessionRunner and gains
+// per-session run discipline: one active run per session, queued concurrency,
+// and atomic cancel). Workspace.Prompt has identical blocking semantics (it
+// blocks until the runner's Wait returns, same as Run), but the test fake's
+// Prompt stub is a no-op, so routing through the seam would require updating
+// the fake to forward to loop.Run before this switch is safe to make.
+// Until then, Interrupt (which already calls runner.CancelAll via the seam)
+// may not cancel a run started here if the runner is not in the call chain.
 func (m *model) runAgent(prompt string, imgBlocks []message.ImageBlock) tea.Cmd {
 	loop := m.deps.Agent
 	sessionID := m.sessionID

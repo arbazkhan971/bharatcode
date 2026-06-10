@@ -42,6 +42,14 @@ type tab struct {
 	statusGoal string
 	// costINR retains the per-tab session spend mirrored into the footer.
 	costINR float64
+	// changedFiles retains the count of files modified by this tab's session so
+	// the header info strip shows the correct count after a tab switch without
+	// waiting for the next turn to refresh it.
+	changedFiles int
+	// lastTurnTokens retains the formatted token-count segment from the most
+	// recently completed turn so the status bar shows the right stats after a
+	// tab switch (not the counts from the previously active tab).
+	lastTurnTokens string
 }
 
 // initTabs seeds the model with a single tab that adopts the freshly built
@@ -51,6 +59,19 @@ type tab struct {
 func (m *model) initTabs() {
 	m.tabs = []tab{m.snapshotTab()}
 	m.activeTab = 0
+}
+
+// tabChangedFiles returns the changedFiles count for tab index. For the active
+// tab it reads the live model field (which loadTab and turn-end updates keep
+// current); other tabs read their snapshot.
+func (m *model) tabChangedFiles(index int) int {
+	if index == m.activeTab {
+		return m.changedFiles
+	}
+	if index >= 0 && index < len(m.tabs) {
+		return m.tabs[index].changedFiles
+	}
+	return 0
 }
 
 // snapshotTab captures the model's live per-session fields into a tab value.
@@ -71,6 +92,8 @@ func (m *model) snapshotTab() tab {
 		statusAgent:      m.status.Agent,
 		statusGoal:       m.status.Goal,
 		costINR:          m.footer.CostINR,
+		changedFiles:     m.changedFiles,
+		lastTurnTokens:   m.lastTurnTokens,
 	}
 }
 
@@ -109,6 +132,8 @@ func (m *model) loadTab(index int) {
 	m.status.Goal = t.statusGoal
 	m.footer.SessionID = t.sessionID
 	m.footer.CostINR = t.costINR
+	m.changedFiles = t.changedFiles
+	m.lastTurnTokens = t.lastTurnTokens
 	// Yolo is per-session: a persisted tab reflects its session's auto-approval
 	// state; an unpersisted "new" tab carries no grant yet, so the indicator clears.
 	if m.deps.Workspace != nil && t.sessionPersisted {

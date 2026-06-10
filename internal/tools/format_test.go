@@ -14,6 +14,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// oneLineEdit returns a TextEdit that replaces the entire first line of a file.
+func oneLineEdit(newText string) lsp.TextEdit {
+	return lsp.TextEdit{
+		Range:   lsp.Range{Start: lsp.Position{Line: 0, Character: 0}, End: lsp.Position{Line: 1, Character: 0}},
+		NewText: newText,
+	}
+}
+
 type fakeFormat struct {
 	edits      []lsp.TextEdit
 	rangeEdits []lsp.TextEdit
@@ -375,4 +383,78 @@ func TestApplyTextEditsRejectsOutOfRangeLine(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "out of range")
+}
+
+// TestFormatRefusesUnreadFile asserts that the format tool enforces the same
+// read-before-edit guard as edit/patch/write/rename: it must refuse to rewrite a
+// file that the session has never read, so the model cannot silently mutate files
+// it has not inspected.
+func TestFormatRefusesUnreadFile(t *testing.T) {
+	const sid = "format-guard-unread"
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\nfunc  f(){}\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, sid)
+	src := &fakeFormat{edits: []lsp.TextEdit{oneLineEdit("package main\nfunc f() {}\n")}}
+	tool := &formatTool{
+		source: src,
+		deps:   Dependencies{WorkDir: workDir, FileTracker: tracker, SessionID: sid},
+	}
+
+	// The file has NOT been read — the guard must refuse the format.
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go"}))
+	require.NoError(t, err)
+	require.True(t, result.IsError, "expected read-before-edit refusal, got: %s", result.Content)
+	require.Contains(t, result.Content, "has not been read in this session")
+
+	// The file on disk must be unchanged.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "package main\nfunc  f(){}\n", string(got))
+}
+
+// TestFormatAllowsFileReadInSession asserts that the format tool succeeds after
+// the file has been read in the session — the guard must pass.
+func TestFormatAllowsFileReadInSession(t *testing.T) {
+	const sid = "format-guard-read"
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\nfunc  f(){}\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, sid)
+	// Record a read for the file so the guard is satisfied.
+	require.NoError(t, tracker.RecordRead(context.Background(), sid, path))
+
+	src := &fakeFormat{edits: []lsp.TextEdit{oneLineEdit("package main\nfunc f() {}\n")}}
+	tool := &formatTool{
+		source: src,
+		deps:   Dependencies{WorkDir: workDir, FileTracker: tracker, SessionID: sid},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go"}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "expected format to succeed after read; got: %s", result.Content)
+	require.Contains(t, result.Content, "formatted main.go")
+}
+
+// TestFormatPreviewBypassesReadGuard asserts that a preview invocation does not
+// enforce the read-before-edit guard: it writes nothing, so no guard is needed.
+func TestFormatPreviewBypassesReadGuard(t *testing.T) {
+	const sid = "format-guard-preview"
+	workDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\nfunc  f(){}\n"), 0o644))
+
+	tracker := newToolsTestTracker(t, sid)
+	// File has NOT been read — preview must still succeed.
+	src := &fakeFormat{edits: []lsp.TextEdit{oneLineEdit("package main\nfunc f() {}\n")}}
+	tool := &formatTool{
+		source: src,
+		deps:   Dependencies{WorkDir: workDir, FileTracker: tracker, SessionID: sid},
+	}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"path": "main.go", "preview": true}))
+	require.NoError(t, err)
+	require.False(t, result.IsError, "preview should not be blocked by read guard; got: %s", result.Content)
+	require.Contains(t, result.Content, "preview")
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -158,4 +159,78 @@ func TestCompactHistoryPreservesTouchedFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, isPreservedFrame(condensed2[0]))
 	require.Contains(t, textContent(condensed2[0]), "/repo/budget.go")
+}
+
+// TestPatchToolPathsExtractsPaths verifies that patchToolPaths correctly
+// extracts the edited file paths from a unified-diff patch tool call, including
+// the "b/" git-diff prefix stripping.
+func TestPatchToolPathsExtractsPaths(t *testing.T) {
+	diff := `--- a/internal/agent/budget.go
++++ b/internal/agent/budget.go
+@@ -1,3 +1,4 @@
+ package agent
++// changed
+--- a/internal/session/tree.go
++++ b/internal/session/tree.go
+@@ -10,2 +10,3 @@
+ import "fmt"
++// also changed
+`
+	patchJSON, err := json.Marshal(map[string]string{"patch": diff})
+	require.NoError(t, err)
+
+	paths := patchToolPaths(patchJSON)
+	require.Equal(t, []string{
+		"internal/agent/budget.go",
+		"internal/session/tree.go",
+	}, paths)
+
+	// A non-patch input (path-based tool) returns nil.
+	require.Nil(t, patchToolPaths([]byte(`{"path":"/some/file.go"}`)))
+	// An empty patch returns nil.
+	require.Nil(t, patchToolPaths([]byte(`{"patch":""}`)))
+	// /dev/null is filtered out (deletions only).
+	devNull := `--- a/old.go
++++ /dev/null
+@@ -1 +0,0 @@
+-gone
+`
+	devNullJSON, err := json.Marshal(map[string]string{"patch": devNull})
+	require.NoError(t, err)
+	require.Nil(t, patchToolPaths(devNullJSON))
+}
+
+// TestTouchedFiles_PatchToolCollectsEdits verifies that a patch tool call's
+// affected file paths are collected in the edited set so they survive
+// compaction. This is the end-to-end path through touchedFiles → classify →
+// patchToolPaths.
+func TestTouchedFiles_PatchToolCollectsEdits(t *testing.T) {
+	diff := `--- a/pkg/foo.go
++++ b/pkg/foo.go
+@@ -5,3 +5,4 @@
+ func Foo() {}
++func Bar() {}
+--- a/pkg/baz.go
++++ b/pkg/baz.go
+@@ -1,2 +1,3 @@
+ package pkg
++// hello
+`
+	patchJSON, err := json.Marshal(map[string]string{"patch": diff})
+	require.NoError(t, err)
+
+	history := []message.Message{
+		{
+			Role: message.RoleAssistant,
+			Content: []message.ContentBlock{message.ToolUseBlock{
+				ID:    "patch-1",
+				Name:  "patch",
+				Input: patchJSON,
+			}},
+		},
+	}
+
+	_, edited := touchedFiles(history)
+	require.Contains(t, edited, "pkg/foo.go", "patch tool should record foo.go as edited")
+	require.Contains(t, edited, "pkg/baz.go", "patch tool should record baz.go as edited")
 }

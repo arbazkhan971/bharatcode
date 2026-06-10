@@ -1469,7 +1469,9 @@ func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCa
 		AgentName: l.name,
 		ToolName:  call.Name,
 		ToolInput: call.Input,
-	}); err == nil && res.Block {
+	}); err != nil {
+		slog.Warn("before_tool_call extension dispatch error", slog.String("tool", call.Name), slog.String("error", err.Error()))
+	} else if res.Block {
 		reason := res.Reason
 		if reason == "" {
 			reason = "no reason provided"

@@ -112,14 +112,22 @@ func (m *model) syncPage() {
 // switch.
 func (m *model) headerInfo() sidebar.Info {
 	cwd := ""
-	yolo := false
+	// Yolo is per-session: read the session-scoped flag so the header strip
+	// matches the status bar, which also uses per-session state. For a new,
+	// unpersisted session (empty sessionID or "new") no session row exists yet,
+	// so fall back to the in-memory status bar value which is kept current by
+	// the TUI's own yolo-toggle path. The global Workspace.Yolo() flag is no
+	// longer set in production, so it must not be consulted here.
+	yolo := m.status.Yolo
 	if m.deps.Workspace != nil {
 		// The working directory comes from the workspace seam, which owns the
 		// resolved scope the agent runs in. When the seam supplies none (a bare
 		// test double) the segment is simply omitted rather than guessing from
 		// process state, keeping the strip a faithful view of the seam.
 		cwd = m.deps.Workspace.Cwd()
-		yolo = m.deps.Workspace.Yolo()
+		if m.sessionID != "" && m.sessionID != "new" {
+			yolo = m.deps.Workspace.SessionYolo(m.sessionID)
+		}
 	}
 	return sidebar.Info{
 		Theme:    m.theme,

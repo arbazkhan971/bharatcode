@@ -37,10 +37,27 @@ func (m *model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 // line count to land exactly on the oldest line.
 const scrollTopSentinel = 1 << 30
 
+// headerExtraRows returns the number of rows the header region borrows from the
+// chat area beyond the layoutted headerH=1 slot. It is the single source of
+// truth for header height, used by both renderMain (to size chatH) and
+// chatViewportHeight (to keep the viewport contract in sync). Keeping the
+// accounting in one place prevents the two paths from drifting.
+//
+// The rows currently borrowed are:
+//   - 1 for the tricolor brand rule that always follows the wordmark, and
+//   - 1 for the info strip when it would render a non-empty line.
+func (m *model) headerExtraRows() int {
+	extra := 1 // tricolor rule is always present
+	if m.headerInfo().Render(m.width) != "" {
+		extra++ // info strip borrows one additional row
+	}
+	return extra
+}
+
 // chatViewportHeight returns the number of chat rows currently visible: the
 // laid-out chat height, less the one row the tab bar borrows when more than one
-// tab is open, and less the one row the tricolor brand rule adds to the header
-// region (the layout's headerH is 1 but the rendered header occupies 2 rows).
+// tab is open, and less the rows the header region borrows beyond the layoutted
+// headerH=1 (the tricolor rule, and the info strip when it renders).
 // It mirrors the height clampChat renders into, so a page scroll moves by
 // exactly what the user sees. It never returns less than one.
 func (m *model) chatViewportHeight() int {
@@ -48,8 +65,7 @@ func (m *model) chatViewportHeight() int {
 	if len(m.tabs) > 1 {
 		h--
 	}
-	// The tricolor rule adds one row to the header beyond the layoutted headerH=1.
-	h--
+	h -= m.headerExtraRows()
 	if h < 1 {
 		return 1
 	}

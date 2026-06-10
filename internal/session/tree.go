@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/db/sqlc"
@@ -247,8 +248,12 @@ func (r *Repo) Entries(ctx context.Context, sessionID string) ([]Entry, error) {
 // entryID is not in the session. A parent reference that does not resolve (a
 // dangling link) terminates the walk rather than erroring, and a cycle is
 // guarded against so a corrupt tree cannot spin forever.
+//
+// When no explicit entries have been recorded for sessionID, GetPathToRoot falls
+// back to a synthetic linear chain derived from the session's messages so it
+// works for sessions that pre-date or bypass explicit AddEntry calls.
 func (r *Repo) GetPathToRoot(ctx context.Context, sessionID, entryID string) ([]Entry, error) {
-	all, err := r.Entries(ctx, sessionID)
+	all, err := r.entriesOrImplicit(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("getting path to root: %w", err)
 	}
@@ -292,8 +297,12 @@ func (r *Repo) GetPathToRoot(ctx context.Context, sessionID, entryID string) ([]
 // insertion order Entries returns). It is the set of nodes a "delete this branch" or
 // "summarize this branch" operation acts on. Returns ErrNotFound if entryID is
 // not in the session.
+//
+// When no explicit entries have been recorded for sessionID, GetBranch falls
+// back to a synthetic linear chain derived from the session's messages so it
+// works for sessions that pre-date or bypass explicit AddEntry calls.
 func (r *Repo) GetBranch(ctx context.Context, sessionID, entryID string) ([]Entry, error) {
-	all, err := r.Entries(ctx, sessionID)
+	all, err := r.entriesOrImplicit(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("getting branch: %w", err)
 	}
@@ -349,6 +358,11 @@ type ForkFromEntryOptions struct {
 // the underlying message is copied too, so the fork is an independent, working
 // session. If opts.BranchSummary is set, a branch-summary entry is appended at
 // the fork point so the abandoned source branch persists as a durable node.
+//
+// The entire fork — session row, message copies, entry copies, and optional
+// branch-summary — is executed inside a single DB transaction so a mid-way
+// failure leaves no partial session.
+//
 // Returns ErrNotFound if fromSession or fromEntry does not exist.
 func (r *Repo) ForkFromEntry(ctx context.Context, fromSession, fromEntry string, opts ForkFromEntryOptions) (*Session, error) {
 	src, err := r.Get(ctx, fromSession)
@@ -390,6 +404,28 @@ func (r *Repo) ForkFromEntry(ctx context.Context, fromSession, fromEntry string,
 		msgRemap[*e.RefID] = newID
 	}
 
+	// Build the ordered list of messages to copy: sort by (created_at, original
+	// position in srcMsgs) so the fork preserves source order even when two
+	// messages share the same second.
+	type msgCopy struct {
+		srcID    string
+		srcIndex int
+		m        message.Message
+	}
+	orderedMsgs := make([]msgCopy, 0, len(msgRemap))
+	for i, m := range srcMsgs {
+		if _, ok := msgRemap[m.ID]; ok {
+			orderedMsgs = append(orderedMsgs, msgCopy{srcID: m.ID, srcIndex: i, m: m})
+		}
+	}
+	sort.Slice(orderedMsgs, func(i, j int) bool {
+		ti, tj := orderedMsgs[i].m.CreatedAt, orderedMsgs[j].m.CreatedAt
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return orderedMsgs[i].srcIndex < orderedMsgs[j].srcIndex
+	})
+
 	title := opts.Title
 	if title == "" {
 		title = src.Title + " (fork)"
@@ -410,7 +446,44 @@ func (r *Repo) ForkFromEntry(ctx context.Context, fromSession, fromEntry string,
 		MessageCount:    len(msgRemap),
 		OriginSessionID: &fromSession,
 	}
-	if _, err := r.database.Queries.CreateSession(ctx, sqlc.CreateSessionParams{
+
+	// Ensure the entries side table exists before opening the transaction so
+	// the DDL (which cannot run inside a deferred-rollback tx on SQLite) has
+	// already committed. Idempotent: a no-op if the table was created earlier.
+	if err := r.ensureEntriesTable(ctx); err != nil {
+		return nil, fmt.Errorf("forking from entry: %w", err)
+	}
+
+	// Pre-generate all new UUIDs before the transaction so failures inside the
+	// transaction body are limited to DB writes, not UUID generation.
+	entRemap := make(map[string]string, len(path))
+	for _, e := range path {
+		newID, err := newUUID()
+		if err != nil {
+			return nil, fmt.Errorf("forking from entry: %w", err)
+		}
+		entRemap[e.ID] = newID
+	}
+	var summaryID string
+	if opts.BranchSummary != "" {
+		summaryID, err = newUUID()
+		if err != nil {
+			return nil, fmt.Errorf("forking from entry: %w", err)
+		}
+	}
+
+	// --- BEGIN TRANSACTION ---
+	// Everything from here is atomic: a failure at any step rolls back to leave
+	// no partial session in the database.
+	tx, err := r.database.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("forking from entry: beginning transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	txq := r.database.Queries.WithTx(tx)
+
+	if _, err := txq.CreateSession(ctx, sqlc.CreateSessionParams{
 		ID:           fork.ID,
 		ProjectPath:  fork.ProjectPath,
 		Title:        fork.Title,
@@ -422,21 +495,23 @@ func (r *Repo) ForkFromEntry(ctx context.Context, fromSession, fromEntry string,
 	}); err != nil {
 		return nil, fmt.Errorf("forking from entry: creating fork session: %w", err)
 	}
-	if err := r.database.Queries.SetSessionOrigin(ctx, sqlc.SetSessionOriginParams{
+	if err := txq.SetSessionOrigin(ctx, sqlc.SetSessionOriginParams{
 		OriginSessionID: &fromSession,
 		ID:              fork.ID,
 	}); err != nil {
 		return nil, fmt.Errorf("forking from entry: recording origin: %w", err)
 	}
 
-	// Copy the referenced messages into the fork with their planned fresh IDs.
-	for srcMsgID, newMsgID := range msgRemap {
-		m := msgByID[srcMsgID]
+	// Copy the referenced messages in source order (sorted above) so the fork
+	// preserves the original conversation sequence.
+	for _, mc := range orderedMsgs {
+		m := mc.m
+		newMsgID := msgRemap[mc.srcID]
 		contentBytes, err := json.Marshal(m.Content)
 		if err != nil {
 			return nil, fmt.Errorf("forking from entry: marshalling message content: %w", err)
 		}
-		if _, err := r.database.Queries.CreateMessage(ctx, sqlc.CreateMessageParams{
+		if _, err := txq.CreateMessage(ctx, sqlc.CreateMessageParams{
 			ID:          newMsgID,
 			SessionID:   fork.ID,
 			Role:        string(m.Role),
@@ -448,21 +523,9 @@ func (r *Repo) ForkFromEntry(ctx context.Context, fromSession, fromEntry string,
 		}
 	}
 
-	if err := r.ensureEntriesTable(ctx); err != nil {
-		return nil, fmt.Errorf("forking from entry: %w", err)
-	}
-
-	// Remap entry IDs so the copied lineage references itself, then copy each
-	// entry in root-first order. The root's parent is dropped (left nil); a
+	// Copy entries in root-first order (path is already root-first from
+	// GetPathToRoot). Each entry's parent is remapped within the fork; a
 	// message entry's RefID is repointed at the copied message.
-	entRemap := make(map[string]string, len(path))
-	for _, e := range path {
-		newID, err := newUUID()
-		if err != nil {
-			return nil, fmt.Errorf("forking from entry: %w", err)
-		}
-		entRemap[e.ID] = newID
-	}
 	for _, e := range path {
 		var parent *string
 		if e.ParentID != nil {
@@ -476,7 +539,7 @@ func (r *Repo) ForkFromEntry(ctx context.Context, fromSession, fromEntry string,
 				ref = &mapped
 			}
 		}
-		if _, err := r.database.ExecContext(
+		if _, err := tx.ExecContext(
 			ctx,
 			`INSERT INTO session_entries (id, session_id, parent_id, entry_type, ref_id, summary, created_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -489,13 +552,9 @@ func (r *Repo) ForkFromEntry(ctx context.Context, fromSession, fromEntry string,
 	// Record the optional branch summary at the fork point so the source branch
 	// stepped away from is not lost.
 	if opts.BranchSummary != "" {
-		summaryID, err := newUUID()
-		if err != nil {
-			return nil, fmt.Errorf("forking from entry: %w", err)
-		}
 		forkPoint := entRemap[fromEntry]
 		sourceRef := fromEntry
-		if _, err := r.database.ExecContext(
+		if _, err := tx.ExecContext(
 			ctx,
 			`INSERT INTO session_entries (id, session_id, parent_id, entry_type, ref_id, summary, created_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -505,7 +564,72 @@ func (r *Repo) ForkFromEntry(ctx context.Context, fromSession, fromEntry string,
 		}
 	}
 
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("forking from entry: committing transaction: %w", err)
+	}
+	// --- END TRANSACTION ---
+
 	return fork, nil
+}
+
+// implicitEntryID returns the deterministic synthetic entry ID used when
+// building an implicit entry from a message: "msg:" + messageID. Using the
+// message ID as a suffix lets callers that know only the message ID derive the
+// implicit entry ID without round-tripping through the DB.
+func implicitEntryID(msgID string) string {
+	return "msg:" + msgID
+}
+
+// ImplicitEntryID is the exported form of implicitEntryID, exposed so tests
+// and callers outside the package can derive the synthetic entry ID for a
+// message without reading the entries table.
+func ImplicitEntryID(msgID string) string { return implicitEntryID(msgID) }
+
+// implicitEntriesFromMessages builds a synthetic, linear chain of
+// EntryMessage entries from msgs, one per message in source order (oldest
+// first). It is used as a fallback when no explicit tree entries have been
+// recorded for a session, so that GetPathToRoot, GetBranch, and ForkFromEntry
+// work correctly even for sessions that pre-date or bypass AddEntry. The
+// returned entries are in-memory only; they are never written to the database.
+func implicitEntriesFromMessages(sessionID string, msgs []message.Message) []Entry {
+	entries := make([]Entry, 0, len(msgs))
+	var prevID *string
+	for _, m := range msgs {
+		id := implicitEntryID(m.ID)
+		msgID := m.ID
+		e := Entry{
+			ID:        id,
+			SessionID: sessionID,
+			ParentID:  prevID,
+			Type:      EntryMessage,
+			RefID:     &msgID,
+			CreatedAt: m.CreatedAt,
+		}
+		entries = append(entries, e)
+		idCopy := id
+		prevID = &idCopy
+	}
+	return entries
+}
+
+// entriesOrImplicit returns the explicit entries for sessionID when at least
+// one has been recorded, otherwise it synthesizes a linear chain of
+// EntryMessage entries from the session's messages so callers always see a
+// non-empty tree for a session that has messages. It is the single read gate
+// that GetPathToRoot, GetBranch, and ForkFromEntry should use.
+func (r *Repo) entriesOrImplicit(ctx context.Context, sessionID string) ([]Entry, error) {
+	explicit, err := r.Entries(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if len(explicit) > 0 {
+		return explicit, nil
+	}
+	msgs, err := r.Messages(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("building implicit entries for session %s: %w", sessionID, err)
+	}
+	return implicitEntriesFromMessages(sessionID, msgs), nil
 }
 
 // rowScanner is the read surface shared by *sql.Row and *sql.Rows so scanEntry

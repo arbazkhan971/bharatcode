@@ -56,6 +56,46 @@ func toolCallPath(input json.RawMessage) string {
 	return args.Path
 }
 
+// patchToolPaths extracts the edited file paths from a patch tool call's JSON
+// input. The patch tool's input is {"patch":"<unified diff>"} rather than
+// {"path":"..."}, so toolCallPath returns "" for patch calls. This function
+// parses the "+++ b/<path>" lines from the unified-diff value and returns the
+// de-duplicated set of affected file paths in the order they first appear.
+func patchToolPaths(input json.RawMessage) []string {
+	var args struct {
+		Patch string `json:"patch"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil || args.Patch == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var paths []string
+	for _, line := range strings.Split(args.Patch, "\n") {
+		// Unified diff new-file header: "+++ b/<path>" or "+++ <path>".
+		if !strings.HasPrefix(line, "+++ ") {
+			continue
+		}
+		rest := strings.TrimPrefix(line, "+++ ")
+		// Strip the "b/" git diff prefix when present.
+		if strings.HasPrefix(rest, "b/") {
+			rest = rest[2:]
+		}
+		// Remove any trailing tab + timestamp that some diff generators emit.
+		if idx := strings.IndexByte(rest, '\t'); idx >= 0 {
+			rest = rest[:idx]
+		}
+		p := strings.TrimSpace(rest)
+		if p == "" || p == "/dev/null" {
+			continue
+		}
+		if !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
 // touchedFiles returns the de-duplicated, order-stable sets of files the session
 // has read and edited, drawn from the agent's own tool calls in history plus any
 // earlier preserved-files frame (so the census accretes across repeated
@@ -83,7 +123,15 @@ func touchedFiles(history []message.Message) (read, edited []string) {
 			addRead(toolCallPath(input))
 		}
 		if _, ok := editToolNames[name]; ok {
-			addEdit(toolCallPath(input))
+			if name == "patch" {
+				// The patch tool carries a unified diff in a "patch" key, not
+				// a single "path". Extract all affected file paths from the diff.
+				for _, p := range patchToolPaths(input) {
+					addEdit(p)
+				}
+			} else {
+				addEdit(toolCallPath(input))
+			}
 		}
 	}
 	for _, m := range history {

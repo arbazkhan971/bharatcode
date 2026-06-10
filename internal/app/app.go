@@ -17,6 +17,7 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/audit"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/extension"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/hooks"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
@@ -87,6 +88,7 @@ type App struct {
 	MCP         *mcp.Client
 	FileTracker *filetracker.Tracker
 	Tools       *tools.Registry
+	Extensions  *extension.Host
 	Agent       *agent.Coordinator
 	Logger      *slog.Logger
 
@@ -297,6 +299,20 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		Offline:     offlineMode,
 	})
 
+	// Load extensions from the user and project extension directories (and any
+	// compiled-in extensions registered at init time). Tools they contribute are
+	// folded into every agent's tool set and their lifecycle handlers are
+	// dispatched by each agent loop. A bad extension is logged and skipped inside
+	// Load, so this never fails construction.
+	app.Extensions, err = extension.Load(extension.Options{
+		UserDir:    extension.UserDir(),
+		ProjectDir: extension.ProjectDir(projectDir),
+		Env:        extension.NewOSEnv(projectDir),
+	})
+	if err != nil {
+		return rollback(fmt.Errorf("loading extensions: %w", err))
+	}
+
 	providers := configuredProviders(app.Cfg, app.LLM)
 	app.Agent, err = agent.NewCoordinator(app.Cfg, agent.Dependencies{
 		Tools:       app.Tools,
@@ -316,6 +332,10 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		// Record every model-provider turn so the audit log also captures the
 		// egress to the model — which provider/model the prompt was sent to.
 		LLMAuditor: llmAuditLogger{store: app.Audit},
+		// Fold extension-contributed tools into every agent's tool set and route
+		// the lifecycle hooks (before_tool_call, before_provider_request,
+		// session_start, before_compact) through the loaded extensions.
+		Extensions: app.Extensions,
 	})
 	if err != nil {
 		return rollback(fmt.Errorf("constructing agent: %w", err))

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/extension"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/hooks"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
@@ -148,6 +149,14 @@ type hookFirer interface {
 	Fire(ctx context.Context, event hooks.Event, payload any) (hooks.Decision, error)
 }
 
+// extensionDispatcher is the subset of *extension.Host the loop uses to fan
+// agent lifecycle events out to registered extension handlers. It is an
+// interface so tests can inject a capturing fake; *extension.Host satisfies it.
+// A nil dispatcher means no extensions are loaded and every dispatch is skipped.
+type extensionDispatcher interface {
+	Dispatch(ctx context.Context, event extension.Event, payload extension.HookPayload) (extension.HookResult, error)
+}
+
 // verifyHookSource is the subset of *hooks.Engine that provides verify
 // commands for edited files. It is an interface so tests can inject a fake;
 // *hooks.Engine satisfies it. A nil verifyHookSource means no verify commands
@@ -191,16 +200,21 @@ func (execVerifyRunner) RunVerify(ctx context.Context, command, cwd string, time
 
 // Config bundles the dependencies a Loop needs.
 type Config struct {
-	Name          string
-	Model         string
-	Provider      llm.Provider
-	Tools         toolSource
-	Permission    *permission.Checker
-	Sessions      *session.Repo
-	FileTracker   *filetracker.Tracker
-	Ledger        *ledger.Ledger
-	Bus           *pubsub.Topic[Event]
-	Hooks         hookFirer
+	Name        string
+	Model       string
+	Provider    llm.Provider
+	Tools       toolSource
+	Permission  *permission.Checker
+	Sessions    *session.Repo
+	FileTracker *filetracker.Tracker
+	Ledger      *ledger.Ledger
+	Bus         *pubsub.Topic[Event]
+	Hooks       hookFirer
+	// Extensions, when set, dispatches the agent lifecycle events
+	// (before_tool_call, before_provider_request, session_start, before_compact)
+	// to handlers registered by loaded extensions. It is nil by default, leaving
+	// extension hooks off — the non-breaking default. *extension.Host satisfies it.
+	Extensions    extensionDispatcher
 	SystemPrompt  string
 	ToolAllowList []string
 	MaxSteps      int
@@ -590,6 +604,15 @@ func (l *Loop) Compact(ctx context.Context, sessionID string) error {
 // automatically because it is carried in the Config and sent to the provider
 // separately, never within the history. The returned slice is a fresh copy.
 func (l *Loop) compactHistory(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	// before_compact is an observation point for extensions, fired at the single
+	// chokepoint every compaction path (manual Compact, fit, auto) funnels
+	// through. A returned veto is ignored, so the result is discarded.
+	_, _ = l.dispatchExtension(ctx, extension.BeforeCompact, extension.HookPayload{
+		SessionID:    sessionIDFromHistory(history),
+		AgentName:    l.name,
+		MessageCount: len(history),
+	})
+
 	compactor := l.cfg.Compactor
 	if compactor == nil {
 		compactor = l.defaultCompactor()
@@ -838,6 +861,12 @@ func (l *Loop) Run(ctx context.Context, sessionID string, userMsg message.Messag
 	// never refires it.
 	if len(history) == appended {
 		l.fireHook(runCtx, hooks.SessionStart, hooks.SessionPayload{SessionID: sessionID})
+		// session_start is an observation point for extensions: a returned veto is
+		// ignored, so the result is discarded.
+		_, _ = l.dispatchExtension(runCtx, extension.SessionStart, extension.HookPayload{
+			SessionID: sessionID,
+			AgentName: l.name,
+		})
 	}
 
 	// Capture the user's original goal from the FULL on-disk history (before
@@ -1161,6 +1190,25 @@ type pendingToolCall struct {
 }
 
 func (l *Loop) callProvider(ctx context.Context, history []message.Message) (message.Message, []pendingToolCall, *llm.Usage, error) {
+	// before_provider_request lets an extension observe — or veto — the egress to
+	// the model before it happens. A veto fails the turn with the reason (a policy
+	// gate or circuit breaker), so it is honored here rather than discarded.
+	if res, err := l.dispatchExtension(ctx, extension.BeforeProviderRequest, extension.HookPayload{
+		SessionID:    sessionIDFromHistory(history),
+		AgentName:    l.name,
+		Model:        l.activeModel,
+		Provider:     l.cfg.Provider.Name(),
+		MessageCount: len(history),
+	}); err != nil {
+		return message.Message{}, nil, nil, fmt.Errorf("before_provider_request hook: %w", err)
+	} else if res.Block {
+		reason := res.Reason
+		if reason == "" {
+			reason = "no reason provided"
+		}
+		return message.Message{}, nil, nil, fmt.Errorf("provider request blocked by extension: %s", reason)
+	}
+
 	req := llm.Request{
 		Model:        l.activeModel,
 		Messages:     history,
@@ -1187,11 +1235,21 @@ func (l *Loop) callProvider(ctx context.Context, history []message.Message) (mes
 				if text != "" || len(calls) == 0 {
 					blocks = append(blocks, message.TextBlock{Text: text})
 				}
-				for _, call := range calls {
-					if len(call.Input) == 0 {
-						call.Input = json.RawMessage(`{}`)
+				for i := range calls {
+					// Normalize and repair each tool call's streamed arguments before
+					// they enter the conversation history and reach the tool's own
+					// json.Unmarshal. An absent payload becomes an empty object; a
+					// payload the model streamed with invalid escapes, raw control
+					// characters, a lone surrogate, or a body truncated at a length
+					// limit is rewritten into decodable JSON so a recoverable tool call
+					// is not lost to a hard parse failure. RepairToolCallJSON is a no-op
+					// on already-valid input, so the common path keeps the bytes verbatim.
+					if len(calls[i].Input) == 0 {
+						calls[i].Input = json.RawMessage(`{}`)
+					} else if repaired, changed := llm.RepairToolCallJSON(string(calls[i].Input)); changed {
+						calls[i].Input = json.RawMessage(repaired)
 					}
-					blocks = append(blocks, message.ToolUseBlock{ID: call.ID, Name: call.Name, Input: call.Input})
+					blocks = append(blocks, message.ToolUseBlock{ID: calls[i].ID, Name: calls[i].Name, Input: calls[i].Input})
 				}
 				return message.Message{
 					Role:      message.RoleAssistant,
@@ -1345,6 +1403,20 @@ func firstUserGoal(history []message.Message) string {
 	return ""
 }
 
+// sessionIDFromHistory returns the session id carried by the messages, reading
+// the most recent non-empty one. It lets the provider-request and compaction
+// code paths — which receive only the history slice — populate the session id on
+// an extension payload without threading it through every call. It returns ""
+// when no message carries an id.
+func sessionIDFromHistory(history []message.Message) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].SessionID != "" {
+			return history[i].SessionID
+		}
+	}
+	return ""
+}
+
 // messageText concatenates the text blocks of m in order, separating them with
 // newlines. Non-text blocks (tool calls, attachments) are ignored.
 func messageText(m message.Message) string {
@@ -1374,6 +1446,21 @@ func (l *Loop) runTool(ctx context.Context, sessionID string, call pendingToolCa
 	tool, ok := l.cfg.Tools.Get(call.Name)
 	if !ok {
 		return tools.Result{Content: "unknown tool: " + call.Name, IsError: true}
+	}
+	// before_tool_call lets an extension veto a tool before it runs (a policy
+	// guard layered above the user shell hooks). A veto returns an error result so
+	// the model sees the refusal and can adapt; the audit defer still records it.
+	if res, err := l.dispatchExtension(ctx, extension.BeforeToolCall, extension.HookPayload{
+		SessionID: sessionID,
+		AgentName: l.name,
+		ToolName:  call.Name,
+		ToolInput: call.Input,
+	}); err == nil && res.Block {
+		reason := res.Reason
+		if reason == "" {
+			reason = "no reason provided"
+		}
+		return tools.Result{Content: "blocked by extension: " + reason, IsError: true}
 	}
 	wrapped := hookedTool{inner: tool, hooks: l.cfg.Hooks, sessionID: sessionID, agentName: l.name, allowed: l.toolAllowed(call.Name)}
 	l.publish(ctx, Event{SessionID: sessionID, AgentName: l.name, Kind: EventToolCalled, ToolName: call.Name, ToolInput: call.Input})
@@ -1617,6 +1704,21 @@ func (l *Loop) publish(ctx context.Context, ev Event) {
 	if l.cfg.Bus != nil {
 		l.cfg.Bus.Publish(ctx, ev)
 	}
+}
+
+// dispatchExtension fans an agent lifecycle event out to the loaded extensions,
+// guarding on a nil dispatcher so a Loop without extensions pays nothing. The
+// returned HookResult tells the caller whether an extension vetoed the pending
+// action; whether that veto is honored is the caller's decision per event (the
+// loop honors it for before_tool_call and before_provider_request and ignores it
+// for the observation-only events). A dispatcher error is propagated so the
+// before_provider_request path can fail the turn; the observe-only call sites
+// discard it.
+func (l *Loop) dispatchExtension(ctx context.Context, event extension.Event, payload extension.HookPayload) (extension.HookResult, error) {
+	if l.cfg.Extensions == nil {
+		return extension.HookResult{}, nil
+	}
+	return l.cfg.Extensions.Dispatch(ctx, event, payload)
 }
 
 // fireHook fires a lifecycle hook, guarding on a nil hooks engine and logging

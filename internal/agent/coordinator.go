@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/extension"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
 	"github.com/arbazkhan971/bharatcode/internal/hooks"
 	"github.com/arbazkhan971/bharatcode/internal/ledger"
@@ -65,6 +66,11 @@ type Dependencies struct {
 	// each agent's model-provider turns are recorded in the append-only audit
 	// log. It is nil by default, leaving LLM auditing off.
 	LLMAuditor LLMAuditor
+	// Extensions, when set, is the loaded extension host. Its tools are folded
+	// into every agent's effective tool set and its lifecycle handlers are
+	// dispatched by every Loop the Coordinator creates. It is nil by default,
+	// leaving extensions off — the non-breaking default.
+	Extensions *extension.Host
 }
 
 // Coordinator manages configured named agents.
@@ -307,6 +313,7 @@ func (c *Coordinator) Agent(name string) (*Loop, error) {
 				Router:               c.deps.Router,
 				ToolAuditor:          c.deps.ToolAuditor,
 				LLMAuditor:           c.deps.LLMAuditor,
+				Extensions:           c.extensionDispatcher(),
 				AutoCompactThreshold: c.cfg.Options.AutoCompactThreshold,
 			}), nil
 		}
@@ -455,7 +462,21 @@ func (c *Coordinator) extraTools() []tools.Tool {
 	// client they report unavailability rather than panicking.
 	out = append(out, mcp.ResourcesToolFor(c.deps.MCP))
 	out = append(out, mcp.PromptsToolFor(c.deps.MCP))
+	// Tools contributed by loaded extensions are folded in last so any agent can
+	// call them; a nil host contributes nothing.
+	out = append(out, c.deps.Extensions.Tools()...)
 	return out
+}
+
+// extensionDispatcher returns the extension host as the Loop's dispatcher
+// interface, or nil when no host is loaded. Returning an untyped nil (rather
+// than a typed nil *extension.Host wrapped in the interface) keeps the Loop's
+// cheap "no extensions" fast path exact.
+func (c *Coordinator) extensionDispatcher() extensionDispatcher {
+	if c.deps.Extensions == nil {
+		return nil
+	}
+	return c.deps.Extensions
 }
 
 func (c *Coordinator) mcpTools() []tools.Tool {

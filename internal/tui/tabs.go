@@ -109,6 +109,10 @@ func (m *model) loadTab(index int) {
 	m.status.Goal = t.statusGoal
 	m.footer.SessionID = t.sessionID
 	m.footer.CostINR = t.costINR
+	// The newly active tab may hold a conversation or be a fresh empty tab, so
+	// re-derive the content page from its restored state — a freshly opened tab
+	// lands, a tab with turns shows its transcript.
+	m.syncPage()
 }
 
 // newTab opens a fresh session tab and switches to it. The new tab starts as an

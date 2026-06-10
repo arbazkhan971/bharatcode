@@ -169,6 +169,9 @@ func (m *model) openOnboarding() {
 		Body:     m.onboardingBody(),
 		Theme:    m.theme,
 	})
+	// The first-run setup dialog is the focused layer that owns the screen until
+	// it resolves, so move the shell to the explicit onboarding page.
+	m.setState(uiOnboarding, focusInput)
 }
 
 // buildOnboardingOptions assembles the menu rows. Providers are taken from the
@@ -541,6 +544,10 @@ func (m *model) completeOnboarding(mod config.Model, providerName string) {
 		Body:     body,
 		Theme:    m.theme,
 	})
+	// Setup is resolved: leave the onboarding page for the steady-state content
+	// page (landing, since no turn has run yet). The confirmation dialog above
+	// stays up as a dismissable overlay on top of the resolved page.
+	m.setState(m.resolvePage(), focusInput)
 }
 
 // chatgptLoginDoneMsg is delivered to Update when the ChatGPT OAuth flow

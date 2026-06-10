@@ -1,0 +1,168 @@
+package tui
+
+import (
+	"context"
+	"testing"
+
+	"github.com/arbazkhan971/bharatcode/internal/llm"
+	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
+	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/stretchr/testify/require"
+)
+
+// TestState_StartsInInitBeforeSize proves a freshly constructed model sits on the
+// transient init page until a terminal size arrives — the page is not resolved
+// while dimensions (and the first-run check) are unknown.
+func TestState_StartsInInitBeforeSize(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), testDeps())
+	require.Equal(t, uiInit, m.state, "a sized-unknown model is on the init page")
+}
+
+// TestState_ResolvesToLandingOnFirstSize proves the first WindowSizeMsg settles
+// an empty, no-onboarding session onto the landing page (not chat), so a fresh
+// launch shows the welcome panel rather than a blank transcript.
+func TestState_ResolvesToLandingOnFirstSize(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), testDeps())
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	require.Equal(t, uiLanding, m.state, "an empty session lands after the first size")
+	require.False(t, m.dialogs.Contains(onboardingDialogID), "no onboarding for a keyless-but-providerless config")
+}
+
+// TestState_SetStateUpdatesStateAndFocus proves setState moves both the page and
+// the input/chat focus in one step — the single mutator the layout reads.
+func TestState_SetStateUpdatesStateAndFocus(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	m.setState(uiChat, focusChat)
+	require.Equal(t, uiChat, m.state)
+	require.Equal(t, focusChat, m.focus)
+
+	m.setState(uiLanding, focusInput)
+	require.Equal(t, uiLanding, m.state)
+	require.Equal(t, focusInput, m.focus)
+}
+
+// TestState_ResolvePageByContent proves the steady-state page is derived from the
+// conversation: empty lands, while a launched turn or a restored persisted
+// session chats.
+func TestState_ResolvePageByContent(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	require.False(t, m.hasConversation())
+	require.Equal(t, uiLanding, m.resolvePage(), "an empty transcript resolves to landing")
+
+	m.turn = 1
+	require.True(t, m.hasConversation())
+	require.Equal(t, uiChat, m.resolvePage(), "a launched turn resolves to chat")
+
+	m.turn = 0
+	m.sessionPersisted = true
+	require.Equal(t, uiChat, m.resolvePage(), "a restored persisted session resolves to chat")
+}
+
+// TestState_LandingShowsWelcomePanel proves the landing page renders the welcome
+// panel in place of the transcript, and that leaving landing for chat replaces it
+// with the (flowing) transcript region.
+func TestState_LandingShowsWelcomePanel(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	require.Equal(t, uiLanding, m.state)
+	require.Contains(t, m.renderMain(), "Ready when you are", "landing shows the welcome greeting")
+
+	m.setState(uiChat, m.focus)
+	require.NotContains(t, m.renderMain(), "Ready when you are", "the chat page drops the welcome panel")
+}
+
+// TestState_FirstPromptEntersChat proves submitting the first prompt moves the
+// shell off landing onto the chat page — the landing→chat transition.
+func TestState_FirstPromptEntersChat(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]llm.Event{
+		{llm.DeltaTextEvent{Text: "ok"}, llm.EndEvent{}},
+	}}
+	h := newAgentHarness(t, provider)
+	m := h.model
+
+	require.Equal(t, uiLanding, m.state, "the harness model lands before any turn")
+	h.submit(t, "do a thing")
+	// launchTurn sets the chat page synchronously inside the submit Update, before
+	// the background run completes, so the page has already moved here.
+	require.Equal(t, uiChat, m.state, "the first prompt enters the chat page")
+	h.drain(t, func() bool { return !m.running })
+	require.Equal(t, uiChat, m.state, "the shell stays on chat once the turn finishes")
+}
+
+// TestState_OnboardingPageEntersAndLeaves proves first-run setup is its own page:
+// the onboarding deps drive the shell to uiOnboarding on first size, and
+// dismissing the dialog with esc settles back onto the landing page rather than
+// stranding the shell on onboarding with no dialog.
+func TestState_OnboardingPageEntersAndLeaves(t *testing.T) {
+	withMemKeyring(t)
+	m := newModel(context.Background(), onboardingDeps())
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	require.True(t, m.dialogs.Contains(onboardingDialogID), "onboarding deps open the setup dialog")
+	require.Equal(t, uiOnboarding, m.state, "the open setup dialog puts the shell on the onboarding page")
+
+	_, _ = m.Update(keySpecial("esc", tea.KeyEscape))
+	require.False(t, m.dialogs.Contains(onboardingDialogID), "esc dismisses the setup dialog")
+	require.Equal(t, uiLanding, m.state, "dismissing setup settles onto the landing page")
+}
+
+// TestModalFocus_DialogConsumesKeysAwayFromInput proves a modal on the stack is a
+// focus-managed layer: while it is on top, typed keys are routed to the dialog
+// and never reach the prompt buffer, and a dismissal key pops it so input
+// resumes.
+func TestModalFocus_DialogConsumesKeysAwayFromInput(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	require.Equal(t, 0, m.input.Len())
+
+	m.dialogs.Push(&dialog.Text{DialogID: "note", Title: "Heads up", Body: "info", Theme: m.theme})
+	require.Equal(t, 1, m.dialogs.Len())
+
+	// A printable key is consumed by the dialog layer, not inserted into the prompt.
+	_, _ = m.Update(keyText("a"))
+	require.Equal(t, 0, m.input.Len(), "keys must not reach the prompt while a modal is focused")
+	require.Equal(t, 1, m.dialogs.Len(), "a non-dismiss key keeps the modal on the stack")
+
+	// Esc dismisses the modal, returning focus to the prompt.
+	_, _ = m.Update(keySpecial("esc", tea.KeyEscape))
+	require.Equal(t, 0, m.dialogs.Len(), "esc pops the focused modal")
+
+	// With the modal gone, typing reaches the prompt again.
+	_, _ = m.Update(keyText("a"))
+	require.Equal(t, 1, m.input.Len(), "the prompt accepts input once the modal is dismissed")
+}
+
+// TestModalFocus_PermissionRoutesThroughSeam proves a permission request arriving
+// on the consolidated stream renders as a focused modal whose y/n keys answer
+// through the workspace seam — the request's Reply channel receives the decision.
+func TestModalFocus_PermissionRoutesThroughSeam(t *testing.T) {
+	t.Parallel()
+
+	m := newSizedModel(t)
+	reply := make(chan pubsub.PermissionDecision, 1)
+	req := pubsub.PermissionRequest{Tool: "bash", Reason: "run a command", Reply: reply}
+
+	_, _ = m.Update(permissionRequestMsg(req))
+	require.True(t, m.dialogs.Contains("permission"), "a permission request pushes the permission modal")
+
+	// Approving with 'y' answers through the seam on the request's Reply channel.
+	_, _ = m.Update(keyText("y"))
+	select {
+	case dec := <-reply:
+		require.True(t, dec.Approved, "y must approve the request through the seam")
+	default:
+		t.Fatal("approving the permission modal must send a decision on the reply channel")
+	}
+	require.False(t, m.dialogs.Contains("permission"), "answering pops the permission modal")
+}

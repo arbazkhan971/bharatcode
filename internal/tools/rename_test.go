@@ -89,6 +89,65 @@ func TestRenameAppliesEditsAcrossFiles(t *testing.T) {
 	require.Contains(t, diffs["a.go"], "+bar()")
 }
 
+// TestRenameRefusesUnreadFile asserts the rename tool enforces read-before-edit
+// uniformly with edit/multiedit/patch: a session that has not read the file
+// holding the symbol cannot rename it, and nothing is written.
+func TestRenameRefusesUnreadFile(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("foo()\n"), 0o644))
+
+	sessionID := "rename-unread"
+	tracker := newToolsTestTracker(t, sessionID)
+	src := &fakeRename{edit: lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		a: {replaceWord(0, 3, "bar")},
+	}}}
+	tool := &renameTool{source: src, deps: Dependencies{WorkDir: dir, FileTracker: tracker, SessionID: sessionID}}
+
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "column": 1, "new_name": "bar",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "has not been read in this session")
+
+	// The file is untouched: the refusal happened before any write.
+	got, err := os.ReadFile(a)
+	require.NoError(t, err)
+	require.Equal(t, "foo()\n", string(got))
+}
+
+// TestRenameAppliesAfterRead asserts that once the file has been read in the
+// session, the rename proceeds and writes the change.
+func TestRenameAppliesAfterRead(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("foo()\n"), 0o644))
+
+	sessionID := "rename-read"
+	tracker := newToolsTestTracker(t, sessionID)
+	deps := Dependencies{WorkDir: dir, FileTracker: tracker, SessionID: sessionID}
+
+	view := newViewTool(deps)
+	viewed, err := view.Run(context.Background(), mustJSON(t, map[string]string{"path": "a.go"}))
+	require.NoError(t, err)
+	require.False(t, viewed.IsError)
+
+	src := &fakeRename{edit: lsp.WorkspaceEdit{Changes: map[string][]lsp.TextEdit{
+		a: {replaceWord(0, 3, "bar")},
+	}}}
+	tool := &renameTool{source: src, deps: deps}
+	result, err := tool.Run(context.Background(), mustJSON(t, map[string]any{
+		"path": "a.go", "line": 1, "column": 1, "new_name": "bar",
+	}))
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+
+	got, err := os.ReadFile(a)
+	require.NoError(t, err)
+	require.Equal(t, "bar()\n", string(got))
+}
+
 func TestRenameWarnsAboutUnappliedResourceOps(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.go")

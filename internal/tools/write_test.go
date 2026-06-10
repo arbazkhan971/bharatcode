@@ -88,6 +88,42 @@ func TestWriteOverwritesViewedFile(t *testing.T) {
 	require.Equal(t, filetracker.OpEdit, changes[0].Op)
 }
 
+// TestWriteRefusesStaleFile asserts the write tool now enforces the FileTracker
+// stale-read check uniformly with edit/multiedit/patch/rename: a file that
+// changed on disk after the session read it cannot be overwritten until it is
+// re-read, so a concurrent external change is not silently clobbered.
+func TestWriteRefusesStaleFile(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, "stale.txt")
+	require.NoError(t, os.WriteFile(path, []byte("v1\n"), 0o644))
+
+	sessionID := "write-stale"
+	tracker := newToolsTestTracker(t, sessionID)
+	view := newViewTool(Dependencies{FileTracker: tracker, WorkDir: workDir, SessionID: sessionID})
+	write := newWriteTool(Dependencies{FileTracker: tracker, WorkDir: workDir, SessionID: sessionID})
+
+	viewed, err := view.Run(ctx, mustJSON(t, map[string]string{"path": "stale.txt"}))
+	require.NoError(t, err)
+	require.False(t, viewed.IsError)
+
+	// An out-of-band change after the read makes the prior read stale.
+	require.NoError(t, os.WriteFile(path, []byte("changed externally\n"), 0o644))
+
+	result, err := write.Run(ctx, mustJSON(t, map[string]string{
+		"path":    "stale.txt",
+		"content": "v2\n",
+	}))
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Contains(t, result.Content, "modified on disk")
+
+	// The external change is preserved, not clobbered.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "changed externally\n", string(got))
+}
+
 func TestWriteMalformedArgs(t *testing.T) {
 	tool := newWriteTool(Dependencies{WorkDir: t.TempDir(), SessionID: "write-bad"})
 	result, err := tool.Run(context.Background(), []byte(`{`))

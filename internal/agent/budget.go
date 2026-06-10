@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/llm"
 	"github.com/arbazkhan971/bharatcode/internal/message"
@@ -15,6 +16,221 @@ const reservedResponseTokens = 4096
 // compactionSummaryMarker prefixes the synthetic message that the default
 // Compactor leaves in place of the dropped conversation history.
 const compactionSummaryMarker = "[compacted history]"
+
+// preservedFilesMarker prefixes the synthetic message that carries the set of
+// files the session has read and edited across a compaction. The summarizer may
+// drop tool-call detail, so this frame names the touched files explicitly — and
+// is itself parsed back on the next compaction — so the agent never re-reads a
+// file it already saw or clobbers one it already edited after older turns are
+// condensed away.
+const preservedFilesMarker = "[preserved files]"
+
+// preservedReadHeading and preservedEditHeading label the two sections of the
+// preserved-files frame. They are fixed strings so the frame can be parsed back
+// on a subsequent compaction, keeping the census durable across repeated
+// compactions.
+const (
+	preservedReadHeading = "Read in this session:"
+	preservedEditHeading = "Edited in this session:"
+)
+
+// readToolNames and editToolNames classify a tool call as a file read or a file
+// edit for the purpose of preserving touched files across compaction. The edit
+// set mirrors the mutating tools that enforce read-before-edit.
+var (
+	readToolNames = map[string]struct{}{"view": {}}
+	editToolNames = map[string]struct{}{
+		"write": {}, "edit": {}, "multiedit": {}, "patch": {}, "rename": {}, "notebook_edit": {},
+	}
+)
+
+// toolCallPath extracts the "path" argument from a tool call's JSON input, or ""
+// when absent. It mirrors the inline decode the loop and file-edit hooks use.
+func toolCallPath(input json.RawMessage) string {
+	var args struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return ""
+	}
+	return args.Path
+}
+
+// touchedFiles returns the de-duplicated, order-stable sets of files the session
+// has read and edited, drawn from the agent's own tool calls in history plus any
+// earlier preserved-files frame (so the census accretes across repeated
+// compactions rather than being lost when the original tool calls are condensed
+// away). A file that was edited is omitted from the read set, since editing it
+// implies it was read.
+func touchedFiles(history []message.Message) (read, edited []string) {
+	readSeen := map[string]bool{}
+	editSeen := map[string]bool{}
+	var readOrder, editOrder []string
+	addRead := func(p string) {
+		if p != "" && !readSeen[p] {
+			readSeen[p] = true
+			readOrder = append(readOrder, p)
+		}
+	}
+	addEdit := func(p string) {
+		if p != "" && !editSeen[p] {
+			editSeen[p] = true
+			editOrder = append(editOrder, p)
+		}
+	}
+	classify := func(name string, input json.RawMessage) {
+		if _, ok := readToolNames[name]; ok {
+			addRead(toolCallPath(input))
+		}
+		if _, ok := editToolNames[name]; ok {
+			addEdit(toolCallPath(input))
+		}
+	}
+	for _, m := range history {
+		for _, block := range m.Content {
+			switch b := block.(type) {
+			case message.ToolUseBlock:
+				classify(b.Name, b.Input)
+			case *message.ToolUseBlock:
+				classify(b.Name, b.Input)
+			case message.TextBlock:
+				priorRead, priorEdited := parsePreservedFrame(b.Text)
+				for _, p := range priorRead {
+					addRead(p)
+				}
+				for _, p := range priorEdited {
+					addEdit(p)
+				}
+			case *message.TextBlock:
+				priorRead, priorEdited := parsePreservedFrame(b.Text)
+				for _, p := range priorRead {
+					addRead(p)
+				}
+				for _, p := range priorEdited {
+					addEdit(p)
+				}
+			}
+		}
+	}
+	edited = editOrder
+	for _, p := range readOrder {
+		if !editSeen[p] {
+			read = append(read, p)
+		}
+	}
+	return read, edited
+}
+
+// buildPreservedFrame renders the preserved-files frame text from the read and
+// edited sets. It returns "" when both are empty. A section is omitted when its
+// set is empty, but at least one section is always present when the frame is
+// non-empty.
+func buildPreservedFrame(read, edited []string) string {
+	if len(read) == 0 && len(edited) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(preservedFilesMarker)
+	b.WriteString("\nThese files were read or edited earlier in this session; keep them in mind after older turns were condensed away.\n")
+	if len(edited) > 0 {
+		b.WriteString("\n")
+		b.WriteString(preservedEditHeading)
+		b.WriteString("\n")
+		for _, p := range edited {
+			fmt.Fprintf(&b, "- %s\n", p)
+		}
+	}
+	if len(read) > 0 {
+		b.WriteString("\n")
+		b.WriteString(preservedReadHeading)
+		b.WriteString("\n")
+		for _, p := range read {
+			fmt.Fprintf(&b, "- %s\n", p)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// parsePreservedFrame parses a preserved-files frame's text back into its read
+// and edited path lists. It returns nil, nil when text is not a preserved-files
+// frame. It is the inverse of buildPreservedFrame, letting touchedFiles recover
+// a prior frame's census so repeated compactions accrete rather than forget.
+func parsePreservedFrame(text string) (read, edited []string) {
+	if !strings.Contains(text, preservedFilesMarker) {
+		return nil, nil
+	}
+	section := ""
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch trimmed {
+		case preservedReadHeading:
+			section = "read"
+			continue
+		case preservedEditHeading:
+			section = "edit"
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "- ") {
+			continue
+		}
+		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
+		if path == "" {
+			continue
+		}
+		switch section {
+		case "read":
+			read = append(read, path)
+		case "edit":
+			edited = append(edited, path)
+		}
+	}
+	return read, edited
+}
+
+// isPreservedFrame reports whether msg is a preserved-files frame, identified by
+// the marker in its text content.
+func isPreservedFrame(msg message.Message) bool {
+	return strings.Contains(textContent(msg), preservedFilesMarker)
+}
+
+// preserveTouchedFiles ensures the condensed history carries an up-to-date
+// preserved-files frame derived from the full input history. It is called after
+// the Compactor has run: it recomputes the read/edited census from history (and
+// any prior frame folded in by touchedFiles), drops any stale frame left in
+// condensed, and prepends a fresh frame at the front so it stays ahead of the
+// genuine latest user message (preserving latest-user detection). When no files
+// have been touched it returns condensed unchanged, so a text-only conversation
+// is unaffected.
+func preserveTouchedFiles(history, condensed []message.Message) []message.Message {
+	read, edited := touchedFiles(history)
+	frameText := buildPreservedFrame(read, edited)
+	if frameText == "" {
+		return condensed
+	}
+	out := make([]message.Message, 0, len(condensed)+1)
+	out = append(out, message.Message{
+		SessionID: sessionIDOf(history),
+		Role:      message.RoleUser,
+		Content:   []message.ContentBlock{message.TextBlock{Text: frameText}},
+		CreatedAt: firstCreatedAt(history),
+	})
+	for _, m := range condensed {
+		if isPreservedFrame(m) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// firstCreatedAt returns the timestamp of the first message in history, used to
+// stamp synthetic compaction frames so they sort ahead of the retained tail.
+func firstCreatedAt(history []message.Message) time.Time {
+	if len(history) > 0 {
+		return history[0].CreatedAt
+	}
+	return time.Time{}
+}
 
 // toolResultSummaryLimit caps how many characters of a single tool result are
 // serialized into the prefix the summarizer sees. Long tool outputs (file

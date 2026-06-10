@@ -81,6 +81,14 @@ func (t *WriteTool) Run(ctx context.Context, args json.RawMessage) (res Result, 
 	var oldContent []byte
 	exists := fsext.Exists(path)
 	if exists {
+		// Read-before-edit via the FileTracker baseline, uniform with
+		// edit/multiedit/patch/rename: refuse to overwrite an existing file the
+		// session has not read, or one that changed on disk since it was last read.
+		// When no FileTracker is wired (as in some tests) this is a no-op and the
+		// in-memory view guard below still refuses a blind overwrite.
+		if msg := editGuard(ctx, t.deps, path, "overwriting"); msg != "" {
+			return errorResult(msg), nil
+		}
 		if !hasViewed(t.deps.SessionID, path) {
 			return errorResult("refusing to overwrite existing file that has not been viewed in this session"), nil
 		}

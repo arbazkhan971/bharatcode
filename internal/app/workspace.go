@@ -94,6 +94,12 @@ type Workspace interface {
 type appWorkspace struct {
 	app  *App
 	loop *agent.Loop
+	// runner enforces per-session run discipline over the live loop: one active
+	// run per session, additional prompts queued in order, and atomic cancel. The
+	// seam drives Prompt through it so a second prompt submitted mid-turn is
+	// queued behind the first rather than racing the Loop (which rejects
+	// concurrent runs).
+	runner *agent.SessionRunner
 }
 
 // NewWorkspace returns a Workspace backed by app and the live loop that serves
@@ -102,7 +108,7 @@ type appWorkspace struct {
 // loop to drive. It performs no wiring of its own — it is a thin adapter over
 // the already-constructed graph.
 func NewWorkspace(app *App, loop *agent.Loop) Workspace {
-	return &appWorkspace{app: app, loop: loop}
+	return &appWorkspace{app: app, loop: loop, runner: agent.NewSessionRunner(loop.Run)}
 }
 
 // Subscribe delegates to the consolidated UI stream the App fanned in at New.
@@ -110,9 +116,13 @@ func (w *appWorkspace) Subscribe() (<-chan UIEvent, func()) {
 	return w.app.UI.Subscribe()
 }
 
-// Prompt forwards to the live loop's Run.
+// Prompt submits the turn through the per-session runner and blocks until it
+// completes, preserving the direct-Run semantics callers expect while gaining
+// run discipline: if a turn is already active for sessionID, this prompt is
+// queued behind it and runs once the active turn (and anything queued ahead)
+// finishes, instead of racing the Loop.
 func (w *appWorkspace) Prompt(ctx context.Context, sessionID string, userMsg message.Message) error {
-	return w.loop.Run(ctx, sessionID, userMsg)
+	return w.runner.Submit(ctx, sessionID, userMsg).Wait()
 }
 
 // Steer forwards to the live loop's Steer.
@@ -120,9 +130,13 @@ func (w *appWorkspace) Steer(text string) (queued bool) {
 	return w.loop.Steer(text)
 }
 
-// Interrupt forwards to the live loop's Interrupt.
+// Interrupt cancels the in-flight turn and drops any queued prompts. It cancels
+// the live loop's active run directly (interrupting the provider stream) and
+// clears the runner's per-session queues so no deferred prompt fires after an
+// interrupt. It is safe to call when nothing is running.
 func (w *appWorkspace) Interrupt() {
 	w.loop.Interrupt()
+	w.runner.CancelAll()
 }
 
 // GrantPermission sends an approving decision on the request's Reply channel.

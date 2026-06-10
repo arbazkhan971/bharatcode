@@ -125,7 +125,7 @@ func (t *PatchTool) Run(ctx context.Context, args json.RawMessage) (res Result, 
 			if !exists {
 				return errorResult(fmt.Sprintf("patch deletes %s but the file does not exist", target)), nil
 			}
-			if msg := editGuard(ctx, t.deps, path); msg != "" {
+			if msg := editGuard(ctx, t.deps, path, "patching"); msg != "" {
 				return errorResult(msg), nil
 			}
 			old, err := os.ReadFile(path)
@@ -137,7 +137,7 @@ func (t *PatchTool) Run(ctx context.Context, args json.RawMessage) (res Result, 
 			if !exists {
 				return errorResult(fmt.Sprintf("patch modifies %s but the file does not exist (use /dev/null as the old path to create it)", target)), nil
 			}
-			if msg := editGuard(ctx, t.deps, path); msg != "" {
+			if msg := editGuard(ctx, t.deps, path, "patching"); msg != "" {
 				return errorResult(msg), nil
 			}
 			old, err := os.ReadFile(path)
@@ -230,11 +230,15 @@ func (t *PatchTool) checkPermission(ctx context.Context, raw json.RawMessage) er
 	return nil
 }
 
-// editGuard enforces the same read-before-edit and stale-read protections the
-// edit and multiedit tools apply, for a single file a patch will modify or
-// delete. It returns a model-facing message describing the violation, or "" when
-// the edit may proceed (including when no FileTracker is wired, as in tests).
-func editGuard(ctx context.Context, deps Dependencies, path string) string {
+// editGuard enforces read-before-edit and stale-read protection for a single
+// file a mutating tool will modify or delete, using the FileTracker last-read
+// baseline. It is the one place this contract lives, so every mutating tool
+// (edit, multiedit, patch, write, rename) enforces it identically. The action
+// verb (e.g. "patching", "writing", "renaming") is woven into the model-facing
+// message so each tool's refusal reads naturally. It returns a message
+// describing the violation, or "" when the edit may proceed (including when no
+// FileTracker is wired, as in tests).
+func editGuard(ctx context.Context, deps Dependencies, path, action string) string {
 	if deps.FileTracker == nil || deps.SessionID == "" {
 		return ""
 	}
@@ -245,8 +249,8 @@ func editGuard(ctx context.Context, deps Dependencies, path string) string {
 		}
 		if !read {
 			return fmt.Sprintf(
-				"file %s has not been read in this session — view the file before patching so the patch applies to its current contents",
-				path,
+				"file %s has not been read in this session — view the file before %s so it applies to the file's current contents",
+				path, action,
 			)
 		}
 	}
@@ -256,8 +260,8 @@ func editGuard(ctx context.Context, deps Dependencies, path string) string {
 	}
 	if changed {
 		return fmt.Sprintf(
-			"file %s has been modified on disk since it was last read in this session — view the file again before patching to avoid clobbering changes",
-			path,
+			"file %s has been modified on disk since it was last read in this session — view the file again before %s to avoid clobbering changes",
+			path, action,
 		)
 	}
 	return ""

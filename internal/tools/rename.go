@@ -128,10 +128,17 @@ func (t *renameTool) Run(ctx context.Context, raw json.RawMessage) (res Result, 
 	if !isInsideWorkDir(path, t.deps.WorkDir) {
 		return errorResult("path is outside the workspace: " + path), nil
 	}
-	// A preview writes nothing, so it does not need write permission.
+	// A preview writes nothing, so it does not need write permission, nor does
+	// it risk clobbering an unread file.
 	if !args.Preview {
 		if err := t.checkPermission(ctx, path, raw); err != nil {
 			return errorResult(err.Error()), nil
+		}
+		// Read-before-edit: the file holding the symbol must have been read in
+		// this session (and not changed on disk since), so the rename targets the
+		// code the model actually saw. Mirrors edit/multiedit/patch.
+		if msg := editGuard(ctx, t.deps, path, "renaming"); msg != "" {
+			return errorResult(msg), nil
 		}
 	}
 

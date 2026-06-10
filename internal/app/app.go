@@ -102,6 +102,12 @@ type App struct {
 	// directory without re-deriving it.
 	workDir string
 
+	// startupYolo records whether --yolo was passed. It is applied per-session
+	// (as permission.SetAutoApproveSession) once an active session exists, rather
+	// than flipping a single global switch, so yolo is scoped to a session. The
+	// interactive TUI and the run command read it via StartupYolo. See workspace.go.
+	startupYolo bool
+
 	rootCtx    context.Context
 	cancelRoot context.CancelFunc
 	closeMu    sync.Mutex
@@ -182,6 +188,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		return rollback(fmt.Errorf("constructing util paths: %w", err))
 	}
 	app.workDir = projectDir
+	app.startupYolo = opts.YOLO
 
 	app.DB, err = db.Open(rootCtx, dbPath)
 	if err != nil {
@@ -255,7 +262,8 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	}
 
 	app.Permission = permission.New(app.Cfg, app.Bus.Permission)
-	app.Permission.SetYolo(opts.YOLO)
+	// --yolo is applied per-session (via SetAutoApproveSession) once an active
+	// session exists, not as a global switch — see startupYolo / StartupYolo.
 	// Record every permission decision in the append-only audit log so the user
 	// can later prove exactly what the agent was authorized to do.
 	app.Permission.SetAuditLogger(app.Audit.PermissionLogger())
@@ -363,6 +371,16 @@ func (a *App) WorkDir() string {
 		return ""
 	}
 	return a.workDir
+}
+
+// StartupYolo reports whether --yolo was passed at launch. Callers apply it
+// per-session (permission.SetAutoApproveSession) once they know the active
+// session id, so auto-approval is scoped to a session rather than global.
+func (a *App) StartupYolo() bool {
+	if a == nil {
+		return false
+	}
+	return a.startupYolo
 }
 
 func newBus() *Bus {

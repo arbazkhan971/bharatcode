@@ -565,6 +565,11 @@ func (m *model) restoreSession(id string) tea.Cmd {
 	m.status.Model = sess.Model
 	m.status.Agent = sess.Agent
 	m.footer.SessionID = sess.ID
+	// Yolo is per-session, so the indicator must follow the newly active session's
+	// auto-approval state rather than carrying over the previous session's.
+	if m.deps.Workspace != nil {
+		m.status.Yolo = m.deps.Workspace.SessionYolo(sess.ID)
+	}
 	// Reset the session-scoped spend; the ledger bus repopulates it for the
 	// restored session as fresh summaries arrive.
 	m.footer.CostINR = 0

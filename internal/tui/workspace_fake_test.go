@@ -161,6 +161,35 @@ func (fw *fakeWorkspace) Yolo() bool {
 	return fw.yolo
 }
 
+// SetSessionYolo toggles per-session auto-approval on the checker when wired.
+func (fw *fakeWorkspace) SetSessionYolo(sessionID string, on bool) {
+	if fw.perm != nil {
+		fw.perm.SetAutoApproveSession(sessionID, on)
+	}
+}
+
+// SessionYolo reports per-session auto-approval, falling back to the local yolo
+// flag when no checker is wired.
+func (fw *fakeWorkspace) SessionYolo(sessionID string) bool {
+	if fw.perm != nil {
+		return fw.perm.Yolo() || fw.perm.IsAutoApproveSession(sessionID)
+	}
+	return fw.yolo
+}
+
+// SessionState returns a snapshot built from the loop and checker. The fake has
+// no file tracker, so ChangedFiles is always empty.
+func (fw *fakeWorkspace) SessionState(_ context.Context, sessionID string) (app.SessionState, error) {
+	st := app.SessionState{SessionID: sessionID, Yolo: fw.SessionYolo(sessionID)}
+	if fw.loop != nil {
+		st.Model = fw.loop.ActiveModel()
+		if p := fw.loop.Provider(); p != nil {
+			st.Provider = p.Name()
+		}
+	}
+	return st, nil
+}
+
 // CreateSession delegates to the session repo.
 func (fw *fakeWorkspace) CreateSession(ctx context.Context, s *session.Session) error {
 	if fw.sessions == nil {

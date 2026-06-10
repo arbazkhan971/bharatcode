@@ -57,6 +57,7 @@ var (
 			Logger:           application.Logger,
 			MCP:              application.MCP,
 			InitialSessionID: initialSessionID,
+			Yolo:             application.StartupYolo(),
 		})
 	}
 )

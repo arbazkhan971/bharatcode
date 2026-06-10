@@ -64,6 +64,12 @@ type Repo struct {
 	// Repo. See tags.go.
 	tagsMu    sync.Mutex
 	tagsReady bool
+
+	// entriesMu guards lazy creation of the session_entries side table;
+	// entriesReady is set once the CREATE TABLE has succeeded so the DDL runs at
+	// most once per Repo. See tree.go.
+	entriesMu    sync.Mutex
+	entriesReady bool
 }
 
 // Sentinel errors returned by Repo methods.

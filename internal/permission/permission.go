@@ -183,6 +183,10 @@ type Checker struct {
 	sessionMemory sync.Map
 	projectMemory sync.Map
 	globalMemory  sync.Map
+	// autoApprove holds the set of session IDs under per-session auto-approval
+	// (the session-scoped form of YOLO). Keyed by sessionID -> struct{}. See
+	// SetAutoApproveSession / IsAutoApproveSession in session.go.
+	autoApprove sync.Map
 }
 
 // New constructs a Checker with the given config and pubsub topic.
@@ -304,11 +308,19 @@ func (c *Checker) Check(ctx context.Context, req Request) (decision Decision, er
 		})
 	}()
 
-	// 1. YOLO Check.
-	if yolo {
+	// 1. YOLO Check — global yolo or per-session auto-approval both bypass. A
+	// session-scoped bypass records ScopeSession (rather than ScopeOnce) so the
+	// audit trail distinguishes "this session is auto-approved" from a global
+	// or one-off allow.
+	sessionAuto := c.IsAutoApproveSession(req.SessionID)
+	if yolo || sessionAuto {
+		if sessionAuto && !yolo {
+			scope = ScopeSession
+		}
 		slog.WarnContext(
 			ctx, "Bypassing tool permission check in YOLO mode",
 			"tool", req.ToolName,
+			"session_id", req.SessionID,
 			"args", sanitizeLogArgs(req.Args),
 		)
 		return DecisionAllow, nil
@@ -320,11 +332,11 @@ func (c *Checker) Check(ctx context.Context, req Request) (decision Decision, er
 	// a benign head (bash:ls) would silently approve a chained dangerous tail
 	// (rm -rf /). Single commands keep the original single-key resolution exactly.
 	if heads, parseComplete, compound := c.bashCompound(req); compound {
-		if dec, sc, resolved := c.resolveBashHeads(heads, parseComplete); resolved {
+		if dec, sc, resolved := c.resolveBashHeads(req.SessionID, heads, parseComplete); resolved {
 			scope = sc
 			return dec, nil
 		}
-	} else if dec, sc, resolved := c.resolveSingleKey(req.ToolName, c.getMatchKey(req)); resolved {
+	} else if dec, sc, resolved := c.resolveSingleKey(req.SessionID, req.ToolName, c.getMatchKey(req)); resolved {
 		scope = sc
 		return dec, nil
 	}
@@ -387,7 +399,10 @@ func (c *Checker) RememberDecision(req Request, decision Decision, scope Scope) 
 
 	switch scope {
 	case ScopeSession:
-		c.sessionMemory.Store(key, mappedDec)
+		// Session grants are keyed by {sessionID,tool,action,path} so a grant in
+		// one session never resolves in another. Project/global grants below stay
+		// keyed by the bare matchKey because they are meant to span sessions.
+		c.sessionMemory.Store(sessionGrantKey(req.SessionID, req.ToolName, key), mappedDec)
 		return nil
 
 	case ScopeProject:
@@ -657,20 +672,30 @@ func (c *Checker) bashCompound(req Request) (heads []string, parseComplete, comp
 // scope wins, then a stored Allow at the narrowest scope, then the config deny
 // list, then the config auto-approve list. resolved is false when no rule
 // matched, leaving the decision to the approval mode and interactive prompt.
-func (c *Checker) resolveSingleKey(tool, key string) (decision Decision, scope Scope, resolved bool) {
-	memScopes := []Scope{ScopeSession, ScopeProject, ScopeForever}
-	mems := []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory}
+func (c *Checker) resolveSingleKey(sessionID, tool, key string) (decision Decision, scope Scope, resolved bool) {
+	// Session memory is looked up under the session-scoped composite key; project
+	// and global memory under the bare matchKey, since those scopes span sessions.
+	type memLookup struct {
+		mem   *sync.Map
+		key   string
+		scope Scope
+	}
+	lookups := []memLookup{
+		{&c.sessionMemory, sessionGrantKey(sessionID, tool, key), ScopeSession},
+		{&c.projectMemory, key, ScopeProject},
+		{&c.globalMemory, key, ScopeForever},
+	}
 
 	// Deny-wins: a stored Deny at any scope overrides any narrower Allow.
-	for i, mem := range mems {
-		if v, ok := mem.Load(key); ok && v.(Decision) == DecisionDeny {
-			return DecisionDeny, memScopes[i], true
+	for _, l := range lookups {
+		if v, ok := l.mem.Load(l.key); ok && v.(Decision) == DecisionDeny {
+			return DecisionDeny, l.scope, true
 		}
 	}
 	// Any remaining stored value is an Allow (RememberDecision collapses them).
-	for i, mem := range mems {
-		if v, ok := mem.Load(key); ok {
-			return v.(Decision), memScopes[i], true
+	for _, l := range lookups {
+		if v, ok := l.mem.Load(l.key); ok {
+			return v.(Decision), l.scope, true
 		}
 	}
 	if c.cfg != nil {
@@ -696,16 +721,27 @@ func (c *Checker) resolveSingleKey(tool, key string) (decision Decision, scope S
 // parse was incomplete (command substitution present), only a blanket bash:* / *
 // auto-approve clears the command — narrow per-command rules are insufficient
 // because the hidden command's head is not in the key set.
-func (c *Checker) resolveBashHeads(heads []string, parseComplete bool) (decision Decision, scope Scope, resolved bool) {
-	memScopes := []Scope{ScopeSession, ScopeProject, ScopeForever}
-	mems := []*sync.Map{&c.sessionMemory, &c.projectMemory, &c.globalMemory}
+func (c *Checker) resolveBashHeads(sessionID string, heads []string, parseComplete bool) (decision Decision, scope Scope, resolved bool) {
+	// Per-head memory lookup: session memory under the session-scoped composite
+	// key, project/global under the bare head key. Returns the resolved decision,
+	// its scope, and whether any memory matched.
+	memLookup := func(head string, want Decision) (Scope, bool) {
+		if v, ok := c.sessionMemory.Load(sessionGrantKey(sessionID, "bash", head)); ok && v.(Decision) == want {
+			return ScopeSession, true
+		}
+		if v, ok := c.projectMemory.Load(head); ok && v.(Decision) == want {
+			return ScopeProject, true
+		}
+		if v, ok := c.globalMemory.Load(head); ok && v.(Decision) == want {
+			return ScopeForever, true
+		}
+		return ScopeOnce, false
+	}
 
 	// Deny-wins across every head, memory before config.
 	for _, key := range heads {
-		for i, mem := range mems {
-			if v, ok := mem.Load(key); ok && v.(Decision) == DecisionDeny {
-				return DecisionDeny, memScopes[i], true
-			}
+		if sc, ok := memLookup(key, DecisionDeny); ok {
+			return DecisionDeny, sc, true
 		}
 	}
 	if c.cfg != nil {
@@ -735,13 +771,10 @@ func (c *Checker) resolveBashHeads(heads []string, parseComplete bool) (decision
 	scope = ScopeOnce
 	for _, key := range heads {
 		allowed := false
-		for i, mem := range mems {
-			if v, ok := mem.Load(key); ok && v.(Decision) == DecisionAllow {
-				allowed = true
-				if scope == ScopeOnce {
-					scope = memScopes[i]
-				}
-				break
+		if sc, ok := memLookup(key, DecisionAllow); ok {
+			allowed = true
+			if scope == ScopeOnce {
+				scope = sc
 			}
 		}
 		if !allowed && c.cfg != nil {

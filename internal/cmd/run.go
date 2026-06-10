@@ -71,6 +71,12 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 
+			// --yolo is scoped to this run's session rather than a global switch:
+			// auto-approve every tool for this session id only.
+			if application.StartupYolo() && application.Permission != nil {
+				application.Permission.SetAutoApproveSession(s.ID, true)
+			}
+
 			// Prefer an explicit --agent flag; fall back to the session's stored
 			// agent (useful when --continue or --session resumes a prior run);
 			// ultimately default to "coder".

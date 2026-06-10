@@ -111,6 +111,10 @@ type Dependencies struct {
 	// at startup instead of beginning a fresh one. Wired by --continue / -c to
 	// resume the most recently updated session for the current project.
 	InitialSessionID string
+	// Yolo is the startup --yolo intent. It is applied per-session (via
+	// Workspace.SetSessionYolo) to each session the TUI activates, rather than as
+	// a global switch, so auto-approval stays scoped to a session.
+	Yolo bool
 }
 
 // Run launches the TUI and blocks until the program exits.
@@ -506,7 +510,7 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 		chat:              chatList,
 		vp:                viewport.New(viewport.WithWidth(minWidth), viewport.WithHeight(1)),
 		footer:            footer,
-		status:            statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now},
+		status:            statusbar.Bar{Theme: theme, Model: modelName, Agent: agentName, SessionID: sessionID, StartedAt: now, Now: now, Yolo: deps.Yolo},
 		notifications:     notification.NewFocusAware(notification.SystemNotifier{}),
 		textInput:         newPromptInput(),
 		keys:              defaultKeyMap(),
@@ -543,6 +547,12 @@ func newModel(ctx context.Context, deps Dependencies) *model {
 			m.chat.Append(msg)
 		}
 		m.state = uiChat
+	}
+	// Apply the startup --yolo intent per-session. A restored session already has
+	// a real id so it can be marked now; a fresh "new" session is marked later in
+	// ensureSession, when its row is created.
+	if deps.Yolo && m.sessionPersisted && m.deps.Workspace != nil {
+		m.deps.Workspace.SetSessionYolo(m.sessionID, true)
 	}
 	if deps.Permission != nil {
 		m.applyApprovalMode(deps.Permission.GetApprovalMode())
@@ -1288,8 +1298,13 @@ func (m *model) handleSlash(text string) (tea.Model, tea.Cmd) {
 	case "/budget":
 		m.dialogs.Push(&dialog.Text{DialogID: "budget", Title: "Budget", Body: m.footer.Render(m.width), Theme: m.theme})
 	case "/yolo":
+		// Yolo is per-session: toggle auto-approval for the active session only.
+		// Before the session row exists (the "new" placeholder), just hold the
+		// intent in the status bar; ensureSession applies it when the row is made.
 		m.status.Yolo = !m.status.Yolo
-		m.deps.Workspace.SetYolo(m.status.Yolo)
+		if m.sessionPersisted {
+			m.deps.Workspace.SetSessionYolo(m.sessionID, m.status.Yolo)
+		}
 	case "/save":
 		m.dialogs.Push(&dialog.Text{DialogID: "save", Title: "Saved", Body: "Session save requested.", Theme: m.theme})
 	case "/quit", "/exit":

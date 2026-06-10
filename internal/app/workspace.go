@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
@@ -10,6 +11,21 @@ import (
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 )
+
+// SessionState is a live snapshot of a session's user-visible run state, surfaced
+// through the Workspace seam for the sidebar. It bundles the fields the sidebar
+// shows — the active model and provider, the working directory, whether the
+// session is auto-approving (yolo), and the absolute paths changed during the
+// session — so the UI reads one consistent view instead of polling several
+// services. ChangedFiles is sorted and deduplicated (see filetracker.ChangedFiles).
+type SessionState struct {
+	SessionID    string
+	Model        string
+	Provider     string
+	Cwd          string
+	Yolo         bool
+	ChangedFiles []string
+}
 
 // Workspace is the narrow seam the interactive UI depends on instead of the
 // concrete App and its service fields. It exposes exactly three things: the one
@@ -63,6 +79,19 @@ type Workspace interface {
 	// reaching into the permission checker.
 	SetYolo(on bool)
 	Yolo() bool
+
+	// SetSessionYolo toggles per-session auto-approval for sessionID, and
+	// SessionYolo reports it. This is the session-scoped form of yolo: --yolo and
+	// the in-UI yolo toggle flip approval for the active session only, so one
+	// session can run unattended while another keeps prompting.
+	SetSessionYolo(sessionID string, on bool)
+	SessionYolo(sessionID string) bool
+
+	// SessionState returns a live snapshot of the session's user-visible state —
+	// model, provider, working directory, yolo, and the files changed so far — for
+	// the sidebar to render. It reads through to the live loop, the permission
+	// checker, and the file tracker, so it always reflects the current run.
+	SessionState(ctx context.Context, sessionID string) (SessionState, error)
 
 	// CreateSession persists a new session record.
 	CreateSession(ctx context.Context, s *session.Session) error
@@ -168,6 +197,42 @@ func (w *appWorkspace) SetYolo(on bool) {
 // Yolo reports the permission checker's current yolo state.
 func (w *appWorkspace) Yolo() bool {
 	return w.app.Permission.Yolo()
+}
+
+// SetSessionYolo toggles per-session auto-approval through the checker.
+func (w *appWorkspace) SetSessionYolo(sessionID string, on bool) {
+	w.app.Permission.SetAutoApproveSession(sessionID, on)
+}
+
+// SessionYolo reports whether sessionID is auto-approving. It is the per-session
+// companion to Yolo and treats global yolo as covering every session, so the
+// sidebar shows yolo when either the global switch or this session's grant is on.
+func (w *appWorkspace) SessionYolo(sessionID string) bool {
+	return w.app.Permission.Yolo() || w.app.Permission.IsAutoApproveSession(sessionID)
+}
+
+// SessionState assembles the live snapshot for the sidebar from the loop (model,
+// provider), the App (working directory), the permission checker (yolo), and the
+// file tracker (changed files). A nil file tracker or empty sessionID yields an
+// empty ChangedFiles set rather than an error.
+func (w *appWorkspace) SessionState(ctx context.Context, sessionID string) (SessionState, error) {
+	st := SessionState{
+		SessionID: sessionID,
+		Model:     w.loop.ActiveModel(),
+		Cwd:       w.app.WorkDir(),
+		Yolo:      w.SessionYolo(sessionID),
+	}
+	if p := w.loop.Provider(); p != nil {
+		st.Provider = p.Name()
+	}
+	if w.app.FileTracker != nil && sessionID != "" {
+		files, err := w.app.FileTracker.ChangedFiles(ctx, sessionID)
+		if err != nil {
+			return st, fmt.Errorf("collecting changed files for session %s: %w", sessionID, err)
+		}
+		st.ChangedFiles = files
+	}
+	return st, nil
 }
 
 // CreateSession delegates to the session repository.

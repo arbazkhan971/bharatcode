@@ -45,8 +45,12 @@ type noticeMsg app.Notice
 // after the agent loop releases its run mutex, so it is safe to start the next
 // turn (the autonomous goal loop relies on this to avoid concurrent Run calls).
 type runDoneMsg struct {
-	last *message.Message
-	err  error
+	// sessionID is the session whose turn finished. With per-session concurrent
+	// runs, runDoneMsg may arrive for a background tab; the handler uses this to
+	// decide whether the finished run is the active tab's.
+	sessionID string
+	last      *message.Message
+	err       error
 }
 
 // assistantStreamID returns the chat-list key for the assistant bubble of the
@@ -199,17 +203,14 @@ func (m *model) ensureSession() error {
 // are appended to the user message's content so vision-capable models can
 // inspect them. A nil or empty slice produces a plain text-only message.
 //
-// NOTE(M1): This path drives the agent via m.deps.Agent.Run directly, bypassing
-// the Workspace.Prompt seam (which routes through agent.SessionRunner and gains
-// per-session run discipline: one active run per session, queued concurrency,
-// and atomic cancel). Workspace.Prompt has identical blocking semantics (it
-// blocks until the runner's Wait returns, same as Run), but the test fake's
-// Prompt stub is a no-op, so routing through the seam would require updating
-// the fake to forward to loop.Run before this switch is safe to make.
-// Until then, Interrupt (which already calls runner.CancelAll via the seam)
-// may not cancel a run started here if the runner is not in the call chain.
+// The turn is driven through Workspace.Prompt, which routes via the per-session
+// SessionRunner: each session resolves its OWN Loop, so distinct tabs run
+// concurrently, a second prompt for the same session queues behind the first
+// rather than panicking the Loop, and Interrupt/InterruptSession cancel through
+// the runner. Prompt has the same blocking semantics as a direct Run (it blocks
+// until the runner's Wait returns).
 func (m *model) runAgent(prompt string, imgBlocks []message.ImageBlock) tea.Cmd {
-	loop := m.deps.Agent
+	ws := m.deps.Workspace
 	sessionID := m.sessionID
 	ctx := m.ctx
 	repo := m.deps.Sessions
@@ -223,11 +224,12 @@ func (m *model) runAgent(prompt string, imgBlocks []message.ImageBlock) tea.Cmd 
 			content = append(content, img)
 		}
 		userMsg := message.Message{
-			Role:    message.RoleUser,
-			Content: content,
+			SessionID: sessionID,
+			Role:      message.RoleUser,
+			Content:   content,
 		}
-		err := loop.Run(ctx, sessionID, userMsg)
-		return runDoneMsg{last: lastAssistantMessage(ctx, repo, sessionID), err: err}
+		err := ws.Prompt(ctx, sessionID, userMsg)
+		return runDoneMsg{sessionID: sessionID, last: lastAssistantMessage(ctx, repo, sessionID), err: err}
 	}
 }
 
@@ -448,10 +450,12 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 			m.chat.Stream(streamID, text)
 		}
 		m.chat.FinishStream(streamID)
-		// Capture the plan when the plan turn ends.
-		if m.deps.Agent.PlanMode() && ev.Message != nil {
+		// Capture the plan when the plan turn ends. Key the plan-mode check and the
+		// store on the event's own session so a background tab's plan turn stores
+		// against the right session rather than the focused tab.
+		if m.deps.Workspace.PlanMode(ev.SessionID) && ev.Message != nil {
 			planText := agent.ExtractPlanText(*ev.Message)
-			m.deps.Coordinator.StorePlan(m.sessionID, planText)
+			m.deps.Coordinator.StorePlan(ev.SessionID, planText)
 		}
 	}
 	return m, m.listenAgent()
@@ -509,7 +513,7 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	// lives on the shared Loop and the run loop drains it unconditionally at the
 	// next turn, so it must be cleared here on EVERY run-end to avoid leaking
 	// into an unrelated future turn.
-	pending := m.deps.Agent.PendingSteering()
+	pending := m.deps.Workspace.PendingSteering(done.sessionID)
 
 	if done.err != nil {
 		// The turn errored or was interrupted: discard the leftover steering

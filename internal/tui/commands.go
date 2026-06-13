@@ -537,9 +537,9 @@ func (m *model) refreshModelPicker() {
 // is more informative than blocking the selection.
 func (m *model) applyModel(mod config.Model) {
 	m.status.Model = mod.ID
-	if m.deps.Coordinator != nil && m.deps.Agent != nil {
-		if provider, err := m.deps.Coordinator.SetActiveModel("coder", mod.ID); err == nil {
-			m.deps.Agent.SetModel(mod.ID, provider)
+	if m.deps.Coordinator != nil {
+		if provider, err := m.deps.Coordinator.SetActiveModel("coder", mod.ID); err == nil && m.deps.Workspace != nil {
+			m.deps.Workspace.SetModel(m.sessionID, mod.ID, provider)
 		}
 	}
 }
@@ -752,7 +752,7 @@ func (m *model) handleCompact() (tea.Model, tea.Cmd) {
 		m.dialogs.Push(&dialog.Text{DialogID: "compact", Title: "Compact", Body: "No active session to compact yet. Send a prompt first.", Theme: m.theme})
 		return m, nil
 	}
-	if err := m.deps.Agent.Compact(m.ctx, m.sessionID); err != nil {
+	if err := m.deps.Workspace.Compact(m.ctx, m.sessionID); err != nil {
 		m.dialogs.Push(&dialog.Text{DialogID: "error", Title: "Compact failed", Body: err.Error(), Theme: m.theme})
 		return m, nil
 	}
@@ -820,11 +820,11 @@ const (
 // rather than execute. It takes effect on the next provider call; the existing
 // session is preserved. /approve clears it.
 func (m *model) handlePlan() (tea.Model, tea.Cmd) {
-	if m.deps.Agent.PlanMode() {
+	if m.deps.Workspace.PlanMode(m.sessionID) {
 		m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Plan mode", Body: planEnabledBody, Theme: m.theme})
 		return m, nil
 	}
-	m.deps.Agent.SetPlanMode(true)
+	m.deps.Workspace.SetPlanMode(m.sessionID, true)
 	m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Plan mode", Body: planEnabledBody, Theme: m.theme})
 	return m, nil
 }
@@ -834,7 +834,7 @@ func (m *model) handlePlan() (tea.Model, tea.Cmd) {
 // mode. When a plan is stored, it shows the plan for final review before
 // auto-continuing execution with the approved plan.
 func (m *model) handleApprove() (tea.Model, tea.Cmd) {
-	if !m.deps.Agent.PlanMode() {
+	if !m.deps.Workspace.PlanMode(m.sessionID) {
 		m.dialogs.Push(&dialog.Text{DialogID: "plan", Title: "Approve", Body: approveNoopBody, Theme: m.theme})
 		return m, nil
 	}
@@ -850,7 +850,7 @@ func (m *model) handleApprove() (tea.Model, tea.Cmd) {
 	}
 
 	// Approve the plan: transitions the loop out of plan mode and retrieves the plan.
-	planText = m.deps.Coordinator.ApprovePlan(m.sessionID, m.deps.Agent)
+	planText = m.deps.Workspace.ApprovePlan(m.sessionID)
 
 	// Auto-continue execution: seed the next turn with the approved plan.
 	// Extract the prompt text from the seed message so continueRun can render it.

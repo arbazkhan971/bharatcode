@@ -36,7 +36,7 @@ type stubProvider struct {
 func (s *stubProvider) Name() string { return s.name }
 
 func (s *stubProvider) Models() []llm.Model {
-	return []llm.Model{{ID: s.model, Provider: s.name, ContextWindow: 8192, SupportsTools: true}}
+	return []llm.Model{{ID: s.model, Provider: s.name, ContextWindow: 1 << 20, SupportsTools: true}}
 }
 
 func (s *stubProvider) SupportsTools() bool  { return true }
@@ -330,7 +330,7 @@ func TestWorkspaceSessionOps(t *testing.T) {
 func TestWorkspaceSteerNoRun(t *testing.T) {
 	ws, _, _, _ := newTestWorkspace(t)
 
-	require.False(t, ws.Steer("course correct"), "Steer must report not-queued when no turn is live")
+	require.False(t, ws.Steer("sess-nolive", "course correct"), "Steer must report not-queued when no turn is live")
 	require.NotPanics(t, ws.Interrupt, "Interrupt must be safe with no active turn")
 }
 
@@ -368,4 +368,130 @@ func TestWorkspacePromptDrivesTurn(t *testing.T) {
 			t.Fatal("timed out waiting for turn-finished on the consolidated stream")
 		}
 	}
+}
+
+// newConcurrentWorkspace builds a Workspace whose App carries a real
+// Coordinator, so loopFor mints a distinct Loop per session (rather than
+// falling back to the shared default loop). The Coordinator resolves the
+// "coder" agent to a stub provider, exactly as the dispatch path does, proving
+// the per-session Loop factory works end to end through the seam.
+func newConcurrentWorkspace(t *testing.T) (*appWorkspace, *App) {
+	t.Helper()
+
+	bus := newBus()
+	ctx := context.Background()
+	ui := FanIn(ctx, bus)
+	t.Cleanup(func() {
+		ui.Close()
+		bus.Close()
+	})
+
+	repo := session.NewRepo(openWorkspaceDB(t))
+	checker := permission.New(&config.Config{}, bus.Permission)
+	prov := &stubProvider{name: "stub", model: "stub-model", reply: "ok"}
+
+	coord, err := agent.NewCoordinator(nil, agent.Dependencies{
+		Tools:     tools.NewRegistry(tools.Dependencies{}),
+		Sessions:  repo,
+		Bus:       bus.Agent,
+		Providers: map[string]llm.Provider{"stub": prov},
+	})
+	require.NoError(t, err)
+	require.NoError(t, coord.Start(ctx))
+	t.Cleanup(func() { _ = coord.Stop(ctx) })
+
+	app := &App{
+		Bus:        bus,
+		UI:         ui,
+		Sessions:   repo,
+		Permission: checker,
+		Agent:      coord,
+		workDir:    "/tmp/bc-workspace",
+	}
+
+	// The default loop mirrors what root.go wires (the "coder" agent).
+	defLoop, err := coord.Agent("coder")
+	require.NoError(t, err)
+
+	ws := NewWorkspace(app, defLoop).(*appWorkspace)
+	return ws, app
+}
+
+// TestWorkspaceLoopForPerSession asserts loopFor caches one Loop per session:
+// repeat calls for the same sessionID return the SAME instance, while distinct
+// sessionIDs return DIFFERENT instances (and differ from the default loop). This
+// is the isolation that lets distinct sessions run concurrently without sharing
+// mutable Loop state.
+func TestWorkspaceLoopForPerSession(t *testing.T) {
+	ws, _ := newConcurrentWorkspace(t)
+
+	a1 := ws.loopFor("sess-a")
+	a2 := ws.loopFor("sess-a")
+	b1 := ws.loopFor("sess-b")
+
+	require.NotNil(t, a1)
+	require.NotNil(t, b1)
+	require.Same(t, a1, a2, "repeat loopFor for one session must return the same Loop")
+	require.NotSame(t, a1, b1, "distinct sessions must get distinct Loops")
+	require.NotSame(t, ws.loop, a1, "a per-session Loop must not be the shared default loop")
+}
+
+// TestWorkspaceConcurrentSessionsBothProgress proves the seam runs two distinct
+// sessions concurrently through Prompt without the Loop's concurrent-Run panic
+// and without serialising them: both prompts complete and each session's
+// turn-finished event lands on the consolidated stream. Run under -race this
+// also asserts the per-session Loops never share mutable state.
+func TestWorkspaceConcurrentSessionsBothProgress(t *testing.T) {
+	ws, _ := newConcurrentWorkspace(t)
+	ctx := context.Background()
+
+	require.NoError(t, ws.CreateSession(ctx, &session.Session{ID: "csa", ProjectPath: "/tmp/p", Agent: "coder"}))
+	require.NoError(t, ws.CreateSession(ctx, &session.Session{ID: "csb", ProjectPath: "/tmp/p", Agent: "coder"}))
+
+	ch, cancel := ws.Subscribe()
+	defer cancel()
+
+	msg := func(id string) message.Message {
+		return message.Message{
+			SessionID: id,
+			Role:      message.RoleUser,
+			Content:   []message.ContentBlock{message.TextBlock{Text: "do it"}},
+		}
+	}
+
+	errA := make(chan error, 1)
+	errB := make(chan error, 1)
+	go func() { errA <- ws.Prompt(ctx, "csa", msg("csa")) }()
+	go func() { errB <- ws.Prompt(ctx, "csb", msg("csb")) }()
+
+	require.NoError(t, <-errA)
+	require.NoError(t, <-errB)
+
+	// Both sessions must surface a turn-finished event on the consolidated stream.
+	finished := map[string]bool{}
+	deadline := time.After(5 * time.Second)
+	for !(finished["csa"] && finished["csb"]) {
+		select {
+		case ev := <-ch:
+			if ev.Kind == UIEventAgent && ev.Agent.Kind == agent.EventTurnFinished {
+				finished[ev.Agent.SessionID] = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out; finished=%v", finished)
+		}
+	}
+}
+
+// TestWorkspaceReleaseSession asserts ReleaseSession drops a session's cached
+// Loop so a later loopFor mints a fresh instance.
+func TestWorkspaceReleaseSession(t *testing.T) {
+	ws, _ := newConcurrentWorkspace(t)
+
+	first := ws.loopFor("rel-a")
+	ws.ReleaseSession("rel-a")
+	second := ws.loopFor("rel-a")
+	require.NotSame(t, first, second, "ReleaseSession must drop the cached Loop so a fresh one is minted")
+
+	// Releasing a never-seen session is a safe no-op.
+	require.NotPanics(t, func() { ws.ReleaseSession("never-seen") })
 }

@@ -1394,7 +1394,7 @@ func (m *model) submitInput() (tea.Model, tea.Cmd) {
 // the running check and Steer (a narrow race), Steer reports it was not queued
 // and the text is started as a fresh turn instead.
 func (m *model) steerRun(text string) (tea.Model, tea.Cmd) {
-	if !m.deps.Workspace.Steer(text) {
+	if !m.deps.Workspace.Steer(m.sessionID, text) {
 		return m.startRun(text)
 	}
 	m.queueCounter++

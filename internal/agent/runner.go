@@ -32,33 +32,38 @@ const (
 // in flight are queued in FIFO order, and an in-flight-plus-queued session can
 // be cancelled atomically. It is the run-discipline seam the interactive layer
 // drives turns through, so a user who sends a second prompt mid-turn has it
-// queued rather than racing the first or panicking the Loop.
+// queued rather than racing the session's Loop or panicking it.
 //
 // The runner is agnostic to what a run does: it is constructed over a RunFunc
-// (typically a Loop's Run). Because a single Loop rejects concurrent Run calls,
-// the runner also serialises the underlying RunFunc across sessions through one
-// execution mutex, so two sessions never invoke the shared Loop at once; the
-// per-session queues still order each session's own messages independently.
+// (typically a per-session Loop's Run, resolved by the caller). Serialisation
+// is PER SESSION: each session's queue has its own execution mutex, so distinct
+// sessions now run concurrently while each session's own messages stay ordered.
+// The caller is responsible for ensuring distinct sessions resolve to distinct
+// Loop instances (a single Loop rejects concurrent Run calls); the runner only
+// guarantees a session never invokes its own RunFunc twice at once.
 type SessionRunner struct {
 	run RunFunc
-
-	// execMu serialises the underlying RunFunc across all sessions. A single
-	// Loop panics on a concurrent Run, so even though the per-session queues are
-	// independent, only one run executes at a time. Held only while the RunFunc
-	// runs, never while mu is held.
-	execMu sync.Mutex
 
 	mu       sync.Mutex
 	sessions map[string]*sessionQueue
 }
 
 // sessionQueue holds one session's run state: whether a drain worker is active,
-// the FIFO of pending jobs, and the cancel func for the job currently running
-// (or about to run). All fields are guarded by SessionRunner.mu.
+// the FIFO of pending jobs, the cancel func for the job currently running (or
+// about to run), and the per-session execution mutex. All fields except execMu
+// are guarded by SessionRunner.mu; execMu is taken by the session's single
+// drain goroutine only while its RunFunc runs (never while mu is held).
 type sessionQueue struct {
 	running bool
 	pending []*job
 	cancel  context.CancelFunc
+
+	// execMu serialises this session's RunFunc invocations. Only one drain
+	// goroutine exists per session (guarded by running under mu), so execMu is
+	// effectively single-acquirer; it is kept to preserve the explicit
+	// "one exec per session" invariant. Because it lives on the session queue
+	// rather than the runner, distinct sessions execute concurrently.
+	execMu sync.Mutex
 }
 
 // job is one queued message together with the channel its completion error is
@@ -126,9 +131,9 @@ func (r *SessionRunner) Submit(ctx context.Context, sessionID string, msg messag
 // drain processes sq's queue for sessionID until it empties, running one job at
 // a time. Each job runs under a fresh cancellable context derived from the
 // job's own context, recorded as sq.cancel so Cancel can interrupt it (whether
-// it is already executing or still waiting on execMu). The execution mutex is
-// held only across the underlying run so a shared Loop is never entered
-// concurrently.
+// it is already executing or still waiting on execMu). The session's execMu is
+// held only across the underlying run so a session's Loop is never entered
+// concurrently; distinct sessions hold distinct execMu and so run in parallel.
 func (r *SessionRunner) drain(sessionID string, sq *sessionQueue) {
 	for {
 		r.mu.Lock()
@@ -144,9 +149,9 @@ func (r *SessionRunner) drain(sessionID string, sq *sessionQueue) {
 		sq.cancel = cancel
 		r.mu.Unlock()
 
-		r.execMu.Lock()
+		sq.execMu.Lock()
 		err := r.run(runCtx, sessionID, j.msg)
-		r.execMu.Unlock()
+		sq.execMu.Unlock()
 
 		cancel()
 		r.mu.Lock()
@@ -199,6 +204,24 @@ func (r *SessionRunner) CancelAll() int {
 		}
 	}
 	return n
+}
+
+// Remove drops sessionID's queue from the runner when it is idle (no active or
+// draining run and no pending jobs), so a released session does not leak its
+// bookkeeping and the sessions map does not grow unbounded across long-lived
+// processes. Removing a session that is running, has queued work, or was never
+// seen is a no-op; callers that need to stop live work first call Cancel.
+func (r *SessionRunner) Remove(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sq := r.sessions[sessionID]
+	if sq == nil {
+		return
+	}
+	if sq.running || len(sq.pending) > 0 {
+		return
+	}
+	delete(r.sessions, sessionID)
 }
 
 // Running reports whether a run is currently active (or draining) for

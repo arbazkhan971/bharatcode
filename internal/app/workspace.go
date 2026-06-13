@@ -4,6 +4,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/arbazkhan971/bharatcode/internal/agent"
 	"github.com/arbazkhan971/bharatcode/internal/llm"
@@ -39,6 +40,11 @@ type SessionState struct {
 // long as the surface below is preserved. It is deliberately additive — App
 // keeps its exported fields, and this interface is implemented over them — so
 // introducing it changes nothing for existing callers.
+//
+// Per-session operations (Prompt, Steer, Compact, SetModel, plan mode, Approve,
+// PendingSteering, the per-session Interrupt, and ReleaseSession) take a
+// sessionID and route to that session's own Loop instance, so distinct sessions
+// run concurrently without sharing mutable Loop state.
 type Workspace interface {
 	// Subscribe registers a subscriber on the consolidated UI event stream and
 	// returns a receive-only channel plus a cancel func. This is the single
@@ -53,15 +59,48 @@ type Workspace interface {
 	// progress is observed on the Subscribe stream rather than this call's return.
 	Prompt(ctx context.Context, sessionID string, userMsg message.Message) error
 
-	// Steer queues text as a steering message for an in-flight turn, returning
-	// true when a turn was live and the text was queued onto it, and false when no
-	// turn was active (the caller should then start a fresh Prompt). It lets the
-	// user course-correct mid-turn without restarting.
-	Steer(text string) (queued bool)
+	// Steer queues text as a steering message for sessionID's in-flight turn,
+	// returning true when a turn was live and the text was queued onto it, and
+	// false when no turn was active (the caller should then start a fresh Prompt).
+	// It lets the user course-correct mid-turn without restarting.
+	Steer(sessionID, text string) (queued bool)
 
-	// Interrupt cancels the in-flight turn, if any. It is safe to call when no
-	// turn is running.
+	// Interrupt cancels every in-flight turn across all sessions, if any. It is
+	// the global Ctrl-C affordance and is safe to call when nothing is running.
 	Interrupt()
+
+	// InterruptSession cancels only sessionID's in-flight turn (and drops its
+	// queued prompts), leaving other sessions running. It is the per-tab interrupt
+	// path and is safe to call when nothing is running for sessionID.
+	InterruptSession(sessionID string)
+
+	// Compact condenses sessionID's conversation in memory so the next provider
+	// request for it sends a smaller history.
+	Compact(ctx context.Context, sessionID string) error
+
+	// SetModel rebinds sessionID's Loop to a different model and provider.
+	SetModel(sessionID, model string, provider llm.Provider)
+
+	// PlanMode reports whether sessionID's Loop is currently in plan mode, and
+	// SetPlanMode turns it on or off; Approve exits plan mode (equivalent to
+	// SetPlanMode(false)) for sessionID.
+	PlanMode(sessionID string) bool
+	SetPlanMode(sessionID string, on bool)
+	Approve(sessionID string)
+
+	// PendingSteering drains and returns sessionID's queued-but-unsent steering
+	// messages so a finished turn can restart leftover text as a fresh prompt.
+	PendingSteering(sessionID string) []string
+
+	// ApprovePlan exits plan mode on sessionID's Loop and returns the stored
+	// plan text so the caller can seed the next execution turn with it. It routes
+	// the Coordinator's plan approval through that session's own Loop.
+	ApprovePlan(sessionID string) string
+
+	// ReleaseSession drops sessionID's cached Loop and runner bookkeeping once a
+	// tab closes, so a long-lived process does not accumulate per-session state.
+	// It is safe to call for a never-seen session.
+	ReleaseSession(sessionID string)
 
 	// GrantPermission answers a pending permission request with approval, sending
 	// the decision on the request's Reply channel so the blocked agent proceeds.
@@ -89,8 +128,9 @@ type Workspace interface {
 
 	// SessionState returns a live snapshot of the session's user-visible state —
 	// model, provider, working directory, yolo, and the files changed so far — for
-	// the sidebar to render. It reads through to the live loop, the permission
-	// checker, and the file tracker, so it always reflects the current run.
+	// the sidebar to render. It reads through to the session's loop, the
+	// permission checker, and the file tracker, so it always reflects the current
+	// run.
 	SessionState(ctx context.Context, sessionID string) (SessionState, error)
 
 	// CreateSession persists a new session record.
@@ -106,38 +146,81 @@ type Workspace interface {
 	// AppendMessage appends one message to a session's history.
 	AppendMessage(ctx context.Context, sessionID string, msg message.Message) error
 
-	// CurrentModel returns the model id the active agent is bound to, reflecting
-	// the latest model switch.
+	// CurrentModel returns the model id the default agent is bound to, reflecting
+	// the latest model switch. It reads the default loop for the global status
+	// line and does not mint a per-session Loop.
 	CurrentModel() string
-	// CurrentProvider returns the provider the active agent is bound to.
+	// CurrentProvider returns the provider the default agent is bound to.
 	CurrentProvider() llm.Provider
 	// Cwd returns the resolved, absolute working directory the App is scoped to.
 	Cwd() string
 }
 
-// appWorkspace implements Workspace over an App and the live agent Loop that
-// serves the interactive session. The Loop is the one resolved at UI startup
-// (the "coder" agent); holding it here lets the run-state accessors and the
-// prompt/steer/interrupt operations target the same Loop the UI drives, while
-// the session, permission, and event-stream operations delegate to the App.
+// appWorkspace implements Workspace over an App and a per-session cache of agent
+// Loops. Each session resolves to its OWN Loop instance (minted via the
+// Coordinator's Agent factory and cached under loopMu), so distinct sessions
+// never share mutable Loop state and can run concurrently. The original loop —
+// the one resolved at UI startup (the "coder" agent) — is retained as the
+// default/fallback for global status reads (CurrentModel/CurrentProvider) and
+// when minting a fresh per-session Loop fails.
 type appWorkspace struct {
 	app  *App
 	loop *agent.Loop
-	// runner enforces per-session run discipline over the live loop: one active
-	// run per session, additional prompts queued in order, and atomic cancel. The
-	// seam drives Prompt through it so a second prompt submitted mid-turn is
-	// queued behind the first rather than racing the Loop (which rejects
-	// concurrent runs).
+	// runner enforces per-session run discipline: one active run per session,
+	// additional prompts queued in order, and atomic cancel. Each session's queue
+	// has its own execution mutex, so distinct sessions run in parallel; the seam
+	// drives Prompt through it via a closure that resolves the session's Loop.
 	runner *agent.SessionRunner
+
+	// loopMu guards loops. loops caches one Loop per sessionID so every operation
+	// for a given session targets the same instance (preserving its compaction
+	// and steering state and per-session FIFO ordering). Concurrent first-Prompts
+	// for distinct sessions mint distinct Loops; the double-check under loopMu
+	// guarantees one session never mints two Loops.
+	loopMu sync.Mutex
+	loops  map[string]*agent.Loop
 }
 
 // NewWorkspace returns a Workspace backed by app and the live loop that serves
 // the interactive session (typically app.Agent.Agent("coder")). Both must be
 // non-nil; the UI seam is meaningless without a stream to subscribe to and a
-// loop to drive. It performs no wiring of its own — it is a thin adapter over
-// the already-constructed graph.
+// loop to drive. The runner is built from a closure that resolves each session's
+// own Loop (so distinct sessions run concurrently), which is why the struct is
+// constructed first and its runner assigned after — the closure captures w.
 func NewWorkspace(app *App, loop *agent.Loop) Workspace {
-	return &appWorkspace{app: app, loop: loop, runner: agent.NewSessionRunner(loop.Run)}
+	w := &appWorkspace{
+		app:   app,
+		loop:  loop,
+		loops: make(map[string]*agent.Loop),
+	}
+	w.runner = agent.NewSessionRunner(func(ctx context.Context, sessionID string, msg message.Message) error {
+		return w.loopFor(sessionID).Run(ctx, sessionID, msg)
+	})
+	return w
+}
+
+// loopFor returns the Loop dedicated to sessionID, minting and caching one via
+// the Coordinator's Agent factory on first use. The whole resolve-or-mint runs
+// under loopMu (a double-check) so two concurrent first-Prompts for one session
+// can never split it across two Loops, which would fork that session's
+// compaction and steering state and break its FIFO ordering. When minting fails
+// (or no Coordinator is wired), it falls back to the default loop so behaviour
+// degrades gracefully rather than panicking.
+func (w *appWorkspace) loopFor(sessionID string) *agent.Loop {
+	w.loopMu.Lock()
+	defer w.loopMu.Unlock()
+	if l, ok := w.loops[sessionID]; ok {
+		return l
+	}
+	if w.app == nil || w.app.Agent == nil {
+		return w.loop
+	}
+	l, err := w.app.Agent.Agent("coder")
+	if err != nil || l == nil {
+		return w.loop
+	}
+	w.loops[sessionID] = l
+	return l
 }
 
 // Subscribe delegates to the consolidated UI stream the App fanned in at New.
@@ -149,23 +232,92 @@ func (w *appWorkspace) Subscribe() (<-chan UIEvent, func()) {
 // completes, preserving the direct-Run semantics callers expect while gaining
 // run discipline: if a turn is already active for sessionID, this prompt is
 // queued behind it and runs once the active turn (and anything queued ahead)
-// finishes, instead of racing the Loop.
+// finishes. Distinct sessions resolve distinct Loops and run concurrently.
 func (w *appWorkspace) Prompt(ctx context.Context, sessionID string, userMsg message.Message) error {
 	return w.runner.Submit(ctx, sessionID, userMsg).Wait()
 }
 
-// Steer forwards to the live loop's Steer.
-func (w *appWorkspace) Steer(text string) (queued bool) {
-	return w.loop.Steer(text)
+// Steer forwards to sessionID's loop's Steer.
+func (w *appWorkspace) Steer(sessionID, text string) (queued bool) {
+	return w.loopFor(sessionID).Steer(text)
 }
 
-// Interrupt cancels the in-flight turn and drops any queued prompts. It cancels
-// the live loop's active run directly (interrupting the provider stream) and
-// clears the runner's per-session queues so no deferred prompt fires after an
-// interrupt. It is safe to call when nothing is running.
+// Interrupt cancels every in-flight turn across all sessions and drops every
+// queued prompt. It interrupts each cached Loop's active run directly (cancelling
+// the provider stream) and clears the runner's per-session queues, so the single
+// Ctrl-C affordance still stops everything. It is safe to call when nothing is
+// running.
 func (w *appWorkspace) Interrupt() {
+	w.loopMu.Lock()
+	for _, l := range w.loops {
+		l.Interrupt()
+	}
+	w.loopMu.Unlock()
 	w.loop.Interrupt()
 	w.runner.CancelAll()
+}
+
+// InterruptSession cancels only sessionID's in-flight turn and drops its queued
+// prompts, leaving other sessions running. It is the per-tab interrupt path.
+func (w *appWorkspace) InterruptSession(sessionID string) {
+	w.loopFor(sessionID).Interrupt()
+	w.runner.Cancel(sessionID)
+}
+
+// Compact condenses sessionID's conversation through its own loop.
+func (w *appWorkspace) Compact(ctx context.Context, sessionID string) error {
+	return w.loopFor(sessionID).Compact(ctx, sessionID)
+}
+
+// SetModel rebinds sessionID's loop to a different model and provider.
+func (w *appWorkspace) SetModel(sessionID, model string, provider llm.Provider) {
+	w.loopFor(sessionID).SetModel(model, provider)
+}
+
+// PlanMode reports whether sessionID's loop is in plan mode.
+func (w *appWorkspace) PlanMode(sessionID string) bool {
+	return w.loopFor(sessionID).PlanMode()
+}
+
+// SetPlanMode toggles plan mode on sessionID's loop.
+func (w *appWorkspace) SetPlanMode(sessionID string, on bool) {
+	w.loopFor(sessionID).SetPlanMode(on)
+}
+
+// Approve exits plan mode on sessionID's loop.
+func (w *appWorkspace) Approve(sessionID string) {
+	w.loopFor(sessionID).Approve()
+}
+
+// PendingSteering drains sessionID's queued steering messages.
+func (w *appWorkspace) PendingSteering(sessionID string) []string {
+	return w.loopFor(sessionID).PendingSteering()
+}
+
+// ApprovePlan exits plan mode on sessionID's Loop and returns the stored plan
+// text, routing the Coordinator's plan approval through that session's own
+// Loop. When no Coordinator is wired it falls back to clearing plan mode on the
+// session's Loop and returns an empty plan.
+func (w *appWorkspace) ApprovePlan(sessionID string) string {
+	loop := w.loopFor(sessionID)
+	if w.app == nil || w.app.Agent == nil {
+		loop.Approve()
+		return ""
+	}
+	return w.app.Agent.ApprovePlan(sessionID, loop)
+}
+
+// ReleaseSession drops sessionID's cached Loop and runner queue. It cancels any
+// live work first so a released session leaves nothing draining, then deletes
+// the cache entry under loopMu and removes the (now idle) runner queue. Loops
+// hold no OS resources, so deletion suffices for GC. Safe for a never-seen
+// session.
+func (w *appWorkspace) ReleaseSession(sessionID string) {
+	w.runner.Cancel(sessionID)
+	w.loopMu.Lock()
+	delete(w.loops, sessionID)
+	w.loopMu.Unlock()
+	w.runner.Remove(sessionID)
 }
 
 // GrantPermission sends an approving decision on the request's Reply channel.
@@ -211,18 +363,19 @@ func (w *appWorkspace) SessionYolo(sessionID string) bool {
 	return w.app.Permission.Yolo() || w.app.Permission.IsAutoApproveSession(sessionID)
 }
 
-// SessionState assembles the live snapshot for the sidebar from the loop (model,
-// provider), the App (working directory), the permission checker (yolo), and the
-// file tracker (changed files). A nil file tracker or empty sessionID yields an
-// empty ChangedFiles set rather than an error.
+// SessionState assembles the live snapshot for the sidebar from the session's
+// loop (model, provider), the App (working directory), the permission checker
+// (yolo), and the file tracker (changed files). A nil file tracker or empty
+// sessionID yields an empty ChangedFiles set rather than an error.
 func (w *appWorkspace) SessionState(ctx context.Context, sessionID string) (SessionState, error) {
+	loop := w.loopFor(sessionID)
 	st := SessionState{
 		SessionID: sessionID,
-		Model:     w.loop.ActiveModel(),
+		Model:     loop.ActiveModel(),
 		Cwd:       w.app.WorkDir(),
 		Yolo:      w.SessionYolo(sessionID),
 	}
-	if p := w.loop.Provider(); p != nil {
+	if p := loop.Provider(); p != nil {
 		st.Provider = p.Name()
 	}
 	if w.app.FileTracker != nil && sessionID != "" {
@@ -265,12 +418,15 @@ func (w *appWorkspace) AppendMessage(ctx context.Context, sessionID string, msg 
 	return w.app.Sessions.AppendMessage(ctx, sessionID, msg)
 }
 
-// CurrentModel returns the live loop's active model id.
+// CurrentModel returns the default loop's active model id for the global status
+// line. It reads the default loop rather than minting a per-session Loop, since
+// this is a status read, not per-turn state.
 func (w *appWorkspace) CurrentModel() string {
 	return w.loop.ActiveModel()
 }
 
-// CurrentProvider returns the live loop's bound provider.
+// CurrentProvider returns the default loop's bound provider for the global
+// status line.
 func (w *appWorkspace) CurrentProvider() llm.Provider {
 	return w.loop.Provider()
 }

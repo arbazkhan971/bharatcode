@@ -1,6 +1,6 @@
 {
   "name": "bharatcode-cli",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "BharatCode \u2014 an open, sovereign terminal coding agent. OpenCode for India. This npm package downloads the correct prebuilt binary for your platform from GitHub Releases.",
   "keywords": [
     "bharatcode",

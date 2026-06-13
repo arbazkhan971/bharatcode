@@ -243,9 +243,12 @@ func keyCtrlTab(shift bool) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Code: tea.KeyTab, Mod: mod})
 }
 
-// TestTabs_SwitchBlockedDuringRun proves a tab switch is refused while an agent
-// turn is in flight, so streamed output never lands in the wrong tab.
-func TestTabs_SwitchBlockedDuringRun(t *testing.T) {
+// TestTabs_SwitchAllowedDuringRunBlockedDuringGoal proves the relaxed tab
+// guards: a tab switch is now ALLOWED while a plain agent turn is in flight
+// (the run keeps streaming into its own tab because events are demuxed by
+// sessionID), and is refused only while an autonomous goal loop is active (a
+// single-tab intent).
+func TestTabs_SwitchAllowedDuringRunBlockedDuringGoal(t *testing.T) {
 	h := newAgentHarness(t, &scriptedProvider{})
 	m := h.model
 
@@ -253,12 +256,26 @@ func TestTabs_SwitchBlockedDuringRun(t *testing.T) {
 	require.Len(t, m.tabs, 2)
 	require.Equal(t, 1, m.activeTab)
 
-	// Simulate an in-flight turn.
+	// A plain in-flight turn no longer blocks switching: the run is backgrounded
+	// into its own tab rather than abandoned.
 	m.running = true
-	require.Nil(t, m.switchTab(0), "switching is refused mid-run")
-	require.Equal(t, 1, m.activeTab, "the active tab is unchanged while running")
+	_ = m.switchTab(0)
+	require.Equal(t, 0, m.activeTab, "switching is allowed while a plain turn runs")
+	require.False(t, m.dialogs.Contains("tabs"), "no block note is surfaced mid-run")
+
+	// An active goal loop still blocks switching, opening, and closing.
+	m.running = true
+	m.goalActive = true
+	require.Nil(t, m.switchTab(1), "switching is refused while a goal loop is active")
+	require.Equal(t, 0, m.activeTab, "the active tab is unchanged while a goal loop runs")
 	require.True(t, m.dialogs.Contains("tabs"))
 	require.Contains(t, m.dialogs.Render(120), "before switching tabs")
+	m.dialogs.Pop()
+	require.Nil(t, m.newTab(), "opening a tab is refused while a goal loop is active")
+	require.Contains(t, m.dialogs.Render(120), "before opening a tab")
+	m.dialogs.Pop()
+	require.Nil(t, m.closeTab(), "closing a tab is refused while a goal loop is active")
+	require.Contains(t, m.dialogs.Render(120), "before closing a tab")
 }
 
 // TestTabs_SlashCommand exercises the /tab command family end to end through the

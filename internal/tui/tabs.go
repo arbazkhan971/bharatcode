@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/tui/chat"
 	"github.com/arbazkhan971/bharatcode/internal/tui/dialog"
@@ -50,6 +51,29 @@ type tab struct {
 	// recently completed turn so the status bar shows the right stats after a
 	// tab switch (not the counts from the previously active tab).
 	lastTurnTokens string
+	// running marks an in-flight turn in this tab. It is per-tab so a background
+	// run keeps streaming while a different tab is active; the active tab mirrors
+	// this onto m.running for the existing render/status path.
+	running bool
+	// turnStartedAt marks when this tab's in-flight turn began, so the status bar
+	// shows correct elapsed time when the tab is reactivated mid-run.
+	turnStartedAt time.Time
+	// currentActivity names the tool this tab's turn is currently running, so the
+	// status bar reads the right action verb after a switch back into the tab.
+	currentActivity string
+	// turnToolCount is this tab's per-turn tool-call counter, mirrored from
+	// m.turnToolCount for the active tab and advanced directly for a background tab.
+	turnToolCount int
+	// turnErrShown records that this tab's in-flight turn already surfaced a run
+	// error inline, so handleRunDone does not double-report it for a background tab.
+	turnErrShown bool
+	// deltaPending counts un-reconciled streamed bytes for this tab's assistant
+	// bubble, so a background stream rewinds its OWN provisional text on retry
+	// without touching the active tab's counter.
+	deltaPending int
+	// lastContextPct retains the context-window fill percentage for this tab so a
+	// switch restores the right gauge rather than the previously active tab's.
+	lastContextPct int
 }
 
 // initTabs seeds the model with a single tab that adopts the freshly built
@@ -94,6 +118,13 @@ func (m *model) snapshotTab() tab {
 		costINR:          m.footer.CostINR,
 		changedFiles:     m.changedFiles,
 		lastTurnTokens:   m.lastTurnTokens,
+		running:          m.running,
+		turnStartedAt:    m.turnStartedAt,
+		currentActivity:  m.currentActivity,
+		turnToolCount:    m.turnToolCount,
+		turnErrShown:     m.turnErrShown,
+		deltaPending:     m.deltaPending,
+		lastContextPct:   m.lastContextPct,
 	}
 }
 
@@ -134,6 +165,13 @@ func (m *model) loadTab(index int) {
 	m.footer.CostINR = t.costINR
 	m.changedFiles = t.changedFiles
 	m.lastTurnTokens = t.lastTurnTokens
+	m.running = t.running
+	m.turnStartedAt = t.turnStartedAt
+	m.currentActivity = t.currentActivity
+	m.turnToolCount = t.turnToolCount
+	m.turnErrShown = t.turnErrShown
+	m.deltaPending = t.deltaPending
+	m.lastContextPct = t.lastContextPct
 	// Yolo is per-session: a persisted tab reflects its session's auto-approval
 	// state; an unpersisted "new" tab carries no grant yet, so the indicator clears.
 	if m.deps.Workspace != nil && t.sessionPersisted {
@@ -152,9 +190,13 @@ func (m *model) loadTab(index int) {
 // TUI, so its first prompt creates a real session row. It returns a command
 // that refreshes the ledger footer for the now-active (empty) session. When the
 // tab limit is reached it surfaces an informational note and does nothing.
+//
+// Opening a tab mid-run is allowed: a background turn keeps streaming into its
+// own tab's chat because agent events are demuxed by sessionID into the owning
+// tab. Only an active autonomous goal loop blocks (it is a single-tab intent).
 func (m *model) newTab() tea.Cmd {
-	if m.running || m.goalActive {
-		m.note("Finish or interrupt the current turn before opening a tab.")
+	if m.goalActive {
+		m.note("Finish or interrupt the active goal loop before opening a tab.")
 		return nil
 	}
 	if len(m.tabs) >= maxTabs {
@@ -179,10 +221,13 @@ func (m *model) newTab() tea.Cmd {
 }
 
 // switchTab activates the tab at index, saving the current tab first. Switching
-// to the already-active tab, or to an out-of-range index, is a no-op. It is
-// refused while an agent turn is in flight so streamed output never lands in
-// the wrong tab; the caller is told via a note. It returns a command that
-// refreshes the ledger footer for the newly active session.
+// to the already-active tab, or to an out-of-range index, is a no-op. It returns
+// a command that refreshes the ledger footer for the newly active session.
+//
+// Switching mid-run is allowed: agent events are demuxed by sessionID into the
+// owning tab's chat, so a background turn keeps streaming after a switch and the
+// freshly active tab rehydrates its own run-state from its snapshot. Only an
+// active autonomous goal loop blocks (it is a single-tab intent).
 func (m *model) switchTab(index int) tea.Cmd {
 	if index < 0 || index >= len(m.tabs) {
 		return nil
@@ -190,8 +235,8 @@ func (m *model) switchTab(index int) tea.Cmd {
 	if index == m.activeTab {
 		return nil
 	}
-	if m.running || m.goalActive {
-		m.note("Finish or interrupt the current turn before switching tabs.")
+	if m.goalActive {
+		m.note("Finish or interrupt the active goal loop before switching tabs.")
 		return nil
 	}
 	m.saveActiveTab()
@@ -221,14 +266,18 @@ func (m *model) prevTab() tea.Cmd {
 // remaining tab is never closed (so there is always a live chat/session); an
 // attempt to close it surfaces a note instead. Closing a tab discards its
 // in-memory transcript view only; any persisted session row is untouched and
-// remains reachable through /sessions. It is refused while a turn is in flight.
+// remains reachable through /sessions.
+//
+// Closing mid-run is allowed; ReleaseSession drops the run's bookkeeping and a
+// straggler event for the closed session is harmlessly dropped (tabForSession
+// finds no owner). Only an active autonomous goal loop blocks the close.
 func (m *model) closeTab() tea.Cmd {
 	if len(m.tabs) <= 1 {
 		m.note("Cannot close the last tab.")
 		return nil
 	}
-	if m.running || m.goalActive {
-		m.note("Finish or interrupt the current turn before closing a tab.")
+	if m.goalActive {
+		m.note("Finish or interrupt the active goal loop before closing a tab.")
 		return nil
 	}
 	closing := m.activeTab
@@ -419,10 +468,58 @@ func (m *model) tabPersisted(index int) bool {
 	return m.tabs[index].sessionPersisted
 }
 
-// tabLabel renders one tab's short label for the tab bar: its 1-based number and
-// a compact session identifier (or "new" for an unpersisted tab).
+// tabForSession returns the tab that owns the given session id, resolving an
+// agent event or runDoneMsg to the slot whose chat must receive it. An empty id,
+// or the active tab's own session id, resolves to the active tab (whose
+// authoritative run-state lives on m.*); any other id matches the slot whose
+// snapshot holds it. It reports false when no open tab owns the session — the
+// session was closed (its slot dropped via closeTab) — so a straggler event for
+// an abandoned run is dropped rather than misrouted into the active chat.
+//
+// The returned pointer is into m.tabs, so callers must not hold it across a
+// slice mutation (newTab/closeTab); within a single Update dispatch the slice is
+// stable, which is the only context this is used from.
+func (m *model) tabForSession(id string) (*tab, bool) {
+	if id == "" || id == m.sessionID {
+		return &m.tabs[m.activeTab], true
+	}
+	for i := range m.tabs {
+		if i == m.activeTab {
+			// The active tab's live session lives on m.sessionID (handled above);
+			// its snapshot can lag, so skip it here to avoid a stale match.
+			continue
+		}
+		if m.tabs[i].sessionID == id {
+			return &m.tabs[i], true
+		}
+	}
+	return nil, false
+}
+
+// tabRunning reports whether tab index has a turn in flight, reading the live
+// model field for the active tab (which loadTab keeps mirrored) and the snapshot
+// for the rest. It backs the tab-bar running marker.
+func (m *model) tabRunning(index int) bool {
+	if index == m.activeTab {
+		return m.running
+	}
+	if index >= 0 && index < len(m.tabs) {
+		return m.tabs[index].running
+	}
+	return false
+}
+
+// tabLabel renders one tab's short label for the tab bar: its 1-based number, a
+// compact session identifier (or "new" for an unpersisted tab), and a themed
+// running marker when that tab has a turn in flight — so a background run stays
+// visible from any tab. The marker is wrapped in the accent style so fitTabBar
+// measures its styled width and the bar never overflows or splits an escape.
 func (m *model) tabLabel(index int) string {
-	return fmt.Sprintf("%d:%s", index+1, shortSessionID(m.tabSessionID(index)))
+	label := fmt.Sprintf("%d:%s", index+1, shortSessionID(m.tabSessionID(index)))
+	if m.tabRunning(index) {
+		label += m.theme.Accent.Render(" ●")
+	}
+	return label
 }
 
 // renderTabBar renders the tab bar shown above the chat when more than one tab

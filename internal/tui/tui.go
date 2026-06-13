@@ -657,9 +657,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case spinner.TickMsg:
-		// Forward tick to the streaming spinner only while a turn is in flight;
-		// once idle, stepStreamSpinner returns nil so the per-frame loop ends.
-		sp, cmd := stepStreamSpinner(m.streamSpinner, msg, m.running)
+		// Forward tick to the streaming spinner while ANY tab has a turn in flight
+		// (active or background), so the animation survives a switch into a still
+		// working tab and is live the instant it becomes visible; once every tab is
+		// idle, stepStreamSpinner returns nil so the per-frame loop ends.
+		sp, cmd := stepStreamSpinner(m.streamSpinner, msg, m.anyRunning())
 		m.streamSpinner = sp
 		return m, cmd
 	case startChatGPTLoginMsg:
@@ -2786,6 +2788,28 @@ func workingDir() string {
 		return ""
 	}
 	return wd
+}
+
+// anyRunning reports whether ANY open tab has a turn in flight: the active tab
+// (whose live state is on m.running) or any background tab (whose snapshot holds
+// its running flag). It widens only the streaming-spinner tick loop so the
+// animation keeps ticking while a background tab works; the status-bar Working
+// segment and the rendered spinner stay gated on the active tab's m.running, so
+// an idle focused tab shows no spinner while its background siblings animate only
+// the tab-bar marker.
+func (m *model) anyRunning() bool {
+	if m.running {
+		return true
+	}
+	for i := range m.tabs {
+		if i == m.activeTab {
+			continue
+		}
+		if m.tabs[i].running {
+			return true
+		}
+	}
+	return false
 }
 
 // cancelEventSub invokes the consolidated-event subscription cancel func stored

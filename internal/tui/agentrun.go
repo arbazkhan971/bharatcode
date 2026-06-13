@@ -53,11 +53,19 @@ type runDoneMsg struct {
 	err       error
 }
 
-// assistantStreamID returns the chat-list key for the assistant bubble of the
-// current turn. A per-turn suffix ensures each turn opens a fresh bubble
-// instead of appending to the previous one.
+// assistantStreamID returns the chat-list key for the active tab's assistant
+// bubble of the current turn. A per-turn suffix ensures each turn opens a fresh
+// bubble instead of appending to the previous one.
 func (m *model) assistantStreamID() string {
-	return fmt.Sprintf("assistant-%d", m.turn)
+	return assistantStreamIDFor(m.turn)
+}
+
+// assistantStreamIDFor returns the assistant-bubble chat-list key for the given
+// turn number. The background-stream path keys on the owning tab's own turn
+// (t.turn) so its bubble lands in that tab's distinct *chat.List, never the
+// active tab's; the per-turn suffix opens a fresh bubble each turn.
+func assistantStreamIDFor(turn int) string {
+	return fmt.Sprintf("assistant-%d", turn)
 }
 
 // nextToolTurnID returns a fresh, unique chat-list id for an appended tool turn
@@ -312,11 +320,86 @@ func uiEventMsg(ev app.UIEvent) tea.Msg {
 	}
 }
 
-// handleAgentEvent renders one agent event into the chat view and re-issues the
-// listen command, keeping the stream alive. Run lifecycle (and goal-loop
-// advancement) is handled separately on runDoneMsg, after loop.Run returns.
+// eventTarget carries the per-tab render state one agent event mutates: the
+// chat list it streams into, the assistant-bubble key for the owning tab's
+// current turn, and pointers to the four run-state fields the event advances.
+// Resolving the target by sessionID first, then running one shared body against
+// it, lets the active tab (target fields point at m.*) and a background tab
+// (they point at the tab struct's fields) share identical rendering logic — so a
+// background stream advances its own tab's transcript and counters without ever
+// touching the active tab's chat or state.
+type eventTarget struct {
+	chat            *chat.List
+	streamID        string
+	deltaPending    *int
+	currentActivity *string
+	turnToolCount   *int
+	turnErrShown    *bool
+}
+
+// activeEventTarget returns the target backed by the active tab's live model
+// fields, so the existing single-tab render path runs byte-identically.
+func (m *model) activeEventTarget() eventTarget {
+	return eventTarget{
+		chat:            m.chat,
+		streamID:        m.assistantStreamID(),
+		deltaPending:    &m.deltaPending,
+		currentActivity: &m.currentActivity,
+		turnToolCount:   &m.turnToolCount,
+		turnErrShown:    &m.turnErrShown,
+	}
+}
+
+// backgroundEventTarget returns the target backed by a non-active tab's own
+// fields and chat list, keyed on that tab's turn so its bubble lands in its
+// distinct list.
+func backgroundEventTarget(t *tab) eventTarget {
+	return eventTarget{
+		chat:            t.chat,
+		streamID:        assistantStreamIDFor(t.turn),
+		deltaPending:    &t.deltaPending,
+		currentActivity: &t.currentActivity,
+		turnToolCount:   &t.turnToolCount,
+		turnErrShown:    &t.turnErrShown,
+	}
+}
+
+// handleAgentEvent renders one agent event into its owning tab's chat view and
+// re-issues the listen command, keeping the stream alive. The owning tab is
+// resolved by ev.SessionID FIRST: an event for the active session runs against
+// m.* (byte-identical to the single-tab path), an event for a background tab
+// runs the SAME logic against that tab's own chat and counters, and an event for
+// a closed/unknown session is dropped. This is what makes a background run
+// visible — its output keeps streaming into its tab while another tab is active.
+// Run lifecycle (and goal-loop advancement) is handled separately on runDoneMsg.
 func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
-	streamID := m.assistantStreamID()
+	owner, ok := m.tabForSession(ev.SessionID)
+	if !ok {
+		// No open tab owns this session (it was closed): drop the straggler — there
+		// is no chat to render it into — and keep the stream alive.
+		return m, m.listenAgent()
+	}
+	var tgt eventTarget
+	if ev.SessionID == "" || ev.SessionID == m.sessionID {
+		tgt = m.activeEventTarget()
+	} else {
+		tgt = backgroundEventTarget(owner)
+	}
+	m.applyAgentEvent(tgt, ev)
+	return m, m.listenAgent()
+}
+
+// applyAgentEvent renders one agent event into tgt's chat list and advances
+// tgt's run-state counters. It is the single shared body the active and
+// background paths both run, parameterized by the owning tab's chat/streamID and
+// counter pointers. Tool-turn ids come from m.nextToolTurnID() (a global
+// monotonic counter) in both paths so two concurrently streaming tabs never
+// collide ids and collapse tool bubbles. The PlanMode/StorePlan capture stays
+// keyed on ev.SessionID so a background tab's plan turn stores against the right
+// session.
+func (m *model) applyAgentEvent(tgt eventTarget, ev agentEventMsg) {
+	cl := tgt.chat
+	streamID := tgt.streamID
 	switch ev.Kind {
 	case agent.EventLLMStreamStart:
 		// A provider stream attempt is starting. Any un-reconciled delta text
@@ -325,39 +408,39 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		// before the fresh attempt's deltas arrive. Completed calls always reset
 		// deltaPending via their boundary event, so this can never eat text from
 		// an earlier, finished response.
-		if m.deltaPending > 0 {
-			m.chat.TruncateStreamTail(streamID, m.deltaPending)
-			m.deltaPending = 0
+		if *tgt.deltaPending > 0 {
+			cl.TruncateStreamTail(streamID, *tgt.deltaPending)
+			*tgt.deltaPending = 0
 		}
 	case agent.EventLLMDelta:
 		// Incremental assistant text: render it as it arrives. The bytes are
 		// provisional — EventLLMResponse below replaces them with the canonical
 		// full text — so count what was appended for exact rollback.
-		m.currentActivity = ""
+		*tgt.currentActivity = ""
 		if ev.Delta != "" {
-			m.chat.Stream(streamID, ev.Delta)
-			m.deltaPending += len(ev.Delta)
+			cl.Stream(streamID, ev.Delta)
+			*tgt.deltaPending += len(ev.Delta)
 		}
 	case agent.EventLLMResponse:
 		// Fresh model text means the agent is thinking again, not inside a tool;
 		// clear the activity so the status bar reverts to "working".
-		m.currentActivity = ""
+		*tgt.currentActivity = ""
 		// Replace the provisional delta text with the canonical response so the
 		// bubble is byte-identical to the recorded message even when the lossy
 		// bus dropped some deltas mid-stream.
-		if m.deltaPending > 0 {
-			m.chat.TruncateStreamTail(streamID, m.deltaPending)
-			m.deltaPending = 0
+		if *tgt.deltaPending > 0 {
+			cl.TruncateStreamTail(streamID, *tgt.deltaPending)
+			*tgt.deltaPending = 0
 		}
 		if text := assistantText(ev.Message); text != "" {
-			m.chat.Stream(streamID, text)
+			cl.Stream(streamID, text)
 		}
 	case agent.EventToolCalled:
 		// Surface the running tool's name in the status bar so a long turn reads
 		// as "Bash"/"Edit" rather than a bare "working". Count each call so the
 		// status can show total tool invocations for progress clarity.
-		m.currentActivity = ev.ToolName
-		m.turnToolCount++
+		*tgt.currentActivity = ev.ToolName
+		*tgt.turnToolCount++
 		// Close the assistant's prose bubble (if any) so the tool block becomes its
 		// own turn rather than merging into the surrounding text. Reindex detaches
 		// the id so the next model text after the tool opens a fresh bubble instead
@@ -365,9 +448,9 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		// text it still holds (the canonical EventLLMResponse normally reconciled
 		// it already; if the lossy bus dropped that event the deltas are the best
 		// rendition we have), so the pending counter must not survive the close.
-		m.deltaPending = 0
-		m.chat.FinishStream(streamID)
-		m.chat.Reindex(streamID)
+		*tgt.deltaPending = 0
+		cl.FinishStream(streamID)
+		cl.Reindex(streamID)
 		// Append the invocation as a discrete turn. A message carrying only a
 		// ToolUseBlock flattens to "tool: <name>", which the activity-stream
 		// renderer leads with the action verb (e.g. "Running", "Editing"). The raw
@@ -382,7 +465,7 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 			// renderer routes it through the diff viewer (line numbers, red/green)
 			// rather than dumping the raw arguments. A new-file write shows all-green;
 			// an edit shows red/green hunks.
-			m.chat.Append(message.Message{
+			cl.Append(message.Message{
 				ID:   useID,
 				Role: message.RoleAssistant,
 				Content: []message.ContentBlock{message.TextBlock{
@@ -390,7 +473,7 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 				}},
 			})
 		} else {
-			m.chat.Append(message.Message{
+			cl.Append(message.Message{
 				ID:   useID,
 				Role: message.RoleAssistant,
 				Content: []message.ContentBlock{message.ToolUseBlock{
@@ -401,13 +484,13 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 	case agent.EventToolResult:
-		m.currentActivity = ""
+		*tgt.currentActivity = ""
 		// Append the tool's output as its own turn. A tool-role message flattens to
 		// its raw content, and the renderer leads it with a "Result" verb and draws
 		// the output indented under the muted connector, with long output elided and
 		// added/removed lines tinted. Empty output renders the header alone, so a
 		// silent tool does not leave a dangling bubble.
-		m.chat.Append(message.Message{
+		cl.Append(message.Message{
 			ID:   m.nextToolTurnID(),
 			Role: message.RoleTool,
 			Content: []message.ContentBlock{message.ToolResultBlock{
@@ -415,11 +498,11 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 			}},
 		})
 	case agent.EventLoopDetected:
-		m.deltaPending = 0
+		*tgt.deltaPending = 0
 		if text := assistantText(ev.Message); text != "" {
-			m.chat.Stream(streamID, "\n"+text)
+			cl.Stream(streamID, "\n"+text)
 		}
-		m.chat.FinishStream(streamID)
+		cl.FinishStream(streamID)
 	case agent.EventRunError:
 		msg := "agent error"
 		if ev.Err != nil {
@@ -430,26 +513,26 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 		// partial delta text above the error block (if any) stays — what arrived
 		// before the failure is information — but its pending counter must not
 		// leak into the next turn's reconciliation.
-		m.deltaPending = 0
-		m.chat.FinishStream(streamID)
-		m.chat.Reindex(streamID)
-		m.chat.Append(message.Message{
+		*tgt.deltaPending = 0
+		cl.FinishStream(streamID)
+		cl.Reindex(streamID)
+		cl.Append(message.Message{
 			ID:      m.nextToolTurnID(),
 			Role:    message.RoleTool,
 			Content: []message.ContentBlock{message.ToolResultBlock{Content: "Error: " + msg, IsError: true}},
 		})
-		m.turnErrShown = true
+		*tgt.turnErrShown = true
 	case agent.EventAutoCompacted:
 		// Surface a brief inline notice so users understand why the visible
 		// history shrank. The notice is injected as a synthetic stream so it
 		// appears between the current assistant bubble and the next one.
-		m.chat.Stream(streamID, "\nContext auto-compacted — older turns summarised to free space.\n")
+		cl.Stream(streamID, "\nContext auto-compacted — older turns summarised to free space.\n")
 	case agent.EventTurnFinished:
-		m.deltaPending = 0
+		*tgt.deltaPending = 0
 		if text := assistantText(ev.Message); text != "" {
-			m.chat.Stream(streamID, text)
+			cl.Stream(streamID, text)
 		}
-		m.chat.FinishStream(streamID)
+		cl.FinishStream(streamID)
 		// Capture the plan when the plan turn ends. Key the plan-mode check and the
 		// store on the event's own session so a background tab's plan turn stores
 		// against the right session rather than the focused tab.
@@ -458,12 +541,19 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 			m.deps.Coordinator.StorePlan(ev.SessionID, planText)
 		}
 	}
-	return m, m.listenAgent()
 }
 
 // handleRunDone is invoked once a turn's loop.Run has fully returned. It closes
 // the assistant bubble, clears running state, and drives the autonomous goal
 // loop (CHANGE 2) when one is active. A run error aborts any goal loop.
+//
+// With per-session concurrent runs a runDoneMsg can arrive for a BACKGROUND tab
+// while a different tab is active. The owning tab is resolved by done.sessionID
+// FIRST: a background finish clears only that tab's own run-state and finishes
+// its own assistant bubble (handleBackgroundRunDone), so it never wedges the
+// active tab's m.running or corrupts the active chat. A finish for the active
+// session runs the existing path verbatim below. A finish for a closed/unknown
+// session is dropped.
 //
 // Sequencing note: runDoneMsg can be delivered to the Bubble Tea loop a
 // hair before the turn's final agent events (EventLLMResponse, EventTurnFinished)
@@ -475,6 +565,17 @@ func (m *model) handleAgentEvent(ev agentEventMsg) (tea.Model, tea.Cmd) {
 // its only effect is to break the straggler invariant. A late delta folds
 // correctly into the existing finished item via the normal Stream path.
 func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
+	owner, ok := m.tabForSession(done.sessionID)
+	if !ok {
+		// The owning tab was closed before its run returned: there is nothing to
+		// update, and ReleaseSession already dropped the run's bookkeeping.
+		return m, nil
+	}
+	if done.sessionID != "" && done.sessionID != m.sessionID {
+		// A background tab finished: update only its own state, never m.*.
+		return m.handleBackgroundRunDone(owner, done)
+	}
+
 	m.running = false
 	m.turnStartedAt = time.Time{}
 	m.currentActivity = ""
@@ -577,6 +678,70 @@ func (m *model) handleRunDone(done runDoneMsg) (tea.Model, tea.Cmd) {
 	if len(pending) > 0 {
 		return m, m.continueRun(strings.Join(pending, "\n"))
 	}
+	return m, nil
+}
+
+// handleBackgroundRunDone finishes a turn that completed in a non-active tab. It
+// mutates ONLY that tab's struct fields and its own chat list — never m.* — so a
+// background finish can never clear the active tab's running indicator or corrupt
+// its transcript. It mirrors the active path's bubble-close, token/context
+// capture, and error surfacing, but deliberately does NOT advance an autonomous
+// goal loop or auto-continue leftover steering: those are single-tab intents that
+// park until the tab is focused (no regression, since today no run can be
+// backgrounded at all). The drained steering is discarded so it does not leak
+// into an unrelated future turn on the shared Loop.
+func (m *model) handleBackgroundRunDone(t *tab, done runDoneMsg) (tea.Model, tea.Cmd) {
+	t.running = false
+	t.turnStartedAt = time.Time{}
+	t.currentActivity = ""
+	streamID := assistantStreamIDFor(t.turn)
+	t.chat.FinishStream(streamID)
+	// Do NOT Reindex — same straggler invariant as the active path.
+	if done.last != nil && done.last.Usage != nil {
+		u := done.last.Usage
+		tokens := formatTurnTokens(u.InputTokens, u.OutputTokens)
+		var cfg []config.Model
+		if m.deps.Cfg != nil {
+			cfg = m.deps.Cfg.Models
+		}
+		// A background tab can run a different model than the active one; key the
+		// cost/window on the tab's own status model rather than m.status.Model.
+		cost := turnCostUSD(cfg, t.statusModel, u.InputTokens, u.OutputTokens)
+		if cost > 0 {
+			t.lastTurnTokens = tokens + " · " + formatTurnCostUSD(cost)
+		} else {
+			t.lastTurnTokens = tokens
+		}
+		if window := contextWindowForModel(cfg, t.statusModel); window > 0 {
+			t.lastContextPct = u.InputTokens * 100 / window
+			if t.lastContextPct < 1 {
+				t.lastContextPct = 1
+			}
+			if t.lastContextPct > 100 {
+				t.lastContextPct = 100
+			}
+		}
+	}
+	// Clear any leftover steering on the shared Loop for this session so it does
+	// not leak into a future turn; a background tab does not auto-continue it.
+	_ = m.deps.Workspace.PendingSteering(done.sessionID)
+	if done.err != nil {
+		// Surface the failure into the background tab's own transcript when it was
+		// not already reported inline, mirroring the active error path. A user
+		// interrupt is intentional, so it stays quiet.
+		if !t.turnErrShown && !errors.Is(done.err, context.Canceled) {
+			t.chat.FinishStream(streamID)
+			t.chat.Append(message.Message{
+				ID:      m.nextToolTurnID(),
+				Role:    message.RoleTool,
+				Content: []message.ContentBlock{message.ToolResultBlock{Content: "Error: " + friendlyRunError(done.err), IsError: true}},
+			})
+		}
+		return m, nil
+	}
+	// Notify on a background completion too, so a turn finishing in a non-focused
+	// tab still reaches the user when the terminal is out of focus.
+	_ = m.notifications.Notify("BharatCode", turnNotifyBody(done.last))
 	return m, nil
 }
 

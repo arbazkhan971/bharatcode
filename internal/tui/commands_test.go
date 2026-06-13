@@ -69,11 +69,17 @@ func TestApplyModelRebindsLiveAgentLoop(t *testing.T) {
 	require.Equal(t, "deepseek", loop.Provider().Name(),
 		"pre-condition: loop must start on the deepseek provider")
 
+	// applyModel now rebinds the session's Loop through the Workspace seam, so
+	// the test wires a Workspace over the SAME loop instance; rebinding it is
+	// observable through m.deps.Agent (which points at the same Loop).
+	ws := newFakeWorkspace(context.Background(), nil, loop, nil, repo)
+	t.Cleanup(ws.close)
 	m := newModel(context.Background(), Dependencies{
 		Agent:       loop,
 		Coordinator: coord,
 		Sessions:    repo,
 		Cfg:         cfg,
+		Workspace:   ws,
 	})
 
 	// Simulate what onboarding.go does after a successful ChatGPT login.

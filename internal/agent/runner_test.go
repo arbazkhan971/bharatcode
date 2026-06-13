@@ -216,3 +216,94 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met before deadline")
 }
+
+// TestSessionRunnerConcurrentDistinctSessionsRunInParallel proves the global
+// execution lock is gone: two distinct sessions submitted blocking runs that
+// gate on a shared barrier must both reach the barrier at once, so observed
+// concurrency reaches 2. Before per-session execMu this deadlocked at
+// concurrency 1 (the second run could never start while the first held the
+// shared lock).
+func TestSessionRunnerConcurrentDistinctSessionsRunInParallel(t *testing.T) {
+	const n = 2
+	var inFlight sync.WaitGroup
+	inFlight.Add(n)
+	release := make(chan struct{})
+	var active int32
+	var maxActive int32
+
+	run := func(ctx context.Context, sessionID string, m message.Message) error {
+		cur := atomic.AddInt32(&active, 1)
+		for {
+			old := atomic.LoadInt32(&maxActive)
+			if cur <= old || atomic.CompareAndSwapInt32(&maxActive, old, cur) {
+				break
+			}
+		}
+		inFlight.Done() // signal this session reached the barrier
+		<-release       // hold until both sessions are confirmed in flight
+		atomic.AddInt32(&active, -1)
+		return nil
+	}
+
+	r := NewSessionRunner(run)
+	ha := r.Submit(context.Background(), "a", runnerMsg("x"))
+	hb := r.Submit(context.Background(), "b", runnerMsg("y"))
+
+	// Both runs must be simultaneously in flight; if the global lock still
+	// existed only one would start and this Wait would block until the deadline.
+	done := make(chan struct{})
+	go func() { inFlight.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("distinct sessions did not both reach the barrier: still serialized")
+	}
+	close(release)
+
+	if err := ha.Wait(); err != nil {
+		t.Fatalf("session a wait: %v", err)
+	}
+	if err := hb.Wait(); err != nil {
+		t.Fatalf("session b wait: %v", err)
+	}
+	if maxActive != 2 {
+		t.Fatalf("max concurrent runs across distinct sessions = %d, want 2", maxActive)
+	}
+}
+
+// TestSessionRunnerRemove asserts Remove drops an idle session's queue and is a
+// no-op for a running session (so a live drain is never disturbed).
+func TestSessionRunnerRemove(t *testing.T) {
+	r := NewSessionRunner(func(ctx context.Context, sessionID string, m message.Message) error { return nil })
+
+	// An idle, completed session is removed.
+	if err := r.Submit(context.Background(), "idle", runnerMsg("x")).Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	r.Remove("idle")
+	if r.Running("idle") || r.QueueLen("idle") != 0 {
+		t.Fatalf("idle session not fully cleared after Remove")
+	}
+
+	// Removing a never-seen session is a safe no-op.
+	r.Remove("never-seen")
+
+	// A running session is NOT removed by Remove.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	r2 := NewSessionRunner(func(ctx context.Context, sessionID string, m message.Message) error {
+		close(started)
+		<-release
+		return nil
+	})
+	h := r2.Submit(context.Background(), "live", runnerMsg("x"))
+	<-started
+	r2.Remove("live")
+	if !r2.Running("live") {
+		t.Fatal("Remove dropped a running session; want no-op while running")
+	}
+	close(release)
+	if err := h.Wait(); err != nil {
+		t.Fatalf("live wait: %v", err)
+	}
+}

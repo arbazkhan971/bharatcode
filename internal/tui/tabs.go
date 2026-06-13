@@ -232,6 +232,15 @@ func (m *model) closeTab() tea.Cmd {
 		return nil
 	}
 	closing := m.activeTab
+	// Release the closed tab's cached per-session Loop and runner bookkeeping so
+	// a long-lived TUI does not accumulate state for sessions the user is done
+	// with. Persisted session rows are untouched (still reachable via /sessions);
+	// only the in-memory Loop cache entry is dropped.
+	if m.deps.Workspace != nil {
+		if sid := m.tabs[closing].sessionID; sid != "" && sid != "new" {
+			m.deps.Workspace.ReleaseSession(sid)
+		}
+	}
 	m.tabs = append(m.tabs[:closing], m.tabs[closing+1:]...)
 	next := closing
 	if next >= len(m.tabs) {

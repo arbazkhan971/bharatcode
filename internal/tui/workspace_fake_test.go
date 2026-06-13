@@ -109,27 +109,99 @@ func (fw *fakeWorkspace) Subscribe() (<-chan app.UIEvent, func()) {
 	return fw.out.Subscribe()
 }
 
-// Prompt is not exercised by the TUI tests that need a Workspace; the actual
-// agent run is driven by m.runAgent (which calls loop.Run directly). Return nil
-// to satisfy the interface.
-func (fw *fakeWorkspace) Prompt(_ context.Context, _ string, _ message.Message) error {
-	return nil
+// Prompt forwards to the live loop's Run so a turn driven through the
+// Workspace seam exercises a real run under the race detector. When no loop is
+// wired it is a no-op.
+func (fw *fakeWorkspace) Prompt(ctx context.Context, sessionID string, userMsg message.Message) error {
+	if fw.loop == nil {
+		return nil
+	}
+	return fw.loop.Run(ctx, sessionID, userMsg)
 }
 
-// Steer forwards to the live loop's Steer.
-func (fw *fakeWorkspace) Steer(text string) (queued bool) {
+// Steer forwards to the live loop's Steer for the given session. The fake
+// holds a single loop, so the sessionID is accepted for signature parity.
+func (fw *fakeWorkspace) Steer(_ string, text string) (queued bool) {
 	if fw.loop == nil {
 		return false
 	}
 	return fw.loop.Steer(text)
 }
 
-// Interrupt forwards to the live loop's Interrupt.
+// Interrupt forwards to the live loop's Interrupt (global interrupt).
 func (fw *fakeWorkspace) Interrupt() {
 	if fw.loop == nil {
 		return
 	}
 	fw.loop.Interrupt()
+}
+
+// InterruptSession forwards to the live loop's Interrupt for the per-tab path.
+func (fw *fakeWorkspace) InterruptSession(_ string) {
+	if fw.loop == nil {
+		return
+	}
+	fw.loop.Interrupt()
+}
+
+// Compact forwards to the live loop's Compact.
+func (fw *fakeWorkspace) Compact(ctx context.Context, sessionID string) error {
+	if fw.loop == nil {
+		return nil
+	}
+	return fw.loop.Compact(ctx, sessionID)
+}
+
+// SetModel forwards to the live loop's SetModel.
+func (fw *fakeWorkspace) SetModel(_ string, model string, provider llm.Provider) {
+	if fw.loop == nil {
+		return
+	}
+	fw.loop.SetModel(model, provider)
+}
+
+// PlanMode forwards to the live loop's PlanMode.
+func (fw *fakeWorkspace) PlanMode(_ string) bool {
+	if fw.loop == nil {
+		return false
+	}
+	return fw.loop.PlanMode()
+}
+
+// SetPlanMode forwards to the live loop's SetPlanMode.
+func (fw *fakeWorkspace) SetPlanMode(_ string, on bool) {
+	if fw.loop == nil {
+		return
+	}
+	fw.loop.SetPlanMode(on)
+}
+
+// Approve forwards to the live loop's Approve.
+func (fw *fakeWorkspace) Approve(_ string) {
+	if fw.loop == nil {
+		return
+	}
+	fw.loop.Approve()
+}
+
+// PendingSteering forwards to the live loop's PendingSteering.
+func (fw *fakeWorkspace) PendingSteering(_ string) []string {
+	if fw.loop == nil {
+		return nil
+	}
+	return fw.loop.PendingSteering()
+}
+
+// ReleaseSession is a no-op for the fake (it caches no per-session loops).
+func (fw *fakeWorkspace) ReleaseSession(_ string) {}
+
+// ApprovePlan clears plan mode on the live loop and returns no stored plan (the
+// fake has no Coordinator plan store).
+func (fw *fakeWorkspace) ApprovePlan(_ string) string {
+	if fw.loop != nil {
+		fw.loop.Approve()
+	}
+	return ""
 }
 
 // GrantPermission answers a pending permission request with approval.

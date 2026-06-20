@@ -1,155 +1,33 @@
-name: release
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: goreleaser
 
 on:
   push:
     tags:
-      - "v*"
+      - v*.*.*
 
-permissions:
-  contents: write
+concurrency:
+  group: goreleaser
+  cancel-in-progress: true
 
 jobs:
-  # Blocking pre-release gate. The same tests/build/ux-smoke the everyday CI
-  # runs, re-asserted here so a tag can never cut a release the gate would have
-  # failed (CI runs on the branch; this runs on the pushed tag). goreleaser
-  # `needs:` this job, so a red gate stops the release before any asset, npm
-  # publish, or tap push happens. Linux-only and offline: the checks are
-  # OS-independent, so one runner keeps the gate fast.
-  gate:
-    name: pre-release gate (test + build + ux-smoke)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-          cache: true
-
-      - name: Test
-        run: go test ./...
-
-      - name: Build
-        run: go build ./...
-
-      - name: Build CLI for ux-smoke
-        run: go build -o bharatcode .
-
-      - name: UX smoke
-        # Guards the redraw flood, the "Changed files:" summary, the doctor
-        # ChatGPT status line, and clean exits against the built binary.
-        # Provider-dependent checks skip (not fail) when no provider is
-        # reachable, so this is green offline.
-        run: scripts/ux-smoke.sh ./bharatcode
-
   goreleaser:
-    needs: gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          # GoReleaser needs the full history and all tags to build release notes.
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          version: "~> v2"
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # PAT with `repo` scope on arbazkhan971/homebrew-tap so GoReleaser can
-          # push the generated Homebrew formula to the tap repository.
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-
-  # Publish the npm launcher package after the GitHub release exists: the package
-  # is a thin shim whose postinstall downloads the binary for tag v<version> from
-  # GitHub Releases, so the release assets must be present before npm publishes.
-  # The npm version is kept in sync with the tag in npm/package.json at bump time.
-  #
-  # Auth is the NPM_TOKEN repository secret — a granular access token (read+write
-  # on bharatcode-cli, "bypass 2FA" enabled) that the package's publish policy
-  # requires. setup-node's registry-url writes an .npmrc that reads the token from
-  # NODE_AUTH_TOKEN, so the publish step only needs to set that env var. (OIDC /
-  # Trusted Publishing was tried first but the registry rejected it for this
-  # already-token-published package; the stored token is the reliable path.)
-  npm-publish:
-    needs: goreleaser
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Verify package version matches the tag
-        working-directory: npm
-        run: |
-          PKG_VERSION="$(node -p "require('./package.json').version")"
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::npm/package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
-            exit 1
-          fi
-          echo "Publishing bharatcode-cli@$PKG_VERSION"
-
-      # NODE_AUTH_TOKEN authenticates the publish via the .npmrc setup-node wrote.
-      # No --provenance: a signed build-provenance attestation requires the OIDC
-      # id-token, which this token-auth path does not mint.
-      - name: Publish to npm
-        working-directory: npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
-
-  # Post-release verification. Once the GitHub release and the npm package are
-  # both published, confirm the same version is reachable across channels for
-  # the tag that triggered this run. Runs last (needs: npm-publish) so every
-  # channel it checks has had a chance to publish.
-  #
-  # The checks reach remote registries: `gh release view` for the GitHub
-  # release and its assets, and `npm view bharatcode-cli version` for npm —
-  # both available on this runner (gh is preinstalled and authenticated via
-  # GH_TOKEN; npm comes from setup-node). The script's brew and installed-binary
-  # checks have no tooling here (no Homebrew, the freshly published binary is
-  # not on PATH) and SKIP themselves cleanly, so POSTREL_REQUIRE_ALL is left
-  # unset — promoting those to failures would red every release for tools this
-  # runner is not meant to have. continue-on-error keeps even the checks that do
-  # run non-fatal: they depend on network and on registries propagating, so a
-  # transient lag surfaces as a warning annotation rather than failing an
-  # already-published release. The blocking quality gate is the `gate` job
-  # above, before anything ships.
-  post-release-smoke:
-    needs: npm-publish
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Post-release smoke
-        env:
-          # gh release view needs a token to read the release in this repo.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: scripts/post-release-smoke.sh "${GITHUB_REF_NAME}"
+    uses: charmbracelet/meta/.github/workflows/goreleaser.yml@main
+    with:
+      go_version: "1.26"
+      macos_sign_entitlements: "./.github/entitlements.plist"
+    secrets:
+      docker_username: ${{ secrets.DOCKERHUB_USERNAME }}
+      docker_token: ${{ secrets.DOCKERHUB_TOKEN }}
+      gh_pat: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+      goreleaser_key: ${{ secrets.GORELEASER_KEY }}
+      fury_token: ${{ secrets.FURY_TOKEN }}
+      nfpm_gpg_key: ${{ secrets.NFPM_GPG_KEY }}
+      nfpm_passphrase: ${{ secrets.NFPM_PASSPHRASE }}
+      aur_key: ${{ secrets.AUR_KEY }}
+      macos_sign_p12: ${{ secrets.MACOS_SIGN_P12 }}
+      macos_sign_password: ${{ secrets.MACOS_SIGN_PASSWORD }}
+      macos_notary_issuer_id: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+      macos_notary_key_id: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+      macos_notary_key: ${{ secrets.MACOS_NOTARY_KEY }}

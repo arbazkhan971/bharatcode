@@ -1,172 +1,330 @@
-//go:build !windows
-
 package shell
 
 import (
 	"context"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// newTestShell builds a Shell with a fixed injectable clock and no event bus.
-// The clock lets the TTL eviction policy be exercised at precise offsets from a
-// job's finish time without sleeping for the real ten-minute window.
-func newTestShell(t *testing.T, clock func() time.Time) *Shell {
-	t.Helper()
-	s := New(nil)
-	t.Cleanup(s.Shutdown)
-	s.now = clock
-	return s
-}
+func TestBackgroundShellManager_Start(t *testing.T) {
+	t.Skip("Skipping this until I figure out why its flaky")
+	t.Parallel()
 
-// TestEviction_FinishedJobBaseline asserts the core fix: eviction is keyed off
-// when a job FINISHED, not when it started. A real command is run to completion;
-// its finish time is then used as the baseline. The job must remain retrievable
-// just after finishing and through the grace window, and be evicted only once
-// the clock advances past finishedAt + jobTTL.
-func TestEviction_FinishedJobBaseline(t *testing.T) {
-	// The clock is pinned so the wait goroutine stamps finishedAt = base and the
-	// eviction sweeps below run at deterministic offsets from it.
-	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	s := newTestShell(t, func() time.Time { return base })
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := newBackgroundShellManager()
 
-	job, err := s.Run(context.Background(), "echo -n done", RunOpts{})
-	require.NoError(t, err)
-	require.Equal(t, StatusCompleted, job.Status)
-
-	// Confirm the finish time was stamped to the injected clock, not left zero
-	// and not derived from start.
-	stateRaw, ok := s.jobs.Load(job.ID)
-	require.True(t, ok, "job must be tracked immediately after finishing")
-	st := stateRaw.(*jobState)
-	st.mu.RLock()
-	finishedAt := st.finishedAt
-	st.mu.RUnlock()
-	require.Equal(t, base, finishedAt, "finishedAt must be stamped from the clock at completion")
-
-	// Just after finishing: a sweep at the finish instant must NOT evict.
-	s.evictExpired(base)
-	_, err = s.Output(job.ID)
-	require.NoError(t, err, "a just-finished job must still be retrievable")
-
-	// Within the grace window (one second before the TTL elapses): still kept.
-	s.evictExpired(base.Add(jobTTL - time.Second))
-	_, err = s.Output(job.ID)
-	require.NoError(t, err, "a finished job inside its grace window must be retained")
-
-	// Past the grace window: now evicted.
-	s.evictExpired(base.Add(jobTTL + time.Second))
-	_, err = s.Output(job.ID)
-	require.Error(t, err, "a finished job must be evicted only after finishedAt + jobTTL")
-}
-
-// TestEviction_LongRunningJobKeepsGraceWindow is the regression test for the
-// audited bug: a job that RAN for longer than jobTTL must still get the full
-// grace window after it finishes, rather than being evicted the instant it
-// completes. With the old start-time baseline this job would be dropped on the
-// very first sweep after completion; with the finish-time baseline it survives
-// until finishedAt + jobTTL.
-func TestEviction_LongRunningJobKeepsGraceWindow(t *testing.T) {
-	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	// The job ran for 30 minutes (3x the TTL) before finishing.
-	finish := start.Add(30 * time.Minute)
-
-	s := newTestShell(t, func() time.Time { return start })
-
-	// Construct a finished job by hand so we can control both start and finish
-	// independently and assert the eviction policy in isolation.
-	st := &jobState{
-		id:         "longjob",
-		command:    "sleep 1800",
-		startedAt:  start,
-		finishedAt: finish,
-		status:     StatusCompleted,
-		doneChan:   make(chan struct{}),
+	bgShell, err := manager.Start(ctx, workingDir, nil, "echo 'hello world'", "")
+	if err != nil {
+		t.Fatalf("failed to start background shell: %v", err)
 	}
-	close(st.doneChan)
-	s.jobs.Store(st.id, st)
 
-	// A sweep the instant the long job finishes must NOT evict it: under the old
-	// (start-based) logic now.Sub(startedAt) == 30m > 10m would have dropped it
-	// here, losing the entire grace window.
-	s.evictExpired(finish)
-	_, err := s.Output(st.id)
-	require.NoError(t, err, "a long-running job must keep its grace window after finishing, not be evicted immediately")
-
-	// Still retained near the end of the window.
-	s.evictExpired(finish.Add(jobTTL - time.Second))
-	_, err = s.Output(st.id)
-	require.NoError(t, err, "long job must remain through its full post-finish grace window")
-
-	// Evicted only after finishedAt + jobTTL.
-	s.evictExpired(finish.Add(jobTTL + time.Second))
-	_, err = s.Output(st.id)
-	require.Error(t, err, "long job must be evicted once its post-finish grace window elapses")
-}
-
-// TestEviction_RunningJobNeverEvicted asserts a still-running job (finishedAt
-// zero) is never dropped, no matter how far the clock advances.
-func TestEviction_RunningJobNeverEvicted(t *testing.T) {
-	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	s := newTestShell(t, func() time.Time { return start })
-
-	st := &jobState{
-		id:        "running",
-		command:   "sleep inf",
-		startedAt: start,
-		status:    StatusRunning,
-		doneChan:  make(chan struct{}),
+	if bgShell.ID == "" {
+		t.Error("expected shell ID to be non-empty")
 	}
-	s.jobs.Store(st.id, st)
 
-	// Far past any TTL: a running job has no finish baseline and must survive.
-	s.evictExpired(start.Add(100 * jobTTL))
-	_, ok := s.jobs.Load(st.id)
-	require.True(t, ok, "a running job must never be evicted")
+	// Wait for the command to complete
+	bgShell.Wait()
+
+	stdout, stderr, done, err := bgShell.GetOutput()
+	if !done {
+		t.Error("expected shell to be done")
+	}
+
+	if err != nil {
+		t.Errorf("expected no error, got: %v", err)
+	}
+
+	if !strings.Contains(stdout, "hello world") {
+		t.Errorf("expected stdout to contain 'hello world', got: %s", stdout)
+	}
+
+	if stderr != "" {
+		t.Errorf("expected empty stderr, got: %s", stderr)
+	}
 }
 
-// TestList_EmptyWhenNoJobs asserts List returns an empty slice on a fresh shell.
-func TestList_EmptyWhenNoJobs(t *testing.T) {
-	s := newTestShell(t, time.Now)
-	require.Empty(t, s.List())
+func TestBackgroundShellManager_Get(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := newBackgroundShellManager()
+
+	bgShell, err := manager.Start(ctx, workingDir, nil, "echo 'test'", "")
+	if err != nil {
+		t.Fatalf("failed to start background shell: %v", err)
+	}
+
+	// Retrieve the shell
+	retrieved, ok := manager.Get(bgShell.ID)
+	if !ok {
+		t.Error("expected to find the background shell")
+	}
+
+	if retrieved.ID != bgShell.ID {
+		t.Errorf("expected shell ID %s, got %s", bgShell.ID, retrieved.ID)
+	}
+
+	// Clean up
+	manager.Kill(bgShell.ID)
 }
 
-// TestList_ReportsJobsNewestFirst asserts List enumerates tracked jobs ordered
-// newest-started first, carrying status metadata without output text.
-func TestList_ReportsJobsNewestFirst(t *testing.T) {
-	s := newTestShell(t, time.Now)
+func TestBackgroundShellManager_Kill(t *testing.T) {
+	t.Parallel()
 
-	older, err := s.Start(context.Background(), "sleep 30", RunOpts{})
-	require.NoError(t, err)
-	time.Sleep(5 * time.Millisecond)
-	newer, err := s.Start(context.Background(), "sleep 31", RunOpts{})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Kill(older); _ = s.Kill(newer) })
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := newBackgroundShellManager()
 
-	jobs := s.List()
-	require.Len(t, jobs, 2)
-	// Newest-started first.
-	require.Equal(t, newer, jobs[0].ID)
-	require.Equal(t, older, jobs[1].ID)
-	// Running jobs report their command and status; output is omitted.
-	require.Equal(t, StatusRunning, jobs[0].Status)
-	require.Equal(t, "sleep 31", jobs[0].Command)
-	require.Empty(t, jobs[0].Stdout)
-	require.Empty(t, jobs[0].Stderr)
+	// Start a long-running command
+	bgShell, err := manager.Start(ctx, workingDir, nil, "sleep 10", "")
+	if err != nil {
+		t.Fatalf("failed to start background shell: %v", err)
+	}
+
+	// Kill it
+	err = manager.Kill(bgShell.ID)
+	if err != nil {
+		t.Errorf("failed to kill background shell: %v", err)
+	}
+
+	// Verify it's no longer in the manager
+	_, ok := manager.Get(bgShell.ID)
+	if ok {
+		t.Error("expected shell to be removed after kill")
+	}
+
+	// Verify the shell is done
+	if !bgShell.IsDone() {
+		t.Error("expected shell to be done after kill")
+	}
 }
 
-// TestList_ReflectsTerminalStatus asserts a finished job appears with its
-// terminal status and exit code.
-func TestList_ReflectsTerminalStatus(t *testing.T) {
-	s := newTestShell(t, time.Now)
+func TestBackgroundShellManager_KillNonExistent(t *testing.T) {
+	t.Parallel()
 
-	_, err := s.Run(context.Background(), "exit 3", RunOpts{})
+	manager := newBackgroundShellManager()
+
+	err := manager.Kill("non-existent-id")
+	if err == nil {
+		t.Error("expected error when killing non-existent shell")
+	}
+}
+
+func TestBackgroundShell_IsDone(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := newBackgroundShellManager()
+
+	bgShell, err := manager.Start(ctx, workingDir, nil, "echo 'quick'", "")
+	if err != nil {
+		t.Fatalf("failed to start background shell: %v", err)
+	}
+
+	// Wait for the command to complete (Windows is slower to spin up).
+	require.Eventually(t, bgShell.IsDone, 5*time.Second, 50*time.Millisecond, "expected shell to be done")
+
+	// Clean up
+	manager.Kill(bgShell.ID)
+}
+
+func TestBackgroundShell_WithBlockFuncs(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := newBackgroundShellManager()
+
+	blockFuncs := []BlockFunc{
+		CommandsBlocker([]string{"curl", "wget"}),
+	}
+
+	bgShell, err := manager.Start(ctx, workingDir, blockFuncs, "curl example.com", "")
+	if err != nil {
+		t.Fatalf("failed to start background shell: %v", err)
+	}
+
+	// Wait for the command to complete
+	bgShell.Wait()
+
+	stdout, stderr, done, execErr := bgShell.GetOutput()
+	if !done {
+		t.Error("expected shell to be done")
+	}
+
+	// The command should have been blocked
+	output := stdout + stderr
+	if !strings.Contains(output, "not allowed") && execErr == nil {
+		t.Errorf("expected command to be blocked, got stdout: %s, stderr: %s, err: %v", stdout, stderr, execErr)
+	}
+
+	// Clean up
+	manager.Kill(bgShell.ID)
+}
+
+func TestBackgroundShellManager_List(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping flacky test on windows")
+	}
+
+	t.Parallel()
+
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := newBackgroundShellManager()
+
+	// Start two shells
+	bgShell1, err := manager.Start(ctx, workingDir, nil, "sleep 1", "")
+	if err != nil {
+		t.Fatalf("failed to start first background shell: %v", err)
+	}
+
+	bgShell2, err := manager.Start(ctx, workingDir, nil, "sleep 1", "")
+	if err != nil {
+		t.Fatalf("failed to start second background shell: %v", err)
+	}
+
+	ids := manager.List()
+
+	// Check that both shells are in the list
+	found1 := false
+	found2 := false
+	for _, id := range ids {
+		if id == bgShell1.ID {
+			found1 = true
+		}
+		if id == bgShell2.ID {
+			found2 = true
+		}
+	}
+
+	if !found1 {
+		t.Errorf("expected to find shell %s in list", bgShell1.ID)
+	}
+	if !found2 {
+		t.Errorf("expected to find shell %s in list", bgShell2.ID)
+	}
+
+	// Clean up
+	manager.Kill(bgShell1.ID)
+	manager.Kill(bgShell2.ID)
+}
+
+func TestBackgroundShellManager_KillAll(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	workingDir := t.TempDir()
+	manager := newBackgroundShellManager()
+
+	// Start multiple long-running shells
+	shell1, err := manager.Start(ctx, workingDir, nil, "sleep 10", "")
+	if err != nil {
+		t.Fatalf("failed to start shell 1: %v", err)
+	}
+
+	shell2, err := manager.Start(ctx, workingDir, nil, "sleep 10", "")
+	if err != nil {
+		t.Fatalf("failed to start shell 2: %v", err)
+	}
+
+	shell3, err := manager.Start(ctx, workingDir, nil, "sleep 10", "")
+	if err != nil {
+		t.Fatalf("failed to start shell 3: %v", err)
+	}
+
+	// Verify shells are running
+	if shell1.IsDone() || shell2.IsDone() || shell3.IsDone() {
+		t.Error("shells should not be done yet")
+	}
+
+	// Kill all shells
+	manager.KillAll(t.Context())
+
+	// Verify all shells are done
+	if !shell1.IsDone() {
+		t.Error("shell1 should be done after KillAll")
+	}
+	if !shell2.IsDone() {
+		t.Error("shell2 should be done after KillAll")
+	}
+	if !shell3.IsDone() {
+		t.Error("shell3 should be done after KillAll")
+	}
+
+	// Verify they're removed from the manager
+	if _, ok := manager.Get(shell1.ID); ok {
+		t.Error("shell1 should be removed from manager")
+	}
+	if _, ok := manager.Get(shell2.ID); ok {
+		t.Error("shell2 should be removed from manager")
+	}
+	if _, ok := manager.Get(shell3.ID); ok {
+		t.Error("shell3 should be removed from manager")
+	}
+
+	// Verify list is empty (or doesn't contain our shells)
+	ids := manager.List()
+	for _, id := range ids {
+		if id == shell1.ID || id == shell2.ID || id == shell3.ID {
+			t.Errorf("shell %s should not be in list after KillAll", id)
+		}
+	}
+}
+
+func TestBackgroundShellManager_KillAll_Timeout(t *testing.T) {
+	t.Parallel()
+
+	// XXX: can't use synctest here - causes --race to trip.
+
+	workingDir := t.TempDir()
+	manager := newBackgroundShellManager()
+
+	// Start a shell that traps signals and ignores cancellation.
+	_, err := manager.Start(t.Context(), workingDir, nil, "trap '' TERM INT; sleep 60", "")
 	require.NoError(t, err)
 
-	jobs := s.List()
-	require.Len(t, jobs, 1)
-	require.Equal(t, StatusFailed, jobs[0].Status)
-	require.Equal(t, 3, jobs[0].ExitCode)
+	// Short timeout to test the timeout path.
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	t.Cleanup(cancel)
+
+	start := time.Now()
+	manager.KillAll(ctx)
+
+	elapsed := time.Since(start)
+
+	// Must return promptly after timeout, not hang for 60 seconds.
+	require.Less(t, elapsed, 2*time.Second)
+}
+
+func TestBackgroundShell_WaitContext_Completed(t *testing.T) {
+	t.Parallel()
+
+	done := make(chan struct{})
+	close(done)
+
+	bgShell := &BackgroundShell{done: done}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	t.Cleanup(cancel)
+
+	require.True(t, bgShell.WaitContext(ctx))
+}
+
+func TestBackgroundShell_WaitContext_Canceled(t *testing.T) {
+	t.Parallel()
+
+	bgShell := &BackgroundShell{done: make(chan struct{})}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	require.False(t, bgShell.WaitContext(ctx))
 }

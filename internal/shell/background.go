@@ -1,156 +1,245 @@
-// Package shell manages bash command execution and background tracking.
 package shell
 
 import (
+	"bytes"
+	"context"
 	"fmt"
-	"log/slog"
-	"sort"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/arbazkhan971/bharatcode/internal/csync"
 )
 
-// Output retrieves the current state and accumulated stdout/stderr for a job.
-func (s *Shell) Output(jobID string) (Job, error) {
-	stateRaw, ok := s.jobs.Load(jobID)
-	if !ok {
-		return Job{}, fmt.Errorf("job not found: %s", jobID)
-	}
-	state := stateRaw.(*jobState)
+const (
+	// MaxBackgroundJobs is the maximum number of concurrent background jobs allowed
+	MaxBackgroundJobs = 50
+	// CompletedJobRetentionMinutes is how long to keep completed jobs before auto-cleanup (8 hours)
+	CompletedJobRetentionMinutes = 8 * 60
+)
 
-	state.mu.RLock()
-	defer state.mu.RUnlock()
-
-	stdoutStr := state.stdout.String()
-	if state.truncatedStdout {
-		stdoutStr += fmt.Sprintf("\n... [truncated, %d bytes]", state.rawStdoutBytes)
-	}
-
-	stderrStr := state.stderr.String()
-	if state.truncatedStderr {
-		stderrStr += fmt.Sprintf("\n... [truncated, %d bytes]", state.rawStderrBytes)
-	}
-
-	return Job{
-		ID:        state.id,
-		Command:   state.command,
-		StartedAt: state.startedAt,
-		Status:    state.status,
-		ExitCode:  state.exitCode,
-		Stdout:    stdoutStr,
-		Stderr:    stderrStr,
-		// pgid is internal
-	}, nil
+// syncBuffer is a thread-safe wrapper around bytes.Buffer.
+type syncBuffer struct {
+	buf bytes.Buffer
+	mu  sync.RWMutex
 }
 
-// List returns a status snapshot of every tracked job, newest-started first
-// (ties broken by ID for determinism). The returned Jobs carry status metadata
-// only — Stdout/Stderr are left empty so listing stays cheap regardless of how
-// much output a job has captured; call Output for a job's accumulated text.
-// This lets a caller (e.g. the model after losing a job ID across compaction)
-// recover the set of running and recently-finished background jobs.
-func (s *Shell) List() []Job {
-	var jobs []Job
-	s.jobs.Range(func(_, value any) bool {
-		state := value.(*jobState)
-
-		state.mu.RLock()
-		jobs = append(jobs, Job{
-			ID:        state.id,
-			Command:   state.command,
-			StartedAt: state.startedAt,
-			Status:    state.status,
-			ExitCode:  state.exitCode,
-		})
-		state.mu.RUnlock()
-		return true
-	})
-
-	sort.Slice(jobs, func(i, j int) bool {
-		if !jobs[i].StartedAt.Equal(jobs[j].StartedAt) {
-			return jobs[i].StartedAt.After(jobs[j].StartedAt)
-		}
-		return jobs[i].ID < jobs[j].ID
-	})
-	return jobs
+func (sb *syncBuffer) Write(p []byte) (n int, err error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
 }
 
-// Kill halts a running background job by sending SIGKILL to its process group.
-// It is idempotent; killing an already finished or non-existent job returns nil.
-func (s *Shell) Kill(jobID string) error {
-	stateRaw, ok := s.jobs.Load(jobID)
+func (sb *syncBuffer) WriteString(s string) (n int, err error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.WriteString(s)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.RLock()
+	defer sb.mu.RUnlock()
+	return sb.buf.String()
+}
+
+// BackgroundShell represents a shell running in the background.
+type BackgroundShell struct {
+	ID          string
+	Command     string
+	Description string
+	Shell       *Shell
+	WorkingDir  string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	stdout      *syncBuffer
+	stderr      *syncBuffer
+	done        chan struct{}
+	exitErr     error
+	completedAt atomic.Int64 // Unix timestamp when job completed (0 if still running)
+}
+
+// BackgroundShellManager manages background shell instances.
+type BackgroundShellManager struct {
+	shells *csync.Map[string, *BackgroundShell]
+}
+
+var (
+	backgroundManager     *BackgroundShellManager
+	backgroundManagerOnce sync.Once
+	idCounter             atomic.Uint64
+)
+
+// newBackgroundShellManager creates a new BackgroundShellManager instance.
+func newBackgroundShellManager() *BackgroundShellManager {
+	return &BackgroundShellManager{
+		shells: csync.NewMap[string, *BackgroundShell](),
+	}
+}
+
+// GetBackgroundShellManager returns the singleton background shell manager.
+func GetBackgroundShellManager() *BackgroundShellManager {
+	backgroundManagerOnce.Do(func() {
+		backgroundManager = newBackgroundShellManager()
+	})
+	return backgroundManager
+}
+
+// Start creates and starts a new background shell with the given command.
+func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, command string, description string) (*BackgroundShell, error) {
+	// Check job limit
+	if m.shells.Len() >= MaxBackgroundJobs {
+		return nil, fmt.Errorf("maximum number of background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
+	}
+
+	id := fmt.Sprintf("%03X", idCounter.Add(1))
+
+	shell := NewShell(&Options{
+		WorkingDir: workingDir,
+		BlockFuncs: blockFuncs,
+	})
+
+	shellCtx, cancel := context.WithCancel(ctx)
+
+	bgShell := &BackgroundShell{
+		ID:          id,
+		Command:     command,
+		Description: description,
+		WorkingDir:  workingDir,
+		Shell:       shell,
+		ctx:         shellCtx,
+		cancel:      cancel,
+		stdout:      &syncBuffer{},
+		stderr:      &syncBuffer{},
+		done:        make(chan struct{}),
+	}
+
+	m.shells.Set(id, bgShell)
+
+	go func() {
+		defer close(bgShell.done)
+
+		err := shell.ExecStream(shellCtx, command, bgShell.stdout, bgShell.stderr)
+
+		bgShell.exitErr = err
+		bgShell.completedAt.Store(time.Now().Unix())
+	}()
+
+	return bgShell, nil
+}
+
+// Get retrieves a background shell by ID.
+func (m *BackgroundShellManager) Get(id string) (*BackgroundShell, bool) {
+	return m.shells.Get(id)
+}
+
+// Remove removes a background shell from the manager without terminating it.
+// This is useful when a shell has already completed and you just want to clean up tracking.
+func (m *BackgroundShellManager) Remove(id string) error {
+	_, ok := m.shells.Take(id)
 	if !ok {
-		return nil
+		return fmt.Errorf("background shell not found: %s", id)
 	}
-	state := stateRaw.(*jobState)
-
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	if state.status != StatusRunning {
-		return nil
-	}
-
-	state.status = StatusKilled
-	state.exitCode = -1
-	// Stamp the finish time so a killed job whose wait goroutine has not yet
-	// reaped it still carries a TTL baseline. The wait goroutine may overwrite
-	// this with the (marginally later) reap time, which is equally valid.
-	if state.finishedAt.IsZero() {
-		state.finishedAt = s.now()
-	}
-
-	if state.process != nil {
-		// Kill the whole process group (negative pid on Unix).
-		killProcessGroup(state.process.Pid)
-	}
-
 	return nil
 }
 
-// jobTTL is the grace window a finished job remains retrievable before the TTL
-// watcher evicts it. It is measured from when the job FINISHED, not when it
-// started, so a long-running job still gets the full window after completing.
-const jobTTL = 10 * time.Minute
+// Kill terminates a background shell by ID.
+func (m *BackgroundShellManager) Kill(id string) error {
+	shell, ok := m.shells.Take(id)
+	if !ok {
+		return fmt.Errorf("background shell not found: %s", id)
+	}
 
-// startTTLWatcher monitors tracked jobs and evicts finished ones whose finish
-// time is older than jobTTL. Eviction is keyed off finishedAt (not startedAt) so
-// a job that ran longer than jobTTL is not dropped the instant it completes; it
-// keeps the full grace window from completion.
-func (s *Shell) startTTLWatcher() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+	shell.cancel()
+	<-shell.done
+	return nil
+}
 
-	for {
-		select {
-		case <-s.cleanup:
-			return
-		case <-ticker.C:
-			s.evictExpired(s.now())
+// BackgroundShellInfo contains information about a background shell.
+type BackgroundShellInfo struct {
+	ID          string
+	Command     string
+	Description string
+}
+
+// List returns all background shell IDs.
+func (m *BackgroundShellManager) List() []string {
+	ids := make([]string, 0, m.shells.Len())
+	for id := range m.shells.Seq2() {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// Cleanup removes completed jobs that have been finished for more than the retention period
+func (m *BackgroundShellManager) Cleanup() int {
+	now := time.Now().Unix()
+	retentionSeconds := int64(CompletedJobRetentionMinutes * 60)
+
+	var toRemove []string
+	for shell := range m.shells.Seq() {
+		completedAt := shell.completedAt.Load()
+		if completedAt > 0 && now-completedAt > retentionSeconds {
+			toRemove = append(toRemove, shell.ID)
 		}
+	}
+
+	for _, id := range toRemove {
+		m.Remove(id)
+	}
+
+	return len(toRemove)
+}
+
+// KillAll terminates all background shells. The provided context bounds how
+// long the function waits for each shell to exit.
+func (m *BackgroundShellManager) KillAll(ctx context.Context) {
+	shells := slices.Collect(m.shells.Seq())
+	m.shells.Reset(map[string]*BackgroundShell{})
+
+	var wg sync.WaitGroup
+	for _, shell := range shells {
+		wg.Go(func() {
+			shell.cancel()
+			select {
+			case <-shell.done:
+			case <-ctx.Done():
+			}
+		})
+	}
+	wg.Wait()
+}
+
+// GetOutput returns the current output of a background shell.
+func (bs *BackgroundShell) GetOutput() (stdout string, stderr string, done bool, err error) {
+	select {
+	case <-bs.done:
+		return bs.stdout.String(), bs.stderr.String(), true, bs.exitErr
+	default:
+		return bs.stdout.String(), bs.stderr.String(), false, nil
 	}
 }
 
-// evictExpired removes every finished job whose grace window has elapsed
-// relative to now. It is separated from the ticker loop so the eviction policy
-// can be unit-tested directly with a controlled clock. Running jobs are never
-// evicted; finished jobs with a zero finishedAt are skipped (their baseline is
-// not yet known) and revisited on the next tick.
-func (s *Shell) evictExpired(now time.Time) {
-	s.jobs.Range(func(key, value any) bool {
-		state := value.(*jobState)
-
-		state.mu.RLock()
-		status := state.status
-		finishedAt := state.finishedAt
-		state.mu.RUnlock()
-
-		if status == StatusRunning || finishedAt.IsZero() {
-			return true
-		}
-
-		if now.Sub(finishedAt) > jobTTL {
-			s.jobs.Delete(key)
-			slog.Debug("Evicted stale shell job from memory", "jobID", key)
-		}
+// IsDone checks if the background shell has finished execution.
+func (bs *BackgroundShell) IsDone() bool {
+	select {
+	case <-bs.done:
 		return true
-	})
+	default:
+		return false
+	}
+}
+
+// Wait blocks until the background shell completes.
+func (bs *BackgroundShell) Wait() {
+	<-bs.done
+}
+
+func (bs *BackgroundShell) WaitContext(ctx context.Context) bool {
+	select {
+	case <-bs.done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

@@ -2,299 +2,182 @@ package app
 
 import (
 	"context"
-	"errors"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"strings"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
-	"github.com/arbazkhan971/bharatcode/internal/agent"
-	"github.com/arbazkhan971/bharatcode/internal/llm"
+	tea "charm.land/bubbletea/v2"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/stretchr/testify/require"
 )
 
-func TestNew_DefaultConfig_NoAPIKeys_Succeeds(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	setAppEnv(t, tempDir)
+// TestSetupSubscriber_NormalFlow verifies that events published to the source
+// broker are forwarded to the output broker.
+func TestSetupSubscriber_NormalFlow(t *testing.T) {
+	t.Parallel()
 
-	a, err := New(ctx, Options{ProjectDir: tempDir})
-	require.NoError(t, err)
-	require.NotNil(t, a)
-	t.Cleanup(func() {
-		require.NoError(t, a.Close(context.Background()))
-	})
-
-	require.NotNil(t, a.Cfg)
-	require.NotNil(t, a.DB)
-	require.NotNil(t, a.Bus)
-	require.NotNil(t, a.UI)
-	require.NotNil(t, a.LLM)
-	require.NotNil(t, a.Sessions)
-	require.NotNil(t, a.Ledger)
-	require.NotNil(t, a.Permission)
-	require.NotNil(t, a.Hooks)
-	require.NotNil(t, a.Shell)
-	require.NotNil(t, a.LSP)
-	require.NotNil(t, a.MCP)
-	require.NotNil(t, a.FileTracker)
-	require.NotNil(t, a.Tools)
-	require.NotNil(t, a.Agent)
-	require.NotNil(t, a.Logger)
-
-	provider, err := a.LLM.Get("deepseek")
-	require.NoError(t, err)
-	_, err = provider.Stream(ctx, llm.Request{Model: "deepseek-chat"})
-	require.ErrorIs(t, err, llm.ErrAuth)
-}
-
-// TestNew_WiresUIStreamFanIn asserts New connects the bus's UI-bound source
-// topics into app.UI: a permission request and a terminal agent event published
-// on the bus arrive on the single consolidated stream the TUI subscribes to. It
-// guards the P1b wiring (not just the FanIn helper, which uievent_test covers in
-// isolation) so a future refactor that drops the FanIn call is caught here.
-func TestNew_WiresUIStreamFanIn(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	setAppEnv(t, tempDir)
-
-	a, err := New(ctx, Options{ProjectDir: tempDir})
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, a.Close(context.Background()))
-	})
-
-	ch, cancel := a.UI.Subscribe()
-	t.Cleanup(cancel)
-
-	// A permission request is must-deliver, so it survives the fan-in regardless
-	// of buffer pressure; a terminal agent event likewise.
-	reply := make(chan pubsub.PermissionDecision, 1)
-	a.Bus.Permission.Publish(ctx, pubsub.PermissionRequest{Tool: "edit", Reply: reply})
-	a.Bus.Agent.Publish(ctx, agent.Event{Kind: agent.EventTurnFinished, SessionID: "s1"})
-
-	var sawPermission, sawTurnFinished bool
-	for i := 0; i < 2; i++ {
-		ev := recvUIEvent(t, ch)
-		switch ev.Kind {
-		case UIEventPermission:
-			require.Equal(t, "edit", ev.Permission.Tool)
-			sawPermission = true
-		case UIEventAgent:
-			require.Equal(t, agent.EventTurnFinished, ev.Agent.Kind)
-			sawTurnFinished = true
-		}
-	}
-	require.True(t, sawPermission, "permission request must reach the consolidated stream")
-	require.True(t, sawTurnFinished, "agent event must reach the consolidated stream")
-}
-
-func TestClose_FastPath_UnderDeadline(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	setAppEnv(t, tempDir)
-
-	a, err := New(ctx, Options{ProjectDir: tempDir})
-	require.NoError(t, err)
-
-	start := time.Now()
-	require.NoError(t, a.Close(ctx))
-	require.Less(t, time.Since(start), 100*time.Millisecond)
-}
-
-func TestClose_DoubleCall_Errors(t *testing.T) {
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	setAppEnv(t, tempDir)
-
-	a, err := New(ctx, Options{ProjectDir: tempDir})
-	require.NoError(t, err)
-
-	require.NoError(t, a.Close(ctx))
-	require.ErrorIs(t, a.Close(ctx), ErrAlreadyClosed)
-}
-
-func TestNoTUIOrCmdImport(t *testing.T) {
-	cmd := exec.Command("go", "list", "-deps", "./internal/app")
-	cmd.Dir = repoRoot(t)
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-
-	for _, dep := range strings.Fields(string(out)) {
-		require.NotContains(t, dep, "/internal/tui")
-		require.NotContains(t, dep, "/internal/cmd")
-	}
-}
-
-func TestCloseSteps_ReverseConstructionOrder(t *testing.T) {
-	var got []string
-	steps := []closeStep{
-		{name: "util", close: recordClose(&got, "util")},
-		{name: "db", close: recordClose(&got, "db")},
-		{name: "pubsub", close: recordClose(&got, "pubsub")},
-		{name: "config", close: recordClose(&got, "config")},
-		{name: "ledger", close: recordClose(&got, "ledger")},
-		{name: "session", close: recordClose(&got, "session")},
-		{name: "filetracker", close: recordClose(&got, "filetracker")},
-		{name: "llm", close: recordClose(&got, "llm")},
-		{name: "permission", close: recordClose(&got, "permission")},
-		{name: "hooks", close: recordClose(&got, "hooks")},
-		{name: "shell", close: recordClose(&got, "shell")},
-		{name: "lsp", close: recordClose(&got, "lsp")},
-		{name: "mcp", close: recordClose(&got, "mcp")},
-		{name: "tools", close: recordClose(&got, "tools")},
-		{name: "agent", close: recordClose(&got, "agent")},
-	}
-
-	err := closeSteps(context.Background(), steps, nil)
-	require.NoError(t, err)
-	require.Equal(t, []string{
-		"agent",
-		"tools",
-		"mcp",
-		"lsp",
-		"shell",
-		"hooks",
-		"permission",
-		"llm",
-		"filetracker",
-		"session",
-		"ledger",
-		"config",
-		"pubsub",
-		"db",
-		"util",
-	}, got)
-}
-
-func TestCloseSteps_ReportsSubsystemDeadline(t *testing.T) {
-	steps := []closeStep{
-		{name: "db", close: func(context.Context) error { return nil }},
-		{name: "lsp", close: func(ctx context.Context) error {
-			<-ctx.Done()
-			return ctx.Err()
-		}},
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	err := closeSteps(ctx, steps, nil)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "closing lsp")
-	require.True(t, errors.Is(err, context.DeadlineExceeded))
-}
+	src := pubsub.NewBroker[string]()
+	defer src.Shutdown()
+	out := pubsub.NewBroker[tea.Msg]()
+	defer out.Shutdown()
 
-func TestNewBus_AgentTopicBuffer_NotLossy(t *testing.T) {
-	bus := newBus()
-	t.Cleanup(bus.Close)
+	ch := out.Subscribe(ctx)
 
-	events, cancel := bus.Agent.Subscribe()
-	t.Cleanup(cancel)
+	var wg sync.WaitGroup
+	setupSubscriber(ctx, &wg, "test", src.Subscribe, out)
 
-	// A subscriber's channel is buffered to the topic's configured size,
-	// so cap reflects the real agent event buffer. It must be large enough
-	// that bursts of streaming token deltas are not dropped under load.
-	require.GreaterOrEqual(t, cap(events), 256)
-	require.GreaterOrEqual(t, agentEventBufferSize, 256)
-}
+	// Yield so the subscriber goroutine can call src.Subscribe before we publish.
+	time.Sleep(10 * time.Millisecond)
 
-func TestNewLoggerToFile_AppendsAndRespectsLevel(t *testing.T) {
-	tests := []struct {
-		name      string
-		verbose   bool
-		wantDebug bool
-	}{
-		{name: "info level drops debug records", verbose: false, wantDebug: false},
-		{name: "verbose keeps debug records", verbose: true, wantDebug: true},
+	src.Publish(pubsub.CreatedEvent, "hello")
+	src.Publish(pubsub.CreatedEvent, "world")
+
+	for range 2 {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for forwarded event")
+		}
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "nested", "bharatcode.log")
 
-			logger, f := newLoggerToFile(path, tc.verbose)
-			require.NotNil(t, f)
-			logger.Info("info record")
-			logger.Debug("debug record")
-			require.NoError(t, f.Close())
+	cancel()
+	wg.Wait()
+}
 
-			data, err := os.ReadFile(path)
-			require.NoError(t, err)
-			contents := string(data)
-			require.Contains(t, contents, "info record")
-			if tc.wantDebug {
-				require.Contains(t, contents, "debug record")
-			} else {
-				require.NotContains(t, contents, "debug record")
-			}
+// TestSetupSubscriber_ContextCancellation verifies the goroutine exits cleanly
+// when the context is cancelled.
+func TestSetupSubscriber_ContextCancellation(t *testing.T) {
+	t.Parallel()
 
-			// A second logger over the same path must append, not truncate.
-			logger2, f2 := newLoggerToFile(path, tc.verbose)
-			require.NotNil(t, f2)
-			logger2.Info("second record")
-			require.NoError(t, f2.Close())
-			data, err = os.ReadFile(path)
-			require.NoError(t, err)
-			require.Contains(t, string(data), "info record")
-			require.Contains(t, string(data), "second record")
+	ctx, cancel := context.WithCancel(t.Context())
+
+	src := pubsub.NewBroker[string]()
+	defer src.Shutdown()
+	out := pubsub.NewBroker[tea.Msg]()
+	defer out.Shutdown()
+
+	var wg sync.WaitGroup
+	setupSubscriber(ctx, &wg, "test", src.Subscribe, out)
+
+	src.Publish(pubsub.CreatedEvent, "event")
+	cancel()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("setupSubscriber goroutine did not exit after context cancellation")
+	}
+}
+
+// TestEvents_ZeroConsumers verifies that publishing with no subscribers does
+// not block or panic.
+func TestEvents_ZeroConsumers(t *testing.T) {
+	t.Parallel()
+
+	broker := pubsub.NewBroker[tea.Msg]()
+	defer broker.Shutdown()
+
+	require.Equal(t, 0, broker.GetSubscriberCount())
+
+	// Must not block.
+	done := make(chan struct{})
+	go func() {
+		broker.Publish(pubsub.UpdatedEvent, tea.Msg("msg1"))
+		broker.Publish(pubsub.UpdatedEvent, tea.Msg("msg2"))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Publish with zero consumers blocked")
+	}
+}
+
+// TestEvents_OneConsumer verifies that a single subscriber receives every event
+// exactly once.
+func TestEvents_OneConsumer(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	broker := pubsub.NewBroker[tea.Msg]()
+	defer broker.Shutdown()
+
+	ch := broker.Subscribe(ctx)
+
+	const n = 10
+	for i := range n {
+		broker.Publish(pubsub.UpdatedEvent, tea.Msg(i))
+	}
+
+	for i := range n {
+		select {
+		case ev := <-ch:
+			require.Equal(t, tea.Msg(i), ev.Payload)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for event %d", i)
+		}
+	}
+}
+
+// TestEvents_NConsumers verifies that every subscriber receives every event
+// exactly once, regardless of how many concurrent consumers are attached.
+func TestEvents_NConsumers(t *testing.T) {
+	t.Parallel()
+
+	for _, n := range []int{2, 5, 10} {
+		t.Run(fmt.Sprintf("consumers=%d", n), func(t *testing.T) {
+			t.Parallel()
+			testNConsumers(t, n)
 		})
 	}
 }
 
-func TestNewLoggerToFile_UnopenablePath_FallsBackToDiscard(t *testing.T) {
-	// A path whose parent is a regular file cannot be created; the logger must
-	// degrade to a no-op rather than panic or write to stderr.
-	file := filepath.Join(t.TempDir(), "blocker")
-	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
-	bad := filepath.Join(file, "bharatcode.log")
-
-	logger, f := newLoggerToFile(bad, false)
-	require.NotNil(t, logger)
-	require.Nil(t, f) // unopenable path yields a nil handle and a discard logger
-	require.NotPanics(t, func() { logger.Info("ignored") })
-}
-
-func TestDefaultLogPath_SharesDataDirWithDB(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", filepath.Join(t.TempDir(), "data"))
-	require.Equal(t, filepath.Dir(defaultDBPath()), filepath.Dir(defaultLogPath()))
-	require.Equal(t, "bharatcode.log", filepath.Base(defaultLogPath()))
-}
-
-func setAppEnv(t *testing.T, tempDir string) {
+func testNConsumers(t *testing.T, n int) {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(tempDir, "data"))
-	for _, key := range []string{
-		"ANTHROPIC_API_KEY",
-		"OPENAI_API_KEY",
-		"DEEPSEEK_API_KEY",
-		"MOONSHOT_API_KEY",
-		"GROQ_API_KEY",
-		"TOGETHER_API_KEY",
-		"FIREWORKS_API_KEY",
-		"OPENROUTER_API_KEY",
-	} {
-		t.Setenv(key, "")
-	}
-}
 
-func recordClose(got *[]string, name string) func(context.Context) error {
-	return func(context.Context) error {
-		*got = append(*got, name)
-		return nil
-	}
-}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	require.True(t, ok)
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
-	_, err := os.Stat(filepath.Join(root, "go.mod"))
-	require.NoError(t, err)
-	return root
+	broker := pubsub.NewBroker[tea.Msg]()
+	defer broker.Shutdown()
+
+	// Subscribe all N consumers before publishing.
+	channels := make([]<-chan pubsub.Event[tea.Msg], n)
+	for i := range n {
+		channels[i] = broker.Subscribe(ctx)
+	}
+	require.Equal(t, n, broker.GetSubscriberCount())
+
+	const numEvents = 20
+	for i := range numEvents {
+		broker.Publish(pubsub.UpdatedEvent, tea.Msg(i))
+	}
+
+	// Each consumer must receive all numEvents messages.
+	var wg sync.WaitGroup
+	for i, ch := range channels {
+		wg.Go(func() {
+			for j := range numEvents {
+				select {
+				case ev := <-ch:
+					require.Equal(t, tea.Msg(j), ev.Payload,
+						"consumer %d: wrong payload for event %d", i, j)
+				case <-time.After(5 * time.Second):
+					t.Errorf("consumer %d: timed out waiting for event %d", i, j)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
 }

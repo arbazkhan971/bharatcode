@@ -1,338 +1,646 @@
-// Package message defines the canonical conversation representation for BharatCode.
-// It is provider-agnostic and enforces structural invariants on messages.
 package message
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"sync"
 	"time"
+
+	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/google/uuid"
 )
 
-// Role is the conversational role of a Message.
-type Role string
+// defaultUpdateDebounce is the default debounce window for [Service.Update].
+// Streaming deltas that arrive within the window are coalesced into a
+// single SQL write and a single pubsub event. Terminal updates
+// (finish/error/cancel/tool-call structural changes) bypass the
+// debounce and flush synchronously.
+const defaultUpdateDebounce = 33 * time.Millisecond
 
-const (
-	// RoleUser represents a message from the user.
-	RoleUser Role = "user"
-	// RoleAssistant represents a message from the assistant (model).
-	RoleAssistant Role = "assistant"
-	// RoleSystem represents a system message directing the model.
-	RoleSystem Role = "system"
-	// RoleTool represents a message carrying tool results.
-	RoleTool Role = "tool"
-)
-
-// BlockType discriminates ContentBlock implementations on the wire.
-type BlockType string
-
-const (
-	// BlockText represents a plain text block.
-	BlockText BlockType = "text"
-	// BlockToolUse represents a tool execution request from the model.
-	BlockToolUse BlockType = "tool_use"
-	// BlockToolResult represents the execution result of a tool.
-	BlockToolResult BlockType = "tool_result"
-	// BlockImage represents an inline image block.
-	BlockImage BlockType = "image"
-	// BlockThinking represents reasoning traces from the provider.
-	BlockThinking BlockType = "thinking"
-	// BlockAttachment represents a file attachment block.
-	BlockAttachment BlockType = "attachment"
-)
-
-// ContentBlock is one typed segment of a Message body.
-// All concrete blocks marshal to JSON with a "type" discriminator.
-type ContentBlock interface {
-	Type() BlockType
+type CreateMessageParams struct {
+	Role             MessageRole
+	Parts            []ContentPart
+	Model            string
+	Provider         string
+	IsSummaryMessage bool
 }
 
-// TextBlock is a plain-text segment.
-type TextBlock struct {
-	Text string `json:"text"`
+// Service is the public interface to the message store.
+//
+// [Service.Update] is eventually consistent: it accepts new state into
+// an in-memory buffer and writes it to SQLite plus publishes a
+// [pubsub.UpdatedEvent] on the next debounce tick (default
+// [defaultUpdateDebounce]) or on the next terminal-state update,
+// whichever comes first. Terminal-state updates — those that finish
+// the message, add or finish a tool call, or end a reasoning section —
+// flush synchronously before [Service.Update] returns.
+//
+// Callers that need stronger ordering (e.g. tests, shutdown,
+// session-switch reads) must use [Service.Flush] or [Service.FlushAll]
+// before reading via [Service.Get] / [Service.List]. Without an
+// explicit flush, a read can race the debounce timer and miss the
+// most recent in-memory state.
+type Service interface {
+	pubsub.Subscriber[Message]
+	Create(ctx context.Context, sessionID string, params CreateMessageParams) (Message, error)
+	Update(ctx context.Context, message Message) error
+	Get(ctx context.Context, id string) (Message, error)
+	List(ctx context.Context, sessionID string) ([]Message, error)
+	ListUserMessages(ctx context.Context, sessionID string) ([]Message, error)
+	ListAllUserMessages(ctx context.Context) ([]Message, error)
+	Delete(ctx context.Context, id string) error
+	DeleteSessionMessages(ctx context.Context, sessionID string) error
+
+	// Flush synchronously drains any pending debounced state for the
+	// given message ID, performs the SQL write, and publishes the
+	// resulting [pubsub.UpdatedEvent]. Idempotent; cheap no-op if no
+	// updates are pending. Use this before any read that must observe
+	// the latest [Service.Update].
+	Flush(ctx context.Context, id string) error
+
+	// FlushAll synchronously drains pending debounced state for every
+	// message known to the service. Intended for shutdown and
+	// session-switch paths.
+	FlushAll(ctx context.Context) error
 }
 
-// Type returns BlockText.
-func (b TextBlock) Type() BlockType {
-	return BlockText
+// pendingState holds the in-memory coalescing buffer for a single
+// message ID. All fields except where noted are guarded by
+// service.mu. The flushing flag serializes concurrent flushers for
+// the same ID so SQL writes never reorder.
+type pendingState struct {
+	// latest is the most recent [Message] passed to [Service.Update]
+	// that has not yet been flushed.
+	latest Message
+
+	// dirty is true when latest contains state that has not been
+	// written to SQL since the last successful flush.
+	dirty bool
+
+	// flushing is true while a goroutine is performing the SQL write
+	// for this ID. New updates are still accepted (and re-mark dirty)
+	// but other flushers must back off.
+	flushing bool
+
+	// timer is the active debounce timer, or nil if no flush is
+	// scheduled. Stopped and reset when a terminal update preempts
+	// the debounce window.
+	timer *time.Timer
+
+	// lastFlushed is the snapshot most recently written to SQL. Used
+	// as the baseline for terminal-state detection.
+	lastFlushed Message
+
+	// hasFlushed is false until the first successful write for this
+	// ID; until then lastFlushed is the zero value and must not be
+	// treated as a real prior state.
+	hasFlushed bool
 }
 
-// MarshalJSON serializes TextBlock with its type discriminator.
-func (b TextBlock) MarshalJSON() ([]byte, error) {
-	type Alias TextBlock
-	return json.Marshal(&struct {
-		Type BlockType `json:"type"`
-		Alias
-	}{
-		Type:  BlockText,
-		Alias: Alias(b),
-	})
+type service struct {
+	*pubsub.Broker[Message]
+	q        db.Querier
+	debounce time.Duration
+
+	mu      sync.Mutex
+	pending map[string]*pendingState
 }
 
-// ToolUseBlock is a model's request to invoke a tool.
-// Input is opaque JSON forwarded to the tool implementation.
-type ToolUseBlock struct {
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
-}
+// ServiceOption configures a [Service] at construction.
+type ServiceOption func(*service)
 
-// Type returns BlockToolUse.
-func (b ToolUseBlock) Type() BlockType {
-	return BlockToolUse
-}
-
-// MarshalJSON serializes ToolUseBlock with its type discriminator.
-func (b ToolUseBlock) MarshalJSON() ([]byte, error) {
-	type Alias ToolUseBlock
-	return json.Marshal(&struct {
-		Type BlockType `json:"type"`
-		Alias
-	}{
-		Type:  BlockToolUse,
-		Alias: Alias(b),
-	})
-}
-
-// ToolResultBlock is the response that closes a prior ToolUseBlock.
-// Content is the tool's stringified output. IsError is true when
-// the tool reported a failure the model should observe.
-type ToolResultBlock struct {
-	ToolUseID string `json:"tool_use_id"`
-	Content   string `json:"content"`
-	IsError   bool   `json:"is_error"`
-}
-
-// Type returns BlockToolResult.
-func (b ToolResultBlock) Type() BlockType {
-	return BlockToolResult
-}
-
-// MarshalJSON serializes ToolResultBlock with its type discriminator.
-func (b ToolResultBlock) MarshalJSON() ([]byte, error) {
-	type Alias ToolResultBlock
-	return json.Marshal(&struct {
-		Type BlockType `json:"type"`
-		Alias
-	}{
-		Type:  BlockToolResult,
-		Alias: Alias(b),
-	})
-}
-
-// ImageBlock carries inline base64 image data.
-type ImageBlock struct {
-	MimeType string `json:"mime_type"`
-	Data     []byte `json:"data"`
-}
-
-// Type returns BlockImage.
-func (b ImageBlock) Type() BlockType {
-	return BlockImage
-}
-
-// MarshalJSON serializes ImageBlock with its type discriminator.
-func (b ImageBlock) MarshalJSON() ([]byte, error) {
-	type Alias ImageBlock
-	return json.Marshal(&struct {
-		Type BlockType `json:"type"`
-		Alias
-	}{
-		Type:  BlockImage,
-		Alias: Alias(b),
-	})
-}
-
-// AttachmentBlock carries a file attachment associated with a Message. Unlike
-// ImageBlock, it represents an arbitrary file: it records the original
-// filename, MIME type, and byte size, and may carry the file's bytes inline
-// (Data), a reference to it on disk (Path), or both. Data and Path are
-// independent and may coexist; callers decide which to populate.
-type AttachmentBlock struct {
-	Filename string `json:"filename"`
-	MimeType string `json:"mime_type"`
-	// Data holds the attachment bytes inline, or is nil when the attachment is
-	// referenced by Path alone.
-	Data []byte `json:"data"`
-	// Path references the attachment on disk, or is empty when the bytes are
-	// carried inline via Data alone.
-	Path string `json:"path"`
-	// Size is the attachment's byte size. It is recorded explicitly so the size
-	// survives even when Data is omitted in favor of Path. int64 accommodates
-	// files larger than 2 GiB.
-	Size int64 `json:"size"`
-}
-
-// Type returns BlockAttachment.
-func (b AttachmentBlock) Type() BlockType {
-	return BlockAttachment
-}
-
-// MarshalJSON serializes AttachmentBlock with its type discriminator.
-func (b AttachmentBlock) MarshalJSON() ([]byte, error) {
-	type Alias AttachmentBlock
-	return json.Marshal(&struct {
-		Type BlockType `json:"type"`
-		Alias
-	}{
-		Type:  BlockAttachment,
-		Alias: Alias(b),
-	})
-}
-
-// ThinkingBlock carries provider reasoning traces (Anthropic
-// extended thinking, OpenAI o-series reasoning, etc.).
-type ThinkingBlock struct {
-	Text string `json:"text"`
-}
-
-// Type returns BlockThinking.
-func (b ThinkingBlock) Type() BlockType {
-	return BlockThinking
-}
-
-// MarshalJSON serializes ThinkingBlock with its type discriminator.
-func (b ThinkingBlock) MarshalJSON() ([]byte, error) {
-	type Alias ThinkingBlock
-	return json.Marshal(&struct {
-		Type BlockType `json:"type"`
-		Alias
-	}{
-		Type:  BlockThinking,
-		Alias: Alias(b),
-	})
-}
-
-// TokenUsage records provider-reported token counts for a Message.
-type TokenUsage struct {
-	InputTokens      int `json:"input_tokens"`
-	OutputTokens     int `json:"output_tokens"`
-	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
-}
-
-// Message is one entry in a session conversation.
-type Message struct {
-	ID        string         `json:"id"`
-	SessionID string         `json:"session_id"`
-	Role      Role           `json:"role"`
-	Content   []ContentBlock `json:"content"`
-	ParentID  *string        `json:"parent_id,omitempty"`
-	CreatedAt time.Time      `json:"created_at"`
-	Usage     *TokenUsage    `json:"usage,omitempty"`
-}
-
-// Sentinel errors returned by Validate or during deserialization.
-var (
-	ErrToolResultWithoutUse = errors.New("tool_result without preceding tool_use")
-	ErrToolUseWithoutResult = errors.New("tool_use without following tool_result")
-	ErrEmptyContent         = errors.New("message has no content blocks")
-	ErrUnknownBlockType     = errors.New("unknown content block type")
-	// ErrEmptyToolUseID indicates a tool_use block with an empty ID.
-	ErrEmptyToolUseID = errors.New("tool_use block has empty ID")
-	// ErrDuplicateToolUseID indicates two tool_use blocks share the same ID.
-	ErrDuplicateToolUseID = errors.New("duplicate tool_use ID")
-	// ErrToolUseRole indicates a tool_use block in a non-assistant-role message.
-	ErrToolUseRole = errors.New("tool_use block requires assistant role")
-)
-
-// UnmarshalJSON deserializes a Message from JSON, dispatching each item in
-// Content to its concrete type based on the "type" field.
-func (m *Message) UnmarshalJSON(data []byte) error {
-	aux := struct {
-		ID        string            `json:"id"`
-		SessionID string            `json:"session_id"`
-		Role      Role              `json:"role"`
-		Content   []json.RawMessage `json:"content"`
-		ParentID  *string           `json:"parent_id,omitempty"`
-		CreatedAt time.Time         `json:"created_at"`
-		Usage     *TokenUsage       `json:"usage,omitempty"`
-	}{}
-
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return fmt.Errorf("unmarshalling message envelope: %w", err)
+// WithDebounce overrides the debounce window for [Service.Update]. A
+// zero or negative value disables debouncing entirely (every update
+// flushes synchronously). Intended primarily for tests.
+func WithDebounce(d time.Duration) ServiceOption {
+	return func(s *service) {
+		s.debounce = d
 	}
+}
 
-	content := make([]ContentBlock, len(aux.Content))
-	for i, raw := range aux.Content {
-		var typeInfo struct {
-			Type BlockType `json:"type"`
-		}
-		if err := json.Unmarshal(raw, &typeInfo); err != nil {
-			return fmt.Errorf("unmarshalling block type at index %d: %w", i, err)
-		}
-
-		var block ContentBlock
-		switch typeInfo.Type {
-		case BlockText:
-			var b TextBlock
-			if err := json.Unmarshal(raw, &b); err != nil {
-				return fmt.Errorf("unmarshalling text block at index %d: %w", i, err)
-			}
-			block = b
-		case BlockToolUse:
-			var b ToolUseBlock
-			if err := json.Unmarshal(raw, &b); err != nil {
-				return fmt.Errorf("unmarshalling tool_use block at index %d: %w", i, err)
-			}
-			block = b
-		case BlockToolResult:
-			var b ToolResultBlock
-			if err := json.Unmarshal(raw, &b); err != nil {
-				return fmt.Errorf("unmarshalling tool_result block at index %d: %w", i, err)
-			}
-			block = b
-		case BlockImage:
-			var b ImageBlock
-			if err := json.Unmarshal(raw, &b); err != nil {
-				return fmt.Errorf("unmarshalling image block at index %d: %w", i, err)
-			}
-			block = b
-		case BlockThinking:
-			var b ThinkingBlock
-			if err := json.Unmarshal(raw, &b); err != nil {
-				return fmt.Errorf("unmarshalling thinking block at index %d: %w", i, err)
-			}
-			block = b
-		case BlockAttachment:
-			var b AttachmentBlock
-			if err := json.Unmarshal(raw, &b); err != nil {
-				return fmt.Errorf("unmarshalling attachment block at index %d: %w", i, err)
-			}
-			block = b
-		default:
-			return fmt.Errorf("decoding block %q: %w", string(raw), ErrUnknownBlockType)
-		}
-		content[i] = block
+func NewService(q db.Querier, opts ...ServiceOption) Service {
+	s := &service{
+		Broker:   pubsub.NewBroker[Message](),
+		q:        q,
+		debounce: defaultUpdateDebounce,
+		pending:  make(map[string]*pendingState),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
 
-	m.ID = aux.ID
-	m.SessionID = aux.SessionID
-	m.Role = aux.Role
-	m.Content = content
-	m.ParentID = aux.ParentID
-	m.CreatedAt = aux.CreatedAt
-	m.Usage = aux.Usage
-
+func (s *service) Delete(ctx context.Context, id string) error {
+	message, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	err = s.q.DeleteMessage(ctx, message.ID)
+	if err != nil {
+		return err
+	}
+	// Drop any pending coalesced state for this ID. We never want to
+	// flush back over a deleted row.
+	s.mu.Lock()
+	if p, ok := s.pending[id]; ok {
+		if p.timer != nil {
+			p.timer.Stop()
+		}
+		delete(s.pending, id)
+	}
+	s.mu.Unlock()
+	// Clone the message before publishing to avoid race conditions with
+	// concurrent modifications to the Parts slice.
+	s.Publish(pubsub.DeletedEvent, message.Clone())
 	return nil
 }
 
-// AddAttachment appends an AttachmentBlock to the Message's content and returns
-// the appended block. It is a convenience over building the block literal and
-// appending it manually.
-func (m *Message) AddAttachment(a AttachmentBlock) AttachmentBlock {
-	m.Content = append(m.Content, a)
-	return a
+func (s *service) Create(ctx context.Context, sessionID string, params CreateMessageParams) (Message, error) {
+	if params.Role != Assistant {
+		params.Parts = append(params.Parts, Finish{
+			Reason: "stop",
+		})
+	}
+	partsJSON, err := marshalParts(params.Parts)
+	if err != nil {
+		return Message{}, err
+	}
+	isSummary := int64(0)
+	if params.IsSummaryMessage {
+		isSummary = 1
+	}
+	dbMessage, err := s.q.CreateMessage(ctx, db.CreateMessageParams{
+		ID:               uuid.New().String(),
+		SessionID:        sessionID,
+		Role:             string(params.Role),
+		Parts:            string(partsJSON),
+		Model:            sql.NullString{String: string(params.Model), Valid: true},
+		Provider:         sql.NullString{String: params.Provider, Valid: params.Provider != ""},
+		IsSummaryMessage: isSummary,
+	})
+	if err != nil {
+		return Message{}, err
+	}
+	message, err := s.fromDBItem(dbMessage)
+	if err != nil {
+		return Message{}, err
+	}
+	// Clone the message before publishing to avoid race conditions with
+	// concurrent modifications to the Parts slice.
+	s.Publish(pubsub.CreatedEvent, message.Clone())
+	return message, nil
 }
 
-// Attachments returns the AttachmentBlocks in the Message's content, in order.
-// It returns nil when the Message carries no attachments.
-func (m Message) Attachments() []AttachmentBlock {
-	var out []AttachmentBlock
-	for _, block := range m.Content {
-		if a, ok := block.(AttachmentBlock); ok {
-			out = append(out, a)
+func (s *service) DeleteSessionMessages(ctx context.Context, sessionID string) error {
+	messages, err := s.List(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	for _, message := range messages {
+		if message.SessionID == sessionID {
+			err = s.Delete(ctx, message.ID)
+			if err != nil {
+				return err
+			}
 		}
 	}
-	return out
+	return nil
+}
+
+// Update accepts a new state for a message and either flushes
+// synchronously (terminal updates, debounce <= 0) or buffers it until
+// the next debounce tick. See [Service] for the contract.
+func (s *service) Update(ctx context.Context, msg Message) error {
+	cloned := msg.Clone()
+
+	// Zero or negative debounce: flush every update synchronously. This
+	// preserves the pre-coalescing behaviour for tests and any caller
+	// that explicitly opted out via [WithDebounce].
+	if s.debounce <= 0 {
+		s.mu.Lock()
+		p, ok := s.pending[msg.ID]
+		if !ok {
+			p = &pendingState{}
+			s.pending[msg.ID] = p
+		}
+		p.latest = cloned
+		p.dirty = true
+		s.mu.Unlock()
+		return s.flushOne(ctx, msg.ID, true)
+	}
+
+	s.mu.Lock()
+	p, ok := s.pending[msg.ID]
+	if !ok {
+		p = &pendingState{}
+		s.pending[msg.ID] = p
+	}
+	p.latest = cloned
+	p.dirty = true
+
+	var prev *Message
+	if p.hasFlushed {
+		prev = &p.lastFlushed
+	}
+	terminal := shouldFlushNow(prev, &cloned)
+
+	if terminal {
+		if p.timer != nil {
+			p.timer.Stop()
+			p.timer = nil
+		}
+		s.mu.Unlock()
+		return s.flushOne(ctx, msg.ID, true)
+	}
+
+	// Debounce: schedule a single flush per pending state. If a flush
+	// is already running we let it finish; the trailing dirty bit will
+	// be picked up by the next Update or by Flush.
+	if p.timer == nil && !p.flushing {
+		id := msg.ID
+		p.timer = time.AfterFunc(s.debounce, func() {
+			// Detached from caller ctx so a cancelled stream context
+			// does not strand the buffered write.
+			_ = s.flushOne(context.Background(), id, false)
+		})
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// Flush implements [Service.Flush].
+func (s *service) Flush(ctx context.Context, id string) error {
+	return s.flushOne(ctx, id, true)
+}
+
+// FlushAll implements [Service.FlushAll]. It snapshots every ID with
+// outstanding work — either dirty buffered state or a flush already in
+// flight — then drains each one. Picking up in-flight IDs ensures
+// FlushAll cannot return while a timer-fired write is still mid-SQL,
+// which is what shutdown and session-switch callers rely on.
+func (s *service) FlushAll(ctx context.Context) error {
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.pending))
+	for id, p := range s.pending {
+		if p.dirty || p.flushing {
+			ids = append(ids, id)
+		}
+	}
+	s.mu.Unlock()
+	var firstErr error
+	for _, id := range ids {
+		if err := s.flushOne(ctx, id, true); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// flushOne drains a single message ID. When syncCaller is true the
+// caller is willing to wait through a concurrent in-flight flush so
+// that, on return, lastFlushed equals latest at the moment of return.
+// When false (timer-fired path) we bail if another flusher is already
+// running; that flusher will pick up the trailing dirty bit.
+//
+// Order matters: a sync caller must wait for any in-flight flush to
+// drain even when the buffer is currently clean — that in-flight
+// write has not yet updated the SQL row, so returning early would
+// violate the contract that on success lastFlushed reflects the most
+// recent state.
+func (s *service) flushOne(ctx context.Context, id string, syncCaller bool) error {
+	for {
+		s.mu.Lock()
+		p, ok := s.pending[id]
+		if !ok {
+			s.mu.Unlock()
+			return nil
+		}
+		if p.flushing {
+			if !syncCaller {
+				s.mu.Unlock()
+				return nil
+			}
+			s.mu.Unlock()
+			// Brief yield; in-flight write should land in <1ms typical.
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		if !p.dirty {
+			s.mu.Unlock()
+			return nil
+		}
+
+		if p.timer != nil {
+			p.timer.Stop()
+			p.timer = nil
+		}
+		snap := p.latest
+		// Decide whether this snapshot represents a terminal event
+		// against the prior baseline. We must do this before resetting
+		// dirty/flushing because shouldFlushNow looks at p.lastFlushed
+		// (which is what was on disk before this write).
+		var prev *Message
+		if p.hasFlushed {
+			prev = &p.lastFlushed
+		}
+		isTerminal := shouldFlushNow(prev, &snap)
+		p.flushing = true
+		p.dirty = false
+		s.mu.Unlock()
+
+		err := s.write(ctx, snap)
+
+		s.mu.Lock()
+		p.flushing = false
+		if err == nil {
+			p.lastFlushed = snap
+			p.hasFlushed = true
+		} else {
+			// Restore dirty so the next caller retries.
+			p.dirty = true
+		}
+		// If a delta arrived during the SQL write and we are a sync
+		// caller, the user expects that delta to land too.
+		wasDirty := p.dirty
+		s.mu.Unlock()
+
+		if err != nil {
+			return err
+		}
+
+		// Terminal events — message finished, tool call added or
+		// finished, reasoning ended — use the bounded must-deliver
+		// path so they never get dropped under channel contention.
+		if isTerminal {
+			s.PublishMustDeliver(ctx, pubsub.UpdatedEvent, snap)
+		} else {
+			s.Publish(pubsub.UpdatedEvent, snap)
+		}
+
+		if wasDirty && syncCaller {
+			continue
+		}
+		return nil
+	}
+}
+
+// write performs the unguarded SQL write + UpdatedAt stamp. Caller
+// owns publishing.
+func (s *service) write(ctx context.Context, msg Message) error {
+	parts, err := marshalParts(msg.Parts)
+	if err != nil {
+		return err
+	}
+	finishedAt := sql.NullInt64{}
+	if f := msg.FinishPart(); f != nil {
+		finishedAt.Int64 = f.Time
+		finishedAt.Valid = true
+	}
+	if err := s.q.UpdateMessage(ctx, db.UpdateMessageParams{
+		ID:         msg.ID,
+		Parts:      string(parts),
+		FinishedAt: finishedAt,
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// shouldFlushNow returns true when next represents a structural
+// change that must not be silently coalesced: the message just
+// finished, the tool-call set grew, a tool call transitioned to
+// finished, or reasoning just finished. prev is the last-flushed
+// snapshot (or nil if no write has landed yet).
+func shouldFlushNow(prev, next *Message) bool {
+	if next.IsFinished() {
+		return true
+	}
+
+	var prevCalls []ToolCall
+	var prevReasoningFinishedAt int64
+	if prev != nil {
+		prevCalls = prev.ToolCalls()
+		prevReasoningFinishedAt = prev.ReasoningContent().FinishedAt
+	}
+	nextCalls := next.ToolCalls()
+	if len(nextCalls) != len(prevCalls) {
+		return true
+	}
+	for i := range nextCalls {
+		// Bounds-safe: lengths are equal here.
+		if nextCalls[i].Finished != prevCalls[i].Finished {
+			return true
+		}
+		// A tool call's input only matters once it has landed (Finished
+		// flips true). Earlier deltas to Input are debounced with the
+		// rest of the streaming state.
+	}
+	if next.ReasoningContent().FinishedAt > 0 && prevReasoningFinishedAt == 0 {
+		return true
+	}
+	return false
+}
+
+func (s *service) Get(ctx context.Context, id string) (Message, error) {
+	dbMessage, err := s.q.GetMessage(ctx, id)
+	if err != nil {
+		return Message{}, err
+	}
+	return s.fromDBItem(dbMessage)
+}
+
+func (s *service) List(ctx context.Context, sessionID string) ([]Message, error) {
+	dbMessages, err := s.q.ListMessagesBySession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		messages[i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+func (s *service) ListUserMessages(ctx context.Context, sessionID string) ([]Message, error) {
+	dbMessages, err := s.q.ListUserMessagesBySession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		messages[i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+func (s *service) ListAllUserMessages(ctx context.Context) ([]Message, error) {
+	dbMessages, err := s.q.ListAllUserMessages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]Message, len(dbMessages))
+	for i, dbMessage := range dbMessages {
+		messages[i], err = s.fromDBItem(dbMessage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return messages, nil
+}
+
+func (s *service) fromDBItem(item db.Message) (Message, error) {
+	parts, err := unmarshalParts([]byte(item.Parts))
+	if err != nil {
+		return Message{}, err
+	}
+	return Message{
+		ID:               item.ID,
+		SessionID:        item.SessionID,
+		Role:             MessageRole(item.Role),
+		Parts:            parts,
+		Model:            item.Model.String,
+		Provider:         item.Provider.String,
+		CreatedAt:        item.CreatedAt,
+		UpdatedAt:        item.UpdatedAt,
+		IsSummaryMessage: item.IsSummaryMessage != 0,
+	}, nil
+}
+
+type partType string
+
+const (
+	reasoningType    partType = "reasoning"
+	textType         partType = "text"
+	imageURLType     partType = "image_url"
+	binaryType       partType = "binary"
+	toolCallType     partType = "tool_call"
+	toolResultType   partType = "tool_result"
+	finishType       partType = "finish"
+	shellCommandType partType = "shell_command"
+)
+
+type partWrapper struct {
+	Type partType    `json:"type"`
+	Data ContentPart `json:"data"`
+}
+
+func marshalParts(parts []ContentPart) ([]byte, error) {
+	wrappedParts := make([]partWrapper, len(parts))
+
+	for i, part := range parts {
+		var typ partType
+
+		switch part.(type) {
+		case ReasoningContent:
+			typ = reasoningType
+		case TextContent:
+			typ = textType
+		case ImageURLContent:
+			typ = imageURLType
+		case BinaryContent:
+			typ = binaryType
+		case ToolCall:
+			typ = toolCallType
+		case ToolResult:
+			typ = toolResultType
+		case Finish:
+			typ = finishType
+		case ShellCommand:
+			typ = shellCommandType
+		default:
+			return nil, fmt.Errorf("unknown part type: %T", part)
+		}
+
+		wrappedParts[i] = partWrapper{
+			Type: typ,
+			Data: part,
+		}
+	}
+	return json.Marshal(wrappedParts)
+}
+
+func unmarshalParts(data []byte) ([]ContentPart, error) {
+	temp := []json.RawMessage{}
+
+	if err := json.Unmarshal(data, &temp); err != nil {
+		return nil, err
+	}
+
+	parts := make([]ContentPart, 0)
+
+	for _, rawPart := range temp {
+		var wrapper struct {
+			Type partType        `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}
+
+		if err := json.Unmarshal(rawPart, &wrapper); err != nil {
+			return nil, err
+		}
+
+		switch wrapper.Type {
+		case reasoningType:
+			part := ReasoningContent{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		case textType:
+			part := TextContent{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		case imageURLType:
+			part := ImageURLContent{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		case binaryType:
+			part := BinaryContent{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		case toolCallType:
+			part := ToolCall{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		case toolResultType:
+			part := ToolResult{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		case finishType:
+			part := Finish{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		case shellCommandType:
+			part := ShellCommand{}
+			if err := json.Unmarshal(wrapper.Data, &part); err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
+		default:
+			return nil, fmt.Errorf("unknown part type: %s", wrapper.Type)
+		}
+	}
+
+	return parts, nil
 }

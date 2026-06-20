@@ -5,257 +5,519 @@ import (
 	"errors"
 	"testing"
 
+	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/fantasy"
+	"charm.land/fantasy/providers/anthropic"
+	"charm.land/fantasy/providers/bedrock"
 	"github.com/arbazkhan971/bharatcode/internal/config"
-	"github.com/arbazkhan971/bharatcode/internal/llm"
-	"github.com/arbazkhan971/bharatcode/internal/pubsub"
-	"github.com/arbazkhan971/bharatcode/internal/tools"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestCombinedToolsListDeduplicatesExtensionTools asserts that when an
-// extension tool shares a name with a base tool, combinedTools.List() returns
-// exactly one entry for that name — the base tool — and the extension tool is
-// silently dropped (with a warning). This prevents duplicate tool definitions
-// from reaching provider requests, which would cause 400 errors or misrouting.
-func TestCombinedToolsListDeduplicatesExtensionTools(t *testing.T) {
-	// Use a real tools.Registry so combinedTools.base accepts it.
-	// NewRegistry registers built-in tools including "bash", which is the base
-	// tool whose name we want to collide with.
-	baseReg := tools.NewRegistry(tools.Dependencies{})
-
-	// Look up the base "bash" tool's description to confirm the surviving entry
-	// is the base one, not the extension one.
-	baseBashTool, ok := baseReg.Get("bash")
-	require.True(t, ok, "base registry must contain a 'bash' tool")
-	baseBashDesc := baseBashTool.Description()
-
-	// An extension tool also named "bash" — the collision case.
-	extBash := &recordingTool{name: "bash", desc: "extension bash (must not appear)"}
-
-	// A second extension tool with a unique name must still appear.
-	extUnique := &recordingTool{name: "ext_unique", desc: "unique extension tool"}
-
-	ct := combinedTools{
-		base:  baseReg,
-		extra: []tools.Tool{extBash, extUnique},
-	}
-
-	listed := ct.List()
-
-	// Count how many tools named "bash" appear in the list.
-	var bashCount int
-	var foundBashDesc string
-	for _, tool := range listed {
-		if tool.Name() == "bash" {
-			bashCount++
-			foundBashDesc = tool.Description()
-		}
-	}
-	require.Equal(t, 1, bashCount,
-		"combinedTools.List must return exactly one tool named %q; got %d", "bash", bashCount)
-	require.Equal(t, baseBashDesc, foundBashDesc,
-		"the surviving %q tool must be the base tool, not the extension tool", "bash")
-
-	// The unique extension tool must still be present.
-	var hasUnique bool
-	for _, tool := range listed {
-		if tool.Name() == "ext_unique" {
-			hasUnique = true
-		}
-	}
-	require.True(t, hasUnique,
-		"combinedTools.List must still include extension tools that do not collide with base tools")
+// mockSessionAgent is a minimal mock for the SessionAgent interface.
+type mockSessionAgent struct {
+	model     Model
+	runFunc   func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error)
+	cancelled []string
 }
 
-// namedProvider is a minimal fake that exposes a fixed model list. It is used
-// to prove provider selection rather than stream behaviour.
-type namedProvider struct {
-	name   string
-	models []llm.Model
+func (m *mockSessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+	return m.runFunc(ctx, call)
 }
 
-func (p *namedProvider) Name() string { return p.name }
-func (p *namedProvider) Stream(_ context.Context, _ llm.Request) (<-chan llm.Event, error) {
-	ch := make(chan llm.Event)
-	close(ch)
-	return ch, nil
+func (m *mockSessionAgent) BeginAccepted(sessionID string) *AcceptedRun {
+	return &AcceptedRun{sessionID: sessionID}
 }
-func (p *namedProvider) Models() []llm.Model  { return p.models }
-func (p *namedProvider) SupportsTools() bool  { return false }
-func (p *namedProvider) SupportsImages() bool { return false }
 
-// newCoordinatorWithProviders builds a started Coordinator wired with the
-// supplied provider map. The "coder" agent defaults to the first model of the
-// first provider (alphabetical), which is how the production default config
-// starts up when the user has not yet configured a preferred model.
-func newCoordinatorWithProviders(t *testing.T, providers map[string]llm.Provider) *Coordinator {
-	t.Helper()
-	coord, err := NewCoordinator(nil, Dependencies{
-		Tools:     tools.NewRegistry(tools.Dependencies{}),
-		Sessions:  testRepo(t),
-		Providers: providers,
-	})
+func (m *mockSessionAgent) Model() Model                        { return m.model }
+func (m *mockSessionAgent) SetModels(large, small Model)        {}
+func (m *mockSessionAgent) SetTools(tools []fantasy.AgentTool)  {}
+func (m *mockSessionAgent) SetSystemPrompt(systemPrompt string) {}
+func (m *mockSessionAgent) Cancel(sessionID string) {
+	m.cancelled = append(m.cancelled, sessionID)
+}
+func (m *mockSessionAgent) CancelAll()                                  {}
+func (m *mockSessionAgent) IsSessionBusy(sessionID string) bool         { return false }
+func (m *mockSessionAgent) IsBusy() bool                                { return false }
+func (m *mockSessionAgent) QueuedPrompts(sessionID string) int          { return 0 }
+func (m *mockSessionAgent) QueuedPromptsList(sessionID string) []string { return nil }
+func (m *mockSessionAgent) ClearQueue(sessionID string)                 {}
+func (m *mockSessionAgent) Summarize(context.Context, string, fantasy.ProviderOptions) error {
+	return nil
+}
+func (m *mockSessionAgent) GenerateTitle(context.Context, string, string) {}
+
+// newTestCoordinator creates a minimal coordinator for unit testing runSubAgent.
+func newTestCoordinator(t *testing.T, env fakeEnv, providerID string, providerCfg config.ProviderConfig) *coordinator {
+	cfg, err := config.Init(env.workingDir, "", false)
 	require.NoError(t, err)
-	require.NoError(t, coord.Start(context.Background()))
-	return coord
+	cfg.Config().Providers.Set(providerID, providerCfg)
+	return &coordinator{
+		cfg:      cfg,
+		sessions: env.sessions,
+		messages: env.messages,
+	}
 }
 
-// TestSetActiveModelRebindsCoderAgent asserts that SetActiveModel updates the
-// stored provider and model on the "coder" agentDef, so a subsequent Agent()
-// call returns a Loop bound to the new provider.
-func TestSetActiveModelRebindsCoderAgent(t *testing.T) {
-	deepseek := &namedProvider{
-		name:   "deepseek",
-		models: []llm.Model{{ID: "deepseek-chat", Provider: "deepseek", ContextWindow: 65536}},
+// newMockAgent creates a mockSessionAgent with the given provider and run function.
+func newMockAgent(providerID string, maxTokens int64, runFunc func(context.Context, SessionAgentCall) (*fantasy.AgentResult, error)) *mockSessionAgent {
+	return &mockSessionAgent{
+		model: Model{
+			CatwalkCfg: catwalk.Model{
+				DefaultMaxTokens: maxTokens,
+			},
+			ModelCfg: config.SelectedModel{
+				Provider: providerID,
+			},
+		},
+		runFunc: runFunc,
 	}
-	chatgpt := &namedProvider{
-		name:   "chatgpt",
-		models: []llm.Model{{ID: "gpt-5.1-codex", Provider: "chatgpt", ContextWindow: 128000}},
-	}
-
-	coord := newCoordinatorWithProviders(t, map[string]llm.Provider{
-		"chatgpt":  chatgpt,
-		"deepseek": deepseek,
-	})
-
-	// Before activation the coder agent resolves to one of the two providers
-	// (whichever the alphabetical fallback picked; irrelevant for this assertion).
-	// Activate gpt-5.1-codex and assert the returned provider is the chatgpt one.
-	provider, err := coord.SetActiveModel("coder", "gpt-5.1-codex")
-	require.NoError(t, err)
-	require.Equal(t, "chatgpt", provider.Name(),
-		"SetActiveModel should return the chatgpt provider for gpt-5.1-codex, not deepseek")
-
-	// The stored agentDef must also reflect the change so a subsequent Agent()
-	// call constructs a Loop with the correct provider.
-	loop, err := coord.Agent("coder")
-	require.NoError(t, err)
-	require.Equal(t, "chatgpt", loop.cfg.Provider.Name(),
-		"Agent() should return a Loop bound to the chatgpt provider after SetActiveModel")
-	require.Equal(t, "gpt-5.1-codex", loop.cfg.Model,
-		"Agent() should return a Loop with the correct model id after SetActiveModel")
 }
 
-// TestSetActiveModelErrorOnUnknownModel asserts that SetActiveModel returns an
-// error wrapping llm.ErrModelNotFound when the requested model id is not
-// served by any configured provider.
-func TestSetActiveModelErrorOnUnknownModel(t *testing.T) {
-	deepseek := &namedProvider{
-		name:   "deepseek",
-		models: []llm.Model{{ID: "deepseek-chat", Provider: "deepseek", ContextWindow: 65536}},
-	}
-	coord := newCoordinatorWithProviders(t, map[string]llm.Provider{"deepseek": deepseek})
-
-	_, err := coord.SetActiveModel("coder", "gpt-5.1-codex")
-	require.Error(t, err)
-	require.True(t, errors.Is(err, llm.ErrModelNotFound),
-		"SetActiveModel should wrap ErrModelNotFound for an unrecognised model id")
-}
-
-// TestSetActiveModelErrorOnUnknownAgent asserts that SetActiveModel returns an
-// error wrapping ErrUnknownAgent when the named agent does not exist.
-func TestSetActiveModelErrorOnUnknownAgent(t *testing.T) {
-	deepseek := &namedProvider{
-		name:   "deepseek",
-		models: []llm.Model{{ID: "deepseek-chat", Provider: "deepseek", ContextWindow: 65536}},
-	}
-	coord := newCoordinatorWithProviders(t, map[string]llm.Provider{"deepseek": deepseek})
-
-	// "deepseek-chat" exists but "ghost" agent does not.
-	_, err := coord.SetActiveModel("ghost", "deepseek-chat")
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrUnknownAgent),
-		"SetActiveModel should wrap ErrUnknownAgent for an unrecognised agent name")
-}
-
-// TestLoopSetModelRebindsProvider asserts that Loop.SetModel swaps the
-// provider and model seen by subsequent callProvider invocations. The test
-// constructs two providers, starts the loop on the first, calls SetModel to
-// switch to the second, then runs a turn and checks which provider was used.
-func TestLoopSetModelRebindsProvider(t *testing.T) {
-	// provider A — the startup default
-	providerA := &scriptProvider{
-		scripts: [][]llm.Event{
-			{llm.DeltaTextEvent{Text: "from-A"}, llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}}},
+// agentResultWithText creates a minimal AgentResult with the given text response.
+func agentResultWithText(text string) *fantasy.AgentResult {
+	return &fantasy.AgentResult{
+		Response: fantasy.Response{
+			Content: fantasy.ResponseContent{
+				fantasy.TextContent{Text: text},
+			},
 		},
 	}
-	// provider B — the one we switch to
-	providerB := &scriptProvider{
-		scripts: [][]llm.Event{
-			{llm.DeltaTextEvent{Text: "from-B"}, llm.EndEvent{Usage: llm.Usage{InputTokens: 1, OutputTokens: 1}}},
-		},
-		models: []llm.Model{{ID: "gpt-5.1-codex", Provider: "chatgpt", ContextWindow: 128000, SupportsTools: true}},
-	}
-
-	repo := testRepo(t)
-	loop := New(Config{
-		Name:     "coder",
-		Model:    "fake-model",
-		Provider: providerA,
-		Tools:    newFakeRegistry(),
-		Sessions: repo,
-		Bus:      pubsub.NewTopic[Event]("coord-test", 16),
-	})
-
-	// Switch to provider B before the first (and only) Run.
-	loop.SetModel("gpt-5.1-codex", providerB)
-
-	require.Equal(t, "gpt-5.1-codex", loop.cfg.Model,
-		"cfg.Model must reflect the new model id after SetModel")
-	// cfg.Provider must point at providerB (not providerA).
-	require.Same(t, providerB, loop.cfg.Provider,
-		"cfg.Provider must be replaced with the new provider after SetModel")
-
-	// Run one turn and confirm provider B was called (not A).
-	sessionID := testSession(t, repo)
-	err := loop.Run(context.Background(), sessionID, userMessage("hello"))
-	require.NoError(t, err)
-
-	providerA.mu.Lock()
-	calledA := len(providerA.reqs)
-	providerA.mu.Unlock()
-	require.Equal(t, 0, calledA, "provider A should not have been called after SetModel switch")
-
-	providerB.mu.Lock()
-	calledB := len(providerB.reqs)
-	providerB.mu.Unlock()
-	require.Equal(t, 1, calledB, "provider B should have been called exactly once after SetModel switch")
 }
 
-// TestDefaultConfigChatGPTProviderResolvesGPT51Codex asserts that the embedded
-// default config correctly maps gpt-5.1-codex to the chatgpt provider — not to
-// deepseek or any other provider — so the registration layer is sound and the
-// routing bug would only manifest if the TUI activation path skips rebinding.
-func TestDefaultConfigChatGPTProviderResolvesGPT51Codex(t *testing.T) {
-	cfg := config.Default()
+func TestRunSubAgent(t *testing.T) {
+	const providerID = "test-provider"
+	providerCfg := config.ProviderConfig{ID: providerID}
 
-	// Wire up the Coordinator over the default config's provider/model catalog.
-	// We do not need real API keys or network access: resolveProvider only
-	// matches model IDs against provider.Models() lists, which come from the
-	// config; no HTTP round-trips are made.
-	providers := make(map[string]llm.Provider)
-	for _, p := range cfg.Providers {
-		if p.Disabled {
-			continue
-		}
-		// Use namedProvider stubs to avoid constructing real HTTP clients.
-		var models []llm.Model
-		for _, id := range p.Models {
-			models = append(models, llm.Model{ID: id, Provider: p.Name})
-		}
-		providers[p.Name] = &namedProvider{name: p.Name, models: models}
-	}
+	t.Run("happy path", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
 
-	coord, err := NewCoordinator(cfg, Dependencies{
-		Tools:     tools.NewRegistry(tools.Dependencies{}),
-		Sessions:  testRepo(t),
-		Providers: providers,
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			assert.Equal(t, "do something", call.Prompt)
+			assert.Equal(t, int64(4096), call.MaxOutputTokens)
+			return agentResultWithText("done"), nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "do something",
+			SessionTitle:   "Test Session",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "done", resp.Content)
+		assert.False(t, resp.IsError)
 	})
-	require.NoError(t, err)
-	require.NoError(t, coord.Start(context.Background()))
 
-	provider, err := coord.SetActiveModel("coder", "gpt-5.1-codex")
-	require.NoError(t, err, "gpt-5.1-codex must resolve to a provider in the default config")
-	require.Equal(t, "chatgpt", provider.Name(),
-		"gpt-5.1-codex must route to the chatgpt provider, not deepseek or any other provider")
+	t.Run("cost update failure preserves output", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return agentResultWithText("output before cost failure"), nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      "missing-parent-session",
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "output before cost failure", resp.Content)
+	})
+
+	t.Run("response with text returns it", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return agentResultWithText("the answer"), nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.False(t, resp.IsError)
+		assert.Equal(t, "the answer", resp.Content)
+	})
+
+	t.Run("nil result returns error response", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return nil, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.True(t, resp.IsError)
+		assert.Equal(t, "Sub-agent completed but produced no text output.", resp.Content)
+	})
+
+	t.Run("empty result returns error response", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return &fantasy.AgentResult{}, nil
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.True(t, resp.IsError)
+		assert.Equal(t, "Sub-agent completed but produced no text output.", resp.Content)
+	})
+
+	t.Run("ModelCfg.MaxTokens overrides default", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := &mockSessionAgent{
+			model: Model{
+				CatwalkCfg: catwalk.Model{
+					DefaultMaxTokens: 4096,
+				},
+				ModelCfg: config.SelectedModel{
+					Provider:  providerID,
+					MaxTokens: 8192,
+				},
+			},
+			runFunc: func(_ context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+				assert.Equal(t, int64(8192), call.MaxOutputTokens)
+				return agentResultWithText("ok"), nil
+			},
+		}
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "ok", resp.Content)
+	})
+
+	t.Run("session creation failure with canceled context", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, nil)
+
+		// Use a canceled context to trigger CreateTaskSession failure.
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		_, err = coord.runSubAgent(ctx, subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("provider not configured", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		// Agent references a provider that doesn't exist in config.
+		agent := newMockAgent("unknown-provider", 4096, nil)
+
+		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "model provider not configured")
+	})
+
+	t.Run("agent run error returns error response", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return nil, errors.New("provider request failed")
+		})
+
+		resp, err := coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		// runSubAgent returns (errorResponse, nil) when agent.Run fails — not a Go error.
+		require.NoError(t, err)
+		assert.True(t, resp.IsError)
+		assert.Equal(t, "Failed to generate response: provider request failed", resp.Content)
+	})
+
+	t.Run("session setup callback is invoked", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		var setupCalledWith string
+		agent := newMockAgent(providerID, 4096, func(_ context.Context, _ SessionAgentCall) (*fantasy.AgentResult, error) {
+			return agentResultWithText("ok"), nil
+		})
+
+		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+			SessionSetup: func(sessionID string) {
+				setupCalledWith = sessionID
+			},
+		})
+		require.NoError(t, err)
+		assert.NotEmpty(t, setupCalledWith, "SessionSetup should have been called")
+	})
+
+	t.Run("cost propagation to parent session", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+
+		parentSession, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		agent := newMockAgent(providerID, 4096, func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+			// Simulate the agent incurring cost by updating the child session.
+			childSession, err := env.sessions.Get(ctx, call.SessionID)
+			if err != nil {
+				return nil, err
+			}
+			childSession.Cost = 0.05
+			_, err = env.sessions.Save(ctx, childSession)
+			if err != nil {
+				return nil, err
+			}
+			return agentResultWithText("ok"), nil
+		})
+
+		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			SessionID:      parentSession.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "test",
+			SessionTitle:   "Test",
+		})
+		require.NoError(t, err)
+
+		updated, err := env.sessions.Get(t.Context(), parentSession.ID)
+		require.NoError(t, err)
+		assert.InDelta(t, 0.05, updated.Cost, 1e-9)
+	})
+}
+
+func TestUpdateParentSessionCost(t *testing.T) {
+	t.Run("accumulates cost correctly", func(t *testing.T) {
+		env := testEnv(t)
+		cfg, err := config.Init(env.workingDir, "", false)
+		require.NoError(t, err)
+		coord := &coordinator{cfg: cfg, sessions: env.sessions}
+
+		parent, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		child, err := env.sessions.CreateTaskSession(t.Context(), "tool-1", parent.ID, "Child")
+		require.NoError(t, err)
+
+		// Set child cost.
+		child.Cost = 0.10
+		_, err = env.sessions.Save(t.Context(), child)
+		require.NoError(t, err)
+
+		err = coord.updateParentSessionCost(t.Context(), child.ID, parent.ID)
+		require.NoError(t, err)
+
+		updated, err := env.sessions.Get(t.Context(), parent.ID)
+		require.NoError(t, err)
+		assert.InDelta(t, 0.10, updated.Cost, 1e-9)
+	})
+
+	t.Run("accumulates multiple child costs", func(t *testing.T) {
+		env := testEnv(t)
+		cfg, err := config.Init(env.workingDir, "", false)
+		require.NoError(t, err)
+		coord := &coordinator{cfg: cfg, sessions: env.sessions}
+
+		parent, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		child1, err := env.sessions.CreateTaskSession(t.Context(), "tool-1", parent.ID, "Child1")
+		require.NoError(t, err)
+		child1.Cost = 0.05
+		_, err = env.sessions.Save(t.Context(), child1)
+		require.NoError(t, err)
+
+		child2, err := env.sessions.CreateTaskSession(t.Context(), "tool-2", parent.ID, "Child2")
+		require.NoError(t, err)
+		child2.Cost = 0.03
+		_, err = env.sessions.Save(t.Context(), child2)
+		require.NoError(t, err)
+
+		err = coord.updateParentSessionCost(t.Context(), child1.ID, parent.ID)
+		require.NoError(t, err)
+		err = coord.updateParentSessionCost(t.Context(), child2.ID, parent.ID)
+		require.NoError(t, err)
+
+		updated, err := env.sessions.Get(t.Context(), parent.ID)
+		require.NoError(t, err)
+		assert.InDelta(t, 0.08, updated.Cost, 1e-9)
+	})
+
+	t.Run("child session not found", func(t *testing.T) {
+		env := testEnv(t)
+		cfg, err := config.Init(env.workingDir, "", false)
+		require.NoError(t, err)
+		coord := &coordinator{cfg: cfg, sessions: env.sessions}
+
+		parent, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		err = coord.updateParentSessionCost(t.Context(), "non-existent", parent.ID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "get child session")
+	})
+
+	t.Run("parent session not found", func(t *testing.T) {
+		env := testEnv(t)
+		cfg, err := config.Init(env.workingDir, "", false)
+		require.NoError(t, err)
+		coord := &coordinator{cfg: cfg, sessions: env.sessions}
+
+		parent, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+		child, err := env.sessions.CreateTaskSession(t.Context(), "tool-1", parent.ID, "Child")
+		require.NoError(t, err)
+
+		err = coord.updateParentSessionCost(t.Context(), child.ID, "non-existent")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "get parent session")
+	})
+
+	t.Run("zero cost handled correctly", func(t *testing.T) {
+		env := testEnv(t)
+		cfg, err := config.Init(env.workingDir, "", false)
+		require.NoError(t, err)
+		coord := &coordinator{cfg: cfg, sessions: env.sessions}
+
+		parent, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+		child, err := env.sessions.CreateTaskSession(t.Context(), "tool-1", parent.ID, "Child")
+		require.NoError(t, err)
+
+		err = coord.updateParentSessionCost(t.Context(), child.ID, parent.ID)
+		require.NoError(t, err)
+
+		updated, err := env.sessions.Get(t.Context(), parent.ID)
+		require.NoError(t, err)
+		assert.InDelta(t, 0.0, updated.Cost, 1e-9)
+	})
+}
+
+func TestGetProviderOptionsReasoningEffort(t *testing.T) {
+	// Bedrock is Fantasy's Anthropic under a different provider name; options
+	// must land under anthropic.Name so the Anthropic language model picks them up.
+	tests := []struct {
+		name         string
+		providerType catwalk.Type
+	}{
+		{"anthropic honors reasoning_effort", catwalk.Type(anthropic.Name)},
+		{"bedrock honors reasoning_effort", catwalk.Type(bedrock.Name)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			model := Model{
+				CatwalkCfg: catwalk.Model{
+					ID:              "claude-opus-4-7",
+					CanReason:       true,
+					ReasoningLevels: []string{"max"},
+				},
+				ModelCfg: config.SelectedModel{
+					Provider:        "test",
+					ReasoningEffort: "max",
+				},
+			}
+			providerCfg := config.ProviderConfig{ID: "test", Type: tc.providerType}
+
+			opts := getProviderOptions(model, providerCfg)
+
+			raw, ok := opts[anthropic.Name]
+			require.True(t, ok, "options should be keyed under anthropic.Name for type %q", tc.providerType)
+			parsed, ok := raw.(*anthropic.ProviderOptions)
+			require.True(t, ok)
+			require.NotNil(t, parsed.Effort)
+			assert.Equal(t, anthropic.Effort("max"), *parsed.Effort)
+		})
+	}
 }

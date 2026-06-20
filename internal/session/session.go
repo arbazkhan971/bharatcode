@@ -1,778 +1,368 @@
-// Package session persists conversation threads.
 package session
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/db"
-	"github.com/arbazkhan971/bharatcode/internal/db/sqlc"
-	"github.com/arbazkhan971/bharatcode/internal/message"
+	"github.com/arbazkhan971/bharatcode/internal/event"
+	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/google/uuid"
+	"github.com/zeebo/xxh3"
 )
 
-// Session is one persisted conversation thread.
+type TodoStatus string
+
+const (
+	TodoStatusPending    TodoStatus = "pending"
+	TodoStatusInProgress TodoStatus = "in_progress"
+	TodoStatusCompleted  TodoStatus = "completed"
+)
+
+// HashID returns the XXH3 hash of a session ID (UUID) as a hex string.
+func HashID(id string) string {
+	h := xxh3.New()
+	h.WriteString(id)
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+type Todo struct {
+	Content    string     `json:"content"`
+	Status     TodoStatus `json:"status"`
+	ActiveForm string     `json:"active_form"`
+}
+
+// HasIncompleteTodos returns true if there are any non-completed todos.
+func HasIncompleteTodos(todos []Todo) bool {
+	for _, todo := range todos {
+		if todo.Status != TodoStatusCompleted {
+			return true
+		}
+	}
+	return false
+}
+
 type Session struct {
-	ID           string    `json:"id"`
-	ProjectPath  string    `json:"project_path"`
-	Title        string    `json:"title"`
-	Model        string    `json:"model"` // Model ID (e.g. "deepseek-chat", "kimi-k2").
-	Agent        string    `json:"agent"` // Named agent ("coder", "task", ...).
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	MessageCount int       `json:"message_count"`
-	// OriginSessionID is the ID of the session this one was forked from, or
-	// nil for sessions created directly. It is populated by Fork on the
-	// returned session and may be read back with OriginOf.
-	OriginSessionID *string `json:"origin_session_id,omitempty"`
+	ID               string
+	ParentSessionID  string
+	Title            string
+	MessageCount     int64
+	PromptTokens     int64
+	CompletionTokens int64
+	EstimatedUsage   bool
+	SummaryMessageID string
+	Cost             float64
+	Todos            []Todo
+	CreatedAt        int64
+	UpdatedAt        int64
 }
 
-// ListFilter narrows a Repo.List call.
-// A zero ListFilter returns every non-archived session, newest first.
-type ListFilter struct {
-	ProjectPath string    // Exact-match filter; empty disables.
-	Since       time.Time // UpdatedAt >= Since; zero disables.
-	Limit       int       // 0 means no limit.
-	// IncludeArchived, when true, makes List return archived sessions
-	// alongside active ones. When false (the default), archived sessions are
-	// hidden. See Archive for how a session becomes archived.
-	IncludeArchived bool
+type Service interface {
+	pubsub.Subscriber[Session]
+	Create(ctx context.Context, title string) (Session, error)
+	CreateTitleSession(ctx context.Context, parentSessionID string) (Session, error)
+	CreateTaskSession(ctx context.Context, toolCallID, parentSessionID, title string) (Session, error)
+	Get(ctx context.Context, id string) (Session, error)
+	GetLast(ctx context.Context) (Session, error)
+	List(ctx context.Context) ([]Session, error)
+	Save(ctx context.Context, session Session) (Session, error)
+	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
+	Rename(ctx context.Context, id string, title string) error
+	Delete(ctx context.Context, id string) error
+
+	// Agent tool session management
+	CreateAgentToolSessionID(messageID, toolCallID string) string
+	ParseAgentToolSessionID(sessionID string) (messageID string, toolCallID string, ok bool)
+	IsAgentToolSession(sessionID string) bool
 }
 
-// Repo is the public handle for session storage. All methods take
-// a context and return wrapped errors. Repo is safe for concurrent
-// use by multiple goroutines.
-type Repo struct {
-	database *db.DB
-	mu       sync.Mutex
+type service struct {
+	*pubsub.Broker[Session]
+	db *sql.DB
+	q  *db.Queries
 
-	// archiveMu guards lazy creation of the session_archive side table;
-	// archiveReady is set once the CREATE TABLE has succeeded so the DDL runs
-	// at most once per Repo. See archive.go.
-	archiveMu    sync.Mutex
-	archiveReady bool
-
-	// tagsMu guards lazy creation of the session_tags side table; tagsReady is
-	// set once the CREATE TABLE has succeeded so the DDL runs at most once per
-	// Repo. See tags.go.
-	tagsMu    sync.Mutex
-	tagsReady bool
-
-	// entriesMu guards lazy creation of the session_entries side table;
-	// entriesReady is set once the CREATE TABLE has succeeded so the DDL runs at
-	// most once per Repo. See tree.go.
-	entriesMu    sync.Mutex
-	entriesReady bool
+	// Estimated usage stays in memory so fetch-modify-save paths (e.g.,
+	// updating todos or parent-session cost) do not rebuild a session from
+	// SQLite and incorrectly clear the UI "~" marker.
+	estimatedUsageMu sync.RWMutex
+	estimatedUsage   map[string]bool
 }
 
-// Sentinel errors returned by Repo methods.
-var (
-	ErrNotFound      = errors.New("session not found")
-	ErrAlreadyExists = errors.New("session already exists")
-)
-
-// NewRepo constructs a Repo backed by the given SQLite handle.
-func NewRepo(database *db.DB) *Repo {
-	return &Repo{
-		database: database,
-	}
-}
-
-// Create inserts s. s.ID, s.CreatedAt, and s.UpdatedAt are populated by
-// Create if zero. Returns ErrAlreadyExists on PK collision.
-func (r *Repo) Create(ctx context.Context, s *Session) error {
-	if s == nil {
-		return fmt.Errorf("creating session: session is nil")
-	}
-	if s.ID == "" {
-		id, err := newUUID()
-		if err != nil {
-			return fmt.Errorf("creating session: %w", err)
-		}
-		s.ID = id
-	}
-	now := time.Now().UTC()
-	if s.CreatedAt.IsZero() {
-		s.CreatedAt = now
-	}
-	if s.UpdatedAt.IsZero() {
-		s.UpdatedAt = now
-	}
-	if s.Title == "" {
-		s.Title = "New session"
-	}
-
-	params := sqlc.CreateSessionParams{
-		ID:           s.ID,
-		ProjectPath:  s.ProjectPath,
-		Title:        s.Title,
-		Model:        s.Model,
-		Agent:        s.Agent,
-		CreatedAt:    s.CreatedAt.UTC().Unix(),
-		UpdatedAt:    s.UpdatedAt.UTC().Unix(),
-		MessageCount: int64(s.MessageCount),
-	}
-
-	_, err := r.database.Queries.CreateSession(ctx, params)
+func (s *service) Create(ctx context.Context, title string) (Session, error) {
+	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
+		ID:    uuid.New().String(),
+		Title: title,
+	})
 	if err != nil {
-		// Unique constraint failure on the primary key ID is the only constraint
-		// that can fail in sessions table since other fields are unconstrained.
-		if strings.Contains(err.Error(), "constraint failed") || strings.Contains(err.Error(), "UNIQUE") {
-			return fmt.Errorf("creating session: %w", ErrAlreadyExists)
-		}
-		return fmt.Errorf("creating session in database: %w", err)
+		return Session{}, err
+	}
+	session := s.fromDBItem(dbSession)
+	s.Publish(pubsub.CreatedEvent, session)
+	event.SessionCreated()
+	return session, nil
+}
+
+func (s *service) CreateTaskSession(ctx context.Context, toolCallID, parentSessionID, title string) (Session, error) {
+	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
+		ID:              toolCallID,
+		ParentSessionID: sql.NullString{String: parentSessionID, Valid: true},
+		Title:           title,
+	})
+	if err != nil {
+		return Session{}, err
+	}
+	session := s.fromDBItem(dbSession)
+	s.Publish(pubsub.CreatedEvent, session)
+	return session, nil
+}
+
+func (s *service) CreateTitleSession(ctx context.Context, parentSessionID string) (Session, error) {
+	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
+		ID:              "title-" + parentSessionID,
+		ParentSessionID: sql.NullString{String: parentSessionID, Valid: true},
+		Title:           "Generate a title",
+	})
+	if err != nil {
+		return Session{}, err
+	}
+	session := s.fromDBItem(dbSession)
+	s.Publish(pubsub.CreatedEvent, session)
+	return session, nil
+}
+
+func (s *service) Delete(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	qtx := s.q.WithTx(tx)
+
+	dbSession, err := qtx.GetSessionByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err = qtx.DeleteSessionMessages(ctx, dbSession.ID); err != nil {
+		return fmt.Errorf("deleting session messages: %w", err)
+	}
+	if err = qtx.DeleteSessionFiles(ctx, dbSession.ID); err != nil {
+		return fmt.Errorf("deleting session files: %w", err)
+	}
+	if err = qtx.DeleteSession(ctx, dbSession.ID); err != nil {
+		return fmt.Errorf("deleting session: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 
+	session := s.fromDBItem(dbSession)
+	s.clearEstimatedUsageState(dbSession.ID)
+	s.Publish(pubsub.DeletedEvent, session)
+	event.SessionDeleted()
 	return nil
 }
 
-// Get fetches by ID. Returns ErrNotFound if absent.
-func (r *Repo) Get(ctx context.Context, id string) (*Session, error) {
-	row, err := r.database.Queries.GetSessionByID(ctx, id)
+func (s *service) Get(ctx context.Context, id string) (Session, error) {
+	dbSession, err := s.q.GetSessionByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("getting session %s: %w", id, ErrNotFound)
-		}
-		return nil, fmt.Errorf("getting session %s from database: %w", id, err)
+		return Session{}, err
 	}
-
-	s := &Session{
-		ID:           row.ID,
-		ProjectPath:  row.ProjectPath,
-		Title:        row.Title,
-		Model:        row.Model,
-		Agent:        row.Agent,
-		CreatedAt:    time.Unix(row.CreatedAt, 0).UTC(),
-		UpdatedAt:    time.Unix(row.UpdatedAt, 0).UTC(),
-		MessageCount: int(row.MessageCount),
-	}
-	return s, nil
+	session := s.fromDBItem(dbSession)
+	s.applyEstimatedUsageState(&session)
+	return session, nil
 }
 
-// List returns sessions matching the filter, ordered by UpdatedAt DESC.
-// Archived sessions are excluded unless f.IncludeArchived is true.
-func (r *Repo) List(ctx context.Context, f ListFilter) ([]Session, error) {
-	var sinceUnix int64
-	if !f.Since.IsZero() {
-		sinceUnix = f.Since.UTC().Unix()
-	}
-
-	// When archived sessions are hidden we cannot push f.Limit down to SQL:
-	// the limit must apply to the visible (post-filter) rows, not to the raw
-	// rows, or we could return fewer than Limit active sessions while more
-	// exist past archived ones. So we fetch unlimited, drop archived rows,
-	// then truncate to Limit in Go.
-	sqlLimit := int64(f.Limit)
-	if !f.IncludeArchived {
-		sqlLimit = 0
-	}
-
-	params := sqlc.ListSessionsFilteredParams{
-		Column1: f.ProjectPath,
-		Column2: f.ProjectPath,
-		Column3: sinceUnix,
-		Column4: sqlLimit,
-		Column5: sqlLimit,
-	}
-
-	rows, err := r.database.Queries.ListSessionsFiltered(ctx, params)
+func (s *service) GetLast(ctx context.Context) (Session, error) {
+	dbSession, err := s.q.GetLastSession(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("listing sessions: %w", err)
+		return Session{}, err
+	}
+	session := s.fromDBItem(dbSession)
+	s.applyEstimatedUsageState(&session)
+	return session, nil
+}
+
+func (s *service) Save(ctx context.Context, session Session) (Session, error) {
+	todosJSON, err := marshalTodos(session.Todos)
+	if err != nil {
+		return Session{}, err
 	}
 
-	var archived map[string]struct{}
-	if !f.IncludeArchived {
-		archived, err = r.archivedSet(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("listing sessions: %w", err)
-		}
+	dbSession, err := s.q.UpdateSession(ctx, db.UpdateSessionParams{
+		ID:               session.ID,
+		Title:            session.Title,
+		PromptTokens:     session.PromptTokens,
+		CompletionTokens: session.CompletionTokens,
+		SummaryMessageID: sql.NullString{
+			String: session.SummaryMessageID,
+			Valid:  session.SummaryMessageID != "",
+		},
+		Cost: session.Cost,
+		Todos: sql.NullString{
+			String: todosJSON,
+			Valid:  todosJSON != "",
+		},
+	})
+	if err != nil {
+		return Session{}, err
 	}
+	estimatedUsage := session.EstimatedUsage
+	s.setEstimatedUsageState(session.ID, estimatedUsage)
+	session = s.fromDBItem(dbSession)
+	session.EstimatedUsage = estimatedUsage
+	s.Publish(pubsub.UpdatedEvent, session)
+	return session, nil
+}
 
-	sessions := make([]Session, 0, len(rows))
-	for _, row := range rows {
-		if !f.IncludeArchived {
-			if _, ok := archived[row.ID]; ok {
-				continue
-			}
-		}
-		sessions = append(sessions, Session{
-			ID:           row.ID,
-			ProjectPath:  row.ProjectPath,
-			Title:        row.Title,
-			Model:        row.Model,
-			Agent:        row.Agent,
-			CreatedAt:    time.Unix(row.CreatedAt, 0).UTC(),
-			UpdatedAt:    time.Unix(row.UpdatedAt, 0).UTC(),
-			MessageCount: int(row.MessageCount),
-		})
-		if !f.IncludeArchived && f.Limit > 0 && len(sessions) == f.Limit {
-			break
-		}
+// UpdateTitleAndUsage updates only the title and usage fields atomically.
+// This is safer than fetching, modifying, and saving the entire session.
+func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error {
+	if err := s.q.UpdateSessionTitleAndUsage(ctx, db.UpdateSessionTitleAndUsageParams{
+		ID:               sessionID,
+		Title:            title,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		Cost:             cost,
+	}); err != nil {
+		return err
+	}
+	s.publishSessionUpdate(ctx, sessionID)
+	return nil
+}
+
+// Rename updates only the title of a session without touching updated_at or
+// usage fields.
+func (s *service) Rename(ctx context.Context, id string, title string) error {
+	if err := s.q.RenameSession(ctx, db.RenameSessionParams{
+		ID:    id,
+		Title: title,
+	}); err != nil {
+		return err
+	}
+	s.publishSessionUpdate(ctx, id)
+	return nil
+}
+
+func (s *service) List(ctx context.Context) ([]Session, error) {
+	dbSessions, err := s.q.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]Session, len(dbSessions))
+	for i, dbSession := range dbSessions {
+		sessions[i] = s.fromDBItem(dbSession)
+		s.applyEstimatedUsageState(&sessions[i])
 	}
 	return sessions, nil
 }
 
-// Search returns sessions whose title or first user message contains query
-// as a case-insensitive substring, ordered by UpdatedAt DESC (matching List).
-// An empty query returns every non-archived session. Archived sessions are
-// excluded from results because Search draws from the default List view; use
-// List with ListFilter.IncludeArchived to reach archived sessions. Search reads
-// message content for each session via Messages, so it scales with total stored
-// messages; callers that need only title matching should prefer a narrower
-// filter.
-func (r *Repo) Search(ctx context.Context, query string) ([]Session, error) {
-	all, err := r.List(ctx, ListFilter{})
+// publishSessionUpdate re-fetches a session and publishes an UpdatedEvent so
+// that UI subscribers reflect title or usage changes.
+func (s *service) publishSessionUpdate(ctx context.Context, sessionID string) {
+	session, err := s.Get(ctx, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("searching sessions: %w", err)
+		slog.Error("Failed to re-fetch session for event publish", "error", err, "sessionID", sessionID)
+		return
 	}
-
-	if query == "" {
-		return all, nil
-	}
-
-	needle := strings.ToLower(query)
-	matches := make([]Session, 0, len(all))
-	for _, s := range all {
-		if strings.Contains(strings.ToLower(s.Title), needle) {
-			matches = append(matches, s)
-			continue
-		}
-
-		msgs, err := r.Messages(ctx, s.ID)
-		if err != nil {
-			return nil, fmt.Errorf("searching sessions: %w", err)
-		}
-		if first := firstUserMessageText(msgs); first != "" &&
-			strings.Contains(strings.ToLower(first), needle) {
-			matches = append(matches, s)
-		}
-	}
-	return matches, nil
+	s.Publish(pubsub.UpdatedEvent, session)
 }
 
-// SetTitle persists a new title for the session with the given id and bumps
-// its UpdatedAt. Other mutable fields are left unchanged. Returns ErrNotFound
-// if no session has that id.
-func (r *Repo) SetTitle(ctx context.Context, id, title string) error {
-	existing, err := r.Get(ctx, id)
-	if err != nil {
-		return fmt.Errorf("setting session title: %w", err)
-	}
-
-	params := sqlc.UpdateSessionParams{
-		ID:           existing.ID,
-		ProjectPath:  existing.ProjectPath,
-		Title:        title,
-		Model:        existing.Model,
-		Agent:        existing.Agent,
-		UpdatedAt:    time.Now().UTC().Unix(),
-		MessageCount: int64(existing.MessageCount),
-	}
-	if _, err := r.database.Queries.UpdateSession(ctx, params); err != nil {
-		return fmt.Errorf("setting session title in database: %w", err)
-	}
-	return nil
+func (s *service) applyEstimatedUsageState(session *Session) {
+	s.estimatedUsageMu.RLock()
+	session.EstimatedUsage = s.estimatedUsage[session.ID]
+	s.estimatedUsageMu.RUnlock()
 }
 
-// firstUserMessageText returns the text of the first text block of the first
-// user message in msgs, or "" if there is none.
-func firstUserMessageText(msgs []message.Message) string {
-	for _, m := range msgs {
-		if m.Role != message.RoleUser {
-			continue
-		}
-		for _, block := range m.Content {
-			if textBlock, ok := block.(message.TextBlock); ok {
-				return textBlock.Text
-			}
-			if textBlock, ok := block.(*message.TextBlock); ok {
-				return textBlock.Text
-			}
-		}
+func (s *service) setEstimatedUsageState(sessionID string, estimatedUsage bool) {
+	s.estimatedUsageMu.Lock()
+	defer s.estimatedUsageMu.Unlock()
+	if estimatedUsage {
+		s.estimatedUsage[sessionID] = true
+		return
 	}
-	return ""
+	delete(s.estimatedUsage, sessionID)
 }
 
-// Update writes mutable fields (Title, Model, Agent, UpdatedAt). Other
-// fields are ignored. UpdatedAt is set to time.Now() if zero.
-func (r *Repo) Update(ctx context.Context, s *Session) error {
-	if s == nil {
-		return fmt.Errorf("updating session: session is nil")
-	}
-	existing, err := r.Get(ctx, s.ID)
-	if err != nil {
-		return fmt.Errorf("updating session: %w", err)
-	}
-
-	if s.UpdatedAt.IsZero() {
-		s.UpdatedAt = time.Now().UTC()
-	}
-
-	// ProjectPath and MessageCount are ignored for updates, so we use the
-	// existing database values.
-	s.ProjectPath = existing.ProjectPath
-	s.MessageCount = existing.MessageCount
-
-	params := sqlc.UpdateSessionParams{
-		ID:           s.ID,
-		ProjectPath:  existing.ProjectPath,
-		Title:        s.Title,
-		Model:        s.Model,
-		Agent:        s.Agent,
-		UpdatedAt:    s.UpdatedAt.UTC().Unix(),
-		MessageCount: int64(existing.MessageCount),
-	}
-
-	_, err = r.database.Queries.UpdateSession(ctx, params)
-	if err != nil {
-		return fmt.Errorf("updating session in database: %w", err)
-	}
-
-	return nil
+func (s *service) clearEstimatedUsageState(sessionID string) {
+	s.estimatedUsageMu.Lock()
+	delete(s.estimatedUsage, sessionID)
+	s.estimatedUsageMu.Unlock()
 }
 
-// Delete hard-deletes the session row. The schema FK cascade also removes
-// every messages.session_id, file_changes.session_id, and
-// ledger_entries.session_id row matching id. Any archive marker for id is
-// also cleared so a later session reusing the id is not silently hidden.
-func (r *Repo) Delete(ctx context.Context, id string) error {
-	if err := r.database.Queries.DeleteSession(ctx, id); err != nil {
-		return fmt.Errorf("deleting session %s: %w", id, err)
-	}
-	// Clear any archive marker so a later session reusing this id is not
-	// silently hidden. If no session has ever been archived the side table does
-	// not exist yet and there is nothing to clear, so we skip rather than
-	// create the table on the delete path.
-	exists, err := r.archiveTableExists(ctx)
+func (s *service) fromDBItem(item db.Session) Session {
+	todos, err := unmarshalTodos(item.Todos.String)
 	if err != nil {
-		return fmt.Errorf("deleting session %s: %w", id, err)
+		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
-	if exists {
-		if _, err := r.database.ExecContext(ctx, `DELETE FROM session_archive WHERE session_id = ?`, id); err != nil {
-			return fmt.Errorf("deleting session %s archive marker: %w", id, err)
-		}
+	return Session{
+		ID:               item.ID,
+		ParentSessionID:  item.ParentSessionID.String,
+		Title:            item.Title,
+		MessageCount:     item.MessageCount,
+		PromptTokens:     item.PromptTokens,
+		CompletionTokens: item.CompletionTokens,
+		SummaryMessageID: item.SummaryMessageID.String,
+		Cost:             item.Cost,
+		Todos:            todos,
+		CreatedAt:        item.CreatedAt,
+		UpdatedAt:        item.UpdatedAt,
 	}
-	// Clear any tag rows for this id so a tag never references a deleted session
-	// (and a later session reusing the id does not inherit stale tags). As with
-	// the archive marker, skip if no tag has ever been written rather than
-	// creating the side table on the delete path.
-	tagsExist, err := r.tagsTableExists(ctx)
-	if err != nil {
-		return fmt.Errorf("deleting session %s: %w", id, err)
-	}
-	if tagsExist {
-		if _, err := r.database.ExecContext(ctx, `DELETE FROM session_tags WHERE session_id = ?`, id); err != nil {
-			return fmt.Errorf("deleting session %s tags: %w", id, err)
-		}
-	}
-	return nil
 }
 
-// AppendMessage inserts msg into the messages table, links it to
-// sessionID, increments the session's MessageCount, bumps UpdatedAt,
-// and — if the session's Title is still the placeholder and msg is
-// the first user message — generates a title from msg's text.
-// AppendMessage is the only path by which the session message count
-// and timestamps are mutated; callers must not write to messages
-// directly.
-func (r *Repo) AppendMessage(ctx context.Context, sessionID string, msg message.Message) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	s, err := r.Get(ctx, sessionID)
+func marshalTodos(todos []Todo) (string, error) {
+	if len(todos) == 0 {
+		return "", nil
+	}
+	data, err := json.Marshal(todos)
 	if err != nil {
-		return fmt.Errorf("appending message: %w", err)
+		return "", err
 	}
-
-	if s.Title == "New session" && msg.Role == message.RoleUser {
-		newTitle := TitleFromFirstMessage(msg)
-		s.Title = newTitle
-		slog.Debug("Auto-titling session", "session_id", s.ID, "title", newTitle)
-	}
-
-	s.MessageCount++
-	s.UpdatedAt = time.Now().UTC()
-
-	params := sqlc.UpdateSessionParams{
-		ID:           s.ID,
-		ProjectPath:  s.ProjectPath,
-		Title:        s.Title,
-		Model:        s.Model,
-		Agent:        s.Agent,
-		UpdatedAt:    s.UpdatedAt.UTC().Unix(),
-		MessageCount: int64(s.MessageCount),
-	}
-	_, err = r.database.Queries.UpdateSession(ctx, params)
-	if err != nil {
-		return fmt.Errorf("updating session message count/title: %w", err)
-	}
-
-	contentBytes, err := json.Marshal(msg.Content)
-	if err != nil {
-		return fmt.Errorf("marshalling message content: %w", err)
-	}
-
-	// If the message has no ID, we generate a UUID for it.
-	if msg.ID == "" {
-		id, err := newUUID()
-		if err != nil {
-			return fmt.Errorf("generating message ID: %w", err)
-		}
-		msg.ID = id
-	}
-
-	msgCreatedAt := msg.CreatedAt
-	if msgCreatedAt.IsZero() {
-		msgCreatedAt = time.Now().UTC()
-	}
-
-	msgParams := sqlc.CreateMessageParams{
-		ID:          msg.ID,
-		SessionID:   sessionID,
-		Role:        string(msg.Role),
-		ContentJson: string(contentBytes),
-		ParentID:    msg.ParentID,
-		CreatedAt:   msgCreatedAt.UTC().Unix(),
-	}
-
-	_, err = r.database.Queries.CreateMessage(ctx, msgParams)
-	if err != nil {
-		return fmt.Errorf("inserting message: %w", err)
-	}
-
-	return nil
+	return string(data), nil
 }
 
-// Messages returns every message in the session, oldest first.
-func (r *Repo) Messages(ctx context.Context, sessionID string) ([]message.Message, error) {
-	rows, err := r.database.Queries.ListMessagesBySession(ctx, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("listing messages for session %s: %w", sessionID, err)
+func unmarshalTodos(data string) ([]Todo, error) {
+	if data == "" {
+		return []Todo{}, nil
 	}
-	return decodeMessageRows(rows)
+	var todos []Todo
+	if err := json.Unmarshal([]byte(data), &todos); err != nil {
+		return []Todo{}, err
+	}
+	return todos, nil
 }
 
-// MessagesPage returns a single window of a session's messages, oldest first,
-// skipping offset rows and returning at most limit of them. It lets callers
-// such as the TUI and exports stream a long transcript a page at a time
-// instead of loading every message into memory. The window order matches
-// Messages (oldest first), with a stable tie-break for messages sharing the
-// same created_at second, so paging through with increasing offsets visits
-// every message exactly once.
-//
-// A limit <= 0 returns no rows (an empty, non-nil slice); callers wanting the
-// whole transcript should use Messages. A negative offset is treated as 0.
-// Use MessageCount to learn how many pages a session has.
-func (r *Repo) MessagesPage(ctx context.Context, sessionID string, limit, offset int) ([]message.Message, error) {
-	if limit <= 0 {
-		return []message.Message{}, nil
+func NewService(q *db.Queries, conn *sql.DB) Service {
+	broker := pubsub.NewBroker[Session]()
+	return &service{
+		Broker:         broker,
+		db:             conn,
+		q:              q,
+		estimatedUsage: make(map[string]bool),
 	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	rows, err := r.database.Queries.ListMessagesBySessionPaged(ctx, sqlc.ListMessagesBySessionPagedParams{
-		SessionID: sessionID,
-		Limit:     int64(limit),
-		Offset:    int64(offset),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing messages page for session %s: %w", sessionID, err)
-	}
-	return decodeMessageRows(rows)
 }
 
-// MessageCount returns the number of messages stored for sessionID. It counts
-// rows directly rather than reading the session's denormalized MessageCount,
-// so it is accurate even for sessions written outside AppendMessage (for
-// example, forks). It is the companion to MessagesPage for computing how many
-// pages a transcript spans. A session with no messages (or an unknown ID)
-// returns 0 with no error.
-func (r *Repo) MessageCount(ctx context.Context, sessionID string) (int, error) {
-	n, err := r.database.Queries.CountMessagesBySession(ctx, sessionID)
-	if err != nil {
-		return 0, fmt.Errorf("counting messages for session %s: %w", sessionID, err)
-	}
-	return int(n), nil
+// CreateAgentToolSessionID creates a session ID for agent tool sessions using the format "messageID$$toolCallID"
+func (s *service) CreateAgentToolSessionID(messageID, toolCallID string) string {
+	return fmt.Sprintf("%s$$%s", messageID, toolCallID)
 }
 
-// decodeMessageRows converts sqlc message rows into message.Message values,
-// preserving row order. It marshals each row into a helper envelope matching
-// the JSON shape message.Message expects, then deserializes via the message
-// package's custom UnmarshalJSON so every content block is parsed with that
-// package's logic.
-func decodeMessageRows(rows []sqlc.Message) ([]message.Message, error) {
-	messages := make([]message.Message, len(rows))
-	for i, row := range rows {
-		type msgEnvelope struct {
-			ID        string          `json:"id"`
-			SessionID string          `json:"session_id"`
-			Role      message.Role    `json:"role"`
-			Content   json.RawMessage `json:"content"`
-			ParentID  *string         `json:"parent_id,omitempty"`
-			CreatedAt time.Time       `json:"created_at"`
-		}
-
-		env := msgEnvelope{
-			ID:        row.ID,
-			SessionID: row.SessionID,
-			Role:      message.Role(row.Role),
-			Content:   json.RawMessage(row.ContentJson),
-			ParentID:  row.ParentID,
-			CreatedAt: time.Unix(row.CreatedAt, 0).UTC(),
-		}
-
-		envBytes, err := json.Marshal(env)
-		if err != nil {
-			return nil, fmt.Errorf("serializing message envelope: %w", err)
-		}
-
-		var msg message.Message
-		if err := json.Unmarshal(envBytes, &msg); err != nil {
-			return nil, fmt.Errorf("deserializing message %s: %w", row.ID, err)
-		}
-
-		messages[i] = msg
+// ParseAgentToolSessionID parses an agent tool session ID into its components
+func (s *service) ParseAgentToolSessionID(sessionID string) (messageID string, toolCallID string, ok bool) {
+	parts := strings.Split(sessionID, "$$")
+	if len(parts) != 2 {
+		return "", "", false
 	}
-	return messages, nil
+	return parts[0], parts[1], true
 }
 
-// Latest returns the most recently updated session for projectPath,
-// or ErrNotFound if none. Used by bharatcode --continue.
-func (r *Repo) Latest(ctx context.Context, projectPath string) (*Session, error) {
-	row, err := r.database.Queries.GetLatestSessionByProjectPath(ctx, projectPath)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("getting latest session for project %s: %w", projectPath, ErrNotFound)
-		}
-		return nil, fmt.Errorf("getting latest session for project %s from database: %w", projectPath, err)
-	}
-
-	s := &Session{
-		ID:           row.ID,
-		ProjectPath:  row.ProjectPath,
-		Title:        row.Title,
-		Model:        row.Model,
-		Agent:        row.Agent,
-		CreatedAt:    time.Unix(row.CreatedAt, 0).UTC(),
-		UpdatedAt:    time.Unix(row.UpdatedAt, 0).UTC(),
-		MessageCount: int(row.MessageCount),
-	}
-	return s, nil
-}
-
-// ForkOptions configures a Fork call. The zero value forks the entire
-// source session, copying every message, and derives the title from the
-// source.
-type ForkOptions struct {
-	// CutoffMessageID, when non-nil, limits the copy to messages up to and
-	// including the message with this ID (in oldest-first order). Messages
-	// after it are not copied. If the ID is not found in the source session,
-	// Fork returns ErrNotFound. Nil copies every message.
-	CutoffMessageID *string
-	// Title overrides the forked session's title. When empty, the title is
-	// "<source title> (fork)".
-	Title string
-}
-
-// Fork creates a new session whose messages are copied from sourceSessionID
-// up to opts.CutoffMessageID (default: all messages), letting the user branch
-// an exploration without mutating the original. The new session receives a
-// fresh ID, a title like "<source title> (fork)", its own CreatedAt and
-// UpdatedAt, and an OriginSessionID pointing back at the source. Copied
-// messages get fresh IDs; intra-fork ParentID references are remapped to the
-// new IDs so the branch's message graph stays internally consistent. The
-// source session and its messages are left unchanged.
-func (r *Repo) Fork(ctx context.Context, sourceSessionID string, opts ForkOptions) (*Session, error) {
-	src, err := r.Get(ctx, sourceSessionID)
-	if err != nil {
-		return nil, fmt.Errorf("forking session: %w", err)
-	}
-
-	msgs, err := r.Messages(ctx, sourceSessionID)
-	if err != nil {
-		return nil, fmt.Errorf("forking session: %w", err)
-	}
-
-	// Apply the cutoff: keep messages up to and including the cutoff message.
-	if opts.CutoffMessageID != nil {
-		cutoff := *opts.CutoffMessageID
-		idx := -1
-		for i, m := range msgs {
-			if m.ID == cutoff {
-				idx = i
-				break
-			}
-		}
-		if idx == -1 {
-			return nil, fmt.Errorf("forking session: cutoff message %s: %w", cutoff, ErrNotFound)
-		}
-		msgs = msgs[:idx+1]
-	}
-
-	title := opts.Title
-	if title == "" {
-		title = src.Title + " (fork)"
-	}
-
-	forkID, err := newUUID()
-	if err != nil {
-		return nil, fmt.Errorf("forking session: %w", err)
-	}
-
-	now := time.Now().UTC()
-	fork := &Session{
-		ID:              forkID,
-		ProjectPath:     src.ProjectPath,
-		Title:           title,
-		Model:           src.Model,
-		Agent:           src.Agent,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		MessageCount:    len(msgs),
-		OriginSessionID: &sourceSessionID,
-	}
-
-	createParams := sqlc.CreateSessionParams{
-		ID:           fork.ID,
-		ProjectPath:  fork.ProjectPath,
-		Title:        fork.Title,
-		Model:        fork.Model,
-		Agent:        fork.Agent,
-		CreatedAt:    fork.CreatedAt.Unix(),
-		UpdatedAt:    fork.UpdatedAt.Unix(),
-		MessageCount: int64(fork.MessageCount),
-	}
-	if _, err := r.database.Queries.CreateSession(ctx, createParams); err != nil {
-		return nil, fmt.Errorf("forking session: creating fork session: %w", err)
-	}
-
-	if err := r.database.Queries.SetSessionOrigin(ctx, sqlc.SetSessionOriginParams{
-		OriginSessionID: &sourceSessionID,
-		ID:              fork.ID,
-	}); err != nil {
-		return nil, fmt.Errorf("forking session: recording origin: %w", err)
-	}
-
-	// idRemap maps each source message ID to its freshly generated fork ID so
-	// that ParentID references between copied messages point within the fork.
-	idRemap := make(map[string]string, len(msgs))
-	for _, m := range msgs {
-		newID, err := newUUID()
-		if err != nil {
-			return nil, fmt.Errorf("forking session: %w", err)
-		}
-		idRemap[m.ID] = newID
-	}
-
-	for _, m := range msgs {
-		contentBytes, err := json.Marshal(m.Content)
-		if err != nil {
-			return nil, fmt.Errorf("forking session: marshalling message content: %w", err)
-		}
-
-		var parentID *string
-		if m.ParentID != nil {
-			if remapped, ok := idRemap[*m.ParentID]; ok {
-				parentID = &remapped
-			}
-			// A parent outside the copied range is dropped (left nil) so the
-			// fork never references a message it does not contain.
-		}
-
-		msgParams := sqlc.CreateMessageParams{
-			ID:          idRemap[m.ID],
-			SessionID:   fork.ID,
-			Role:        string(m.Role),
-			ContentJson: string(contentBytes),
-			ParentID:    parentID,
-			CreatedAt:   m.CreatedAt.UTC().Unix(),
-		}
-		if _, err := r.database.Queries.CreateMessage(ctx, msgParams); err != nil {
-			return nil, fmt.Errorf("forking session: copying message: %w", err)
-		}
-	}
-
-	return fork, nil
-}
-
-// OriginOf returns the ID of the session that id was forked from, or nil if
-// id was created directly. Returns ErrNotFound if id does not exist.
-func (r *Repo) OriginOf(ctx context.Context, id string) (*string, error) {
-	if _, err := r.Get(ctx, id); err != nil {
-		return nil, fmt.Errorf("getting origin: %w", err)
-	}
-	origin, err := r.database.Queries.GetSessionOrigin(ctx, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting origin of session %s: %w", id, err)
-	}
-	return origin, nil
-}
-
-// TitleFromFirstMessage extracts an at-most-60-char title from the
-// first user message's text. Exposed for testability; callers do
-// not normally invoke it (AppendMessage handles auto-titling).
-func TitleFromFirstMessage(m message.Message) string {
-	var text string
-	// Find the first text block to use as the title source.
-	for _, block := range m.Content {
-		if textBlock, ok := block.(message.TextBlock); ok {
-			text = textBlock.Text
-			break
-		}
-		if textBlock, ok := block.(*message.TextBlock); ok {
-			text = textBlock.Text
-			break
-		}
-	}
-
-	// Replace all newlines with spaces.
-	text = strings.ReplaceAll(text, "\r\n", " ")
-	text = strings.ReplaceAll(text, "\n", " ")
-	text = strings.TrimSpace(text)
-
-	runes := []rune(text)
-	if len(runes) <= 60 {
-		if len(runes) == 0 {
-			return "New session"
-		}
-		return text
-	}
-
-	// Look backwards for a space to truncate on a word boundary.
-	truncateIdx := 60
-	for i := 60; i >= 0; i-- {
-		if runes[i] == ' ' {
-			truncateIdx = i
-			break
-		}
-	}
-
-	// If we found a space, we truncate at that space.
-	res := string(runes[:truncateIdx])
-	res = strings.TrimSpace(res)
-	// If we ended up with an empty string, just fallback to first 60 runes.
-	if res == "" {
-		return string(runes[:60])
-	}
-	return res
-}
-
-// newUUID generates a random UUID v4 using stdlib crypto/rand.
-func newUUID() (string, error) {
-	b := make([]byte, 16)
-	_, err := rand.Read(b)
-	if err != nil {
-		return "", fmt.Errorf("reading random bytes for UUID: %w", err)
-	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
+// IsAgentToolSession checks if a session ID follows the agent tool session format
+func (s *service) IsAgentToolSession(sessionID string) bool {
+	_, _, ok := s.ParseAgentToolSessionID(sessionID)
+	return ok
 }

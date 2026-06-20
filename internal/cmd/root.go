@@ -1,281 +1,866 @@
-// Package cmd is the Cobra command tree for the bharatcode binary.
 package cmd
 
 import (
+	"bytes"
 	"context"
+	_ "embed"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	fang "charm.land/fang/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/arbazkhan971/bharatcode/internal/app"
-	"github.com/arbazkhan971/bharatcode/internal/llm"
-	"github.com/arbazkhan971/bharatcode/internal/offline"
-	"github.com/arbazkhan971/bharatcode/internal/selfupdate"
+	"github.com/arbazkhan971/bharatcode/internal/client"
+	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/db"
+	"github.com/arbazkhan971/bharatcode/internal/event"
+	"github.com/arbazkhan971/bharatcode/internal/lock"
+	bharatcodelog "github.com/arbazkhan971/bharatcode/internal/log"
+	"github.com/arbazkhan971/bharatcode/internal/projects"
+	"github.com/arbazkhan971/bharatcode/internal/proto"
+	"github.com/arbazkhan971/bharatcode/internal/server"
 	"github.com/arbazkhan971/bharatcode/internal/session"
-	"github.com/arbazkhan971/bharatcode/internal/tui"
+	"github.com/arbazkhan971/bharatcode/internal/skills"
+	"github.com/arbazkhan971/bharatcode/internal/ui/common"
+	ui "github.com/arbazkhan971/bharatcode/internal/ui/model"
+	"github.com/arbazkhan971/bharatcode/internal/version"
+	"github.com/arbazkhan971/bharatcode/internal/workspace"
+	"github.com/charmbracelet/colorprofile"
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/charmtone"
+	xstrings "github.com/charmbracelet/x/exp/strings"
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 )
 
-// startupUpdateTimeout bounds the opt-in auto-update probe+install at launch so
-// a slow or unreachable network can never delay the TUI by more than a moment.
-// The whole step is best-effort: any failure is a non-fatal warning.
-const startupUpdateTimeout = 6 * time.Second
+var clientHost string
 
-type rootOptions struct {
-	configPath      string
-	verbose         bool
-	yolo            bool
-	projectDir      string
-	offline         bool
-	continueSession bool
-	profile         string
-	// logToFile routes diagnostics to a log file instead of stderr. Only the
-	// interactive TUI path sets it; the 'run' subcommand and other non-TTY
-	// callers leave it false so their stderr/JSON logging is preserved.
-	logToFile bool
+func init() {
+	rootCmd.PersistentFlags().StringP("cwd", "c", "", "Current working directory")
+	rootCmd.PersistentFlags().StringP("data-dir", "D", "", "Custom bharatcode data directory")
+	rootCmd.PersistentFlags().BoolP("debug", "d", false, "Debug")
+	rootCmd.PersistentFlags().StringVarP(&clientHost, "host", "H", server.DefaultHost(), "Connect to a specific bharatcode server host (for advanced users)")
+	rootCmd.Flags().BoolP("help", "h", false, "Help")
+	rootCmd.Flags().BoolP("yolo", "y", false, "Automatically accept all permissions (dangerous mode)")
+	rootCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
+	rootCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
+	rootCmd.MarkFlagsMutuallyExclusive("session", "continue")
+
+	rootCmd.AddCommand(
+		runCmd,
+		dirsCmd,
+		projectsCmd,
+		updateProvidersCmd,
+		logsCmd,
+		logoutCmd,
+		schemaCmd,
+		loginCmd,
+		statsCmd,
+		sessionCmd,
+	)
 }
 
-var (
-	newApp = app.New
-	// runTUI launches the interactive TUI. initialSessionID is non-empty when
-	// --continue / -c was passed and a prior session was found for the project.
-	runTUI = func(ctx context.Context, application *app.App, initialSessionID string) error {
-		loop, err := application.Agent.Agent("coder")
-		if err != nil {
-			return fmt.Errorf("resolving default agent: %w", err)
-		}
-		return tui.Run(ctx, tui.Dependencies{
-			Agent:            loop,
-			Coordinator:      application.Agent,
-			Sessions:         application.Sessions,
-			Cfg:              application.Cfg,
-			Workspace:        app.NewWorkspace(application, loop),
-			Permission:       application.Permission,
-			Ledger:           application.Ledger,
-			FileTracker:      application.FileTracker,
-			Logger:           application.Logger,
-			MCP:              application.MCP,
-			Extensions:       application.Extensions,
-			InitialSessionID: initialSessionID,
-			Yolo:             application.StartupYolo(),
-		})
-	}
-)
+var rootCmd = &cobra.Command{
+	Use:   "bharatcode",
+	Short: "A terminal-first AI assistant for software development",
+	Long:  "A glamorous, terminal-first AI assistant for software development and adjacent tasks",
+	Example: `
+# Run in interactive mode
+bharatcode
 
-// Execute parses os.Args and exits with the matched command's status.
+# Run non-interactively
+bharatcode run "Guess my 5 favorite Pokémon"
+
+# Run a non-interactively with pipes and redirection
+cat README.md | bharatcode run "make this more glamorous" > GLAMOROUS_README.md
+
+# Run with debug logging in a specific directory
+bharatcode --debug --cwd /path/to/project
+
+# Run in yolo mode (auto-accept all permissions; use with care)
+bharatcode --yolo
+
+# Run with custom data directory
+bharatcode --data-dir /path/to/custom/.bharatcode
+
+# Continue a previous session
+bharatcode --session {session-id}
+
+# Continue the most recent session
+bharatcode --continue
+  `,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sessionID, _ := cmd.Flags().GetString("session")
+		continueLast, _ := cmd.Flags().GetBool("continue")
+
+		ws, cleanup, err := setupWorkspaceWithProgressBar(cmd)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+
+		if sessionID != "" {
+			sess, err := resolveWorkspaceSessionID(cmd.Context(), ws, sessionID)
+			if err != nil {
+				return err
+			}
+			sessionID = sess.ID
+		}
+
+		event.AppInitialized()
+
+		com := common.DefaultCommon(ws)
+		model := ui.New(com, sessionID, continueLast)
+
+		inputFilter := ui.NewFilter()
+		var env uv.Environ = os.Environ()
+		program := tea.NewProgram(
+			model,
+			tea.WithEnvironment(env),
+			tea.WithContext(cmd.Context()),
+			tea.WithFilter(inputFilter.Filter),
+		)
+		go ws.Subscribe(program)
+
+		if _, err := program.Run(); err != nil {
+			event.Error(err)
+			slog.Error("TUI run error", "error", err)
+			return errors.New("BharatCode crashed. If metrics are enabled, we were notified about it. If you'd like to report it, please copy the stacktrace above and open an issue at https://github.com/arbazkhan971/bharatcode/issues/new?template=bug.yml") //nolint:staticcheck
+		}
+		return nil
+	},
+}
+
+var heartbit = lipgloss.NewStyle().Foreground(charmtone.Dolly).SetString(`
+    ▄▄▄▄▄▄▄▄    ▄▄▄▄▄▄▄▄
+  ███████████  ███████████
+████████████████████████████
+████████████████████████████
+██████████▀██████▀██████████
+██████████ ██████ ██████████
+▀▀██████▄████▄▄████▄██████▀▀
+  ████████████████████████
+    ████████████████████
+       ▀▀██████████▀▀
+           ▀▀▀▀▀▀
+`)
+
+// copied from cobra:
+const defaultVersionTemplate = `{{with .DisplayName}}{{printf "%s " .}}{{end}}{{printf "version %s" .Version}}
+`
+
 func Execute() {
-	root := newRootCmd()
-	root.SetArgs(os.Args[1:])
-	if err := executeCommand(context.Background(), root); err != nil {
+	// FIXME: config.Load uses slog internally during provider resolution,
+	// but the file-based logger isn't set up until after config is loaded
+	// (because the log path depends on the data directory from config).
+	// This creates a window where slog calls in config.Load leak to
+	// stderr. We discard early logs here as a workaround. The proper
+	// fix is to remove slog calls from config.Load and have it return
+	// warnings/diagnostics instead of logging them as a side effect.
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+
+	// NOTE: very hacky: we create a colorprofile writer with STDOUT, then make
+	// it forward to a bytes.Buffer, write the colored heartbit to it, and then
+	// finally prepend it in the version template.
+	// Unfortunately cobra doesn't give us a way to set a function to handle
+	// printing the version, and PreRunE runs after the version is already
+	// handled, so that doesn't work either.
+	// This is the only way I could find that works relatively well.
+	if term.IsTerminal(os.Stdout.Fd()) {
+		var b bytes.Buffer
+		w := colorprofile.NewWriter(os.Stdout, os.Environ())
+		w.Forward = &b
+		_, _ = w.WriteString(heartbit.String())
+		rootCmd.SetVersionTemplate(b.String() + "\n" + defaultVersionTemplate)
+	}
+	if err := fang.Execute(
+		context.Background(),
+		rootCmd,
+		fang.WithVersion(version.Version),
+		fang.WithNotifySignal(os.Interrupt),
+	); err != nil {
 		os.Exit(1)
 	}
 }
 
-func newRootCmd() *cobra.Command {
-	opts := &rootOptions{}
-	root := &cobra.Command{
-		Use:           "bharatcode",
-		Short:         "AI coding assistant for the terminal",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				return fmt.Errorf("unknown command %q", args[0])
+// supportsProgressBar tries to determine whether the current terminal supports
+// progress bars by looking into environment variables.
+func supportsProgressBar() bool {
+	if !term.IsTerminal(os.Stderr.Fd()) {
+		return false
+	}
+	termProg := os.Getenv("TERM_PROGRAM")
+	_, isWindowsTerminal := os.LookupEnv("WT_SESSION")
+
+	return isWindowsTerminal || xstrings.ContainsAnyOf(strings.ToLower(termProg), "ghostty", "iterm2", "rio")
+}
+
+// useClientServer returns true when the client/server architecture is
+// enabled via the BHARATCODE_CLIENT_SERVER environment variable.
+func useClientServer() bool {
+	v, _ := strconv.ParseBool(os.Getenv("BHARATCODE_CLIENT_SERVER"))
+	return v
+}
+
+// setupWorkspaceWithProgressBar wraps setupWorkspace with an optional
+// terminal progress bar shown during initialization.
+func setupWorkspaceWithProgressBar(cmd *cobra.Command) (workspace.Workspace, func(), error) {
+	showProgress := supportsProgressBar()
+	if showProgress {
+		_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
+	}
+
+	ws, cleanup, err := setupWorkspace(cmd)
+
+	if showProgress {
+		_, _ = fmt.Fprintf(os.Stderr, ansi.ResetProgressBar)
+	}
+
+	return ws, cleanup, err
+}
+
+// setupWorkspace returns a Workspace and cleanup function. When
+// BHARATCODE_CLIENT_SERVER=1, it connects to a server process and returns a
+// ClientWorkspace. Otherwise it creates an in-process app.App and
+// returns an AppWorkspace.
+func setupWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
+	if useClientServer() {
+		return setupClientServerWorkspace(cmd)
+	}
+	return setupLocalWorkspace(cmd)
+}
+
+// setupLocalWorkspace creates an in-process app.App and wraps it in an
+// AppWorkspace.
+func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
+	debug, _ := cmd.Flags().GetBool("debug")
+	yolo, _ := cmd.Flags().GetBool("yolo")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	ctx := cmd.Context()
+
+	cwd, err := ResolveCwd(cmd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	store, err := config.Init(cwd, dataDir, debug)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cfg := store.Config()
+	store.Overrides().SkipPermissionRequests = yolo
+
+	if err := os.MkdirAll(cfg.Options.DataDirectory, 0o700); err != nil {
+		return nil, nil, fmt.Errorf("failed to create data directory: %q %w", cfg.Options.DataDirectory, err)
+	}
+
+	gitIgnorePath := filepath.Join(cfg.Options.DataDirectory, ".gitignore")
+	if _, err := os.Stat(gitIgnorePath); os.IsNotExist(err) {
+		if err := os.WriteFile(gitIgnorePath, []byte("*\n"), 0o644); err != nil {
+			return nil, nil, fmt.Errorf("failed to create .gitignore file: %q %w", gitIgnorePath, err)
+		}
+	}
+
+	if err := projects.Register(cwd, cfg.Options.DataDirectory); err != nil {
+		slog.Warn("Failed to register project", "error", err)
+	}
+
+	conn, err := db.Connect(ctx, cfg.Options.DataDirectory)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	logFile := filepath.Join(cfg.Options.DataDirectory, "logs", "bharatcode.log")
+	bharatcodelog.Setup(logFile, debug)
+
+	// Discover skills once before app.New. Local mode hosts a single
+	// workspace per process, so WithGlobalMirror keeps the package
+	// globals (which the TUI reads via skills.GetLatestStates) in sync
+	// with the manager.
+	discoveryCfg := localSkillsDiscoveryConfig(store)
+	allSkills, activeSkills, skillStates := skills.DiscoverFromConfig(discoveryCfg)
+	skillsMgr := skills.NewManager(
+		allSkills, activeSkills, skillStates,
+		skills.WithGlobalMirror(),
+		skills.WithResolvedPaths(discoveryCfg.ResolvePaths()),
+		skills.WithWorkingDir(discoveryCfg.WorkingDir),
+	)
+
+	appInstance, err := app.New(ctx, conn, store, skillsMgr)
+	if err != nil {
+		_ = conn.Close()
+		slog.Error("Failed to create app instance", "error", err)
+		return nil, nil, err
+	}
+
+	if shouldEnableMetrics(cfg) {
+		event.Init()
+	}
+
+	ws := workspace.NewAppWorkspace(appInstance, store)
+	cleanup := func() { appInstance.Shutdown() }
+	return ws, cleanup, nil
+}
+
+// localSkillsDiscoveryConfig adapts a *config.ConfigStore to the inputs
+// skills.DiscoverFromConfig expects.
+func localSkillsDiscoveryConfig(store *config.ConfigStore) skills.DiscoveryConfig {
+	opts := store.Config().Options
+	var paths, disabled []string
+	if opts != nil {
+		paths = opts.SkillsPaths
+		disabled = opts.DisabledSkills
+	}
+	var resolver func(string) (string, error)
+	if r := store.Resolver(); r != nil {
+		resolver = r.ResolveValue
+	}
+	return skills.DiscoveryConfig{
+		SkillsPaths:    paths,
+		DisabledSkills: disabled,
+		WorkingDir:     store.WorkingDir(),
+		Resolver:       resolver,
+	}
+}
+
+// setupClientServerWorkspace connects to a server process and wraps the
+// result in a ClientWorkspace.
+func setupClientServerWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
+	c, protoWs, cleanupServer, err := connectToServer(cmd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	clientWs := workspace.NewClientWorkspace(c, *protoWs)
+
+	if protoWs.Config.IsConfigured() {
+		if err := clientWs.InitCoderAgent(cmd.Context()); err != nil {
+			slog.Error("Failed to initialize coder agent", "error", err)
+		}
+	}
+
+	return clientWs, cleanupServer, nil
+}
+
+// connectToServer ensures the server is running, creates a client and
+// workspace, and returns a cleanup function that deletes the workspace.
+func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func(), error) {
+	hostURL, err := server.ParseHostURL(clientHost)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("invalid host URL: %v", err)
+	}
+
+	if err := ensureServer(cmd, hostURL); err != nil {
+		return nil, nil, nil, err
+	}
+
+	debug, _ := cmd.Flags().GetBool("debug")
+	yolo, _ := cmd.Flags().GetBool("yolo")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	ctx := cmd.Context()
+
+	cwd, err := ResolveCwd(cmd)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	c, err := client.NewClient(cwd, hostURL.Scheme, hostURL.Host)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	wsReq := proto.Workspace{
+		Path:    cwd,
+		DataDir: dataDir,
+		Debug:   debug,
+		YOLO:    yolo,
+		Version: version.Version,
+		Env:     os.Environ(),
+	}
+
+	ws, err := c.CreateWorkspace(ctx, wsReq)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create workspace: %v", err)
+	}
+
+	if shouldEnableMetrics(ws.Config) {
+		event.Init()
+	}
+
+	if ws.Config != nil {
+		logFile := filepath.Join(ws.Config.Options.DataDirectory, "logs", "bharatcode.log")
+		bharatcodelog.Setup(logFile, debug)
+	}
+
+	cleanup := func() { _ = c.DeleteWorkspace(context.Background(), ws.ID) }
+	return c, ws, cleanup, nil
+}
+
+// ensureServer auto-starts a detached server if the socket file does not
+// exist. When the socket exists, it verifies that the running server
+// version matches the client; on mismatch it shuts down the old server
+// and starts a fresh one.
+func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
+	// Initialize the persistent log here so stale-socket diagnostics
+	// emitted before connectToServer runs are captured in the per-host
+	// server log file. bharatcodelog.Setup uses sync.Once internally, so the
+	// later call from connectToServer becomes a no-op.
+	debug, _ := cmd.Flags().GetBool("debug")
+	logFile := filepath.Join(config.GlobalCacheDir(), "server-"+safeHostName(hostURL), "bharatcode.log")
+	bharatcodelog.Setup(logFile, debug)
+
+	switch hostURL.Scheme {
+	case "unix", "npipe":
+		needsStart := false
+		_, statErr := os.Stat(hostURL.Host)
+		switch {
+		case statErr == nil:
+			// Probe the socket explicitly before the version-check
+			// path. A stale unix socket file (the previous server
+			// exited without cleaning up) would otherwise make
+			// restartIfStale spin on a non-responsive endpoint; here
+			// we detect it with a short DialTimeout and remove the
+			// orphaned file so the normal spawn path can run.
+			if hostURL.Scheme == "unix" {
+				conn, dialErr := net.DialTimeout( //nolint:noctx
+					hostURL.Scheme, hostURL.Host, 200*time.Millisecond,
+				)
+				if dialErr == nil {
+					conn.Close()
+				} else if server.IsStaleSocketErr(dialErr) {
+					slog.Warn("Stale socket detected, removing",
+						"path", hostURL.Host, "error", dialErr)
+					if err := os.Remove(hostURL.Host); err != nil && !errors.Is(err, fs.ErrNotExist) {
+						return fmt.Errorf("failed to remove stale server socket %q: %v", hostURL.Host, err)
+					}
+					needsStart = true
+					break
+				}
 			}
-			ctx := cmd.Context()
-			// The interactive TUI takes over the screen, so slog output must go
-			// to a log file rather than the terminal. slog targets stderr, so the
-			// redirect is gated on stderr being a terminal too — otherwise an
-			// invocation that redirects only stdout (e.g. `bharatcode > out.txt`)
-			// would still flood the attached terminal via stderr. Non-interactive
-			// launches (pipes, redirects, CI) keep their stderr/JSON logging.
-			opts.logToFile = stdoutIsTerminal() && stderrIsTerminal()
-			application, err := buildApp(ctx, opts)
+			restarted, err := restartIfStale(cmd, hostURL)
 			if err != nil {
-				return err
+				slog.Warn("Failed to check server version", "error", err)
 			}
-			defer closeApp(ctx, application)
-			// Opt-in, best-effort self-update before the TUI takes over the
-			// screen. Gated to the interactive path so non-interactive commands
-			// and tests never trigger a network self-replace.
-			maybeAutoUpdate(ctx, application, opts, cmd.ErrOrStderr())
-			initialSessionID := resolveInitialSession(ctx, application, opts)
-			if err := runTUI(ctx, application, initialSessionID); err != nil {
-				return fmt.Errorf("running tui: %w", err)
+			needsStart = restarted || err != nil
+		case errors.Is(statErr, fs.ErrNotExist):
+			needsStart = true
+		default:
+			slog.Warn("Unexpected error stat'ing server socket, attempting cleanup",
+				"path", hostURL.Host, "error", statErr)
+			if err := os.Remove(hostURL.Host); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("failed to remove stale server socket %q: %v", hostURL.Host, err)
+			}
+			needsStart = true
+		}
+
+		if needsStart {
+			if err := spawnAndWaitReady(cmd, hostURL); err != nil {
+				return fmt.Errorf("failed to initialize bharatcode server: %v", err)
 			}
 			return nil
-		},
+		}
+
+		if err := waitForServerReady(cmd.Context(), hostURL); err != nil {
+			return fmt.Errorf("failed to initialize bharatcode server: %v", err)
+		}
 	}
 
-	root.PersistentFlags().StringVar(&opts.configPath, "config", "", "path to user config")
-	root.PersistentFlags().BoolVar(&opts.verbose, "verbose", false, "enable debug logging")
-	root.PersistentFlags().BoolVar(&opts.yolo, "yolo", false, "approve tool calls without prompting")
-	root.PersistentFlags().StringVar(&opts.projectDir, "project-dir", "", "project directory")
-	root.PersistentFlags().BoolVar(&opts.offline, "offline", false, "offline mode: reject non-localhost providers and disable web tools (code will not leave this machine)")
-	root.PersistentFlags().StringVar(&opts.profile, "profile", "", "name of a config profile overlay to apply (looks for <name>.json alongside config.json)")
-	root.Flags().BoolVarP(&opts.continueSession, "continue", "c", false, "continue the most recent session for this project")
-	root.SetContext(withRootOptions(context.Background(), opts))
+	return nil
+}
 
-	root.AddCommand(
-		newInitCmd(),
-		newRunCmd(),
-		newLoginCmd(),
-		newLogoutCmd(),
-		newAuthCmd(),
-		newModelsCmd(),
-		newSessionsCmd(),
-		newRevertCmd(),
-		newShareCmd(),
-		newImportHistoryCmd(),
-		newStatsCmd(),
-		newBudgetCmd(),
-		newUpdateProvidersCmd(),
-		newUpdateCmd(),
-		newConfigCmd(),
-		newTelemetryCmd(),
-		newVersionCmd(),
-		NewDoctorCmd(),
-		newSkillsCmd(),
-		newRecipesCmd(),
-		newAuditCmd(),
-		newEvalCmd(),
-		newAboutCmd(),
-		newCompletionCmd(),
+// spawnAndWaitReady serializes the spawn-and-wait-for-readiness sequence
+// across concurrent clients via an exclusive flock on
+// $XDG_CACHE_HOME/bharatcode/server-<safeHost>/start.lock.
+//
+// After acquiring the lock it re-probes readiness so that a client that
+// blocked while another client was spawning can skip its own spawn and
+// just use the now-running server. The lock is held only for the
+// duration of "spawn + readiness probe" and released before the caller
+// resumes its normal lifetime.
+func spawnAndWaitReady(cmd *cobra.Command, hostURL *url.URL) error {
+	chDir, err := perHostServerDir(hostURL)
+	if err != nil {
+		return err
+	}
+	release, err := lock.File(cmd.Context(), filepath.Join(chDir, "start.lock"))
+	if err != nil {
+		// If the lock itself is unavailable, fall back to the
+		// unsynchronized path rather than blocking the user.
+		slog.Warn("Failed to acquire spawn lock, proceeding without single-flight", "error", err)
+		if err := startDetachedServer(cmd, hostURL); err != nil {
+			return err
+		}
+		return waitForServerReady(cmd.Context(), hostURL)
+	}
+	defer release()
+
+	// Another client may have just finished spawning while we were
+	// waiting on the lock; if the server is already responsive, skip
+	// the spawn entirely.
+	probeCtx, cancel := context.WithTimeout(cmd.Context(), 200*time.Millisecond)
+	probeErr := quickHealthProbe(probeCtx, hostURL)
+	cancel()
+	if probeErr == nil {
+		return nil
+	}
+
+	if err := startDetachedServer(cmd, hostURL); err != nil {
+		return err
+	}
+	return waitForServerReady(cmd.Context(), hostURL)
+}
+
+// quickHealthProbe issues a single readiness request with the caller's
+// context and returns nil iff the server is responsive right now.
+func quickHealthProbe(ctx context.Context, hostURL *url.URL) error {
+	httpClient, reqURL, err := readinessHTTPClient(hostURL)
+	if err != nil {
+		return err
+	}
+	return probeHealth(ctx, httpClient, reqURL, hostURL)
+}
+
+// perHostServerDir returns (and creates) the cache directory used for
+// per-host server state (logs, start.lock, etc.). The path is derived
+// from the parsed host URL rather than the global flag so the same key
+// is computed regardless of where the host came from.
+func perHostServerDir(hostURL *url.URL) (string, error) {
+	chDir := filepath.Join(config.GlobalCacheDir(), "server-"+safeHostName(hostURL))
+	if err := os.MkdirAll(chDir, 0o700); err != nil {
+		return "", fmt.Errorf("failed to create server working directory: %v", err)
+	}
+	return chDir, nil
+}
+
+// safeHostName returns a filesystem-safe identifier for hostURL,
+// suitable for use as a directory name. It mirrors the input shape of
+// the --host flag so client and server compute the same key.
+func safeHostName(hostURL *url.URL) string {
+	return safeNameRegexp.ReplaceAllString(
+		hostURL.Scheme+"://"+hostURL.Host+hostURL.Path, "_",
 	)
-	return root
 }
 
-// resolveInitialSession returns the ID of the most recently updated session for
-// the current project when --continue / -c is set, or "" otherwise. A failure
-// to list sessions is silently ignored; the TUI starts fresh in that case.
-func resolveInitialSession(ctx context.Context, application *app.App, opts *rootOptions) string {
-	if !opts.continueSession || application == nil || application.Sessions == nil {
-		return ""
+// serverReadyTimeout returns the total budget for the readiness probe.
+// Overridable via BHARATCODE_SERVER_READY_TIMEOUT (parsed as a Go duration).
+func serverReadyTimeout() time.Duration {
+	const def = 10 * time.Second
+	v := os.Getenv("BHARATCODE_SERVER_READY_TIMEOUT")
+	if v == "" {
+		return def
 	}
-	projectPath := opts.projectDir
-	if projectPath == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			projectPath = cwd
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+// waitForServerReady polls GET /v1/health until the server responds with
+// any 2xx status or the total timeout elapses. Each attempt uses a short
+// per-attempt timeout so a hung listener doesn't burn the whole budget.
+//
+// The HTTP transport is built to mirror how *client.Client dials so the
+// same unix socket / npipe / tcp setups all work uniformly here.
+func waitForServerReady(ctx context.Context, hostURL *url.URL) error {
+	httpClient, reqURL, err := readinessHTTPClient(hostURL)
+	if err != nil {
+		return err
+	}
+
+	const perAttempt = 100 * time.Millisecond
+	deadline := time.Now().Add(serverReadyTimeout())
+
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return lastErr
+			}
+			return fmt.Errorf("timed out waiting for server readiness")
+		}
+
+		attemptCtx, cancel := context.WithTimeout(ctx, perAttempt)
+		err := probeHealth(attemptCtx, httpClient, reqURL, hostURL)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(perAttempt):
 		}
 	}
-	sessions, err := application.Sessions.List(ctx, session.ListFilter{
-		ProjectPath: projectPath,
-		Limit:       1,
-	})
-	if err != nil || len(sessions) == 0 {
-		return ""
-	}
-	return sessions[0].ID
 }
 
-func buildApp(ctx context.Context, opts *rootOptions) (*app.App, error) {
-	// Wire the OS keyring into the llm package so 'bharatcode login' tokens are
-	// consulted when a provider's env var is not set, and so the TUI's first-run
-	// onboarding can persist a token through the same backend key resolution reads.
-	llm.SetKeyringReader(keyring)
-	llm.SetKeyringWriter(keyring)
-
-	application, err := newApp(ctx, app.Options{
-		ConfigPath: opts.configPath,
-		ProjectDir: opts.projectDir,
-		YOLO:       opts.yolo,
-		Verbose:    opts.verbose,
-		Offline:    opts.offline,
-		Profile:    opts.profile,
-		LogToFile:  opts.logToFile,
-	})
+// readinessHTTPClient builds an *http.Client whose transport dials the
+// server using the same scheme-aware logic as *client.Client (unix
+// socket, named pipe, or tcp).
+func readinessHTTPClient(hostURL *url.URL) (*http.Client, string, error) {
+	c, err := client.NewClient("", hostURL.Scheme, hostURL.Host)
 	if err != nil {
-		return nil, fmt.Errorf("constructing app: %w", err)
+		return nil, "", err
 	}
-	return application, nil
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return c.Dial(ctx, network, addr)
+	}
+	if hostURL.Scheme == "unix" || hostURL.Scheme == "npipe" {
+		tr.DisableCompression = true
+	}
+
+	httpClient := &http.Client{Transport: tr}
+
+	// For unix sockets / named pipes we still need a syntactically valid
+	// HTTP URL; the actual address is resolved by the dialer.
+	host := hostURL.Host
+	if hostURL.Scheme == "unix" || hostURL.Scheme == "npipe" {
+		host = client.DummyHost
+	}
+	reqURL := (&url.URL{Scheme: "http", Host: host, Path: "/v1/health"}).String()
+	return httpClient, reqURL, nil
 }
 
-func closeApp(ctx context.Context, application *app.App) {
-	if application == nil {
-		return
+// probeHealth issues a single GET to the readiness endpoint and treats
+// any 2xx response as success.
+func probeHealth(ctx context.Context, h *http.Client, reqURL string, hostURL *url.URL) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return err
 	}
-	_ = application.Close(ctx)
+	if hostURL.Scheme == "unix" || hostURL.Scheme == "npipe" {
+		req.Host = client.DummyHost
+	}
+	rsp, err := h.Do(req)
+	if err != nil {
+		return err
+	}
+	defer rsp.Body.Close()
+	_, _ = io.Copy(io.Discard, rsp.Body)
+	if rsp.StatusCode < 200 || rsp.StatusCode >= 300 {
+		return fmt.Errorf("server health check failed: %s", rsp.Status)
+	}
+	return nil
 }
 
-// maybeAutoUpdate performs the opt-in startup self-update. It is intentionally
-// conservative and silent unless something happens: it returns immediately
-// unless every guard passes — config Options.AutoUpdate is set, the process is
-// not offline, the build carries a real stamped version/commit (so a dev or
-// `go install` build never nags or mutates itself), and stdout is an
-// interactive terminal (so pipes, CI, and tests never trigger a network
-// self-replace). When all hold it runs a time-bounded check and, if a newer
-// release exists, downloads and installs it in place, printing a single-line
-// notice. The new binary takes effect on the next launch; the running process
-// is deliberately not re-executed. Every failure is a non-fatal warning that
-// never blocks startup.
-// maybeAutoUpdate runs a best-effort startup update check. By default it only
-// NOTIFIES: if a newer release tag exists it prints a one-line, install-method-
-// aware hint (npm/brew/binary) and does nothing else. In-place self-replacement
-// is opt-in (Options.AutoUpdate) AND limited to binary installs, since npm- and
-// Homebrew-managed binaries would be clobbered by the package manager and must
-// be upgraded through it. Any network error or uncertainty stays silent.
-func maybeAutoUpdate(ctx context.Context, application *app.App, opts *rootOptions, warn io.Writer) {
-	if application == nil || application.Cfg == nil {
-		return
+// restartIfStale checks whether the running server matches the current
+// client version. When they differ, it sends a shutdown command and
+// removes the stale socket so the caller can start a fresh server.
+//
+// It returns restarted=true when it has shut down a stale server and the
+// caller must spawn a new one. When the server matches the client version
+// (or the check itself fails), restarted is false.
+func restartIfStale(cmd *cobra.Command, hostURL *url.URL) (restarted bool, err error) {
+	c, err := client.NewClient("", hostURL.Scheme, hostURL.Host)
+	if err != nil {
+		return false, err
 	}
-	if (opts != nil && opts.offline) || offline.EnabledFromEnv() {
-		return
+	vi, err := c.VersionInfo(cmd.Context())
+	if err != nil {
+		return false, err
 	}
-	// Only a real release build (stamped version + commit) checks for updates;
-	// a dev/source build would compare a placeholder and nag spuriously. An
-	// unstamped build keeps the dev sentinels from version.go ("v0.0.0" /
-	// "0000000"); treat those (and an empty stamp) as development.
-	if version == "" || version == "v0.0.0" || commit == "" || commit == "0000000" {
-		return
+	if vi.Version == version.Version && vi.BuildID == version.BuildID {
+		return false, nil
 	}
-	if !stdoutIsTerminal() {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, startupUpdateTimeout)
-	defer cancel()
-
-	status, err := selfupdate.CheckRelease(ctx, selfupdate.DefaultReleaseAPIURL, version)
-	if err != nil || !status.UpdateAvailable {
-		return
-	}
-
-	method := selfupdate.DetectInstallMethod()
-
-	// Opt-in self-replace, but only where it is safe to overwrite our own
-	// executable. Everywhere else (and by default) we fall through to notify.
-	if application.Cfg.Options.AutoUpdate && method == selfupdate.InstallBinary {
-		if err := selfupdate.Apply(ctx, selfupdate.ApplyOptions{}); err != nil {
-			_, _ = fmt.Fprintf(warn, "bharatcode: auto-update skipped: %v\n", err)
-			return
+	slog.Info(
+		"Server version mismatch, restarting",
+		"server_version", vi.Version,
+		"client_version", version.Version,
+		"server_build_id", vi.BuildID,
+		"client_build_id", version.BuildID,
+	)
+	_ = c.ShutdownServer(cmd.Context())
+	// Give the old process a moment to release the socket.
+	for range 20 {
+		if _, err := os.Stat(hostURL.Host); errors.Is(err, fs.ErrNotExist) {
+			break
 		}
-		_, _ = fmt.Fprintln(warn, "bharatcode: updated to the latest release; restart to use it.")
-		return
+		select {
+		case <-cmd.Context().Done():
+			return true, cmd.Context().Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
-
-	// Default path: tell the user how to update for their install method.
-	_, _ = fmt.Fprintf(warn, "bharatcode: %s\n", status.AdviceFor(method))
+	// Force-remove if the socket is still lingering.
+	_ = os.Remove(hostURL.Host)
+	return true, nil
 }
 
-// stdoutIsTerminal reports whether standard output is an interactive character
-// device. It is the guard that keeps the startup self-update off the network in
-// non-interactive contexts (pipes, redirects, CI, unit tests).
-func stdoutIsTerminal() bool {
-	info, err := os.Stdout.Stat()
+var safeNameRegexp = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+
+func startDetachedServer(cmd *cobra.Command, hostURL *url.URL) error {
+	exe, err := os.Executable()
 	if err != nil {
+		return fmt.Errorf("failed to get executable path: %v", err)
+	}
+
+	chDir, err := perHostServerDir(hostURL)
+	if err != nil {
+		return err
+	}
+
+	cmdArgs := []string{"server"}
+	if clientHost != server.DefaultHost() {
+		cmdArgs = append(cmdArgs, "--host", clientHost)
+	}
+
+	// Use context.Background() so the parent's context cancellation does not
+	// kill the spawned server. detachProcess (Setsid on !windows,
+	// DETACHED_PROCESS on windows) is what truly detaches the child from
+	// this process's lifetime.
+	c := exec.CommandContext(context.Background(), exe, cmdArgs...)
+	stdoutPath := filepath.Join(chDir, "stdout.log")
+	stderrPath := filepath.Join(chDir, "stderr.log")
+	detachProcess(c)
+
+	stdout, err := os.Create(stdoutPath)
+	if err != nil {
+		return fmt.Errorf("failed to create stdout log file: %v", err)
+	}
+	defer stdout.Close()
+	c.Stdout = stdout
+
+	stderr, err := os.Create(stderrPath)
+	if err != nil {
+		return fmt.Errorf("failed to create stderr log file: %v", err)
+	}
+	defer stderr.Close()
+	c.Stderr = stderr
+
+	if err := c.Start(); err != nil {
+		return fmt.Errorf("failed to start bharatcode server: %v", err)
+	}
+
+	if err := c.Process.Release(); err != nil {
+		return fmt.Errorf("failed to detach bharatcode server process: %v", err)
+	}
+
+	return nil
+}
+
+func shouldEnableMetrics(cfg *config.Config) bool {
+	if v, _ := strconv.ParseBool(os.Getenv("BHARATCODE_DISABLE_METRICS")); v {
 		return false
 	}
-	return info.Mode()&os.ModeCharDevice != 0
-}
-
-// stderrIsTerminal reports whether standard error is an interactive character
-// device. slog writes to stderr, so the log-to-file redirect checks this stream
-// (not just stdout) before keeping diagnostics off the terminal.
-func stderrIsTerminal() bool {
-	info, err := os.Stderr.Stat()
-	if err != nil {
+	if v, _ := strconv.ParseBool(os.Getenv("DO_NOT_TRACK")); v {
 		return false
 	}
-	return info.Mode()&os.ModeCharDevice != 0
+	if cfg.Options.DisableMetrics {
+		return false
+	}
+	return true
 }
+
+func MaybePrependStdin(prompt string) (string, error) {
+	if term.IsTerminal(os.Stdin.Fd()) {
+		return prompt, nil
+	}
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return prompt, err
+	}
+	// Check if stdin is a named pipe ( | ) or regular file ( < ).
+	if fi.Mode()&os.ModeNamedPipe == 0 && !fi.Mode().IsRegular() {
+		return prompt, nil
+	}
+	bts, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return prompt, err
+	}
+	return string(bts) + "\n\n" + prompt, nil
+}
+
+// resolveWorkspaceSessionID resolves a session ID that may be a full
+// UUID, full hash, or hash prefix. Works against the Workspace
+// interface so both local and client/server paths get hash prefix
+// support.
+func resolveWorkspaceSessionID(ctx context.Context, ws workspace.Workspace, id string) (session.Session, error) {
+	if sess, err := ws.GetSession(ctx, id); err == nil {
+		return sess, nil
+	}
+
+	sessions, err := ws.ListSessions(ctx)
+	if err != nil {
+		return session.Session{}, err
+	}
+
+	var matches []session.Session
+	for _, s := range sessions {
+		hash := session.HashID(s.ID)
+		if hash == id || strings.HasPrefix(hash, id) {
+			matches = append(matches, s)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return session.Session{}, fmt.Errorf("session not found: %s", id)
+	case 1:
+		return matches[0], nil
+	default:
+		return session.Session{}, fmt.Errorf("session ID %q is ambiguous (%d matches)", id, len(matches))
+	}
+}
+
+func ResolveCwd(cmd *cobra.Command) (string, error) {
+	cwd, _ := cmd.Flags().GetString("cwd")
+	if cwd != "" {
+		err := os.Chdir(cwd)
+		if err != nil {
+			return "", fmt.Errorf("failed to change directory: %v", err)
+		}
+		return cwd, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current working directory: %v", err)
+	}
+	return cwd, nil
+}
+
+func createDotBharatCodeDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("failed to create data directory: %q %w", dir, err)
+	}
+
+	gitIgnorePath := filepath.Join(dir, ".gitignore")
+	content, err := os.ReadFile(gitIgnorePath)
+
+	// create or update if old version
+	if os.IsNotExist(err) || string(content) == oldGitIgnore {
+		if err := os.WriteFile(gitIgnorePath, []byte(defaultGitIgnore), 0o644); err != nil {
+			return fmt.Errorf("failed to create .gitignore file: %q %w", gitIgnorePath, err)
+		}
+	}
+
+	return nil
+}
+
+//go:embed gitignore/old
+var oldGitIgnore string
+
+//go:embed gitignore/default
+var defaultGitIgnore string

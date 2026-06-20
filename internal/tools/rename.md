@@ -1,9 +1,0 @@
-Rename a symbol and every reference to it using the file's language server (e.g. gopls, rust-analyzer, typescript-language-server).
-
-Point at the symbol with the workspace-relative `path`, the 1-based `line`, and optional 1-based `column` (as reported by symbols/grep/view), and give the `new_name`. The language server computes the full set of edits — which may span several files — and they are applied and written back to disk atomically. The tool reports the new name, the total number of edits, and each changed file with its edit count followed by a compact unified diff of the lines it touched. After writing, each touched file is re-checked and any errors or warnings the rename introduced (a name collision, a now-shadowed symbol) are appended so they can be fixed immediately.
-
-Set `preview` to true to see the full set of diffs the rename would produce without writing anything to disk — useful for inspecting a wide-reaching rename before committing. Re-run with `preview` omitted (or false) to apply it.
-
-If the language server also wants to create, rename, or delete files as part of the change (some servers tie a symbol rename to a file rename), those file operations are NOT performed — only text edits are applied — and the result lists them under a warning so you can carry them out yourself.
-
-Prefer this over a grep-and-replace when renaming a function, type, variable, or field: it follows the language's scoping and binding rules, so it updates real references without touching unrelated identifiers that happen to share the name. Requires a language server configured and available for the file's language; otherwise it reports that rename is unavailable. If the symbol cannot be renamed (for example a keyword or a position with no symbol), it reports that no edits were produced.

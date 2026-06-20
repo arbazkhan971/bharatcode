@@ -1,793 +1,310 @@
-// Package permission provides tool execution gating, user approval prompt loops,
-// allow-list scanning, yolo bypasses, and decision persistence.
 package permission
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"sync"
-	"time"
+	"sync/atomic"
 
-	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/csync"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/google/uuid"
 )
 
-// ApprovalMode controls the global gating policy applied before the interactive prompt fallback.
-type ApprovalMode string
+// hookApprovalKey is the unexported context key used to mark a tool call as
+// pre-approved by a PreToolUse hook. The value is the tool call ID so an
+// approval can't be reused across calls that happen to share a context.
+type hookApprovalKey struct{}
 
-const (
-	// ApprovalReadOnly auto-denies any tool that writes or executes; only read-class tools are auto-allowed.
-	ApprovalReadOnly ApprovalMode = "ReadOnly"
-	// ApprovalAuto is the default behavior: ask or allow per the existing remembered scopes and config lists.
-	ApprovalAuto ApprovalMode = "Auto"
-	// ApprovalFull allows every tool unconditionally, equivalent to --yolo.
-	ApprovalFull ApprovalMode = "Full"
-)
-
-// readClassTools is the allowlist of tools considered read-only (no writes or execution).
-// It is a package var so it can be adjusted without touching the resolution logic.
-var readClassTools = map[string]bool{
-	"view":          true,
-	"ls":            true,
-	"grep":          true,
-	"glob":          true,
-	"diagnostics":   true,
-	"symbols":       true,
-	"navigate":      true,
-	"mcp_resources": true,
-	"mcp_prompts":   true,
-	"web_fetch":     true,
-	"web_search":    true,
-	"job_output":    true,
-	"job_list":      true,
-	"think":         true,
+// WithHookApproval returns a context that marks the given tool call ID as
+// pre-approved by a hook. When the permission service sees a matching
+// request it short-circuits the normal prompt and grants immediately.
+func WithHookApproval(ctx context.Context, toolCallID string) context.Context {
+	return context.WithValue(ctx, hookApprovalKey{}, toolCallID)
 }
 
-// Decision represents the permission level of a check.
-type Decision string
-
-const (
-	// DecisionAllow means the execution is approved.
-	DecisionAllow Decision = "Allow"
-	// DecisionDeny means the execution is blocked.
-	DecisionDeny Decision = "Deny"
-	// DecisionAllowOnce represents single-time approval.
-	DecisionAllowOnce Decision = "AllowOnce"
-	// DecisionAllowSession represents approval for the active session.
-	DecisionAllowSession Decision = "AllowSession"
-	// DecisionAllowProject represents approval persistent to the current project.
-	DecisionAllowProject Decision = "AllowProject"
-	// DecisionAllowForever represents global perpetual approval.
-	DecisionAllowForever Decision = "AllowForever"
-)
-
-// Scope controls where a remembered decision is stored.
-type Scope string
-
-const (
-	// ScopeOnce means only valid for a single execution.
-	ScopeOnce Scope = "Once"
-	// ScopeSession holds memory for the session duration.
-	ScopeSession Scope = "Session"
-	// ScopeProject persists to the project's .bharatcode.json.
-	ScopeProject Scope = "Project"
-	// ScopeForever persists globally to config.json.
-	ScopeForever Scope = "Forever"
-)
-
-// AuditRecord is an immutable record of a single permission decision, suitable
-// for enterprise audit trails. ArgsSummary is the sanitized (secret-redacted,
-// length-bounded) rendering of the request arguments produced by sanitizeLogArgs;
-// raw secret values are never stored.
-type AuditRecord struct {
-	Timestamp   time.Time `json:"timestamp"`
-	Tool        string    `json:"tool"`
-	SessionID   string    `json:"session_id"`
-	ArgsSummary string    `json:"args_summary"`
-	Decision    Decision  `json:"decision"`
-	Scope       Scope     `json:"scope"`
-}
-
-// AuditLogger receives one AuditRecord per permission decision. Implementations
-// must be safe for concurrent use because Check may be called from many
-// goroutines. The default Checker logger is a no-op.
-type AuditLogger interface {
-	// Log records a single permission decision. It must not retain references to
-	// mutable caller state beyond the call.
-	Log(ctx context.Context, rec AuditRecord)
-}
-
-// noOpAuditLogger discards every record; it is the default so Check never has to
-// nil-check the logger.
-type noOpAuditLogger struct{}
-
-// Log discards the record.
-func (noOpAuditLogger) Log(context.Context, AuditRecord) {}
-
-// InMemoryAuditLogger captures every audit record in memory, guarded for
-// concurrent use. It is useful for tests and short-lived inspection.
-type InMemoryAuditLogger struct {
-	mu      sync.Mutex
-	records []AuditRecord
-}
-
-// Log appends the record under a mutex so concurrent Checks stay race-free.
-func (l *InMemoryAuditLogger) Log(_ context.Context, rec AuditRecord) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.records = append(l.records, rec)
-}
-
-// Records returns a copy of the captured records in arrival order.
-func (l *InMemoryAuditLogger) Records() []AuditRecord {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]AuditRecord, len(l.records))
-	copy(out, l.records)
-	return out
-}
-
-// SlogAuditLogger writes each audit record to a slog.Logger at info level. It
-// emits the sanitized argument summary only, never raw secret values.
-type SlogAuditLogger struct {
-	logger *slog.Logger
-}
-
-// NewSlogAuditLogger builds a SlogAuditLogger; a nil logger falls back to
-// slog.Default so the result is always usable.
-func NewSlogAuditLogger(logger *slog.Logger) *SlogAuditLogger {
-	if logger == nil {
-		logger = slog.Default()
+// hookApproved reports whether the context carries a hook approval for the
+// given tool call ID.
+func hookApproved(ctx context.Context, toolCallID string) bool {
+	if toolCallID == "" {
+		return false
 	}
-	return &SlogAuditLogger{logger: logger}
+	v, _ := ctx.Value(hookApprovalKey{}).(string)
+	return v == toolCallID
 }
 
-// Log writes the record to the underlying slog.Logger.
-func (l *SlogAuditLogger) Log(ctx context.Context, rec AuditRecord) {
-	l.logger.InfoContext(
-		ctx, "permission audit",
-		"timestamp", rec.Timestamp,
-		"tool", rec.Tool,
-		"session_id", rec.SessionID,
-		"args", rec.ArgsSummary,
-		"decision", rec.Decision,
-		"scope", rec.Scope,
-	)
+type CreatePermissionRequest struct {
+	SessionID   string `json:"session_id"`
+	ToolCallID  string `json:"tool_call_id"`
+	ToolName    string `json:"tool_name"`
+	Description string `json:"description"`
+	Action      string `json:"action"`
+	Params      any    `json:"params"`
+	Path        string `json:"path"`
 }
 
-// Request defines the context and arguments of a tool execution.
-type Request struct {
-	ToolName  string
-	Args      map[string]any
+type PermissionNotification struct {
+	ToolCallID string `json:"tool_call_id"`
+	Granted    bool   `json:"granted"`
+	Denied     bool   `json:"denied"`
+}
+
+type PermissionRequest struct {
+	ID          string `json:"id"`
+	SessionID   string `json:"session_id"`
+	ToolCallID  string `json:"tool_call_id"`
+	ToolName    string `json:"tool_name"`
+	Description string `json:"description"`
+	Action      string `json:"action"`
+	Params      any    `json:"params"`
+	Path        string `json:"path"`
+}
+
+type Service interface {
+	pubsub.Subscriber[PermissionRequest]
+	// GrantPersistent grants a permission request and remembers the grant
+	// for the session. It returns true if this call actually resolved the
+	// pending request; false if the request had already been resolved
+	// (e.g., by another concurrent caller) or is unknown.
+	GrantPersistent(permission PermissionRequest) bool
+	// Grant grants a permission request. It returns true if this call
+	// actually resolved the pending request; false if the request had
+	// already been resolved or is unknown.
+	Grant(permission PermissionRequest) bool
+	// Deny denies a permission request. It returns true if this call
+	// actually resolved the pending request; false if the request had
+	// already been resolved or is unknown.
+	Deny(permission PermissionRequest) bool
+	Request(ctx context.Context, opts CreatePermissionRequest) (bool, error)
+	AutoApproveSession(sessionID string)
+	SetSkipRequests(skip bool)
+	SkipRequests() bool
+	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification]
+}
+
+// PermissionKey is a composite key for session permission lookups.
+type PermissionKey struct {
 	SessionID string
+	ToolName  string
+	Action    string
+	Path      string
 }
 
-// ErrCancelled is returned when a permission request blocks on user input and the context is cancelled.
-var ErrCancelled = errors.New("permission check cancelled")
+type permissionService struct {
+	*pubsub.Broker[PermissionRequest]
 
-// Checker manages gating, allow-lists, and persisted approvals.
-type Checker struct {
-	mu            sync.RWMutex
-	cfg           *config.Config
-	bus           *pubsub.Topic[pubsub.PermissionRequest]
-	yolo          bool
-	approvalMode  ApprovalMode
-	auditLogger   AuditLogger
-	sessionMemory sync.Map
-	projectMemory sync.Map
-	globalMemory  sync.Map
-	// autoApprove holds the set of session IDs under per-session auto-approval
-	// (the session-scoped form of YOLO). Keyed by sessionID -> struct{}. See
-	// SetAutoApproveSession / IsAutoApproveSession in session.go.
-	autoApprove sync.Map
+	notificationBroker    *pubsub.Broker[PermissionNotification]
+	workingDir            string
+	sessionPermissions    *csync.Map[PermissionKey, bool]
+	pendingRequests       *csync.Map[string, chan bool]
+	autoApproveSessions   map[string]bool
+	autoApproveSessionsMu sync.RWMutex
+	skip                  atomic.Bool
+	allowedTools          []string
+
+	// used to make sure we only process one request at a time
+	requestMu       sync.Mutex
+	activeRequest   *PermissionRequest
+	activeRequestMu sync.Mutex
 }
 
-// New constructs a Checker with the given config and pubsub topic.
-func New(cfg *config.Config, bus *pubsub.Topic[pubsub.PermissionRequest]) *Checker {
-	c := &Checker{
-		cfg:          cfg,
-		bus:          bus,
-		approvalMode: ApprovalAuto,
-		auditLogger:  noOpAuditLogger{},
-	}
-
-	// Load project level remembered decisions.
-	cwd, err := os.Getwd()
-	if err == nil {
-		projPath := config.ProjectPath(cwd)
-		for k, v := range loadRememberedMap(projPath) {
-			c.projectMemory.Store(k, Decision(v))
-		}
-	}
-
-	// Load global level remembered decisions.
-	for k, v := range loadRememberedMap(config.GlobalPath()) {
-		c.globalMemory.Store(k, Decision(v))
-	}
-
-	return c
-}
-
-// loadRememberedMap reads and parses the configuration file at the given path.
-func loadRememberedMap(path string) map[string]string {
-	if path == "" {
-		return nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var tmp config.Config
-	if err := json.Unmarshal(data, &tmp); err == nil {
-		return tmp.Permissions.Remembered
-	}
-	return nil
-}
-
-// SetYolo turns global YOLO auto-approval mode on or off.
-func (c *Checker) SetYolo(on bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.yolo = on
-}
-
-// Yolo reports whether global YOLO auto-approval mode is currently on. It is the
-// read companion to SetYolo, letting a UI seam show the yolo state without
-// tracking the toggles itself. It reflects only the explicit SetYolo flag, not
-// the config-level AllowAll fallback that Check also honors, so callers asking
-// "is yolo toggled on" get the toggle's value.
-func (c *Checker) Yolo() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.yolo
-}
-
-// SetApprovalMode sets the global approval-mode policy (ReadOnly, Auto, or Full).
-func (c *Checker) SetApprovalMode(mode ApprovalMode) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.approvalMode = mode
-}
-
-// GetApprovalMode returns the current global approval-mode policy.
-func (c *Checker) GetApprovalMode() ApprovalMode {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.approvalMode
-}
-
-// SetAuditLogger installs the audit sink that records every permission decision.
-// A nil logger resets the Checker to the no-op default.
-func (c *Checker) SetAuditLogger(logger AuditLogger) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if logger == nil {
-		logger = noOpAuditLogger{}
-	}
-	c.auditLogger = logger
-}
-
-// Check evaluates the permission request.
+// resolve atomically removes the pending request entry for the given
+// permission and, if it was still pending, publishes exactly one
+// PermissionNotification and forwards the outcome to the waiter on
+// respCh. It returns true if this call resolved the request, false if
+// it had already been resolved (e.g., by another concurrent caller) or
+// the request ID is unknown.
 //
-// Resolution order: yolo -> deny-wins across all scopes -> allow across
-// session/project/global -> config deny list -> config auto-approve list ->
-// approval mode -> interactive prompt. A stored Deny at any scope is sticky:
-// an AllowSession can never override a DenyProject.
-func (c *Checker) Check(ctx context.Context, req Request) (decision Decision, err error) {
-	// scope records where the resolved decision came from. Memory-hit paths set
-	// the actual remembered scope (Session/Project/Forever); every scope-less
-	// path (yolo, config lists, approval mode, prompt-once, nil bus, cancel)
-	// stays ScopeOnce, meaning "not drawn from a broader remembered scope".
-	scope := ScopeOnce
+// If onResolve is non-nil it runs after the pending entry has been
+// taken but before the notification is published or the waiter is
+// unblocked. This lets GrantPersistent record the session permission
+// only when it actually wins the race, so a losing GrantPersistent
+// that lost to a Deny does not leak an auto-approve entry.
+//
+// All three public resolution methods (Grant, GrantPersistent, Deny)
+// route through this helper so multi-subscriber UIs can race safely:
+// the first caller wins, the rest become no-ops.
+func (s *permissionService) resolve(permission PermissionRequest, granted, denied bool, onResolve func()) bool {
+	respCh, ok := s.pendingRequests.Take(permission.ID)
+	if !ok {
+		return false
+	}
 
-	c.mu.RLock()
-	logger := c.auditLogger
-	yolo := c.yolo || (c.cfg != nil && c.cfg.Permissions.AllowAll)
-	mode := c.approvalMode
-	c.mu.RUnlock()
+	if onResolve != nil {
+		onResolve()
+	}
 
-	// Emit exactly one audit record per Check from a single deferred site so no
-	// return path can escape the audit trail, including the early yolo bypass and
-	// the context-cancelled deny. The argument summary is sanitized so raw secret
-	// values never reach the audit sink.
-	defer func() {
-		logger.Log(ctx, AuditRecord{
-			Timestamp:   time.Now().UTC(),
-			Tool:        req.ToolName,
-			SessionID:   req.SessionID,
-			ArgsSummary: sanitizeLogArgs(req.Args),
-			Decision:    decision,
-			Scope:       scope,
+	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+		ToolCallID: permission.ToolCallID,
+		Granted:    granted,
+		Denied:     denied,
+	})
+
+	// respCh is buffered (cap 1) and only ever has at most one sender
+	// per request because Take removes the entry under the map lock,
+	// so this send never blocks.
+	respCh <- granted
+
+	s.activeRequestMu.Lock()
+	if s.activeRequest != nil && s.activeRequest.ID == permission.ID {
+		s.activeRequest = nil
+	}
+	s.activeRequestMu.Unlock()
+	return true
+}
+
+func (s *permissionService) GrantPersistent(permission PermissionRequest) bool {
+	// Record the persistent grant only if this call wins the
+	// pending-request race. Otherwise a losing GrantPersistent that
+	// lost to a Deny would still leave an auto-approve entry behind,
+	// silently flipping later denied calls to allowed.
+	return s.resolve(permission, true, false, func() {
+		s.sessionPermissions.Set(PermissionKey{
+			SessionID: permission.SessionID,
+			ToolName:  permission.ToolName,
+			Action:    permission.Action,
+			Path:      permission.Path,
+		}, true)
+	})
+}
+
+func (s *permissionService) Grant(permission PermissionRequest) bool {
+	return s.resolve(permission, true, false, nil)
+}
+
+func (s *permissionService) Deny(permission PermissionRequest) bool {
+	return s.resolve(permission, false, true, nil)
+}
+
+func (s *permissionService) Request(ctx context.Context, opts CreatePermissionRequest) (bool, error) {
+	if s.skip.Load() {
+		return true, nil
+	}
+
+	// Check if the tool/action combination is in the allowlist
+	commandKey := opts.ToolName + ":" + opts.Action
+	if slices.Contains(s.allowedTools, commandKey) || slices.Contains(s.allowedTools, opts.ToolName) {
+		return true, nil
+	}
+
+	// A PreToolUse hook that returned decision=allow stamps the context
+	// with the tool call ID. Treat that as a pre-approval and skip the
+	// prompt entirely. We still publish a granted notification so the UI
+	// and audit subscribers see the outcome.
+	if hookApproved(ctx, opts.ToolCallID) {
+		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+			ToolCallID: opts.ToolCallID,
+			Granted:    true,
 		})
-	}()
+		return true, nil
+	}
 
-	// 1. YOLO Check — global yolo or per-session auto-approval both bypass. A
-	// session-scoped bypass records ScopeSession (rather than ScopeOnce) so the
-	// audit trail distinguishes "this session is auto-approved" from a global
-	// or one-off allow.
-	sessionAuto := c.IsAutoApproveSession(req.SessionID)
-	if yolo || sessionAuto {
-		if sessionAuto && !yolo {
-			scope = ScopeSession
+	s.requestMu.Lock()
+	defer s.requestMu.Unlock()
+
+	// tell the UI that a permission was requested
+	s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+		ToolCallID: opts.ToolCallID,
+	})
+
+	s.autoApproveSessionsMu.RLock()
+	autoApprove := s.autoApproveSessions[opts.SessionID]
+	s.autoApproveSessionsMu.RUnlock()
+
+	if autoApprove {
+		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+			ToolCallID: opts.ToolCallID,
+			Granted:    true,
+		})
+		return true, nil
+	}
+
+	fileInfo, err := os.Stat(opts.Path)
+	dir := opts.Path
+	if err == nil {
+		if fileInfo.IsDir() {
+			dir = opts.Path
+		} else {
+			dir = filepath.Dir(opts.Path)
 		}
-		slog.WarnContext(
-			ctx, "Bypassing tool permission check in YOLO mode",
-			"tool", req.ToolName,
-			"session_id", req.SessionID,
-			"args", sanitizeLogArgs(req.Args),
-		)
-		return DecisionAllow, nil
 	}
 
-	// 2-4. Resolve remembered scopes and config lists. A compound bash command
-	// (ls && rm, a | b, $(...), ...) collapses to more than one command head,
-	// each of which must clear permission independently — otherwise auto-approving
-	// a benign head (bash:ls) would silently approve a chained dangerous tail
-	// (rm -rf /). Single commands keep the original single-key resolution exactly.
-	if heads, parseComplete, compound := c.bashCompound(req); compound {
-		if dec, sc, resolved := c.resolveBashHeads(req.SessionID, heads, parseComplete); resolved {
-			scope = sc
-			return dec, nil
-		}
-	} else if dec, sc, resolved := c.resolveSingleKey(req.SessionID, req.ToolName, c.getMatchKey(req)); resolved {
-		scope = sc
-		return dec, nil
+	if dir == "." {
+		dir = s.workingDir
+	}
+	permission := PermissionRequest{
+		ID:          uuid.New().String(),
+		Path:        dir,
+		SessionID:   opts.SessionID,
+		ToolCallID:  opts.ToolCallID,
+		ToolName:    opts.ToolName,
+		Description: opts.Description,
+		Action:      opts.Action,
+		Params:      opts.Params,
 	}
 
-	// 5. Approval-mode policy, consulted before the interactive prompt.
-	switch mode {
-	case ApprovalFull:
-		return DecisionAllow, nil
-	case ApprovalReadOnly:
-		if readClassTools[req.ToolName] {
-			return DecisionAllow, nil
-		}
-		return DecisionDeny, nil
+	if _, ok := s.sessionPermissions.Get(PermissionKey{
+		SessionID: permission.SessionID,
+		ToolName:  permission.ToolName,
+		Action:    permission.Action,
+		Path:      permission.Path,
+	}); ok {
+		s.notificationBroker.Publish(pubsub.CreatedEvent, PermissionNotification{
+			ToolCallID: opts.ToolCallID,
+			Granted:    true,
+		})
+		return true, nil
 	}
 
-	// 6. Fallback to TUI prompt via pubsub.
-	if c.bus == nil {
-		return DecisionDeny, nil
-	}
+	s.activeRequestMu.Lock()
+	s.activeRequest = &permission
+	s.activeRequestMu.Unlock()
 
-	replyChan := make(chan pubsub.PermissionDecision, 1)
-	pubsubReq := pubsub.PermissionRequest{
-		Tool:   req.ToolName,
-		Args:   req.Args,
-		Reason: fmt.Sprintf("Tool %s needs authorization", req.ToolName),
-		Reply:  replyChan,
-	}
+	respCh := make(chan bool, 1)
+	s.pendingRequests.Set(permission.ID, respCh)
+	defer s.pendingRequests.Del(permission.ID)
 
-	c.bus.Publish(ctx, pubsubReq)
+	// Publish the request
+	s.Publish(pubsub.CreatedEvent, permission)
 
 	select {
 	case <-ctx.Done():
-		return DecisionDeny, ErrCancelled
-	case dec := <-replyChan:
-		var finalDec Decision
-		if dec.Approved {
-			if dec.Remember {
-				finalDec = DecisionAllowSession
-				scope = ScopeSession
-				_ = c.RememberDecision(req, finalDec, ScopeSession)
-			} else {
-				finalDec = DecisionAllowOnce
-			}
-		} else {
-			finalDec = DecisionDeny
-		}
-		return finalDec, nil
+		return false, ctx.Err()
+	case granted := <-respCh:
+		return granted, nil
 	}
 }
 
-// RememberDecision stores a decision in the specified scope (session, project, or forever).
-func (c *Checker) RememberDecision(req Request, decision Decision, scope Scope) error {
-	key := c.getMatchKey(req)
-	var mappedDec Decision
-	if decision == DecisionAllow || decision == DecisionAllowOnce || decision == DecisionAllowSession || decision == DecisionAllowProject || decision == DecisionAllowForever {
-		mappedDec = DecisionAllow
-	} else {
-		mappedDec = DecisionDeny
-	}
-
-	switch scope {
-	case ScopeSession:
-		// Session grants are keyed by {sessionID,tool,action,path} so a grant in
-		// one session never resolves in another. Project/global grants below stay
-		// keyed by the bare matchKey because they are meant to span sessions.
-		c.sessionMemory.Store(sessionGrantKey(req.SessionID, req.ToolName, key), mappedDec)
-		return nil
-
-	case ScopeProject:
-		c.projectMemory.Store(key, mappedDec)
-
-		// Persist to project config file.
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("getting current directory for project scope persistence: %w", err)
-		}
-		projPath := config.ProjectPath(cwd)
-		if projPath == "" {
-			projPath = filepath.Join(cwd, ".bharatcode.json")
-		}
-
-		return updateConfigFile(context.Background(), projPath, key, string(mappedDec), config.ScopeProject)
-
-	case ScopeForever:
-		c.globalMemory.Store(key, mappedDec)
-
-		// Persist to global config file.
-		return updateConfigFile(context.Background(), config.GlobalPath(), key, string(mappedDec), config.ScopeGlobal)
-
-	default:
-		return nil
-	}
+func (s *permissionService) AutoApproveSession(sessionID string) {
+	s.autoApproveSessionsMu.Lock()
+	s.autoApproveSessions[sessionID] = true
+	s.autoApproveSessionsMu.Unlock()
 }
 
-// updateConfigFile loads, updates, and saves the configuration atomically at the given path.
-func updateConfigFile(ctx context.Context, path, key, val string, scope config.Scope) error {
-	var tmp config.Config
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &tmp)
-	}
-
-	if tmp.Permissions.Remembered == nil {
-		tmp.Permissions.Remembered = make(map[string]string)
-	}
-	tmp.Permissions.Remembered[key] = val
-
-	return config.Save(ctx, &tmp, scope)
+func (s *permissionService) SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[PermissionNotification] {
+	return s.notificationBroker.Subscribe(ctx)
 }
 
-// getMatchKey sanitizes arguments and produces the canonical lookup key (e.g. "bash:rm" or "edit:/path").
-func (c *Checker) getMatchKey(req Request) string {
-	switch req.ToolName {
-	case "bash":
-		cmd := bashCmdString(req.Args)
-		if cmd == "" {
-			return "bash"
-		}
-		if w := firstCommandWord(cmd); w != "" {
-			return "bash:" + w
-		}
-		return "bash"
-
-	case "edit", "write", "view":
-		pathRaw, ok := req.Args["path"].(string)
-		if !ok {
-			pathRaw, ok = req.Args["TargetFile"].(string)
-		}
-		if !ok {
-			pathRaw, ok = req.Args["AbsolutePath"].(string)
-		}
-		if !ok || pathRaw == "" {
-			return req.ToolName
-		}
-		abs, err := filepath.Abs(pathRaw)
-		if err != nil {
-			return req.ToolName + ":" + filepath.Clean(pathRaw)
-		}
-		return req.ToolName + ":" + abs
-
-	case "web_fetch", "web_search":
-		urlRaw, ok := req.Args["url"].(string)
-		if !ok {
-			urlRaw, ok = req.Args["Url"].(string)
-		}
-		if !ok || urlRaw == "" {
-			return req.ToolName
-		}
-		if !strings.Contains(urlRaw, "://") {
-			urlRaw = "http://" + urlRaw
-		}
-		u, err := url.Parse(urlRaw)
-		if err == nil {
-			return req.ToolName + ":" + u.Host
-		}
-		return req.ToolName + ":" + urlRaw
-
-	default:
-		return req.ToolName
-	}
+func (s *permissionService) SetSkipRequests(skip bool) {
+	s.skip.Store(skip)
 }
 
-// sanitizeLogArgs strips sensitive or long parameters for logging.
-func sanitizeLogArgs(args map[string]any) string {
-	if len(args) == 0 {
-		return "{}"
-	}
-	clean := make(map[string]any)
-	for k, v := range args {
-		vStr := fmt.Sprintf("%v", v)
-		if len(vStr) > 100 {
-			clean[k] = vStr[:97] + "..."
-		} else {
-			clean[k] = v
-		}
-	}
-	b, _ := json.Marshal(clean)
-	return string(b)
+func (s *permissionService) SkipRequests() bool {
+	return s.skip.Load()
 }
 
-// matchPattern evaluates if key matches a config pattern rule.
-//
-// A match requires either an explicit wildcard ("*" for every tool, or
-// "<tool>:*" for every invocation of one tool) or an exact key equality.
-// Prefix matching is deliberately avoided so that "bash:echo" never silently
-// broadens to "bash:echox" or "bash:echofoo".
-func matchPattern(tool, key, pattern string) bool {
-	if pattern == "*" || pattern == tool+":*" {
-		return true
+func NewPermissionService(workingDir string, skip bool, allowedTools []string) Service {
+	svc := &permissionService{
+		Broker:              pubsub.NewBroker[PermissionRequest](),
+		notificationBroker:  pubsub.NewBroker[PermissionNotification](),
+		workingDir:          workingDir,
+		sessionPermissions:  csync.NewMap[PermissionKey, bool](),
+		autoApproveSessions: make(map[string]bool),
+		allowedTools:        allowedTools,
+		pendingRequests:     csync.NewMap[string, chan bool](),
 	}
-	return key == pattern
-}
-
-// bashCmdString extracts the shell command line from a bash tool request's
-// arguments, accepting both the native "cmd" key and the "CommandLine" alias.
-func bashCmdString(args map[string]any) string {
-	if v, ok := args["cmd"].(string); ok {
-		return v
-	}
-	if v, ok := args["CommandLine"].(string); ok {
-		return v
-	}
-	return ""
-}
-
-// firstCommandWord returns the head (the command name) of a single shell
-// command segment: the first token that is neither a flag nor punctuation. It
-// is the canonical reduction used to key a bash invocation for permission
-// matching, e.g. "git" for "git commit -m ...".
-func firstCommandWord(cmd string) string {
-	for _, w := range strings.Fields(cmd) {
-		if strings.HasPrefix(w, "-") {
-			continue
-		}
-		w = strings.Trim(w, "\"'`;|&><")
-		if w == "" {
-			continue
-		}
-		return w
-	}
-	return ""
-}
-
-// splitBashSegments splits a command line into its sub-command segments at the
-// unquoted shell operators that introduce a new command (";", "&&", "||", "|",
-// background "&", and newlines). Quoting is honored so a separator inside a
-// quoted string (echo "a; b") does not split. It also reports whether a command
-// substitution ($( ... ) or backticks) was seen: such constructs can hide
-// further commands that this lightweight splitter does not descend into, so the
-// caller treats the parse as incomplete and refuses to auto-approve via narrow
-// per-command rules. Over-splitting (treating a separator that bash would have
-// grouped as a boundary) is deliberately tolerated because it only makes
-// auto-approval stricter, never looser.
-func splitBashSegments(cmd string) (segs []string, hasSubstitution bool) {
-	var b strings.Builder
-	var inSingle, inDouble bool
-	flush := func() {
-		if s := strings.TrimSpace(b.String()); s != "" {
-			segs = append(segs, s)
-		}
-		b.Reset()
-	}
-	runes := []rune(cmd)
-	for i := 0; i < len(runes); i++ {
-		c := runes[i]
-		switch {
-		case inSingle:
-			b.WriteRune(c)
-			if c == '\'' {
-				inSingle = false
-			}
-		case inDouble:
-			// Command substitution stays active inside double quotes, so detect
-			// it here too rather than trusting the quote to neutralize it.
-			if c == '`' {
-				hasSubstitution = true
-			} else if c == '$' && i+1 < len(runes) && runes[i+1] == '(' {
-				hasSubstitution = true
-			}
-			b.WriteRune(c)
-			if c == '"' {
-				inDouble = false
-			}
-		case c == '\'':
-			inSingle = true
-			b.WriteRune(c)
-		case c == '"':
-			inDouble = true
-			b.WriteRune(c)
-		case c == '`':
-			hasSubstitution = true
-			b.WriteRune(c)
-		case c == '$' && i+1 < len(runes) && runes[i+1] == '(':
-			hasSubstitution = true
-			b.WriteRune(c)
-		case c == ';' || c == '\n':
-			flush()
-		case c == '&':
-			if i+1 < len(runes) && runes[i+1] == '&' {
-				i++
-			}
-			flush()
-		case c == '|':
-			if i+1 < len(runes) && runes[i+1] == '|' {
-				i++
-			}
-			flush()
-		default:
-			b.WriteRune(c)
-		}
-	}
-	flush()
-	return segs, hasSubstitution
-}
-
-// bashHeads reduces a command line to the de-duplicated set of permission keys
-// for the command heads it runs ("bash:git", "bash:rm", ...). parseComplete is
-// false when a command substitution was seen, signalling that the key set may be
-// incomplete and so narrow auto-approval must be withheld.
-func bashHeads(cmd string) (heads []string, parseComplete bool) {
-	segs, hasSub := splitBashSegments(cmd)
-	seen := map[string]bool{}
-	for _, s := range segs {
-		w := firstCommandWord(s)
-		if w == "" {
-			continue
-		}
-		key := "bash:" + w
-		if !seen[key] {
-			seen[key] = true
-			heads = append(heads, key)
-		}
-	}
-	return heads, !hasSub
-}
-
-// bashCompound reports whether req is a bash invocation whose command line
-// composes more than one command (or hides commands inside a substitution),
-// returning the per-head permission keys and whether the parse was complete.
-// compound is false for non-bash tools and for a single, fully-parsed command,
-// in which case the caller falls back to the original single-key resolution.
-func (c *Checker) bashCompound(req Request) (heads []string, parseComplete, compound bool) {
-	if req.ToolName != "bash" {
-		return nil, true, false
-	}
-	heads, parseComplete = bashHeads(bashCmdString(req.Args))
-	compound = len(heads) > 1 || !parseComplete
-	return heads, parseComplete, compound
-}
-
-// resolveSingleKey applies the remembered-scope and config-list resolution to a
-// single permission key, returning the decision and the scope it came from. The
-// resolution order matches the original Check flow exactly: a stored Deny at any
-// scope wins, then a stored Allow at the narrowest scope, then the config deny
-// list, then the config auto-approve list. resolved is false when no rule
-// matched, leaving the decision to the approval mode and interactive prompt.
-func (c *Checker) resolveSingleKey(sessionID, tool, key string) (decision Decision, scope Scope, resolved bool) {
-	// Session memory is looked up under the session-scoped composite key; project
-	// and global memory under the bare matchKey, since those scopes span sessions.
-	type memLookup struct {
-		mem   *sync.Map
-		key   string
-		scope Scope
-	}
-	lookups := []memLookup{
-		{&c.sessionMemory, sessionGrantKey(sessionID, tool, key), ScopeSession},
-		{&c.projectMemory, key, ScopeProject},
-		{&c.globalMemory, key, ScopeForever},
-	}
-
-	// Deny-wins: a stored Deny at any scope overrides any narrower Allow.
-	for _, l := range lookups {
-		if v, ok := l.mem.Load(l.key); ok && v.(Decision) == DecisionDeny {
-			return DecisionDeny, l.scope, true
-		}
-	}
-	// Any remaining stored value is an Allow (RememberDecision collapses them).
-	for _, l := range lookups {
-		if v, ok := l.mem.Load(l.key); ok {
-			return v.(Decision), l.scope, true
-		}
-	}
-	if c.cfg != nil {
-		for _, pattern := range c.cfg.Permissions.Deny {
-			if matchPattern(tool, key, pattern) {
-				return DecisionDeny, ScopeOnce, true
-			}
-		}
-		for _, pattern := range c.cfg.Permissions.AutoApprove {
-			if matchPattern(tool, key, pattern) {
-				return DecisionAllow, ScopeOnce, true
-			}
-		}
-	}
-	return "", ScopeOnce, false
-}
-
-// resolveBashHeads resolves a compound bash command against all of its command
-// heads. Deny wins: if any head is denied at any scope or by the config deny
-// list, the whole command is denied. Allow requires every head to be allowed
-// independently (by a remembered Allow or the config auto-approve list); a
-// single un-cleared head leaves the command for the interactive prompt. When the
-// parse was incomplete (command substitution present), only a blanket bash:* / *
-// auto-approve clears the command — narrow per-command rules are insufficient
-// because the hidden command's head is not in the key set.
-func (c *Checker) resolveBashHeads(sessionID string, heads []string, parseComplete bool) (decision Decision, scope Scope, resolved bool) {
-	// Per-head memory lookup: session memory under the session-scoped composite
-	// key, project/global under the bare head key. Returns the resolved decision,
-	// its scope, and whether any memory matched.
-	memLookup := func(head string, want Decision) (Scope, bool) {
-		if v, ok := c.sessionMemory.Load(sessionGrantKey(sessionID, "bash", head)); ok && v.(Decision) == want {
-			return ScopeSession, true
-		}
-		if v, ok := c.projectMemory.Load(head); ok && v.(Decision) == want {
-			return ScopeProject, true
-		}
-		if v, ok := c.globalMemory.Load(head); ok && v.(Decision) == want {
-			return ScopeForever, true
-		}
-		return ScopeOnce, false
-	}
-
-	// Deny-wins across every head, memory before config.
-	for _, key := range heads {
-		if sc, ok := memLookup(key, DecisionDeny); ok {
-			return DecisionDeny, sc, true
-		}
-	}
-	if c.cfg != nil {
-		for _, key := range heads {
-			for _, pattern := range c.cfg.Permissions.Deny {
-				if matchPattern("bash", key, pattern) {
-					return DecisionDeny, ScopeOnce, true
-				}
-			}
-		}
-	}
-
-	if !parseComplete {
-		if c.cfg != nil {
-			for _, pattern := range c.cfg.Permissions.AutoApprove {
-				if pattern == "*" || pattern == "bash:*" {
-					return DecisionAllow, ScopeOnce, true
-				}
-			}
-		}
-		return "", ScopeOnce, false
-	}
-
-	if len(heads) == 0 {
-		return "", ScopeOnce, false
-	}
-	scope = ScopeOnce
-	for _, key := range heads {
-		allowed := false
-		if sc, ok := memLookup(key, DecisionAllow); ok {
-			allowed = true
-			if scope == ScopeOnce {
-				scope = sc
-			}
-		}
-		if !allowed && c.cfg != nil {
-			for _, pattern := range c.cfg.Permissions.AutoApprove {
-				if matchPattern("bash", key, pattern) {
-					allowed = true
-					break
-				}
-			}
-		}
-		if !allowed {
-			return "", ScopeOnce, false
-		}
-	}
-	return DecisionAllow, scope, true
+	svc.skip.Store(skip)
+	return svc
 }

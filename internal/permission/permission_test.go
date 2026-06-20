@@ -1,385 +1,615 @@
-// Package permission implements gating controls and user validation.
-package permission_test
+package permission
 
 import (
-	"context"
-	"os"
-	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/arbazkhan971/bharatcode/internal/config"
-	"github.com/arbazkhan971/bharatcode/internal/permission"
-	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestPermission_YoloBypass(t *testing.T) {
-	bus := pubsub.NewTopic[pubsub.PermissionRequest]("test_permission_yolo", 16)
-	defer bus.Close()
-
-	cfg := &config.Config{}
-	checker := permission.New(cfg, bus)
-	checker.SetYolo(true)
-
-	req := permission.Request{
-		ToolName: "bash",
-		Args:     map[string]any{"cmd": "rm -rf /"},
-	}
-
-	dec, err := checker.Check(context.Background(), req)
-	require.NoError(t, err)
-	require.Equal(t, permission.DecisionAllow, dec)
-}
-
-func TestPermission_AllowDenyLists(t *testing.T) {
-	bus := pubsub.NewTopic[pubsub.PermissionRequest]("test_permission_lists", 16)
-	defer bus.Close()
-
-	cfg := &config.Config{
-		Permissions: config.PermConfig{
-			AutoApprove: []string{"bash:echo"},
-			Deny:        []string{"bash:rm"},
+func TestPermissionService_AllowedCommands(t *testing.T) {
+	tests := []struct {
+		name         string
+		allowedTools []string
+		toolName     string
+		action       string
+		expected     bool
+	}{
+		{
+			name:         "tool in allowlist",
+			allowedTools: []string{"bash", "view"},
+			toolName:     "bash",
+			action:       "execute",
+			expected:     true,
+		},
+		{
+			name:         "tool:action in allowlist",
+			allowedTools: []string{"bash:execute", "edit:create"},
+			toolName:     "bash",
+			action:       "execute",
+			expected:     true,
+		},
+		{
+			name:         "tool not in allowlist",
+			allowedTools: []string{"view", "ls"},
+			toolName:     "bash",
+			action:       "execute",
+			expected:     false,
+		},
+		{
+			name:         "tool:action not in allowlist",
+			allowedTools: []string{"bash:read", "edit:create"},
+			toolName:     "bash",
+			action:       "execute",
+			expected:     false,
+		},
+		{
+			name:         "empty allowlist",
+			allowedTools: []string{},
+			toolName:     "bash",
+			action:       "execute",
+			expected:     false,
 		},
 	}
-	checker := permission.New(cfg, bus)
 
-	// Approved by auto_approve
-	dec, err := checker.Check(context.Background(), permission.Request{
-		ToolName: "bash",
-		Args:     map[string]any{"cmd": "echo hello"},
-	})
-	require.NoError(t, err)
-	require.Equal(t, permission.DecisionAllow, dec)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := NewPermissionService("/tmp", false, tt.allowedTools)
 
-	// Blocked by deny
-	dec2, err2 := checker.Check(context.Background(), permission.Request{
-		ToolName: "bash",
-		Args:     map[string]any{"cmd": "rm -rf /"},
-	})
-	require.NoError(t, err2)
-	require.Equal(t, permission.DecisionDeny, dec2)
-}
+			// Create a channel to capture the permission request
+			// Since we're testing the allowlist logic, we need to simulate the request
+			ps := service.(*permissionService)
 
-func TestPermission_MemoryScopes(t *testing.T) {
-	// Set XDG_CONFIG_HOME to a temporary directory so we don't overwrite real user global settings.
-	tempHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempHome)
-
-	// Change working directory to a temporary project directory.
-	tempProj := t.TempDir()
-	origWd, err := os.Getwd()
-	require.NoError(t, err)
-	err = os.Chdir(tempProj)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_ = os.Chdir(origWd)
-	})
-
-	bus := pubsub.NewTopic[pubsub.PermissionRequest]("test_permission_scopes", 16)
-	defer bus.Close()
-
-	cfg := &config.Config{}
-	checker := permission.New(cfg, bus)
-
-	req := permission.Request{
-		ToolName: "bash",
-		Args:     map[string]any{"cmd": "ls"},
-	}
-
-	// 1. Session scope
-	err = checker.RememberDecision(req, permission.DecisionAllow, permission.ScopeSession)
-	require.NoError(t, err)
-	dec, err := checker.Check(context.Background(), req)
-	require.NoError(t, err)
-	require.Equal(t, permission.DecisionAllow, dec)
-
-	// 2. Project scope
-	req2 := permission.Request{
-		ToolName: "edit",
-		Args:     map[string]any{"path": "main.go"},
-	}
-	err = checker.RememberDecision(req2, permission.DecisionAllow, permission.ScopeProject)
-	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(tempProj, ".bharatcode.json"))
-
-	// 3. Global scope
-	req3 := permission.Request{
-		ToolName: "web_fetch",
-		Args:     map[string]any{"url": "https://google.com"},
-	}
-	err = checker.RememberDecision(req3, permission.DecisionDeny, permission.ScopeForever)
-	require.NoError(t, err)
-	require.FileExists(t, filepath.Join(tempHome, "bharatcode", "config.json"))
-}
-
-func TestPermission_AskPromptAndCancellation(t *testing.T) {
-	bus := pubsub.NewTopic[pubsub.PermissionRequest]("test_permission_ask", 16)
-	defer bus.Close()
-
-	cfg := &config.Config{}
-	checker := permission.New(cfg, bus)
-
-	req := permission.Request{
-		ToolName: "bash",
-		Args:     map[string]any{"cmd": "echo test"},
-	}
-
-	// Test 1: User approves and chooses to remember.
-	ch, cancelSub := bus.Subscribe()
-	defer cancelSub()
-	go func() {
-		select {
-		case pubReq, ok := <-ch:
-			if ok {
-				pubReq.Reply <- pubsub.PermissionDecision{
-					Approved: true,
-					Remember: true,
+			// Test the allowlist logic directly
+			commandKey := tt.toolName + ":" + tt.action
+			allowed := false
+			for _, cmd := range ps.allowedTools {
+				if cmd == commandKey || cmd == tt.toolName {
+					allowed = true
+					break
 				}
 			}
-		case <-time.After(1 * time.Second):
-		}
-	}()
 
-	dec, err := checker.Check(context.Background(), req)
-	require.NoError(t, err)
-	require.Equal(t, permission.DecisionAllowSession, dec)
-
-	// Test 2: Context is cancelled before user replies.
-	ctx, cancel := context.WithCancel(context.Background())
-
-	go func() {
-		// Cancel context after a small delay.
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
-
-	req2 := permission.Request{
-		ToolName: "bash",
-		Args:     map[string]any{"cmd": "whoami"},
+			if allowed != tt.expected {
+				t.Errorf("expected %v, got %v for tool %s action %s with allowlist %v",
+					tt.expected, allowed, tt.toolName, tt.action, tt.allowedTools)
+			}
+		})
 	}
-
-	dec2, err2 := checker.Check(ctx, req2)
-	require.ErrorIs(t, err2, permission.ErrCancelled)
-	require.Equal(t, permission.DecisionDeny, dec2)
 }
 
-// isolateConfigDirs redirects project and global config writes to temp dirs so
-// RememberDecision persistence never touches the real repo or user config.
-func isolateConfigDirs(t *testing.T) {
-	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+func TestSkipRace(t *testing.T) {
+	svc := NewPermissionService("/tmp", false, nil)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		svc.SetSkipRequests(true)
+	}()
+	go func() {
+		defer wg.Done()
+		svc.SkipRequests()
+	}()
+	wg.Wait()
+}
 
-	tempProj := t.TempDir()
-	origWd, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(tempProj))
-	t.Cleanup(func() {
-		_ = os.Chdir(origWd)
+func TestPermissionService_SkipMode(t *testing.T) {
+	service := NewPermissionService("/tmp", true, []string{})
+
+	result, err := service.Request(t.Context(), CreatePermissionRequest{
+		SessionID:   "test-session",
+		ToolName:    "bash",
+		Action:      "execute",
+		Description: "test command",
+		Path:        "/tmp",
+	})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected permission to be granted in skip mode")
+	}
+}
+
+func TestPermissionService_HookApproval(t *testing.T) {
+	t.Parallel()
+
+	t.Run("matching tool call ID short-circuits the prompt", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		ctx := WithHookApproval(t.Context(), "call-42")
+		granted, err := service.Request(ctx, CreatePermissionRequest{
+			SessionID:   "s1",
+			ToolCallID:  "call-42",
+			ToolName:    "bash",
+			Action:      "execute",
+			Description: "hook-approved command",
+			Path:        "/tmp",
+		})
+		require.NoError(t, err)
+		assert.True(t, granted, "hook-approved call should bypass the prompt")
+	})
+
+	t.Run("approval is scoped to the stamped tool call ID", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		// Stamp for call-42, ask for a different call ID — must not leak.
+		ctx := WithHookApproval(t.Context(), "call-42")
+
+		// Kick off a real request that will need a subscriber to resolve it.
+		events := service.Subscribe(t.Context())
+		var (
+			wg      sync.WaitGroup
+			granted bool
+			err     error
+		)
+		wg.Go(func() {
+			granted, err = service.Request(ctx, CreatePermissionRequest{
+				SessionID:   "s1",
+				ToolCallID:  "call-other",
+				ToolName:    "bash",
+				Action:      "execute",
+				Description: "unrelated call",
+				Path:        "/tmp",
+			})
+		})
+
+		// Confirm the service published a real request (i.e. didn't bypass).
+		event := <-events
+		service.Deny(event.Payload)
+		wg.Wait()
+		require.NoError(t, err)
+		assert.False(t, granted, "stamped approval must not apply to a different tool call")
+	})
+
+	t.Run("notifies subscribers that permission was granted", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		notifications := service.SubscribeNotifications(t.Context())
+
+		ctx := WithHookApproval(t.Context(), "call-99")
+		granted, err := service.Request(ctx, CreatePermissionRequest{
+			SessionID:  "s1",
+			ToolCallID: "call-99",
+			ToolName:   "view",
+			Action:     "read",
+			Path:       "/tmp",
+		})
+		require.NoError(t, err)
+		assert.True(t, granted)
+
+		event := <-notifications
+		assert.Equal(t, "call-99", event.Payload.ToolCallID)
+		assert.True(t, event.Payload.Granted, "subscribers should see a granted notification")
 	})
 }
 
-// TestPermission_DenyStickiness asserts a Deny stored at any scope overrides a
-// later Allow stored at a narrower scope: an AllowSession cannot undo a DenyProject.
-func TestPermission_DenyStickiness(t *testing.T) {
-	isolateConfigDirs(t)
+func TestPermissionService_SequentialProperties(t *testing.T) {
+	t.Run("Sequential permission requests with persistent grants", func(t *testing.T) {
+		service := NewPermissionService("/tmp", false, []string{})
 
-	bus := pubsub.NewTopic[pubsub.PermissionRequest]("test_permission_deny_sticky", 16)
-	defer bus.Close()
+		req1 := CreatePermissionRequest{
+			SessionID:   "session1",
+			ToolName:    "file_tool",
+			Description: "Read file",
+			Action:      "read",
+			Params:      map[string]string{"file": "test.txt"},
+			Path:        "/tmp/test.txt",
+		}
 
-	checker := permission.New(&config.Config{}, bus)
+		var result1 bool
+		var wg sync.WaitGroup
+		wg.Add(1)
 
-	req := permission.Request{
-		ToolName: "bash",
-		Args:     map[string]any{"cmd": "rm -rf /tmp/x"},
-	}
+		events := service.Subscribe(t.Context())
 
-	// Project scope says Deny.
-	require.NoError(t, checker.RememberDecision(req, permission.DecisionDeny, permission.ScopeProject))
-	// Session scope then tries to Allow the same key.
-	require.NoError(t, checker.RememberDecision(req, permission.DecisionAllow, permission.ScopeSession))
+		go func() {
+			defer wg.Done()
+			result1, _ = service.Request(t.Context(), req1)
+		}()
 
-	// Deny must win even though the session-scope Allow was stored last and is
-	// resolved earlier in the allow ordering.
-	dec, err := checker.Check(context.Background(), req)
-	require.NoError(t, err)
-	require.Equal(t, permission.DecisionDeny, dec, "project-scope Deny must override session-scope Allow")
-}
+		var permissionReq PermissionRequest
+		event := <-events
 
-// TestPermission_PrefixOverMatch asserts auto-approve and deny patterns match
-// exactly (or via explicit wildcards) and never broaden a key by prefix.
-func TestPermission_PrefixOverMatch(t *testing.T) {
-	tests := []struct {
-		name        string
-		autoApprove []string
-		deny        []string
-		toolName    string
-		cmd         string
-		want        permission.Decision
-	}{
-		{
-			name:        "exact key auto-approves",
-			autoApprove: []string{"bash:echo"},
-			toolName:    "bash",
-			cmd:         "echo hello",
-			want:        permission.DecisionAllow,
-		},
-		{
-			name:        "prefix-extended key does not auto-approve and is denied without bus",
-			autoApprove: []string{"bash:echo"},
-			toolName:    "bash",
-			cmd:         "echox hello",
-			want:        permission.DecisionDeny,
-		},
-		{
-			name:        "prefix-extended key does not auto-approve (echofoo)",
-			autoApprove: []string{"bash:echo"},
-			toolName:    "bash",
-			cmd:         "echofoo bar",
-			want:        permission.DecisionDeny,
-		},
-		{
-			name:        "tool wildcard matches any invocation",
-			autoApprove: []string{"bash:*"},
-			toolName:    "bash",
-			cmd:         "anything goes",
-			want:        permission.DecisionAllow,
-		},
-		{
-			name:        "global wildcard matches",
-			autoApprove: []string{"*"},
-			toolName:    "bash",
-			cmd:         "rm -rf /",
-			want:        permission.DecisionAllow,
-		},
-		{
-			// Wildcard auto-approve is an Allow backdrop so that an observed Deny
-			// can only come from the deny list firing, not from the fallback.
-			name:        "deny exact key blocks despite wildcard allow",
-			deny:        []string{"bash:rm"},
-			autoApprove: []string{"*"},
-			toolName:    "bash",
-			cmd:         "rm -rf /",
-			want:        permission.DecisionDeny,
-		},
-		{
-			// Under the buggy HasPrefix matcher "bash:rmdir" hit "bash:rm" and
-			// returned Deny; with exact matching it falls through to the wildcard
-			// auto-approve, so an Allow here proves the deny list no longer over-matches.
-			name:        "deny does not over-match by prefix so wildcard allow wins",
-			deny:        []string{"bash:rm"},
-			autoApprove: []string{"*"},
-			toolName:    "bash",
-			cmd:         "rmdir foo",
-			want:        permission.DecisionAllow,
-		},
-	}
+		permissionReq = event.Payload
+		service.GrantPersistent(permissionReq)
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// nil bus so the fallback is a deterministic Deny rather than a
-			// blocking prompt; this lets us distinguish "auto-allowed" from
-			// "fell through".
-			cfg := &config.Config{
-				Permissions: config.PermConfig{
-					AutoApprove: tc.autoApprove,
-					Deny:        tc.deny,
-				},
+		wg.Wait()
+		assert.True(t, result1, "First request should be granted")
+
+		// Second identical request should be automatically approved due to persistent permission
+		req2 := CreatePermissionRequest{
+			SessionID:   "session1",
+			ToolName:    "file_tool",
+			Description: "Read file again",
+			Action:      "read",
+			Params:      map[string]string{"file": "test.txt"},
+			Path:        "/tmp/test.txt",
+		}
+		result2, err := service.Request(t.Context(), req2)
+		require.NoError(t, err)
+		assert.True(t, result2, "Second request should be auto-approved")
+	})
+	t.Run("Sequential requests with temporary grants", func(t *testing.T) {
+		service := NewPermissionService("/tmp", false, []string{})
+
+		req := CreatePermissionRequest{
+			SessionID:   "session2",
+			ToolName:    "file_tool",
+			Description: "Write file",
+			Action:      "write",
+			Params:      map[string]string{"file": "test.txt"},
+			Path:        "/tmp/test.txt",
+		}
+
+		events := service.Subscribe(t.Context())
+		var result1 bool
+		var wg sync.WaitGroup
+
+		wg.Go(func() {
+			result1, _ = service.Request(t.Context(), req)
+		})
+
+		var permissionReq PermissionRequest
+		event := <-events
+		permissionReq = event.Payload
+
+		service.Grant(permissionReq)
+		wg.Wait()
+		assert.True(t, result1, "First request should be granted")
+
+		var result2 bool
+
+		wg.Go(func() {
+			result2, _ = service.Request(t.Context(), req)
+		})
+
+		event = <-events
+		permissionReq = event.Payload
+		service.Deny(permissionReq)
+		wg.Wait()
+		assert.False(t, result2, "Second request should be denied")
+	})
+	t.Run("Concurrent requests with different outcomes", func(t *testing.T) {
+		service := NewPermissionService("/tmp", false, []string{})
+
+		events := service.Subscribe(t.Context())
+
+		var wg sync.WaitGroup
+		results := make([]bool, 3)
+
+		requests := []CreatePermissionRequest{
+			{
+				SessionID:   "concurrent1",
+				ToolName:    "tool1",
+				Action:      "action1",
+				Path:        "/tmp/file1.txt",
+				Description: "First concurrent request",
+			},
+			{
+				SessionID:   "concurrent2",
+				ToolName:    "tool2",
+				Action:      "action2",
+				Path:        "/tmp/file2.txt",
+				Description: "Second concurrent request",
+			},
+			{
+				SessionID:   "concurrent3",
+				ToolName:    "tool3",
+				Action:      "action3",
+				Path:        "/tmp/file3.txt",
+				Description: "Third concurrent request",
+			},
+		}
+
+		for i, req := range requests {
+			wg.Add(1)
+			go func(index int, request CreatePermissionRequest) {
+				defer wg.Done()
+				result, _ := service.Request(t.Context(), request)
+				results[index] = result
+			}(i, req)
+		}
+
+		for range 3 {
+			event := <-events
+			switch event.Payload.ToolName {
+			case "tool1":
+				service.Grant(event.Payload)
+			case "tool2":
+				service.GrantPersistent(event.Payload)
+			case "tool3":
+				service.Deny(event.Payload)
 			}
-			checker := permission.New(cfg, nil)
+		}
+		wg.Wait()
+		grantedCount := 0
+		for _, result := range results {
+			if result {
+				grantedCount++
+			}
+		}
 
-			dec, err := checker.Check(context.Background(), permission.Request{
-				ToolName: tc.toolName,
-				Args:     map[string]any{"cmd": tc.cmd},
-			})
-			require.NoError(t, err)
-			require.Equal(t, tc.want, dec)
-		})
-	}
+		assert.Equal(t, 2, grantedCount, "Should have 2 granted and 1 denied")
+		secondReq := requests[1]
+		secondReq.Description = "Repeat of second request"
+		result, err := service.Request(t.Context(), secondReq)
+		require.NoError(t, err)
+		assert.True(t, result, "Repeated request should be auto-approved due to persistent permission")
+	})
 }
 
-// TestPermission_ApprovalModes asserts ReadOnly denies write/execute tools but
-// allows read-class tools, and Full allows everything.
-func TestPermission_ApprovalModes(t *testing.T) {
-	tests := []struct {
-		name     string
-		mode     permission.ApprovalMode
-		toolName string
-		args     map[string]any
-		want     permission.Decision
-	}{
-		{
-			name:     "read-only denies bash",
-			mode:     permission.ApprovalReadOnly,
-			toolName: "bash",
-			args:     map[string]any{"cmd": "ls"},
-			want:     permission.DecisionDeny,
-		},
-		{
-			name:     "read-only denies edit",
-			mode:     permission.ApprovalReadOnly,
-			toolName: "edit",
-			args:     map[string]any{"path": "main.go"},
-			want:     permission.DecisionDeny,
-		},
-		{
-			name:     "read-only denies write",
-			mode:     permission.ApprovalReadOnly,
-			toolName: "write",
-			args:     map[string]any{"path": "out.txt"},
-			want:     permission.DecisionDeny,
-		},
-		{
-			name:     "read-only allows view",
-			mode:     permission.ApprovalReadOnly,
-			toolName: "view",
-			args:     map[string]any{"path": "main.go"},
-			want:     permission.DecisionAllow,
-		},
-		{
-			name:     "read-only allows grep",
-			mode:     permission.ApprovalReadOnly,
-			toolName: "grep",
-			args:     map[string]any{},
-			want:     permission.DecisionAllow,
-		},
-		{
-			name:     "full allows bash",
-			mode:     permission.ApprovalFull,
-			toolName: "bash",
-			args:     map[string]any{"cmd": "rm -rf /"},
-			want:     permission.DecisionAllow,
-		},
-		{
-			name:     "full allows edit",
-			mode:     permission.ApprovalFull,
-			toolName: "edit",
-			args:     map[string]any{"path": "main.go"},
-			want:     permission.DecisionAllow,
-		},
-	}
+// TestPermissionService_ResolveIdempotency covers the multi-subscriber
+// resolve guarantees added for client/server mode: exactly one
+// notification per resolution, racing callers see "already resolved",
+// and stray Grant/Deny calls for unknown IDs are safe no-ops.
+func TestPermissionService_ResolveIdempotency(t *testing.T) {
+	t.Parallel()
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// nil bus: in Auto mode this would deny via fallback, so any Allow
-			// observed here must come from the approval-mode branch itself.
-			checker := permission.New(&config.Config{}, nil)
-			checker.SetApprovalMode(tc.mode)
-			require.Equal(t, tc.mode, checker.GetApprovalMode())
+	t.Run("concurrent grants resolve exactly once", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
 
-			dec, err := checker.Check(context.Background(), permission.Request{
-				ToolName: tc.toolName,
-				Args:     tc.args,
-			})
-			require.NoError(t, err)
-			require.Equal(t, tc.want, dec)
+		events := service.Subscribe(t.Context())
+		notifications := service.SubscribeNotifications(t.Context())
+
+		req := CreatePermissionRequest{
+			SessionID:  "race-session",
+			ToolCallID: "race-call",
+			ToolName:   "tool",
+			Action:     "act",
+			Path:       "/tmp/race",
+		}
+
+		var (
+			wg         sync.WaitGroup
+			granted    bool
+			requestErr error
+		)
+		wg.Go(func() {
+			granted, requestErr = service.Request(t.Context(), req)
 		})
-	}
-}
 
-// TestPermission_DefaultApprovalModeIsAuto asserts New defaults to Auto so the
-// interactive prompt path remains reachable and the zero value never denies silently.
-func TestPermission_DefaultApprovalModeIsAuto(t *testing.T) {
-	checker := permission.New(&config.Config{}, nil)
-	require.Equal(t, permission.ApprovalAuto, checker.GetApprovalMode())
+		// Wait for the request to be published so we have a real
+		// PermissionRequest (with its server-side ID) to race on.
+		var pending PermissionRequest
+		select {
+		case ev := <-events:
+			pending = ev.Payload
+		case <-time.After(2 * time.Second):
+			t.Fatal("permission request was never published")
+		}
+
+		// Drain the initial "request opened" notification (Granted ==
+		// false && Denied == false) so the next read is the resolution
+		// itself.
+		select {
+		case ev := <-notifications:
+			require.False(t, ev.Payload.Granted, "initial notification must not be granted")
+			require.False(t, ev.Payload.Denied, "initial notification must not be denied")
+		case <-time.After(2 * time.Second):
+			t.Fatal("initial notification was never published")
+		}
+
+		// Race two grants from two goroutines.
+		var (
+			resolvedCount atomic.Int32
+			start         = make(chan struct{})
+			racers        sync.WaitGroup
+		)
+		for range 2 {
+			racers.Go(func() {
+				<-start
+				if service.Grant(pending) {
+					resolvedCount.Add(1)
+				}
+			})
+		}
+		close(start)
+		racers.Wait()
+
+		// Original Request must return granted exactly once.
+		wg.Wait()
+		require.NoError(t, requestErr)
+		assert.True(t, granted, "request should observe its grant")
+
+		// Exactly one of the two grants resolved the request.
+		assert.Equal(t, int32(1), resolvedCount.Load(),
+			"exactly one Grant should report it resolved the request")
+
+		// Exactly one resolution notification, and no further ones.
+		select {
+		case ev := <-notifications:
+			assert.True(t, ev.Payload.Granted, "resolution notification should be granted")
+			assert.Equal(t, "race-call", ev.Payload.ToolCallID)
+		case <-time.After(2 * time.Second):
+			t.Fatal("resolution notification was never published")
+		}
+		select {
+		case ev := <-notifications:
+			t.Fatalf("unexpected duplicate notification: %+v", ev.Payload)
+		case <-time.After(50 * time.Millisecond):
+			// good: no duplicate.
+		}
+
+		// pendingRequests must be empty: no goroutine is left blocked
+		// on a send, and a future Grant for the same ID is a no-op.
+		ps := service.(*permissionService)
+		assert.Equal(t, 0, ps.pendingRequests.Len(),
+			"pendingRequests must be empty after resolution")
+
+		assert.False(t, service.Grant(pending),
+			"a third Grant should report already-resolved")
+	})
+
+	t.Run("grant after deny is a no-op", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		events := service.Subscribe(t.Context())
+		notifications := service.SubscribeNotifications(t.Context())
+
+		req := CreatePermissionRequest{
+			SessionID:  "deny-first",
+			ToolCallID: "df-call",
+			ToolName:   "tool",
+			Action:     "act",
+			Path:       "/tmp/df",
+		}
+
+		var (
+			wg         sync.WaitGroup
+			granted    bool
+			requestErr error
+		)
+		wg.Go(func() {
+			granted, requestErr = service.Request(t.Context(), req)
+		})
+
+		var pending PermissionRequest
+		select {
+		case ev := <-events:
+			pending = ev.Payload
+		case <-time.After(2 * time.Second):
+			t.Fatal("permission request was never published")
+		}
+
+		// Drain the initial neither-granted-nor-denied notification.
+		<-notifications
+
+		assert.True(t, service.Deny(pending), "Deny should resolve the request")
+		wg.Wait()
+		require.NoError(t, requestErr)
+		assert.False(t, granted, "request should observe denial")
+
+		// A follow-up Grant must be a no-op and must not flip the
+		// outcome or publish anything new.
+		assert.False(t, service.Grant(pending),
+			"Grant after Deny should report already-resolved")
+
+		select {
+		case ev := <-notifications:
+			// The first resolution notification (denial) is expected;
+			// anything after that is a bug.
+			require.True(t, ev.Payload.Denied,
+				"the only post-initial notification must be the denial")
+		case <-time.After(2 * time.Second):
+			t.Fatal("denial notification was never published")
+		}
+		select {
+		case ev := <-notifications:
+			t.Fatalf("Grant after Deny must not publish: %+v", ev.Payload)
+		case <-time.After(50 * time.Millisecond):
+			// good.
+		}
+	})
+
+	t.Run("losing GrantPersistent does not record session permission", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		events := service.Subscribe(t.Context())
+		notifications := service.SubscribeNotifications(t.Context())
+
+		req := CreatePermissionRequest{
+			SessionID:  "race-persist",
+			ToolCallID: "rp-call",
+			ToolName:   "tool",
+			Action:     "act",
+			Path:       "/tmp/rp",
+		}
+
+		var (
+			wg         sync.WaitGroup
+			granted    bool
+			requestErr error
+		)
+		wg.Go(func() {
+			granted, requestErr = service.Request(t.Context(), req)
+		})
+
+		// Wait for the request to be published so we have the real
+		// pending PermissionRequest to race on.
+		var pending PermissionRequest
+		select {
+		case ev := <-events:
+			pending = ev.Payload
+		case <-time.After(2 * time.Second):
+			t.Fatal("permission request was never published")
+		}
+
+		// Drain the initial neither-granted-nor-denied notification.
+		<-notifications
+
+		// Deny wins, then a competing GrantPersistent loses.
+		assert.True(t, service.Deny(pending), "Deny should resolve the request")
+		assert.False(t, service.GrantPersistent(pending),
+			"GrantPersistent after Deny should report already-resolved")
+
+		wg.Wait()
+		require.NoError(t, requestErr)
+		assert.False(t, granted, "request should observe denial")
+
+		// The losing GrantPersistent must not have inserted an
+		// auto-approve entry. Issue a matching follow-up request and
+		// confirm the service still publishes a pending request (i.e.
+		// not auto-approved). We then Deny it to drain the goroutine.
+		var (
+			wg2         sync.WaitGroup
+			granted2    bool
+			requestErr2 error
+		)
+		wg2.Go(func() {
+			granted2, requestErr2 = service.Request(t.Context(), req)
+		})
+
+		select {
+		case ev := <-events:
+			assert.Equal(t, pending.SessionID, ev.Payload.SessionID)
+			service.Deny(ev.Payload)
+		case <-time.After(2 * time.Second):
+			t.Fatal("follow-up request was auto-approved; persistent grant leaked")
+		}
+
+		wg2.Wait()
+		require.NoError(t, requestErr2)
+		assert.False(t, granted2, "follow-up request should be denied, not auto-approved")
+	})
+
+	t.Run("grant for unknown id is a safe no-op", func(t *testing.T) {
+		t.Parallel()
+		service := NewPermissionService("/tmp", false, nil)
+
+		notifications := service.SubscribeNotifications(t.Context())
+
+		bogus := PermissionRequest{
+			ID:         "does-not-exist",
+			ToolCallID: "ghost",
+			ToolName:   "tool",
+			Action:     "act",
+			Path:       "/tmp/ghost",
+		}
+
+		assert.NotPanics(t, func() {
+			assert.False(t, service.Grant(bogus),
+				"Grant for unknown ID should report already-resolved")
+			assert.False(t, service.GrantPersistent(bogus),
+				"GrantPersistent for unknown ID should report already-resolved")
+			assert.False(t, service.Deny(bogus),
+				"Deny for unknown ID should report already-resolved")
+		})
+
+		select {
+		case ev := <-notifications:
+			t.Fatalf("unknown-ID resolution must not publish: %+v", ev.Payload)
+		case <-time.After(50 * time.Millisecond):
+			// good: no notification.
+		}
+	})
 }

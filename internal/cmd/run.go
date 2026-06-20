@@ -2,475 +2,663 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
-	"path/filepath"
-	"sort"
+	"os/signal"
 	"strings"
 	"time"
 
-	"github.com/arbazkhan971/bharatcode/internal/agent"
-	"github.com/arbazkhan971/bharatcode/internal/app"
-	"github.com/arbazkhan971/bharatcode/internal/filetracker"
-	"github.com/arbazkhan971/bharatcode/internal/identity"
-	"github.com/arbazkhan971/bharatcode/internal/ledger"
-	"github.com/arbazkhan971/bharatcode/internal/message"
+	"charm.land/lipgloss/v2"
+	"charm.land/log/v2"
+	"github.com/arbazkhan971/bharatcode/internal/client"
+	"github.com/arbazkhan971/bharatcode/internal/config"
+	"github.com/arbazkhan971/bharatcode/internal/event"
+	"github.com/arbazkhan971/bharatcode/internal/format"
+	"github.com/arbazkhan971/bharatcode/internal/proto"
+	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
+	"github.com/arbazkhan971/bharatcode/internal/ui/anim"
+	"github.com/arbazkhan971/bharatcode/internal/ui/styles"
+	"github.com/arbazkhan971/bharatcode/internal/workspace"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/charmtone"
+	"github.com/charmbracelet/x/term"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
-func newRunCmd() *cobra.Command {
-	var modelName string
-	var agentName string
-	var jsonStream bool
-	var outputLastMessage string
-	var quiet bool
-	var continueSession bool
-	var resumeSessionID string
-	cmd := &cobra.Command{
-		Use:   "run [prompt]",
-		Short: "Run one prompt without opening the TUI",
-		Example: "  bharatcode run \"summarize this repository\"\n" +
-			"  echo \"hello\" | bharatcode run\n" +
-			"  bharatcode run --continue \"what's next?\"\n" +
-			"  bharatcode run --session <id> \"follow up question\"",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			prompt, err := readPrompt(cmd, args)
+var runCmd = &cobra.Command{
+	Aliases: []string{"r"},
+	Use:     "run [prompt...]",
+	Short:   "Run a single non-interactive prompt",
+	Long: `Run a single prompt in non-interactive mode and exit.
+The prompt can be provided as arguments or piped from stdin.`,
+	Example: `
+# Run a simple prompt
+bharatcode run "Guess my 5 favorite Pokémon"
+
+# Pipe input from stdin
+curl https://charm.land | bharatcode run "Summarize this website"
+
+# Read from a file
+bharatcode run "What is this code doing?" <<< prrr.go
+
+# Redirect output to a file
+bharatcode run "Generate a hot README for this project" > MY_HOT_README.md
+
+# Run in quiet mode (hide the spinner)
+bharatcode run --quiet "Generate a README for this project"
+
+# Run in verbose mode (show logs)
+bharatcode run --verbose "Generate a README for this project"
+
+# Continue a previous session
+bharatcode run --session {session-id} "Follow up on your last response"
+
+# Continue the most recent session
+bharatcode run --continue "Follow up on your last response"
+
+  `,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		var (
+			quiet, _      = cmd.Flags().GetBool("quiet")
+			verbose, _    = cmd.Flags().GetBool("verbose")
+			largeModel, _ = cmd.Flags().GetString("model")
+			smallModel, _ = cmd.Flags().GetString("small-model")
+			sessionID, _  = cmd.Flags().GetString("session")
+			useLast, _    = cmd.Flags().GetBool("continue")
+			goalMode, _   = cmd.Flags().GetBool("goal")
+			maxIters, _   = cmd.Flags().GetInt("max-iterations")
+		)
+
+		// Cancel on SIGINT or SIGTERM.
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+		defer cancel()
+
+		prompt := strings.Join(args, " ")
+
+		prompt, err := MaybePrependStdin(prompt)
+		if err != nil {
+			slog.Error("Failed to read from stdin", "error", err)
+			return err
+		}
+
+		if prompt == "" {
+			return fmt.Errorf("no prompt provided")
+		}
+
+		event.SetNonInteractive(true)
+
+		switch {
+		case sessionID != "":
+			event.SetContinueBySessionID(true)
+		case useLast:
+			event.SetContinueLastSession(true)
+		}
+
+		if useClientServer() {
+			c, ws, cleanup, err := connectToServer(cmd)
 			if err != nil {
 				return err
 			}
-			if answer, ok := identity.Answer(prompt); ok {
-				if jsonStream {
-					return emitLocalIdentityJSON(cmd.OutOrStdout(), answer)
-				}
-				if outputLastMessage != "" {
-					if err := os.WriteFile(outputLastMessage, []byte(answer), 0o644); err != nil {
-						return fmt.Errorf("writing last message: %w", err)
-					}
-				}
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), answer)
-				return nil
-			}
-			opts := getRootOptions(cmd)
-			application, err := buildApp(cmd.Context(), opts)
-			if err != nil {
-				return err
-			}
-			defer closeApp(cmd.Context(), application)
+			defer cleanup()
 
-			projectPath := opts.projectDir
-			if projectPath == "" {
-				projectPath = "."
-			}
+			event.AppInitialized()
 
-			s, err := resolveRunSession(cmd.Context(), application, projectPath,
-				resumeSessionID, modelName, agentName, prompt, continueSession)
-			if err != nil {
-				return err
-			}
-
-			// --yolo is scoped to this run's session rather than a global switch:
-			// auto-approve every tool for this session id only.
-			if application.StartupYolo() && application.Permission != nil {
-				application.Permission.SetAutoApproveSession(s.ID, true)
-			}
-
-			// Prefer an explicit --agent flag; fall back to the session's stored
-			// agent (useful when --continue or --session resumes a prior run);
-			// ultimately default to "coder".
-			effectiveAgent := agentName
-			if effectiveAgent == "" && s.Agent != "" {
-				effectiveAgent = s.Agent
-			}
-			if effectiveAgent == "" {
-				effectiveAgent = "coder"
-			}
-			loop, err := application.Agent.Agent(effectiveAgent)
-			if err != nil {
-				return fmt.Errorf("resolving agent: %w", err)
-			}
-
-			// A --model override must re-point the loop at the provider that owns
-			// that model, not just change the model id in the request: the loop is
-			// bound to its agent's default provider at construction, so without
-			// this a "--model gpt-5.1-codex" would still stream to the default
-			// (e.g. deepseek) provider and fail auth. SetActiveModel resolves the
-			// owning provider; SetModel rebinds the live loop atomically.
-			if modelName != "" {
-				provider, err := application.Agent.SetActiveModel(effectiveAgent, modelName)
+			if sessionID != "" {
+				sess, err := resolveSessionByID(ctx, c, ws.ID, sessionID)
 				if err != nil {
-					return fmt.Errorf("selecting model %q: %w", modelName, err)
-				}
-				loop.SetModel(modelName, provider)
-			}
-
-			var before workspaceSnapshot
-			if !jsonStream {
-				before = snapshotWorkspace(projectPath)
-			}
-
-			if jsonStream {
-				if err := runJSON(cmd, application, loop, s.ID, prompt); err != nil {
 					return err
 				}
-			} else if err := loop.Run(cmd.Context(), s.ID, userMessage(prompt)); err != nil {
-				return fmt.Errorf("running prompt: %w", err)
+				sessionID = sess.ID
 			}
 
-			messages, err := application.Sessions.Messages(cmd.Context(), s.ID)
-			if err != nil {
-				return fmt.Errorf("loading response: %w", err)
-			}
-			response := finalRunOutput(messages)
-
-			if outputLastMessage != "" {
-				if err := os.WriteFile(outputLastMessage, []byte(response), 0o644); err != nil {
-					return fmt.Errorf("writing last message: %w", err)
-				}
-			}
-			if !jsonStream {
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), response)
-				printChangedFiles(cmd.Context(), cmd.OutOrStdout(), application.FileTracker, s.ID, diffWorkspace(projectPath, before))
+			if !ws.Config.IsConfigured() {
+				return fmt.Errorf("no providers configured - please run 'bharatcode' to set up a provider interactively")
 			}
 
-			if !quiet {
-				printRunSummary(cmd.Context(), cmd.ErrOrStderr(), application.Ledger, s.ID)
+			if verbose {
+				slog.SetDefault(slog.New(log.New(os.Stderr)))
 			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&modelName, "model", "", "model id to use")
-	cmd.Flags().StringVar(&agentName, "agent", "", "agent name to use (default: coder, or the resumed session's agent)")
-	cmd.Flags().BoolVar(&jsonStream, "json", false, "stream agent events as newline-delimited JSON")
-	cmd.Flags().StringVar(&outputLastMessage, "output-last-message", "", "write the final assistant message to this file")
-	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress the token/cost summary printed to stderr after each run")
-	cmd.Flags().BoolVarP(&continueSession, "continue", "c", false, "continue the most recent session for this project")
-	cmd.Flags().StringVar(&resumeSessionID, "session", "", "continue a specific session by ID")
-	cmd.MarkFlagsMutuallyExclusive("continue", "session")
-	return cmd
-}
 
-// resolveRunSession returns the session for the run subcommand. When sessionID
-// is non-empty the named session is loaded (error if absent). When
-// continueRecent is true the most recent session for projectPath is reused; if
-// none exists a fresh session is created instead. Otherwise a new session is
-// always created.
-func resolveRunSession(ctx context.Context, application *app.App, projectPath,
-	sessionID, modelName, agentName, prompt string, continueRecent bool) (*session.Session, error) {
+			if goalMode {
+				return fmt.Errorf("--goal is not supported in client/server mode (unset BHARATCODE_CLIENT_SERVER)")
+			}
 
-	if sessionID != "" {
-		s, err := application.Sessions.Get(ctx, sessionID)
+			return runNonInteractive(ctx, c, ws, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
+		}
+
+		ws, cleanup, err := setupLocalWorkspace(cmd)
 		if err != nil {
-			return nil, fmt.Errorf("loading session %q: %w", sessionID, err)
+			return err
 		}
-		return s, nil
-	}
+		defer cleanup()
 
-	if continueRecent {
-		sessions, err := application.Sessions.List(ctx, session.ListFilter{
-			ProjectPath: projectPath,
-			Limit:       1,
-		})
-		if err == nil && len(sessions) > 0 {
-			return &sessions[0], nil
+		event.AppInitialized()
+
+		if !ws.Config().IsConfigured() {
+			return fmt.Errorf("no providers configured - please run 'bharatcode' to set up a provider interactively")
 		}
-		// No prior session: fall through and create a new one.
-	}
 
-	s := &session.Session{
-		ProjectPath: projectPath,
-		Title:       session.TitleFromFirstMessage(userMessage(prompt)),
-		Model:       modelName,
-		Agent:       agentName,
-	}
-	if err := application.Sessions.Create(ctx, s); err != nil {
-		return nil, fmt.Errorf("creating session: %w", err)
-	}
-	return s, nil
+		if verbose {
+			slog.SetDefault(slog.New(log.New(os.Stderr)))
+		}
+
+		appWs := ws.(*workspace.AppWorkspace)
+		if goalMode {
+			return appWs.App().RunGoal(ctx, os.Stdout, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast, maxIters)
+		}
+		return appWs.App().RunNonInteractive(ctx, os.Stdout, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
+	},
 }
 
-// printRunSummary queries the ledger for the session's token and cost totals and
-// writes a one-line summary to stderr. It is a no-op when l is nil (no ledger
-// configured) or when the session recorded no calls (e.g. a dry-run or an error
-// before the first provider turn).
-func printRunSummary(ctx context.Context, w io.Writer, l *ledger.Ledger, sessionID string) {
-	if l == nil {
-		return
-	}
-	sum, err := l.Summary(ctx, sessionID, ledger.WindowSession)
-	if err != nil || sum.CallCount == 0 {
-		return
-	}
-	_, _ = fmt.Fprintln(w, formatRunSummary(sum))
+func init() {
+	runCmd.Flags().BoolP("quiet", "q", false, "Hide spinner")
+	runCmd.Flags().BoolP("verbose", "v", false, "Show logs")
+	runCmd.Flags().StringP("model", "m", "", "Model to use. Accepts 'model' or 'provider/model' to disambiguate models with the same name across providers")
+	runCmd.Flags().String("small-model", "", "Small model to use. If not provided, uses the default small model for the provider")
+	runCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
+	runCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
+	runCmd.Flags().Bool("goal", false, "Run in autonomous goal mode: keep iterating until the goal is achieved, the agent is blocked, or the iteration budget is exhausted")
+	runCmd.Flags().Int("max-iterations", 0, "Maximum goal-mode iterations (0 uses the engine default; only used with --goal)")
+	runCmd.MarkFlagsMutuallyExclusive("session", "continue")
 }
 
-// formatRunSummary formats a ledger.Summary as a compact one-line token/cost
-// string suitable for printing after a non-interactive run. Cost is appended
-// only when non-zero (local/free models carry no pricing).
-func formatRunSummary(sum ledger.Summary) string {
-	s := fmt.Sprintf("Tokens: %d in, %d out", sum.InputTokens, sum.OutputTokens)
-	if sum.CostINR > 0 {
-		s += fmt.Sprintf(" · Cost: ₹%s", formatRupees(sum.CostINR))
-	}
-	return s
-}
+// runNonInteractive executes the agent via the server and streams output
+// to stdout.
+func runNonInteractive(
+	ctx context.Context,
+	c *client.Client,
+	ws *proto.Workspace,
+	prompt, largeModel, smallModel string,
+	hideSpinner bool,
+	continueSessionID string,
+	useLast bool,
+) error {
+	slog.Info("Running in non-interactive mode")
 
-// printChangedFiles prints a short, deduplicated absolute-path summary of the
-// files the run touched, each tagged with an operation label
-// (created/modified/deleted). It keeps the final CLI output useful for
-// file-creation tasks without forcing the user to dig through the transcript.
-type fileChange struct {
-	path  string
-	label string
-}
-
-func printChangedFiles(ctx context.Context, w io.Writer, tracker *filetracker.Tracker, sessionID string, fallback []fileChange) {
-	labels := map[string]string{}
-	if tracker != nil && sessionID != "" {
-		changes, err := tracker.ChangesForSession(ctx, sessionID)
-		if err == nil {
-			for _, ch := range changes {
-				if ch.Path == "" {
-					continue
-				}
-				labels[ch.Path] = mergeChangeLabel(labels[ch.Path], ch.Op)
-			}
-		}
-	}
-	for _, ch := range fallback {
-		if ch.path == "" {
-			continue
-		}
-		if _, exists := labels[ch.path]; !exists {
-			labels[ch.path] = ch.label
-		}
-	}
-	if len(labels) == 0 {
-		return
-	}
-
-	paths := make([]string, 0, len(labels))
-	for path := range labels {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	printChangedFileList(w, paths, labels)
-}
-
-func printChangedFileList(w io.Writer, paths []string, labels map[string]string) {
-	if len(paths) == 0 {
-		return
-	}
-
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, "Changed files:")
-	for _, path := range paths {
-		if label := labels[path]; label != "" {
-			_, _ = fmt.Fprintf(w, "- %s (%s)\n", path, label)
-		} else {
-			_, _ = fmt.Fprintf(w, "- %s\n", path)
-		}
-	}
-}
-
-type workspaceFile struct {
-	size    int64
-	modTime time.Time
-}
-
-type workspaceSnapshot map[string]workspaceFile
-
-func snapshotWorkspace(root string) workspaceSnapshot {
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return nil
-	}
-	snap := workspaceSnapshot{}
-	_ = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", ".bharatcode":
-				if path != absRoot {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil || !info.Mode().IsRegular() {
-			return nil
-		}
-		snap[path] = workspaceFile{size: info.Size(), modTime: info.ModTime()}
-		return nil
-	})
-	return snap
-}
-
-func diffWorkspace(root string, before workspaceSnapshot) []fileChange {
-	if before == nil {
-		return nil
-	}
-	after := snapshotWorkspace(root)
-	if after == nil {
-		return nil
-	}
-	var changes []fileChange
-	for path, next := range after {
-		prev, existed := before[path]
-		switch {
-		case !existed:
-			changes = append(changes, fileChange{path: path, label: "created"})
-		case prev.size != next.size || !prev.modTime.Equal(next.modTime):
-			changes = append(changes, fileChange{path: path, label: "modified"})
-		}
-	}
-	for path := range before {
-		if _, exists := after[path]; !exists {
-			changes = append(changes, fileChange{path: path, label: "deleted"})
-		}
-	}
-	sort.Slice(changes, func(i, j int) bool { return changes[i].path < changes[j].path })
-	return changes
-}
-
-// mergeChangeLabel folds a new operation into the running label for a path.
-// prev is "" on the first change for that path. A delete always wins (it is
-// the file's net state), a create is preserved through later edits, and an
-// edit only sets the label when the file was not already created in this run.
-func mergeChangeLabel(prev string, op filetracker.Operation) string {
-	switch op {
-	case filetracker.OpCreate:
-		return "created"
-	case filetracker.OpDelete:
-		return "deleted"
-	case filetracker.OpEdit:
-		if prev == "created" {
-			return prev
-		}
-		return "modified"
-	default:
-		if prev != "" {
-			return prev
-		}
-		return string(op)
-	}
-}
-
-// runJSON drives loop while streaming each agent.Event to stdout as one JSON
-// object per line, flushing after every line. It subscribes to the agent bus
-// before the run starts so no event is missed, and drains all buffered events
-// before returning.
-func runJSON(cmd *cobra.Command, application *app.App, loop *agent.Loop, sessionID, prompt string) error {
-	events, cancel := application.Bus.Agent.Subscribe()
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	out := cmd.OutOrStdout()
-	enc := json.NewEncoder(out)
+	if largeModel != "" || smallModel != "" {
+		if err := overrideModels(ctx, c, ws, largeModel, smallModel); err != nil {
+			return fmt.Errorf("failed to override models: %w", err)
+		}
+	}
 
-	runErrCh := make(chan error, 1)
-	go func() {
-		runErrCh <- loop.Run(cmd.Context(), sessionID, userMessage(prompt))
+	var (
+		spinner   *format.Spinner
+		stdoutTTY bool
+		stderrTTY bool
+		stdinTTY  bool
+		progress  bool
+	)
+
+	stdoutTTY = term.IsTerminal(os.Stdout.Fd())
+	stderrTTY = term.IsTerminal(os.Stderr.Fd())
+	stdinTTY = term.IsTerminal(os.Stdin.Fd())
+	progress = ws.Config.Options.Progress == nil || *ws.Config.Options.Progress
+
+	if !hideSpinner && stderrTTY {
+		t := styles.ThemeForProvider(ws.Config.Models[config.SelectedModelTypeLarge].Provider)
+
+		hasDarkBG := true
+		if stdinTTY && stdoutTTY {
+			hasDarkBG = lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
+		}
+		defaultFG := lipgloss.LightDark(hasDarkBG)(charmtone.Pepper, t.WorkingLabelColor)
+
+		spinner = format.NewSpinner(ctx, cancel, anim.Settings{
+			Size:        10,
+			Label:       "Generating",
+			LabelColor:  defaultFG,
+			GradColorA:  t.WorkingGradFromColor,
+			GradColorB:  t.WorkingGradToColor,
+			CycleColors: true,
+		})
+		spinner.Start()
+	}
+
+	stopSpinner := func() {
+		if !hideSpinner && spinner != nil {
+			spinner.Stop()
+			spinner = nil
+		}
+	}
+
+	// Wait for the agent to become ready (MCP init, etc).
+	if err := waitForAgent(ctx, c, ws.ID); err != nil {
+		stopSpinner()
+		return fmt.Errorf("agent not ready: %w", err)
+	}
+
+	// Force-update agent models so MCP tools are loaded.
+	if err := c.UpdateAgent(ctx, ws.ID); err != nil {
+		slog.Warn("Failed to update agent", "error", err)
+	}
+
+	defer stopSpinner()
+
+	sess, err := resolveSession(ctx, c, ws.ID, continueSessionID, useLast)
+	if err != nil {
+		return fmt.Errorf("failed to resolve session: %w", err)
+	}
+	if continueSessionID != "" || useLast {
+		slog.Info("Continuing session for non-interactive run", "session_id", sess.ID)
+	} else {
+		slog.Info("Created session for non-interactive run", "session_id", sess.ID)
+	}
+
+	events, err := c.SubscribeEvents(ctx, ws.ID)
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to events: %w", err)
+	}
+
+	// Mint a per-call RunID so we can correlate the terminal
+	// RunComplete with *this* SendMessage even if the session was
+	// busy and another turn finished first. Without it the stream
+	// loop would exit on whichever RunComplete arrived first for
+	// the same session and drop the queued prompt's output.
+	runID := uuid.New().String()
+	if err := c.SendMessage(ctx, ws.ID, sess.ID, runID, prompt); err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	stream := &runStream{
+		sessionID: sess.ID,
+		runID:     runID,
+		out:       os.Stdout,
+		read:      make(map[string]int),
+	}
+
+	defer func() {
+		if progress && stderrTTY {
+			_, _ = fmt.Fprintf(os.Stderr, ansi.ResetProgressBar)
+		}
+		_, _ = fmt.Fprintln(os.Stdout)
 	}()
 
-	var runErr error
-	done := false
-	for !done {
+	for {
+		if progress && stderrTTY {
+			_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
+		}
+
 		select {
-		case ev := <-events:
-			emitEvent(enc, out, ev)
-		case runErr = <-runErrCh:
-			done = true
+		case ev, ok := <-events:
+			if !ok {
+				stopSpinner()
+				return nil
+			}
+
+			done, err := stream.handle(ev, stopSpinner)
+			if err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
+
+		case <-ctx.Done():
+			stopSpinner()
+			return ctx.Err()
 		}
 	}
+}
 
-	// Drain events the loop published before returning. They are already in the
-	// buffered subscriber channel, so this never blocks.
-	for {
-		select {
-		case ev := <-events:
-			emitEvent(enc, out, ev)
-		default:
-			if runErr != nil {
-				return fmt.Errorf("running prompt: %w", runErr)
+// runStream tracks the per-message stdout cursor and the
+// reconciliation state used by [runNonInteractive] to translate
+// streaming SSE events into a final, complete stdout for `bharatcode run`.
+// It is split out so the state machine can be exercised in unit tests
+// without spinning up the full server/client harness.
+//
+// runID, when non-empty, is the authoritative correlator for the
+// terminal RunComplete event: the stream suppresses live message
+// events and only exits on a RunComplete whose RunID matches, so a
+// turn that finishes first on the same session (e.g. when our prompt
+// was queued behind a busy session) cannot contaminate stdout or
+// terminate us prematurely. When empty (older servers, tests that
+// don't supply one) the stream falls back to SessionID-only matching
+// and live message streaming, which is still correct for the
+// single-turn case.
+type runStream struct {
+	sessionID string
+	runID     string
+	out       io.Writer
+	read      map[string]int
+	printed   bool
+}
+
+// handle processes one SSE event. Returns done=true when the run
+// loop should exit (RunComplete observed); returns an error only
+// when the agent run failed (not on context cancel — that path is
+// handled by the caller's select). stopSpinner is called on the
+// first observable assistant output and on completion; passing nil
+// is safe for tests.
+func (s *runStream) handle(ev any, stopSpinner func()) (done bool, err error) {
+	stop := func() {
+		if stopSpinner != nil {
+			stopSpinner()
+		}
+	}
+	switch e := ev.(type) {
+	case pubsub.Event[proto.Message]:
+		msg := e.Payload
+		if msg.SessionID != s.sessionID || msg.Role != proto.Assistant || len(msg.Parts) == 0 {
+			return false, nil
+		}
+		if s.runID != "" {
+			return false, nil
+		}
+		stop()
+
+		content := msg.Content().String()
+		readBytes := s.read[msg.ID]
+		if len(content) < readBytes {
+			slog.Error("Non-interactive: message content shorter than read bytes",
+				"message_length", len(content), "read_bytes", readBytes)
+			return false, fmt.Errorf("message content is shorter than read bytes: %d < %d", len(content), readBytes)
+		}
+
+		part := content[readBytes:]
+		if readBytes == 0 {
+			part = strings.TrimLeft(part, " \t")
+		}
+		if s.printed || strings.TrimSpace(part) != "" {
+			s.printed = true
+			fmt.Fprint(s.out, part)
+		}
+		s.read[msg.ID] = len(content)
+		return false, nil
+
+	case pubsub.Event[proto.RunComplete]:
+		// RunComplete is the authoritative end-of-run signal. We
+		// exit on it instead of guessing from message finish parts,
+		// which fire on every tool-call step too and were the
+		// source of the regression where `bharatcode run` exited
+		// mid-turn on finish.reason == tool_use.
+		//
+		// Correlation:
+		//   - if we minted a RunID for this SendMessage, only the
+		//     event whose RunID matches is ours; any other turn
+		//     finishing first on the same session (busy-session
+		//     queue path) must be ignored.
+		//   - if we have no RunID (older server, tests), fall back
+		//     to SessionID matching.
+		if s.runID != "" {
+			if e.Payload.RunID != s.runID {
+				return false, nil
 			}
+		} else if e.Payload.SessionID != s.sessionID {
+			return false, nil
+		}
+		stop()
+		if e.Payload.Error != "" && !e.Payload.Cancelled {
+			return true, fmt.Errorf("agent run failed: %s", e.Payload.Error)
+		}
+		// Reconcile stdout against the authoritative final
+		// assistant text carried in the event. The pubsub fan-in
+		// does not serialize publishes across upstream brokers, so
+		// the final message event may not have reached this loop
+		// yet; the embedded Text field is the backstop that
+		// guarantees the full final text always appears on stdout.
+		if e.Payload.MessageID != "" {
+			full := e.Payload.Text
+			readBytes := s.read[e.Payload.MessageID]
+			if readBytes < len(full) {
+				tail := full[readBytes:]
+				if readBytes == 0 {
+					tail = strings.TrimLeft(tail, " \t")
+				}
+				if s.printed || strings.TrimSpace(tail) != "" {
+					s.printed = true
+					fmt.Fprint(s.out, tail)
+				}
+			}
+		}
+		return true, nil
+
+	case pubsub.Event[proto.AgentEvent]:
+		if e.Payload.Error == nil {
+			return false, nil
+		}
+		// Attribute the error to our run before treating it as
+		// fatal. Async errors from an unrelated workspace run share
+		// this channel, so a foreign failure must not abort us:
+		//   - if the event carries a RunID, it is the authoritative
+		//     correlator: it must match our run exactly, otherwise it
+		//     belongs to a different request and we ignore it.
+		//   - if the event carries no RunID (older server), fall back
+		//     to SessionID: it must be present and match our session,
+		//     otherwise we ignore it.
+		if e.Payload.RunID != "" {
+			if e.Payload.RunID != s.runID {
+				return false, nil
+			}
+		} else if e.Payload.SessionID == "" || e.Payload.SessionID != s.sessionID {
+			return false, nil
+		}
+		stop()
+		return true, fmt.Errorf("agent error: %w", e.Payload.Error)
+	}
+	return false, nil
+}
+
+// waitForAgent polls GetAgentInfo until the agent is ready, with a
+// timeout.
+func waitForAgent(ctx context.Context, c *client.Client, wsID string) error {
+	timeout := time.After(30 * time.Second)
+	for {
+		info, err := c.GetAgentInfo(ctx, wsID)
+		if err == nil && info.IsReady {
 			return nil
 		}
+		select {
+		case <-timeout:
+			if err != nil {
+				return fmt.Errorf("timeout waiting for agent: %w", err)
+			}
+			return fmt.Errorf("timeout waiting for agent readiness")
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }
 
-// emitEvent encodes ev as one NDJSON line and flushes it immediately.
-func emitEvent(enc *json.Encoder, out io.Writer, ev agent.Event) {
-	// The per-delta streaming kinds exist for live TUI rendering; the NDJSON
-	// stream keeps its one-canonical-llm_response-per-call contract, so they
-	// are not emitted here. Consumers that want token-level granularity can
-	// subscribe to the bus directly.
-	if ev.Kind == agent.EventLLMDelta || ev.Kind == agent.EventLLMStreamStart {
-		return
+// overrideModels resolves model strings and updates the workspace
+// configuration via the server.
+func overrideModels(
+	ctx context.Context,
+	c *client.Client,
+	ws *proto.Workspace,
+	largeModel, smallModel string,
+) error {
+	cfg, err := c.GetConfig(ctx, ws.ID)
+	if err != nil {
+		return fmt.Errorf("failed to get config: %w", err)
 	}
-	// json.Encoder.Encode appends a trailing newline, giving NDJSON framing.
-	_ = enc.Encode(newRunEvent(ev))
-	if flusher, ok := out.(interface{ Flush() error }); ok {
-		_ = flusher.Flush()
-	} else if syncer, ok := out.(interface{ Sync() error }); ok {
-		_ = syncer.Sync()
+
+	providers := cfg.Providers.Copy()
+
+	largeMatches, smallMatches := findModelMatches(providers, largeModel, smallModel)
+
+	var largeProviderID string
+
+	if largeModel != "" {
+		found, err := validateModelMatches(largeMatches, largeModel, "large")
+		if err != nil {
+			return err
+		}
+		largeProviderID = found.provider
+		slog.Info("Overriding large model", "provider", found.provider, "model", found.modelID)
+		if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeLarge, config.SelectedModel{
+			Provider: found.provider,
+			Model:    found.modelID,
+		}); err != nil {
+			return fmt.Errorf("failed to set large model: %w", err)
+		}
 	}
+
+	switch {
+	case smallModel != "":
+		found, err := validateModelMatches(smallMatches, smallModel, "small")
+		if err != nil {
+			return err
+		}
+		slog.Info("Overriding small model", "provider", found.provider, "model", found.modelID)
+		if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, config.SelectedModel{
+			Provider: found.provider,
+			Model:    found.modelID,
+		}); err != nil {
+			return fmt.Errorf("failed to set small model: %w", err)
+		}
+
+	case largeModel != "":
+		sm, err := c.GetDefaultSmallModel(ctx, ws.ID, largeProviderID)
+		if err != nil {
+			slog.Warn("Failed to get default small model", "error", err)
+		} else if sm != nil {
+			if err := c.UpdatePreferredModel(ctx, ws.ID, config.ScopeWorkspace, config.SelectedModelTypeSmall, *sm); err != nil {
+				return fmt.Errorf("failed to set small model: %w", err)
+			}
+		}
+	}
+
+	return c.UpdateAgent(ctx, ws.ID)
 }
 
-func userMessage(text string) message.Message {
-	return message.Message{
-		Role:      message.RoleUser,
-		Content:   []message.ContentBlock{message.TextBlock{Text: text}},
-		CreatedAt: time.Now().UTC(),
-	}
+type modelMatch struct {
+	provider string
+	modelID  string
 }
 
-func lastAssistantText(messages []message.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role != message.RoleAssistant {
+// findModelMatches searches providers for matching large/small model
+// strings.
+func findModelMatches(providers map[string]config.ProviderConfig, largeModel, smallModel string) ([]modelMatch, []modelMatch) {
+	largeFilter, largeID := parseModelString(largeModel)
+	smallFilter, smallID := parseModelString(smallModel)
+
+	var largeMatches, smallMatches []modelMatch
+	for name, provider := range providers {
+		if provider.Disable {
 			continue
 		}
-		var parts []string
-		for _, block := range messages[i].Content {
-			if text, ok := block.(message.TextBlock); ok {
-				parts = append(parts, text.Text)
+		for _, m := range provider.Models {
+			if matchesModel(largeID, largeFilter, m.ID, name) {
+				largeMatches = append(largeMatches, modelMatch{provider: name, modelID: m.ID})
 			}
-			if text, ok := block.(*message.TextBlock); ok {
-				parts = append(parts, text.Text)
-			}
-		}
-		return strings.Join(parts, "")
-	}
-	return ""
-}
-
-// finalRunOutput prefers the last assistant text, but falls back to the last
-// tool result when a turn ends after a simple file-writing tool. That keeps the
-// headless completion output useful even when the model does not add a prose
-// closing line of its own.
-func finalRunOutput(messages []message.Message) string {
-	if text := strings.TrimSpace(lastAssistantText(messages)); text != "" {
-		return text
-	}
-	return lastToolResultText(messages)
-}
-
-// lastToolResultText returns the raw content of the most recent tool result in
-// the transcript, or "" when none exists.
-func lastToolResultText(messages []message.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		for _, block := range messages[i].Content {
-			if result, ok := block.(message.ToolResultBlock); ok && result.Content != "" {
-				return result.Content
-			}
-			if result, ok := block.(*message.ToolResultBlock); ok && result.Content != "" {
-				return result.Content
+			if matchesModel(smallID, smallFilter, m.ID, name) {
+				smallMatches = append(smallMatches, modelMatch{provider: name, modelID: m.ID})
 			}
 		}
 	}
-	return ""
+	return largeMatches, smallMatches
+}
+
+// parseModelString splits "provider/model" into (provider, model) or
+// ("", model).
+func parseModelString(s string) (string, string) {
+	if s == "" {
+		return "", ""
+	}
+	if idx := strings.Index(s, "/"); idx >= 0 {
+		return s[:idx], s[idx+1:]
+	}
+	return "", s
+}
+
+// matchesModel returns true if the model ID matches the filter
+// criteria.
+func matchesModel(wantID, wantProvider, modelID, providerName string) bool {
+	if wantID == "" {
+		return false
+	}
+	if wantProvider != "" && wantProvider != providerName {
+		return false
+	}
+	return strings.EqualFold(modelID, wantID)
+}
+
+// validateModelMatches ensures exactly one match exists.
+func validateModelMatches(matches []modelMatch, modelID, label string) (modelMatch, error) {
+	switch {
+	case len(matches) == 0:
+		return modelMatch{}, fmt.Errorf("%s model %q not found", label, modelID)
+	case len(matches) > 1:
+		names := make([]string, len(matches))
+		for i, m := range matches {
+			names[i] = m.provider
+		}
+		return modelMatch{}, fmt.Errorf(
+			"%s model: model %q found in multiple providers: %s. Please specify provider using 'provider/model' format",
+			label, modelID, strings.Join(names, ", "),
+		)
+	}
+	return matches[0], nil
+}
+
+// resolveSession returns the session to use for a non-interactive run.
+// If continueSessionID is set it fetches that session; if useLast is set it
+// returns the most recently updated top-level session; otherwise it creates a
+// new one.
+func resolveSession(ctx context.Context, c *client.Client, wsID, continueSessionID string, useLast bool) (*proto.Session, error) {
+	switch {
+	case continueSessionID != "":
+		sess, err := c.GetSession(ctx, wsID, continueSessionID)
+		if err != nil {
+			return nil, fmt.Errorf("session not found: %s", continueSessionID)
+		}
+		if sess.ParentSessionID != "" {
+			return nil, fmt.Errorf("cannot continue a child session: %s", continueSessionID)
+		}
+		return sess, nil
+
+	case useLast:
+		sessions, err := c.ListSessions(ctx, wsID)
+		if err != nil || len(sessions) == 0 {
+			return nil, fmt.Errorf("no sessions found to continue")
+		}
+		last := sessions[0]
+		for _, s := range sessions[1:] {
+			if s.UpdatedAt > last.UpdatedAt && s.ParentSessionID == "" {
+				last = s
+			}
+		}
+		return &last, nil
+
+	default:
+		return c.CreateSession(ctx, wsID, "non-interactive")
+	}
+}
+
+// resolveSessionByID resolves a session ID that may be a full UUID or a hash
+// prefix returned by bharatcode session list.
+func resolveSessionByID(ctx context.Context, c *client.Client, wsID, id string) (*proto.Session, error) {
+	if sess, err := c.GetSession(ctx, wsID, id); err == nil {
+		return sess, nil
+	}
+
+	sessions, err := c.ListSessions(ctx, wsID)
+	if err != nil {
+		return nil, err
+	}
+
+	var matches []proto.Session
+	for _, s := range sessions {
+		hash := session.HashID(s.ID)
+		if hash == id || strings.HasPrefix(hash, id) {
+			matches = append(matches, s)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("session %q not found", id)
+	case 1:
+		return &matches[0], nil
+	default:
+		return nil, fmt.Errorf("session ID %q is ambiguous (%d matches)", id, len(matches))
+	}
 }

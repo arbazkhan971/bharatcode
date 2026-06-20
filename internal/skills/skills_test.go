@@ -3,179 +3,518 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// writeSkill creates root/<name>/SKILL.md with the given content and
-// returns the skill directory path.
-func writeSkill(t *testing.T, root, name, content string) string {
-	t.Helper()
-	dir := filepath.Join(root, name)
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, skillFilename), []byte(content), 0o644))
-	return dir
-}
+func TestParse(t *testing.T) {
+	t.Parallel()
 
-func TestLoadSkillsTwoSkills(t *testing.T) {
-	root := t.TempDir()
-	writeSkill(t, root, "pdf", "---\nname: pdf\ndescription: Fill and read PDF forms\n---\n\nUse pdftk to fill forms.\nThen verify output.\n")
-	writeSkill(t, root, "git-flow", "---\nname: git-flow\ndescription: Manage branches and releases\n---\nRun git flow init first.\n")
+	tests := []struct {
+		name        string
+		content     string
+		wantName    string
+		wantDesc    string
+		wantLicense string
+		wantCompat  string
+		wantMeta    map[string]string
+		wantTools   string
+		wantInstr   string
+		wantErr     bool
+	}{
+		{
+			name: "full skill",
+			content: `---
+name: pdf-processing
+description: Extracts text and tables from PDF files, fills PDF forms, and merges multiple PDFs.
+license: Apache-2.0
+compatibility: Requires python 3.8+, pdfplumber, pdfrw libraries
+metadata:
+  author: example-org
+  version: "1.0"
+---
 
-	set, err := LoadSkills(root)
-	require.NoError(t, err)
-	require.Equal(t, 2, set.Len())
+# PDF Processing
 
-	// List is sorted by name, deterministically.
-	list := set.List()
-	require.Len(t, list, 2)
-	require.Equal(t, "git-flow", list[0].Name)
-	require.Equal(t, "Manage branches and releases", list[0].Description)
-	require.Equal(t, "pdf", list[1].Name)
-	require.Equal(t, "Fill and read PDF forms", list[1].Description)
+## When to use this skill
+Use this skill when the user needs to work with PDF files.
+`,
+			wantName:    "pdf-processing",
+			wantDesc:    "Extracts text and tables from PDF files, fills PDF forms, and merges multiple PDFs.",
+			wantLicense: "Apache-2.0",
+			wantCompat:  "Requires python 3.8+, pdfplumber, pdfrw libraries",
+			wantMeta:    map[string]string{"author": "example-org", "version": "1.0"},
+			wantInstr:   "# PDF Processing\n\n## When to use this skill\nUse this skill when the user needs to work with PDF files.",
+		},
+		{
+			name: "minimal skill",
+			content: `---
+name: my-skill
+description: A simple skill for testing.
+---
 
-	// Get returns the parsed body (frontmatter and closing delimiter
-	// stripped, surrounding whitespace trimmed).
-	pdf, ok := set.Get("pdf")
-	require.True(t, ok)
-	require.Equal(t, "Use pdftk to fill forms.\nThen verify output.", pdf.Body)
-	require.Equal(t, filepath.Join(root, "pdf"), pdf.Dir)
+# My Skill
 
-	gitFlow, ok := set.Get("git-flow")
-	require.True(t, ok)
-	require.Equal(t, "Run git flow init first.", gitFlow.Body)
+Instructions here.
+`,
+			wantName:  "my-skill",
+			wantDesc:  "A simple skill for testing.",
+			wantInstr: "# My Skill\n\nInstructions here.",
+		},
+		{
+			name: "frontmatter with utf8 bom",
+			content: "\uFEFF---\n" +
+				"name: bom-skill\n" +
+				"description: Skill with bom.\n" +
+				"---\n\n" +
+				"# BOM Skill\n",
+			wantName:  "bom-skill",
+			wantDesc:  "Skill with bom.",
+			wantInstr: "# BOM Skill",
+		},
+		{
+			name: "frontmatter with leading blank lines",
+			content: "\n\n---\n" +
+				"name: blank-prefix\n" +
+				"description: Skill with leading blank lines.\n" +
+				"---\n\n" +
+				"# Blank Prefix\n",
+			wantName:  "blank-prefix",
+			wantDesc:  "Skill with leading blank lines.",
+			wantInstr: "# Blank Prefix",
+		},
+		{
+			name: "frontmatter delimiter with trailing spaces",
+			content: "---   \n" +
+				"name: spaced-delimiter\n" +
+				"description: Delimiter has spaces.\n" +
+				"---   \n\n" +
+				"# Spaced Delimiter\n",
+			wantName:  "spaced-delimiter",
+			wantDesc:  "Delimiter has spaces.",
+			wantInstr: "# Spaced Delimiter",
+		},
+		{
+			name:    "no frontmatter",
+			content: "# Just Markdown\n\nNo frontmatter here.",
+			wantErr: true,
+		},
+	}
 
-	_, ok = set.Get("missing")
-	require.False(t, ok)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	// Summaries renders an <available_skills> XML block, one <skill> per
-	// skill in name order, each carrying its absolute <location>.
-	summaries := set.Summaries()
-	require.Contains(t, summaries, "Fill and read PDF forms")
-	require.Contains(t, summaries, "Manage branches and releases")
-	require.Equal(
-		t,
-		"<available_skills>\n"+
-			"  <skill>\n"+
-			"    <name>git-flow</name>\n"+
-			"    <description>Manage branches and releases</description>\n"+
-			"    <location>"+filepath.Join(root, "git-flow")+"</location>\n"+
-			"  </skill>\n"+
-			"  <skill>\n"+
-			"    <name>pdf</name>\n"+
-			"    <description>Fill and read PDF forms</description>\n"+
-			"    <location>"+filepath.Join(root, "pdf")+"</location>\n"+
-			"  </skill>\n"+
-			"</available_skills>",
-		summaries,
-	)
-}
+			// Write content to temp file.
+			dir := t.TempDir()
+			path := filepath.Join(dir, "SKILL.md")
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o644))
 
-func TestSummariesXMLEscapesAndIncludesLocation(t *testing.T) {
-	root := t.TempDir()
-	dir := writeSkill(t, root, "review", "---\nname: review\ndescription: Diff < and > & report\n---\nbody\n")
+			skill, err := Parse(path)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
 
-	set, err := LoadSkills(root)
-	require.NoError(t, err)
+			require.Equal(t, tt.wantName, skill.Name)
+			require.Equal(t, tt.wantDesc, skill.Description)
+			require.Equal(t, tt.wantLicense, skill.License)
+			require.Equal(t, tt.wantCompat, skill.Compatibility)
 
-	out := set.Summaries()
-	require.Contains(t, out, "<available_skills>")
-	require.Contains(t, out, "</available_skills>")
-	// The absolute skill directory is advertised as a <location> so the
-	// model can load the manifest and resolve relative paths against it.
-	require.Contains(t, out, "<location>"+dir+"</location>")
-	// XML metacharacters in the description are escaped.
-	require.Contains(t, out, "Diff &lt; and &gt; &amp; report")
-	require.NotContains(t, out, "Diff < and >")
-}
+			if tt.wantMeta != nil {
+				require.Equal(t, tt.wantMeta, skill.Metadata)
+			}
 
-func TestLoadSkillsSkipsMalformed(t *testing.T) {
-	root := t.TempDir()
-	// A valid skill.
-	writeSkill(t, root, "good", "---\nname: good\ndescription: A working skill\n---\nbody\n")
-	// Missing description.
-	writeSkill(t, root, "no-desc", "---\nname: no-desc\n---\nbody\n")
-	// No frontmatter delimiter at all.
-	writeSkill(t, root, "no-fm", "just some prose without frontmatter\n")
-	// Unterminated frontmatter.
-	writeSkill(t, root, "unterminated", "---\nname: x\ndescription: y\nbody continues forever")
-	// A directory with no SKILL.md is silently skipped (not a skill).
-	require.NoError(t, os.MkdirAll(filepath.Join(root, "empty-dir"), 0o755))
-
-	set, err := LoadSkills(root)
-	// Malformed skills do not fail the whole load.
-	require.NoError(t, err)
-	require.Equal(t, 1, set.Len())
-
-	_, ok := set.Get("good")
-	require.True(t, ok)
-	for _, bad := range []string{"no-desc", "no-fm", "unterminated", "empty-dir"} {
-		_, ok := set.Get(bad)
-		require.Falsef(t, ok, "malformed skill %q should be skipped", bad)
+			require.Equal(t, tt.wantInstr, skill.Instructions)
+		})
 	}
 }
 
-func TestLoadSkillsMissingRootIsSkipped(t *testing.T) {
-	root := t.TempDir()
-	writeSkill(t, root, "ok", "---\nname: ok\ndescription: present\n---\nbody\n")
-	missing := filepath.Join(t.TempDir(), "does-not-exist")
+func TestSkillValidate(t *testing.T) {
+	t.Parallel()
 
-	// A non-existent root is skipped, not an error.
-	set, err := LoadSkills(missing, root)
-	require.NoError(t, err)
-	require.Equal(t, 1, set.Len())
-	_, ok := set.Get("ok")
-	require.True(t, ok)
+	tests := []struct {
+		name    string
+		skill   Skill
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid skill",
+			skill: Skill{
+				Name:        "pdf-processing",
+				Description: "Processes PDF files.",
+				Path:        "/skills/pdf-processing",
+			},
+		},
+		{
+			name:    "missing name",
+			skill:   Skill{Description: "Some description."},
+			wantErr: true,
+			errMsg:  "name is required",
+		},
+		{
+			name:    "missing description",
+			skill:   Skill{Name: "my-skill", Path: "/skills/my-skill"},
+			wantErr: true,
+			errMsg:  "description is required",
+		},
+		{
+			name:    "name too long",
+			skill:   Skill{Name: strings.Repeat("a", 65), Description: "Some description."},
+			wantErr: true,
+			errMsg:  "exceeds",
+		},
+		{
+			name:    "valid name - mixed case",
+			skill:   Skill{Name: "MySkill", Description: "Some description.", Path: "/skills/MySkill"},
+			wantErr: false,
+		},
+		{
+			name:    "invalid name - starts with hyphen",
+			skill:   Skill{Name: "-my-skill", Description: "Some description."},
+			wantErr: true,
+			errMsg:  "alphanumeric with hyphens",
+		},
+		{
+			name:    "name doesn't match directory",
+			skill:   Skill{Name: "my-skill", Description: "Some description.", Path: "/skills/other-skill"},
+			wantErr: true,
+			errMsg:  "must match directory",
+		},
+		{
+			name:    "description too long",
+			skill:   Skill{Name: "my-skill", Description: strings.Repeat("a", 1025), Path: "/skills/my-skill"},
+			wantErr: true,
+			errMsg:  "description exceeds",
+		},
+		{
+			name:    "compatibility too long",
+			skill:   Skill{Name: "my-skill", Description: "desc", Compatibility: strings.Repeat("a", 501), Path: "/skills/my-skill"},
+			wantErr: true,
+			errMsg:  "compatibility exceeds",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.skill.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
-func TestLoadSkillsLaterRootOverrides(t *testing.T) {
-	globalRoot := t.TempDir()
-	projectRoot := t.TempDir()
-	writeSkill(t, globalRoot, "deploy", "---\nname: deploy\ndescription: global deploy\n---\nglobal body\n")
-	writeSkill(t, projectRoot, "deploy", "---\nname: deploy\ndescription: project deploy\n---\nproject body\n")
+func TestDiscover(t *testing.T) {
+	t.Parallel()
 
-	// Project root is passed last, so it wins.
-	set, err := LoadSkills(globalRoot, projectRoot)
-	require.NoError(t, err)
-	require.Equal(t, 1, set.Len())
+	tmpDir := t.TempDir()
 
-	deploy, ok := set.Get("deploy")
-	require.True(t, ok)
-	require.Equal(t, "project deploy", deploy.Description)
-	require.Equal(t, "project body", deploy.Body)
+	// Create valid skill 1.
+	skill1Dir := filepath.Join(tmpDir, "skill-one")
+	require.NoError(t, os.MkdirAll(skill1Dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skill1Dir, "SKILL.md"), []byte(`---
+name: skill-one
+description: First test skill.
+---
+# Skill One
+`), 0o644))
+
+	// Create valid skill 2 in nested directory.
+	skill2Dir := filepath.Join(tmpDir, "nested", "skill-two")
+	require.NoError(t, os.MkdirAll(skill2Dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(skill2Dir, "SKILL.md"), []byte(`---
+name: skill-two
+description: Second test skill.
+---
+# Skill Two
+`), 0o644))
+
+	// Create invalid skill (won't be included).
+	invalidDir := filepath.Join(tmpDir, "invalid-dir")
+	require.NoError(t, os.MkdirAll(invalidDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(invalidDir, "SKILL.md"), []byte(`---
+name: wrong-name
+description: Name doesn't match directory.
+---
+`), 0o644))
+
+	skills, states := DiscoverWithStates([]string{tmpDir})
+
+	var normalCount int
+	var errorCount int
+	var hasInvalidDir bool
+	for _, state := range states {
+		if state.State == StateNormal {
+			normalCount++
+		}
+		if state.State == StateError {
+			errorCount++
+			if strings.Contains(state.Path, "invalid-dir") {
+				hasInvalidDir = true
+			}
+		}
+	}
+	require.Equal(t, 2, normalCount)
+	require.Equal(t, 1, errorCount)
+	require.True(t, hasInvalidDir)
+	require.Len(t, skills, 2)
+	require.Equal(t, []string{"skill-two", "skill-one"}, []string{skills[0].Name, skills[1].Name})
+
+	names := make(map[string]bool)
+	for _, s := range skills {
+		names[s.Name] = true
+	}
+	require.True(t, names["skill-one"])
+	require.True(t, names["skill-two"])
 }
 
-func TestLoadSkillsNoneEmptySet(t *testing.T) {
-	set, err := LoadSkills()
-	require.NoError(t, err)
-	require.Equal(t, 0, set.Len())
-	require.Empty(t, set.List())
-	require.Empty(t, set.Summaries())
+func TestDiscoverEmptyDir(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	skills, states := DiscoverWithStates([]string{tmpDir})
+	require.Empty(t, states)
+	require.Empty(t, skills)
 }
 
-func TestParseSkillDescriptionWithColon(t *testing.T) {
-	// SplitN-style parsing keeps colons inside the value.
-	name, desc, body, err := parseSkill("---\nname: api\ndescription: Calls api: GET, POST, etc.\n---\nbody\n")
-	require.NoError(t, err)
-	require.Equal(t, "api", name)
-	require.Equal(t, "Calls api: GET, POST, etc.", desc)
-	require.Equal(t, "body", body)
+func TestDiscoverMissingPath(t *testing.T) {
+	t.Parallel()
+
+	skills, states := DiscoverWithStates([]string{filepath.Join(t.TempDir(), "missing")})
+	require.Empty(t, states)
+	require.Empty(t, skills)
 }
 
-func TestParseSkillToleratesBOMAndQuotes(t *testing.T) {
-	// A leading UTF-8 BOM and quoted values are tolerated.
-	name, desc, _, err := parseSkill("\ufeff---\nname: \"quoted\"\ndescription: 'single quoted'\n---\nbody\n")
-	require.NoError(t, err)
-	require.Equal(t, "quoted", name)
-	require.Equal(t, "single quoted", desc)
+func TestToPromptXML(t *testing.T) {
+	t.Parallel()
+
+	skills := []*Skill{
+		{Name: "pdf-processing", Description: "Extracts text from PDFs.", SkillFilePath: "/skills/pdf-processing/SKILL.md"},
+		{Name: "data-analysis", Description: "Analyzes datasets & charts.", SkillFilePath: "/skills/data-analysis/SKILL.md"},
+	}
+
+	xml := ToPromptXML(skills)
+
+	require.Contains(t, xml, "<available_skills>")
+	require.Contains(t, xml, "<name>pdf-processing</name>")
+	require.Contains(t, xml, "<description>Extracts text from PDFs.</description>")
+	require.Contains(t, xml, "&amp;") // XML escaping
 }
 
-func TestNilSkillSetSafe(t *testing.T) {
-	var set *SkillSet
-	require.Equal(t, 0, set.Len())
-	require.Nil(t, set.List())
-	require.Empty(t, set.Summaries())
-	_, ok := set.Get("x")
-	require.False(t, ok)
+func TestToPromptXMLDisableModelInvocation(t *testing.T) {
+	t.Parallel()
+
+	skills := []*Skill{
+		{Name: "visible-skill", Description: "This one appears.", SkillFilePath: "/skills/visible/SKILL.md"},
+		{Name: "hidden-skill", Description: "This one is hidden.", SkillFilePath: "/skills/hidden/SKILL.md", DisableModelInvocation: true},
+	}
+
+	xml := ToPromptXML(skills)
+
+	require.Contains(t, xml, "<name>visible-skill</name>")
+	require.NotContains(t, xml, "<name>hidden-skill</name>")
+}
+
+func TestToPromptXMLEmpty(t *testing.T) {
+	t.Parallel()
+	require.Empty(t, ToPromptXML(nil))
+	require.Empty(t, ToPromptXML([]*Skill{}))
+}
+
+func TestEscape(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "escape xml special chars",
+			in:   `<tag attr="x&y">'z'</tag>`,
+			want: `&lt;tag attr=&quot;x&amp;y&quot;&gt;&apos;z&apos;&lt;/tag&gt;`,
+		},
+		{
+			name: "plain text unchanged",
+			in:   "hello world",
+			want: "hello world",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, escape(tt.in))
+		})
+	}
+}
+
+func TestToPromptXMLBuiltinType(t *testing.T) {
+	t.Parallel()
+
+	skills := []*Skill{
+		{Name: "builtin-skill", Description: "A builtin.", SkillFilePath: "bharatcode://skills/builtin-skill/SKILL.md", Builtin: true},
+		{Name: "user-skill", Description: "A user skill.", SkillFilePath: "/home/user/.config/bharatcode/skills/user-skill/SKILL.md"},
+	}
+	xml := ToPromptXML(skills)
+	require.Contains(t, xml, "<type>builtin</type>")
+	require.Equal(t, 1, strings.Count(xml, "<type>builtin</type>"))
+}
+
+func TestParseContent(t *testing.T) {
+	t.Parallel()
+
+	content := []byte(`---
+name: my-skill
+description: A test skill.
+---
+
+# My Skill
+
+Instructions here.
+`)
+	skill, err := ParseContent(content)
+	require.NoError(t, err)
+	require.Equal(t, "my-skill", skill.Name)
+	require.Equal(t, "A test skill.", skill.Description)
+	require.Equal(t, "# My Skill\n\nInstructions here.", skill.Instructions)
+	require.Empty(t, skill.Path)
+	require.Empty(t, skill.SkillFilePath)
+}
+
+func TestParseContent_NoFrontmatter(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseContent([]byte("# Just Markdown"))
+	require.Error(t, err)
+}
+
+func TestDiscoverBuiltin(t *testing.T) {
+	t.Parallel()
+
+	discovered := DiscoverBuiltin()
+	require.NotEmpty(t, discovered)
+
+	var found bool
+	for _, s := range discovered {
+		if s.Name == "bharatcode-config" {
+			found = true
+			require.True(t, strings.HasPrefix(s.SkillFilePath, BuiltinPrefix))
+			require.True(t, strings.HasPrefix(s.Path, BuiltinPrefix))
+			require.Equal(t, "bharatcode://skills/bharatcode-config/SKILL.md", s.SkillFilePath)
+			require.Equal(t, "bharatcode://skills/bharatcode-config", s.Path)
+			require.NotEmpty(t, s.Description)
+			require.NotEmpty(t, s.Instructions)
+			require.True(t, s.Builtin)
+		}
+	}
+	require.True(t, found, "bharatcode-config builtin skill not found")
+
+	var foundJQ bool
+	for _, s := range discovered {
+		if s.Name == "jq" {
+			foundJQ = true
+			require.Equal(t, "bharatcode://skills/jq/SKILL.md", s.SkillFilePath)
+			require.Equal(t, "bharatcode://skills/jq", s.Path)
+			require.NotEmpty(t, s.Description)
+			require.NotEmpty(t, s.Instructions)
+			require.True(t, s.Builtin)
+		}
+	}
+	require.True(t, foundJQ, "jq builtin skill not found")
+
+	var foundHooks bool
+	for _, s := range discovered {
+		if s.Name == "bharatcode-hooks" {
+			foundHooks = true
+			require.Equal(t, "bharatcode://skills/bharatcode-hooks/SKILL.md", s.SkillFilePath)
+			require.Equal(t, "bharatcode://skills/bharatcode-hooks", s.Path)
+			require.NotEmpty(t, s.Description)
+			require.NotEmpty(t, s.Instructions)
+			require.True(t, s.Builtin)
+		}
+	}
+	require.True(t, foundHooks, "bharatcode-hooks builtin skill not found")
+}
+
+func TestDeduplicate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    []*Skill
+		wantLen  int
+		wantName string
+		wantPath string
+	}{
+		{
+			name:    "no duplicates",
+			input:   []*Skill{{Name: "a", Path: "/a"}, {Name: "b", Path: "/b"}},
+			wantLen: 2,
+		},
+		{
+			name:     "user overrides builtin",
+			input:    []*Skill{{Name: "bharatcode-config", Path: "bharatcode://skills/bharatcode-config"}, {Name: "bharatcode-config", Path: "/user/bharatcode-config"}},
+			wantLen:  1,
+			wantName: "bharatcode-config",
+			wantPath: "/user/bharatcode-config",
+		},
+		{
+			name:    "empty",
+			input:   nil,
+			wantLen: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := Deduplicate(tt.input)
+			require.Len(t, result, tt.wantLen)
+			if tt.wantName != "" {
+				require.Equal(t, tt.wantName, result[0].Name)
+				require.Equal(t, tt.wantPath, result[0].Path)
+			}
+		})
+	}
+}
+
+func TestFilter(t *testing.T) {
+	t.Parallel()
+
+	all := []*Skill{
+		{Name: "a"},
+		{Name: "b"},
+		{Name: "c"},
+	}
+
+	tests := []struct {
+		name     string
+		disabled []string
+		wantLen  int
+	}{
+		{"no filter", nil, 3},
+		{"filter one", []string{"b"}, 2},
+		{"filter all", []string{"a", "b", "c"}, 0},
+		{"filter nonexistent", []string{"d"}, 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := Filter(all, tt.disabled)
+			require.Len(t, result, tt.wantLen)
+		})
+	}
 }

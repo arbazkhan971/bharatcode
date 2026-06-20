@@ -1,870 +1,392 @@
+// Package lsp provides a manager for Language Server Protocol (LSP) clients.
 package lsp
 
 import (
+	"cmp"
 	"context"
 	"errors"
-	"fmt"
-	"os"
+	"io"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/arbazkhan971/bharatcode/internal/config"
-	"github.com/arbazkhan971/bharatcode/internal/pubsub"
+	"github.com/arbazkhan971/bharatcode/internal/csync"
+	"github.com/arbazkhan971/bharatcode/internal/fsext"
+	powernapconfig "github.com/charmbracelet/x/powernap/pkg/config"
+	powernap "github.com/charmbracelet/x/powernap/pkg/lsp"
+	"github.com/sourcegraph/jsonrpc2"
 )
 
-// Manager owns language-server processes for one BharatCode session.
+const unavailableRetryDelay = 30 * time.Second
+
+// Manager handles lazy initialization of LSP clients based on file types.
 type Manager struct {
-	bus *pubsub.Topic[Diagnostic]
-
-	mu            sync.Mutex
-	root          string
-	specs         map[string]languageSpec
-	clients       map[string]*client
-	missingWarned map[string]struct{}
-	published     map[diagnosticKey]struct{}
-	discovery     map[string]bool
+	clients     *csync.Map[string, *Client]
+	unavailable *csync.Map[string, time.Time]
+	cfg         *config.ConfigStore
+	manager     *powernapconfig.Manager
+	callback    func(name string, client *Client)
+	now         func() time.Time
 }
 
-type diagnosticKey struct {
-	path    string
-	rng     Range
-	message string
-}
+// NewManager creates a new LSP manager service.
+func NewManager(cfg *config.ConfigStore) *Manager {
+	manager := powernapconfig.NewManager()
+	manager.LoadDefaults()
 
-// NewManager constructs a session-scoped LSP manager.
-func NewManager(cfg *config.Config, bus *pubsub.Topic[Diagnostic]) *Manager {
-	if cfg == nil {
-		cfg = config.Default()
+	// Merge user-configured LSPs into the manager.
+	for name, clientConfig := range cfg.Config().LSP {
+		if clientConfig.Disabled {
+			slog.Debug("LSP disabled by user config", "name", name)
+			manager.RemoveServer(name)
+			continue
+		}
+
+		// HACK: the user might have the command name in their config instead
+		// of the actual name. Find and use the correct name.
+		actualName := resolveServerName(manager, name)
+		manager.AddServer(actualName, &powernapconfig.ServerConfig{
+			Command:     clientConfig.Command,
+			Args:        clientConfig.Args,
+			Environment: clientConfig.Env,
+			FileTypes:   clientConfig.FileTypes,
+			RootMarkers: clientConfig.RootMarkers,
+			InitOptions: clientConfig.InitOptions,
+			Settings:    clientConfig.Options,
+		})
 	}
-	root, err := os.Getwd()
-	if err != nil {
-		root = "."
-	}
+
 	return &Manager{
-		bus:           bus,
-		root:          root,
-		specs:         buildSpecs(cfg),
-		clients:       make(map[string]*client),
-		missingWarned: make(map[string]struct{}),
-		published:     make(map[diagnosticKey]struct{}),
-		discovery:     make(map[string]bool),
+		clients:     csync.NewMap[string, *Client](),
+		unavailable: csync.NewMap[string, time.Time](),
+		cfg:         cfg,
+		manager:     manager,
+		callback:    func(string, *Client) {}, // default no-op callback
+		now:         time.Now,
 	}
 }
 
-// Diagnostics returns diagnostics for path, starting a server if needed.
-func (m *Manager) Diagnostics(ctx context.Context, path string) ([]Diagnostic, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving diagnostics path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	diagnostics, err := c.diagnostics(ctx, abs)
-	if err != nil {
-		return nil, err
-	}
-	m.publish(ctx, diagnostics)
-	return diagnostics, nil
+// Clients returns the map of LSP clients.
+func (s *Manager) Clients() *csync.Map[string, *Client] {
+	return s.clients
 }
 
-// NotifyChange informs the language server for path that its on-disk contents
-// changed (e.g. after an edit) so a subsequent Diagnostics call reflects the new
-// text instead of the version the server first opened. It is a no-op (nil error)
-// for files with no configured language server.
-func (m *Manager) NotifyChange(ctx context.Context, path string) error {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("resolving change path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-
-	return c.change(ctx, abs)
+// SetCallback sets a callback that is invoked when a new LSP
+// client is successfully started. This allows the coordinator to add LSP tools.
+func (s *Manager) SetCallback(cb func(name string, client *Client)) {
+	s.callback = cb
 }
 
-// Hover returns the hover text the language server reports for the position in
-// path, starting a server if needed. An empty string with a nil error means no
-// server is configured for the file or the server reported no hover.
-func (m *Manager) Hover(ctx context.Context, path string, line, col int) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolving hover path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return "", nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", nil
-	}
-
-	text, err := c.hover(ctx, abs, line, col)
-	if err != nil {
-		return "", err
-	}
-	return text, nil
-}
-
-// SignatureHelp returns the language server's signature help for the call at the
-// position in path (the function signature and which argument the cursor is on),
-// starting a server if needed. An empty string with a nil error means no server
-// is configured for the file or the position is not inside a call.
-func (m *Manager) SignatureHelp(ctx context.Context, path string, line, col int) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolving signature help path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return "", nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", nil
-	}
-
-	text, err := c.signatureHelp(ctx, abs, line, col)
-	if err != nil {
-		return "", err
-	}
-	return text, nil
-}
-
-// Definition returns the locations the language server resolves the symbol at
-// the position in path to, starting a server if needed. A nil slice with a nil
-// error means no server is configured for the file or the symbol is undefined.
-func (m *Manager) Definition(ctx context.Context, path string, line, col int) ([]Location, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving definition path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	locations, err := c.definition(ctx, abs, line, col)
-	if err != nil {
-		return nil, err
-	}
-	return locations, nil
-}
-
-// Declaration returns the locations the language server resolves the symbol at
-// the position in path to via textDocument/declaration, starting a server if
-// needed. For languages that separate declaration from definition (a C/C++
-// header vs its source file, a TypeScript ambient `declare`), this lands on the
-// declaration site rather than the implementation Definition jumps to. A nil
-// slice with a nil error means no server is configured for the file or the
-// symbol has no declaration.
-func (m *Manager) Declaration(ctx context.Context, path string, line, col int) ([]Location, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving declaration path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	locations, err := c.declaration(ctx, abs, line, col)
-	if err != nil {
-		return nil, err
-	}
-	return locations, nil
-}
-
-// TypeDefinition returns the locations of the type of the symbol at the
-// position in path, starting a server if needed. A nil slice with a nil error
-// means no server is configured for the file or the symbol has no type
-// definition.
-func (m *Manager) TypeDefinition(ctx context.Context, path string, line, col int) ([]Location, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving type definition path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	locations, err := c.typeDefinition(ctx, abs, line, col)
-	if err != nil {
-		return nil, err
-	}
-	return locations, nil
-}
-
-// Implementation returns the locations implementing the symbol at the position
-// in path (e.g. the concrete types satisfying an interface), starting a server
-// if needed. A nil slice with a nil error means no server is configured for the
-// file or the symbol has no implementations.
-func (m *Manager) Implementation(ctx context.Context, path string, line, col int) ([]Location, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving implementation path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	locations, err := c.implementation(ctx, abs, line, col)
-	if err != nil {
-		return nil, err
-	}
-	return locations, nil
-}
-
-// References returns every location referencing the symbol at the position in
-// path, starting a server if needed. When includeDeclaration is true the
-// symbol's own declaration is included among the results; when false only the
-// use sites are returned. A nil slice with a nil error means no server is
-// configured for the file or the symbol has no references.
-func (m *Manager) References(ctx context.Context, path string, line, col int, includeDeclaration bool) ([]Location, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving references path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	locations, err := c.references(ctx, abs, line, col, includeDeclaration)
-	if err != nil {
-		return nil, err
-	}
-	return locations, nil
-}
-
-// IncomingCalls returns the locations of the symbols that call the function at
-// the position in path (who calls this), starting a server if needed. A nil
-// slice with a nil error means no server is configured for the file or the
-// symbol is not callable / has no callers.
-func (m *Manager) IncomingCalls(ctx context.Context, path string, line, col int) ([]Location, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving incoming calls path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	return c.incomingCalls(ctx, abs, line, col)
-}
-
-// OutgoingCalls returns the locations of the symbols that the function at the
-// position in path calls (what this calls), starting a server if needed. A nil
-// slice with a nil error means no server is configured for the file or the
-// symbol is not callable / makes no calls.
-func (m *Manager) OutgoingCalls(ctx context.Context, path string, line, col int) ([]Location, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving outgoing calls path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	return c.outgoingCalls(ctx, abs, line, col)
-}
-
-// PrepareRename checks whether the symbol at the position in path can be
-// renamed, starting a server if needed. A nil result with a nil error means no
-// server is configured for the file or the server reports the position is not
-// renamable. On success the Range is what would be selected for editing and
-// Placeholder is the current symbol name (empty when the server returned only
-// a range or the defaultBehavior form).
-func (m *Manager) PrepareRename(ctx context.Context, path string, line, col int) (*PrepareRenameResult, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving prepare rename path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	return c.prepareRename(ctx, abs, line, col)
-}
-
-// Rename returns the file edits the language server would apply to rename the
-// symbol at the position in path to newName, starting a server if needed. An
-// empty WorkspaceEdit with a nil error means no server is configured for the
-// file or the symbol cannot be renamed.
-func (m *Manager) Rename(ctx context.Context, path string, line, col int, newName string) (WorkspaceEdit, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return WorkspaceEdit{}, fmt.Errorf("resolving rename path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return WorkspaceEdit{}, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return WorkspaceEdit{}, err
-	}
-	if !ok {
-		return WorkspaceEdit{}, nil
-	}
-
-	edit, err := c.rename(ctx, abs, line, col, newName)
-	if err != nil {
-		return WorkspaceEdit{}, err
-	}
-	return edit, nil
-}
-
-// DocumentSymbols returns the symbols the language server reports for the file,
-// starting a server if needed. A nil slice with a nil error means no server is
-// configured for the file or the server reported no symbols.
-func (m *Manager) DocumentSymbols(ctx context.Context, path string) ([]Symbol, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving document symbols path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	symbols, err := c.documentSymbol(ctx, abs)
-	if err != nil {
-		return nil, err
-	}
-	return symbols, nil
-}
-
-// Format returns the text edits the language server would apply to reformat the
-// file, starting a server if needed. A nil slice with a nil error means no
-// server is configured for the file or the file is already formatted.
-func (m *Manager) Format(ctx context.Context, path string) ([]TextEdit, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving format path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	edits, err := c.format(ctx, abs)
-	if err != nil {
-		return nil, err
-	}
-	return edits, nil
-}
-
-// FormatRange returns the edits the language server would apply to reformat just
-// the given range of the file, starting a server if needed. A nil slice with a
-// nil error means no server is configured for the file or the server reports no
-// edits for the range.
-func (m *Manager) FormatRange(ctx context.Context, path string, rng Range) ([]TextEdit, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolving range format path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	edits, err := c.formatRange(ctx, abs, rng)
-	if err != nil {
-		return nil, err
-	}
-	return edits, nil
-}
-
-// CodeActions returns the quick fixes and refactorings the language server
-// offers for the range in file, starting a server if needed. A nil slice with a
-// nil error means no server is configured for the file or the server offers no
-// actions for the range.
-// CodeActions returns the quick fixes and refactorings the language server
-// offers for the range in file. When only is non-empty it restricts the request
-// to those LSP CodeActionKinds: this is passed through to the server's request
-// context, letting it produce whole-file "source.*" actions (organize imports,
-// fix-all) that some servers compute only when explicitly asked for them. A nil
-// or empty only requests every available action.
-func (m *Manager) CodeActions(ctx context.Context, file string, rng Range, only []string) ([]CodeAction, error) {
-	abs, err := filepath.Abs(file)
-	if err != nil {
-		return nil, fmt.Errorf("resolving code actions path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return nil, nil
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, nil
-	}
-
-	actions, err := c.codeAction(ctx, abs, rng, only)
-	if err != nil {
-		return nil, err
-	}
-	return actions, nil
-}
-
-// ResolveCodeAction asks the language server serving file to populate the edit
-// of an action it returned without one, via a codeAction/resolve round-trip. The
-// action must carry the resolve data the server originally sent (CodeAction.Data,
-// preserved by CodeActions). A nil error with the action's edit still empty means
-// the server resolved to no edit. An error means no server is configured for the
-// file or the resolve request failed.
-func (m *Manager) ResolveCodeAction(ctx context.Context, file string, action CodeAction) (CodeAction, error) {
-	abs, err := filepath.Abs(file)
-	if err != nil {
-		return CodeAction{}, fmt.Errorf("resolving code action path: %w", err)
-	}
-
-	spec, ok := m.specForPath(ctx, abs)
-	if !ok {
-		return CodeAction{}, fmt.Errorf("no language server configured for %s", file)
-	}
-
-	c, ok, err := m.client(ctx, spec, abs)
-	if err != nil {
-		return CodeAction{}, err
-	}
-	if !ok {
-		return CodeAction{}, fmt.Errorf("no language server available for %s", file)
-	}
-
-	return c.resolveCodeAction(ctx, action)
-}
-
-// WorkspaceSymbols returns the symbols matching query across the workspace,
-// starting servers if needed. Every discovered language server is queried and
-// the matches are aggregated. A nil slice with a nil error means no server is
-// configured or no server reported a match.
-func (m *Manager) WorkspaceSymbols(ctx context.Context, query string) ([]Symbol, error) {
-	// Resolve the server root from a path inside the workspace, since
-	// rootForPath searches upward from a file's directory.
-	rootMarker := filepath.Join(m.root, "_")
-	var symbols []Symbol
-	for _, spec := range m.workspaceSpecs(ctx) {
-		c, ok, err := m.client(ctx, spec, rootMarker)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
+// TrackConfigured will callback the user-configured LSPs, but will not create
+// any clients.
+func (s *Manager) TrackConfigured() {
+	var wg sync.WaitGroup
+	for name := range s.manager.GetServers() {
+		if !s.isUserConfigured(name) {
 			continue
 		}
-		matches, err := c.workspaceSymbol(ctx, query)
-		if err != nil {
-			return nil, err
-		}
-		symbols = append(symbols, matches...)
+		wg.Go(func() {
+			s.callback(name, nil)
+		})
 	}
-	return symbols, nil
+	wg.Wait()
 }
 
-// workspaceSpecs returns the discovered language specs whose files are present
-// in the workspace, sorted by name for a deterministic query order.
-func (m *Manager) workspaceSpecs(ctx context.Context) []languageSpec {
-	names := make([]string, 0, len(m.specs))
-	for name := range m.specs {
-		names = append(names, name)
+// Start starts an LSP server that can handle the given file path.
+// If an appropriate LSP is already running, this is a no-op.
+func (s *Manager) Start(ctx context.Context, path string) {
+	if !fsext.HasPrefix(path, s.cfg.WorkingDir()) {
+		return
 	}
-	sort.Strings(names)
 
-	specs := make([]languageSpec, 0, len(names))
-	for _, name := range names {
-		spec := m.specs[name]
-		if !m.languageDiscovered(ctx, spec) {
-			continue
-		}
-		specs = append(specs, spec)
+	var wg sync.WaitGroup
+	for name, server := range s.manager.GetServers() {
+		wg.Go(func() {
+			s.startServer(ctx, name, path, server)
+		})
 	}
-	return specs
+	wg.Wait()
 }
 
-// SupportedExtensions returns the file extensions (lowercased, leading dot,
-// deduplicated and sorted) for which this manager has a language server
-// configured. It is the source of truth for which files a workspace-wide
-// diagnostics scan should open, so the scan tracks the configured language set —
-// including servers added or overridden via config — without keeping a second
-// hardcoded list in sync. A custom server registered for a language with no
-// known extensions contributes nothing, matching the scan's file-driven model.
-func (m *Manager) SupportedExtensions() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	set := make(map[string]struct{})
-	for _, spec := range m.specs {
-		for ext := range spec.extension {
-			set[strings.ToLower(ext)] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(set))
-	for ext := range set {
-		out = append(out, ext)
-	}
-	sort.Strings(out)
-	return out
+// skipAutoStartCommands contains commands that are too generic or ambiguous to
+// auto-start without explicit user configuration.
+var skipAutoStartCommands = map[string]bool{
+	"buck2":   true,
+	"buf":     true,
+	"cue":     true,
+	"dart":    true,
+	"deno":    true,
+	"dotnet":  true,
+	"dprint":  true,
+	"gleam":   true,
+	"java":    true,
+	"julia":   true,
+	"koka":    true,
+	"node":    true,
+	"npx":     true,
+	"perl":    true,
+	"plz":     true,
+	"python":  true,
+	"python3": true,
+	"R":       true,
+	"racket":  true,
+	"rome":    true,
+	"rubocop": true,
+	"ruff":    true,
+	"scarb":   true,
+	"solc":    true,
+	"stylua":  true,
+	"swipl":   true,
+	"tflint":  true,
 }
 
-// Shutdown terminates every running language-server process.
-func (m *Manager) Shutdown(ctx context.Context) error {
-	m.mu.Lock()
-	clients := make([]*client, 0, len(m.clients))
-	for _, c := range m.clients {
-		clients = append(clients, c)
-	}
-	m.clients = make(map[string]*client)
-	m.mu.Unlock()
-
-	if len(clients) == 0 {
-		return nil
+func (s *Manager) startServer(ctx context.Context, name, filepath string, server *powernapconfig.ServerConfig) {
+	var (
+		isUserConfigured = s.isUserConfigured(name)
+		autoLSP          = s.cfg.Config().Options.AutoLSP
+	)
+	if !isUserConfigured && autoLSP != nil && !*autoLSP {
+		slog.Debug("Auto-start LSP disabled", "name", name)
+		return
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	cfg := s.buildConfig(name, server)
+	if cfg.Disabled {
+		return
+	}
+
+	if client, ok := s.clients.Get(name); ok {
+		switch client.GetServerState() {
+		case StateReady, StateStarting, StateDisabled:
+			s.callback(name, client)
+			// already done, return
+			return
+		}
+	}
+
+	if !isUserConfigured {
+		if s.recentlyUnavailable(name) {
+			return
+		}
+		if _, err := exec.LookPath(server.Command); err != nil {
+			slog.Debug("LSP server not installed, skipping", "name", name, "command", server.Command)
+			s.markUnavailable(name)
+			return
+		}
+		s.clearUnavailable(name)
+		if skipAutoStartCommands[server.Command] {
+			slog.Debug("LSP command too generic for auto-start, skipping", "name", name, "command", server.Command)
+			return
+		}
+	}
+
+	// this is the slowest bit, so we do it last.
+	if !handles(server, filepath, s.cfg.WorkingDir()) {
+		// nothing to do
+		return
+	}
+
+	// Check again in case another goroutine started it in the meantime.
+	if client, ok := s.clients.Get(name); ok {
+		switch client.GetServerState() {
+		case StateReady, StateStarting, StateDisabled:
+			s.callback(name, client)
+			return
+		}
+	}
+
+	client, err := New(
+		ctx,
+		name,
+		cfg,
+		s.cfg.Resolver(),
+		s.cfg.WorkingDir(),
+		s.cfg.Config().Options.DebugLSP,
+	)
+	if err != nil {
+		slog.Error("Failed to create LSP client", "name", name, "error", err)
+		return
+	}
+	// Only store non-nil clients. If another goroutine raced us,
+	// prefer the already-stored client.
+	if existing, ok := s.clients.Get(name); ok {
+		switch existing.GetServerState() {
+		case StateReady, StateStarting, StateDisabled:
+			_ = client.Close(ctx)
+			s.callback(name, existing)
+			return
+		}
+	}
+	s.clients.Set(name, client)
+	defer func() {
+		s.callback(name, client)
+	}()
+
+	switch client.GetServerState() {
+	case StateReady, StateStarting, StateDisabled:
+		// already done, return
+		return
+	}
+
+	client.serverState.Store(StateStarting)
+
+	initCtx, cancel := context.WithTimeout(ctx, time.Duration(cmp.Or(cfg.Timeout, 30))*time.Second)
 	defer cancel()
 
-	var firstErr error
-	for _, c := range clients {
-		if err := c.shutdown(shutdownCtx); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	if firstErr != nil {
-		return fmt.Errorf("shutting down language servers: %w", firstErr)
-	}
-	return nil
-}
-
-func (m *Manager) specForPath(ctx context.Context, path string) (languageSpec, bool) {
-	ext := filepath.Ext(path)
-	for _, spec := range m.specs {
-		if _, ok := spec.extension[ext]; !ok {
-			continue
-		}
-		if !m.languageDiscovered(ctx, spec) {
-			return languageSpec{}, false
-		}
-		return spec, true
-	}
-	return languageSpec{}, false
-}
-
-func (m *Manager) client(ctx context.Context, spec languageSpec, path string) (*client, bool, error) {
-	m.mu.Lock()
-	if c, ok := m.clients[spec.name]; ok {
-		m.mu.Unlock()
-		return c, true, nil
-	}
-	if _, ok := m.missingWarned[spec.name]; ok {
-		m.mu.Unlock()
-		return nil, false, nil
-	}
-	m.mu.Unlock()
-
-	c, err := startClient(ctx, spec, m.rootForPath(path, spec))
-	if err != nil {
-		if isMissingServer(err) {
-			m.warnMissing(ctx, spec, path)
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-
-	m.mu.Lock()
-	if existing, ok := m.clients[spec.name]; ok {
-		m.mu.Unlock()
-		_ = c.shutdown(ctx)
-		return existing, true, nil
-	}
-	m.clients[spec.name] = c
-	m.mu.Unlock()
-	return c, true, nil
-}
-
-func (m *Manager) warnMissing(ctx context.Context, spec languageSpec, path string) {
-	m.mu.Lock()
-	if _, ok := m.missingWarned[spec.name]; ok {
-		m.mu.Unlock()
+	if _, err := client.Initialize(initCtx, s.cfg.WorkingDir()); err != nil {
+		slog.Error("LSP client initialization failed", "name", name, "error", err)
+		_ = client.Close(ctx)
+		s.clients.Del(name)
 		return
 	}
-	m.missingWarned[spec.name] = struct{}{}
-	m.mu.Unlock()
 
-	m.publish(ctx, []Diagnostic{{
-		Path:     path,
-		Severity: Warning,
-		Message:  fmt.Sprintf("Language server %q is not available", spec.command),
-		Source:   "lsp",
-	}})
+	if err := client.WaitForServerReady(initCtx); err != nil {
+		slog.Warn("LSP server not fully ready, continuing anyway", "name", name, "error", err)
+		client.SetServerState(StateError)
+	} else {
+		client.SetServerState(StateReady)
+	}
+
+	slog.Debug("LSP client started", "name", name)
 }
 
-func (m *Manager) publish(ctx context.Context, diagnostics []Diagnostic) {
-	if m.bus == nil {
-		return
-	}
-	for _, diagnostic := range diagnostics {
-		key := diagnosticKey{
-			path:    diagnostic.Path,
-			rng:     diagnostic.Range,
-			message: diagnostic.Message,
-		}
-
-		m.mu.Lock()
-		if _, ok := m.published[key]; ok {
-			m.mu.Unlock()
-			continue
-		}
-		m.published[key] = struct{}{}
-		m.mu.Unlock()
-		m.bus.Publish(ctx, diagnostic)
-	}
+func (s *Manager) isUserConfigured(name string) bool {
+	cfg, ok := s.cfg.Config().LSP[name]
+	return ok && !cfg.Disabled
 }
 
-func (m *Manager) languageDiscovered(ctx context.Context, spec languageSpec) bool {
-	m.mu.Lock()
-	if found, ok := m.discovery[spec.name]; ok {
-		m.mu.Unlock()
-		return found
+func (s *Manager) recentlyUnavailable(name string) bool {
+	lastUnavailableAt, exists := s.unavailable.Get(name)
+	if !exists {
+		return false
 	}
-	m.mu.Unlock()
+	if s.now().Sub(lastUnavailableAt) < unavailableRetryDelay {
+		return true
+	}
+	s.unavailable.Del(name)
+	return false
+}
 
-	found := false
-	for ext := range spec.extension {
-		if hasFileWithExt(ctx, m.root, ext) {
-			found = true
-			break
+func (s *Manager) markUnavailable(name string) {
+	s.unavailable.Set(name, s.now())
+}
+
+func (s *Manager) clearUnavailable(name string) {
+	s.unavailable.Del(name)
+}
+
+func (s *Manager) buildConfig(name string, server *powernapconfig.ServerConfig) config.LSPConfig {
+	cfg := config.LSPConfig{
+		Command:     server.Command,
+		Args:        server.Args,
+		Env:         server.Environment,
+		FileTypes:   server.FileTypes,
+		RootMarkers: server.RootMarkers,
+		InitOptions: server.InitOptions,
+		Options:     server.Settings,
+	}
+	if userCfg, ok := s.cfg.Config().LSP[name]; ok {
+		cfg.Timeout = userCfg.Timeout
+	}
+	return cfg
+}
+
+func resolveServerName(manager *powernapconfig.Manager, name string) string {
+	if _, ok := manager.GetServer(name); ok {
+		return name
+	}
+	for sname, server := range manager.GetServers() {
+		if server.Command == name {
+			return sname
+		}
+	}
+	return name
+}
+
+func handlesFiletype(sname string, fileTypes []string, filePath string) bool {
+	if len(fileTypes) == 0 {
+		return true
+	}
+
+	kind := powernap.DetectLanguage(filePath)
+	name := strings.ToLower(filepath.Base(filePath))
+	for _, filetype := range fileTypes {
+		suffix := strings.ToLower(filetype)
+		if !strings.HasPrefix(suffix, ".") {
+			suffix = "." + suffix
+		}
+		if strings.HasSuffix(name, suffix) || filetype == string(kind) {
+			slog.Debug("Handles file", "name", sname, "file", name, "filetype", filetype, "kind", kind)
+			return true
 		}
 	}
 
-	m.mu.Lock()
-	m.discovery[spec.name] = found
-	m.mu.Unlock()
-	return found
+	slog.Debug("Doesn't handle file", "name", sname, "file", name)
+	return false
 }
 
-func (m *Manager) rootForPath(path string, spec languageSpec) string {
-	current := filepath.Dir(path)
-	for {
-		for _, marker := range spec.rootFiles {
-			if _, err := os.Stat(filepath.Join(current, marker)); err == nil {
-				return current
+func hasRootMarkers(dir string, markers []string) bool {
+	if len(markers) == 0 {
+		return true
+	}
+	for _, pattern := range markers {
+		// Use filepath.Glob for a non-recursive check in the root
+		// directory. This avoids walking the entire tree (which is
+		// catastrophic in large monorepos with node_modules, etc.).
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err == nil && len(matches) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func handles(server *powernapconfig.ServerConfig, filePath, workDir string) bool {
+	return handlesFiletype(server.Command, server.FileTypes, filePath) &&
+		hasRootMarkers(workDir, server.RootMarkers)
+}
+
+// KillAll force-kills all the LSP clients.
+//
+// This is generally faster than [Manager.StopAll] because it doesn't wait for
+// the server to exit gracefully, but it can lead to data loss if the server is
+// in the middle of writing something.
+// Generally it doesn't matter when shutting down BharatCode, though.
+func (s *Manager) KillAll(context.Context) {
+	var wg sync.WaitGroup
+	for name, client := range s.clients.Seq2() {
+		wg.Go(func() {
+			defer func() { s.callback(name, client) }()
+			client.client.Kill()
+			client.SetServerState(StateStopped)
+			s.clients.Del(name)
+			slog.Debug("Killed LSP client", "name", name)
+		})
+	}
+	wg.Wait()
+}
+
+// StopAll stops all running LSP clients and clears the client map.
+func (s *Manager) StopAll(ctx context.Context) {
+	var wg sync.WaitGroup
+	for name, client := range s.clients.Seq2() {
+		wg.Go(func() {
+			defer func() { s.callback(name, client) }()
+			if err := client.Close(ctx); err != nil &&
+				!errors.Is(err, io.EOF) &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, jsonrpc2.ErrClosed) &&
+				err.Error() != "signal: killed" {
+				slog.Warn("Failed to stop LSP client", "name", name, "error", err)
 			}
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
+			client.SetServerState(StateStopped)
+			s.clients.Del(name)
+			slog.Debug("Stopped LSP client", "name", name)
+		})
 	}
-	return m.root
-}
-
-func buildSpecs(cfg *config.Config) map[string]languageSpec {
-	specs := make(map[string]languageSpec, len(defaultLanguageSpecs))
-	for _, spec := range defaultLanguageSpecs {
-		specs[spec.name] = spec
-	}
-	for _, server := range cfg.LSP {
-		if server.Disabled {
-			continue
-		}
-		for _, language := range server.Languages {
-			spec, ok := specs[language]
-			if !ok {
-				spec = languageSpec{
-					name:       language,
-					extension:  extSet(),
-					languageID: language,
-				}
-			}
-			spec.command = server.Command
-			spec.args = append([]string(nil), server.Args...)
-			if len(server.RootFiles) > 0 {
-				spec.rootFiles = append([]string(nil), server.RootFiles...)
-			}
-			specs[language] = spec
-		}
-	}
-	return specs
-}
-
-func hasFileWithExt(ctx context.Context, root, ext string) bool {
-	found := false
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || found {
-			return nil
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "vendor", "target", ".venv":
-				if path != root {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if filepath.Ext(path) == ext {
-			found = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return found
-}
-
-func isMissingServer(err error) bool {
-	return err != nil &&
-		(errors.Is(err, exec.ErrNotFound) ||
-			os.IsNotExist(err) ||
-			strings.Contains(err.Error(), "executable file not found"))
+	wg.Wait()
 }

@@ -1,754 +1,773 @@
-// Package app wires BharatCode services into one dependency graph.
+// Package app wires together services, coordinates agents, and manages
+// application lifecycle.
 package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/fantasy"
+	"charm.land/lipgloss/v2"
 	"github.com/arbazkhan971/bharatcode/internal/agent"
-	"github.com/arbazkhan971/bharatcode/internal/audit"
+	"github.com/arbazkhan971/bharatcode/internal/agent/notify"
+	"github.com/arbazkhan971/bharatcode/internal/agent/tools/mcp"
+	"github.com/arbazkhan971/bharatcode/internal/clipboard"
 	"github.com/arbazkhan971/bharatcode/internal/config"
 	"github.com/arbazkhan971/bharatcode/internal/db"
-	"github.com/arbazkhan971/bharatcode/internal/extension"
+	"github.com/arbazkhan971/bharatcode/internal/event"
 	"github.com/arbazkhan971/bharatcode/internal/filetracker"
-	"github.com/arbazkhan971/bharatcode/internal/hooks"
-	"github.com/arbazkhan971/bharatcode/internal/ledger"
-	"github.com/arbazkhan971/bharatcode/internal/llm"
+	"github.com/arbazkhan971/bharatcode/internal/format"
+	"github.com/arbazkhan971/bharatcode/internal/history"
+	"github.com/arbazkhan971/bharatcode/internal/log"
 	"github.com/arbazkhan971/bharatcode/internal/lsp"
-	"github.com/arbazkhan971/bharatcode/internal/mcp"
-	"github.com/arbazkhan971/bharatcode/internal/offline"
+	"github.com/arbazkhan971/bharatcode/internal/message"
 	"github.com/arbazkhan971/bharatcode/internal/permission"
 	"github.com/arbazkhan971/bharatcode/internal/pubsub"
 	"github.com/arbazkhan971/bharatcode/internal/session"
 	"github.com/arbazkhan971/bharatcode/internal/shell"
-	"github.com/arbazkhan971/bharatcode/internal/tools"
-	"github.com/arbazkhan971/bharatcode/internal/util"
+	"github.com/arbazkhan971/bharatcode/internal/skills"
+	"github.com/arbazkhan971/bharatcode/internal/ui/anim"
+	"github.com/arbazkhan971/bharatcode/internal/ui/styles"
+	"github.com/arbazkhan971/bharatcode/internal/update"
+	"github.com/arbazkhan971/bharatcode/internal/version"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/charmtone"
+	"github.com/charmbracelet/x/term"
 )
 
-const closeTimeout = 5 * time.Second
-
-// agentEventBufferSize is the per-subscriber buffer for the agent event
-// topic. pubsub.Publish is non-blocking and drops events for any
-// subscriber whose buffer is full, so a small buffer makes streaming
-// token deltas lossy under render load and yields missing chat output.
-// Sized to comfortably absorb a burst of token-delta events while the
-// TUI catches up.
-const agentEventBufferSize = 256
-
-// ErrAlreadyClosed is returned by a second Close call.
-var ErrAlreadyClosed = errors.New("app: already closed")
-
-// Options configures a New call.
-type Options struct {
-	// ConfigPath overrides the user config lookup.
-	ConfigPath string
-	// ProjectDir is the project root. Empty uses os.Getwd().
-	ProjectDir string
-	// YOLO disables permission prompts for this App.
-	YOLO bool
-	// Verbose enables debug logging.
-	Verbose bool
-	// LogToFile routes diagnostics to an append-only log file under the data
-	// dir instead of stderr. The interactive TUI sets this so slog output never
-	// corrupts the rendered screen; non-interactive callers leave it false to
-	// keep the stderr/JSON behavior that pipes and CI depend on.
-	LogToFile bool
-	// Offline forces sovereignty offline mode on regardless of the
-	// BHARATCODE_OFFLINE environment variable: non-localhost providers are
-	// rejected and the web_fetch/web_search tools are withheld.
-	Offline bool
-	// Profile names a config overlay file (<name>.json alongside the global
-	// config.json) whose settings win over the merged global+project config.
-	// Empty disables the profile layer.
-	Profile string
+// UpdateAvailableMsg is sent when a new version is available.
+type UpdateAvailableMsg struct {
+	CurrentVersion string
+	LatestVersion  string
+	IsDevelopment  bool
 }
 
-// App is the assembled BharatCode service graph.
 type App struct {
-	Cfg         *config.Config
-	DB          *db.DB
-	Audit       *audit.Store
-	Bus         *Bus
-	UI          *UIStream
-	LLM         *llm.Registry
-	Sessions    *session.Repo
-	Ledger      *ledger.Ledger
-	Permission  *permission.Checker
-	Hooks       *hooks.Engine
-	Shell       *shell.Shell
-	LSP         *lsp.Manager
-	MCP         *mcp.Client
-	FileTracker *filetracker.Tracker
-	Tools       *tools.Registry
-	Extensions  *extension.Host
-	Agent       *agent.Coordinator
-	Logger      *slog.Logger
+	Sessions    session.Service
+	Messages    message.Service
+	History     history.Service
+	Permissions permission.Service
+	FileTracker filetracker.Service
 
-	// logFile holds the diagnostics log handle when logging is routed to a file
-	// (the interactive TUI path). It is closed by closeSteps so the descriptor is
-	// released on Close rather than leaking for the process lifetime. nil when
-	// logging targets stderr.
-	logFile *os.File
+	AgentCoordinator agent.Coordinator
 
-	// workDir is the resolved, absolute project root the App was constructed
-	// against (the --project-dir flag or os.Getwd). It is captured once at New
-	// and surfaced read-only via WorkDir so a UI seam can report the working
-	// directory without re-deriving it.
-	workDir string
+	LSPManager *lsp.Manager
 
-	// startupYolo records whether --yolo was passed. It is applied per-session
-	// (as permission.SetAutoApproveSession) once an active session exists, rather
-	// than flipping a single global switch, so yolo is scoped to a session. The
-	// interactive TUI and the run command read it via StartupYolo. See workspace.go.
-	startupYolo bool
+	Skills *skills.Manager
 
-	rootCtx    context.Context
-	cancelRoot context.CancelFunc
-	closeMu    sync.Mutex
-	closed     bool
+	config *config.ConfigStore
+
+	serviceEventsWG *sync.WaitGroup
+	eventsCtx       context.Context
+	events          *pubsub.Broker[tea.Msg]
+	tuiWG           *sync.WaitGroup
+
+	// global context and cleanup functions
+	globalCtx          context.Context
+	cleanupFuncs       []func(context.Context) error
+	agentNotifications *pubsub.Broker[notify.Notification]
+	// runCompletions is the authoritative per-run completion signal,
+	// emitted once per top-level agent turn after all message
+	// updates have been flushed. Bridged into app.events so SSE
+	// subscribers (notably `bharatcode run` in client/server mode) can
+	// drive their exit on a deterministic, payload-bearing event
+	// instead of guessing from message finish parts.
+	runCompletions *pubsub.Broker[notify.RunComplete]
 }
 
-// Bus groups the typed topics used by app-wired services.
-type Bus struct {
-	Ledger      *pubsub.Topic[ledger.Summary]
-	FileChanges *pubsub.Topic[filetracker.Change]
-	LSP         *pubsub.Topic[lsp.Diagnostic]
-	MCP         *pubsub.Topic[mcp.Event]
-	Agent       *pubsub.Topic[agent.Event]
-	Permission  *pubsub.Topic[pubsub.PermissionRequest]
-	Shell       *pubsub.Topic[pubsub.ShellJobPayload]
-	ToolCalls   *pubsub.Topic[pubsub.ToolCallPayload]
-	Todo        *pubsub.Topic[tools.TodoEvent]
-}
-
-// Close closes every topic in the bundle.
-func (b *Bus) Close() {
-	if b == nil {
-		return
-	}
-	b.Ledger.Close()
-	b.FileChanges.Close()
-	b.LSP.Close()
-	b.MCP.Close()
-	b.Agent.Close()
-	b.Permission.Close()
-	b.Shell.Close()
-	b.ToolCalls.Close()
-	b.Todo.Close()
-}
-
-// New constructs the App in dependency order. Signal handling belongs to the
-// caller; cancelling ctx cancels the App root context, and Close still performs
-// resource cleanup.
-func New(ctx context.Context, opts Options) (*App, error) {
-	if ctx == nil {
-		ctx = context.Background()
+// New initializes a new application instance. skillsMgr carries the
+// per-workspace skill discovery results computed by the caller; the
+// caller is responsible for constructing it (typically via
+// skills.NewManager + skills.DiscoverFromConfig).
+func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr *skills.Manager) (*App, error) {
+	q := db.New(conn)
+	sessions := session.NewService(q, conn)
+	messages := message.NewService(q)
+	files := history.NewService(q, conn)
+	cfg := store.Config()
+	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
+	var allowedTools []string
+	if cfg.Permissions != nil && cfg.Permissions.AllowedTools != nil {
+		allowedTools = cfg.Permissions.AllowedTools
 	}
 
-	logger := newLogger(opts.Verbose)
-	var logFile *os.File
-	if opts.LogToFile {
-		logger, logFile = newLoggerToFile(defaultLogPath(), opts.Verbose)
-	}
-	// Route package-level slog calls (ledger, agent loop, providers) through
-	// the same destination decision as app.Logger. Without this, subsystems
-	// that log via the slog default still write to stderr and corrupt the TUI
-	// (e.g. the ledger's "Recorded LLM call" printing over the status bar) even
-	// though the file-backed logger exists precisely to prevent that.
-	slog.SetDefault(logger)
-	rootCtx, cancel := context.WithCancel(ctx)
 	app := &App{
-		Logger:     logger,
-		logFile:    logFile,
-		rootCtx:    rootCtx,
-		cancelRoot: cancel,
+		Sessions:    sessions,
+		Messages:    messages,
+		History:     files,
+		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
+		FileTracker: filetracker.NewService(q),
+		LSPManager:  lsp.NewManager(store),
+		Skills:      skillsMgr,
+
+		globalCtx: ctx,
+
+		config: store,
+
+		events:             pubsub.NewBroker[tea.Msg](),
+		serviceEventsWG:    &sync.WaitGroup{},
+		tuiWG:              &sync.WaitGroup{},
+		agentNotifications: pubsub.NewBroker[notify.Notification](),
+		runCompletions:     pubsub.NewBroker[notify.RunComplete](),
 	}
 
-	var closers []closeStep
-	rollback := func(cause error) (*App, error) {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeTimeout)
-		defer closeCancel()
-		// Cancel the root context before tearing subsystems down, mirroring the
-		// steady-state Close path. Any ctx-bound worker — notably a UI fan-in pump
-		// blocked delivering a must-deliver event — observes the cancellation and
-		// exits, so a close step that waits on such a worker cannot stall.
-		cancel()
-		if err := closeSteps(closeCtx, closers, logger); err != nil {
-			return nil, fmt.Errorf("%w; rollback: %v", cause, err)
+	app.setupEvents()
+
+	// Initialize clipboard support. This is best-effort; if it fails
+	// (e.g., headless environment), clipboard operations will return nil.
+	if err := clipboard.Init(); err != nil {
+		slog.Warn("Clipboard initialization failed", "error", err)
+	}
+
+	// Check for updates in the background.
+	go app.checkForUpdates(ctx)
+
+	go mcp.Initialize(ctx, app.Permissions, store)
+
+	// Release the shared database connection on shutdown. The pool
+	// closes the underlying *sql.DB when the last reference is released.
+	dataDir := cfg.Options.DataDirectory
+	app.cleanupFuncs = append(
+		app.cleanupFuncs,
+		func(context.Context) error { return db.Release(dataDir) },
+		func(ctx context.Context) error { return mcp.Close(ctx) },
+	)
+
+	// TODO: remove the concept of agent config, most likely.
+	if !cfg.IsConfigured() {
+		slog.Warn("No agent configuration found")
+		return app, nil
+	}
+	if err := app.InitCoderAgent(ctx); err != nil {
+		return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
+	}
+
+	// Set up callback for LSP state updates.
+	app.LSPManager.SetCallback(func(name string, client *lsp.Client) {
+		if client == nil {
+			updateLSPState(name, lsp.StateUnstarted, nil, nil, 0)
+			return
 		}
-		return nil, cause
-	}
-	// Register the diagnostics log handle first so it is closed last during
-	// rollback (closeSteps runs in reverse), after any other rollback warning has
-	// been written through the logger that targets it. No-op when logFile is nil.
-	closers = append(closers, closeStep{name: "logfile", close: closeLogFile(logFile)})
-
-	projectDir, globalConfigPath, projectConfigPath, dbPath, err := resolvePaths(opts)
-	if err != nil {
-		return rollback(fmt.Errorf("constructing util paths: %w", err))
-	}
-	app.workDir = projectDir
-	app.startupYolo = opts.YOLO
-
-	app.DB, err = db.Open(rootCtx, dbPath)
-	if err != nil {
-		return rollback(fmt.Errorf("constructing db: %w", err))
-	}
-	closers = append(closers, closeStep{name: "db", close: func(context.Context) error {
-		return app.DB.Close()
-	}})
-
-	auditPath := filepath.Join(filepath.Dir(dbPath), "audit.db")
-	app.Audit, err = audit.Open(rootCtx, auditPath)
-	if err != nil {
-		return rollback(fmt.Errorf("constructing audit log: %w", err))
-	}
-	closers = append(closers, closeStep{name: "audit", close: func(context.Context) error {
-		return app.Audit.Close()
-	}})
-
-	app.Bus = newBus()
-	closers = append(closers, closeStep{name: "pubsub", close: func(context.Context) error {
-		app.Bus.Close()
-		return nil
-	}})
-
-	// Consolidate every UI-bound source topic into one stream the TUI can
-	// subscribe to once. FanIn is additive — the source topics keep their direct
-	// subscribers — so this changes nothing for existing callers while giving the
-	// UI a single entry point. It is bound to rootCtx and registered to close
-	// after the bus step above, so closeSteps (which runs in reverse) tears the
-	// fan-in down before the source topics it reads from.
-	app.UI = FanIn(rootCtx, app.Bus)
-	closers = append(closers, closeStep{name: "ui_stream", close: func(context.Context) error {
-		app.UI.Close()
-		return nil
-	}})
-
-	app.Cfg, err = config.LoadFromWithProfile(rootCtx, globalConfigPath, projectConfigPath, opts.Profile)
-	if err != nil {
-		return rollback(fmt.Errorf("constructing config: %w", err))
-	}
-
-	// Sovereignty offline mode: enabled by flag or the BHARATCODE_OFFLINE env
-	// var. When active, every configured provider must be a localhost endpoint
-	// (so prompts and code never leave the machine) and the egress tools are
-	// withheld below. Reject the run early with an actionable error rather than
-	// silently contacting a remote model.
-	offlineMode := opts.Offline || offline.EnabledFromEnv()
-	if offlineMode {
-		if err := offline.CheckProviders(app.Cfg); err != nil {
-			return rollback(err)
-		}
-		// A remote MCP server is an egress channel too: its tool arguments (which
-		// can carry source code) are sent to whatever URL it lives at. Reject any
-		// non-loopback http/sse server before the MCP client starts below.
-		if err := offline.CheckMCPServers(app.Cfg); err != nil {
-			return rollback(err)
-		}
-		logger.Info(offline.Banner)
-	}
-
-	app.Ledger = ledger.New(app.DB, &app.Cfg.Ledger, app.Cfg.Models, app.Bus.Ledger)
-	app.Sessions = session.NewRepo(app.DB)
-	// Colocate the revert snapshot store next to the database so file
-	// changes can be rolled back with `bharatcode revert`.
-	snapshotDir := filepath.Join(filepath.Dir(dbPath), "snapshots")
-	app.FileTracker = filetracker.NewTrackerWithSnapshots(app.DB, app.Bus.FileChanges, snapshotDir)
-
-	app.LLM, err = llm.NewRegistry(app.Cfg)
-	if err != nil {
-		return rollback(fmt.Errorf("constructing llm: %w", err))
-	}
-
-	app.Permission = permission.New(app.Cfg, app.Bus.Permission)
-	// --yolo is applied per-session (via SetAutoApproveSession) once an active
-	// session exists, not as a global switch — see startupYolo / StartupYolo.
-	// Record every permission decision in the append-only audit log so the user
-	// can later prove exactly what the agent was authorized to do.
-	app.Permission.SetAuditLogger(app.Audit.PermissionLogger())
-
-	app.Shell = shell.New(app.Bus.Shell, shell.WithSandboxMode(shell.ParseSandboxMode(app.Cfg.Sandbox.Mode)))
-	closers = append(closers, closeStep{name: "shell", close: func(context.Context) error {
-		app.Shell.Shutdown()
-		return nil
-	}})
-
-	app.Hooks = hooks.New(app.Cfg, app.Shell)
-	app.LSP = lsp.NewManager(app.Cfg, app.Bus.LSP)
-	closers = append(closers, closeStep{name: "lsp", close: app.LSP.Shutdown})
-
-	app.MCP = mcp.NewClient(app.Cfg, app.Permission, app.Bus.MCP)
-	// Install the MCP request handlers before Start so the corresponding
-	// capabilities are advertised when each server connects. Roots scope servers
-	// to the workspace; the sampler answers server-requested LLM completions via
-	// the app's own providers (lazily resolved, since the agent is built later);
-	// elicitation auto-declines so a server prompting for structured input does
-	// not hang the connection.
-	app.MCP.SetRoots([]mcp.Root{{URI: "file://" + projectDir, Name: filepath.Base(projectDir)}})
-	app.MCP.SetSampler(app.mcpSampler)
-	app.MCP.SetElicitationHandler(autoDeclineElicitation)
-	if err := app.MCP.Start(rootCtx); err != nil {
-		return rollback(fmt.Errorf("constructing mcp: %w", err))
-	}
-	closers = append(closers, closeStep{name: "mcp", close: app.MCP.Stop})
-
-	app.Tools = tools.NewRegistry(tools.Dependencies{
-		Config:      app.Cfg,
-		Permission:  app.Permission,
-		Shell:       app.Shell,
-		LSP:         app.LSP,
-		FileTracker: app.FileTracker,
-		Bus:         app.Bus.ToolCalls,
-		TodoBus:     app.Bus.Todo,
-		WorkDir:     projectDir,
-		Offline:     offlineMode,
+		client.SetDiagnosticsCallback(updateLSPDiagnostics)
+		updateLSPState(name, client.GetServerState(), nil, client, 0)
 	})
-
-	// Load extensions from the user and project extension directories (and any
-	// compiled-in extensions registered at init time). Tools they contribute are
-	// folded into every agent's tool set and their lifecycle handlers are
-	// dispatched by each agent loop. A bad extension is logged and skipped inside
-	// Load, so this never fails construction.
-	app.Extensions, err = extension.Load(extension.Options{
-		UserDir:    extension.UserDir(),
-		ProjectDir: extension.ProjectDir(projectDir),
-		Env:        extension.NewOSEnv(projectDir),
-	})
-	if err != nil {
-		return rollback(fmt.Errorf("loading extensions: %w", err))
-	}
-
-	providers := configuredProviders(app.Cfg, app.LLM)
-	app.Agent, err = agent.NewCoordinator(app.Cfg, agent.Dependencies{
-		Tools:       app.Tools,
-		Permission:  app.Permission,
-		Sessions:    app.Sessions,
-		FileTracker: app.FileTracker,
-		Ledger:      app.Ledger,
-		Hooks:       app.Hooks,
-		MCP:         app.MCP,
-		Bus:         app.Bus.Agent,
-		Providers:   providers,
-		Router:      routerFromConfig(app.Cfg),
-		// Record every tool invocation in the append-only audit log so the
-		// sovereignty proof layer captures what the agent did, not just the
-		// permission decisions it was granted.
-		ToolAuditor: toolAuditLogger{store: app.Audit},
-		// Record every model-provider turn so the audit log also captures the
-		// egress to the model — which provider/model the prompt was sent to.
-		LLMAuditor: llmAuditLogger{store: app.Audit},
-		// Fold extension-contributed tools into every agent's tool set and route
-		// the lifecycle hooks (before_tool_call, before_provider_request,
-		// session_start, before_compact) through the loaded extensions.
-		Extensions: app.Extensions,
-	})
-	if err != nil {
-		return rollback(fmt.Errorf("constructing agent: %w", err))
-	}
-	if err := app.Agent.Start(rootCtx); err != nil {
-		return rollback(fmt.Errorf("starting agent: %w", err))
-	}
-	closers = append(closers, closeStep{name: "agent", close: app.Agent.Stop})
+	go app.LSPManager.TrackConfigured()
 
 	return app, nil
 }
 
-// Close shuts down the App in reverse construction order.
-func (a *App) Close(ctx context.Context) error {
-	if a == nil {
-		return nil
-	}
+// Config returns the pure-data configuration.
+func (app *App) Config() *config.Config {
+	return app.config.Config()
+}
 
-	a.closeMu.Lock()
-	if a.closed {
-		a.closeMu.Unlock()
-		return ErrAlreadyClosed
-	}
-	a.closed = true
-	a.closeMu.Unlock()
+// Store returns the config store.
+func (app *App) Store() *config.ConfigStore {
+	return app.config
+}
 
-	if ctx == nil {
-		ctx = context.Background()
+// Events returns a per-caller subscription channel for application events.
+// Each caller receives its own channel; all callers receive every event.
+func (app *App) Events(ctx context.Context) <-chan pubsub.Event[tea.Msg] {
+	return app.events.Subscribe(ctx)
+}
+
+// SendEvent publishes a message to all event subscribers.
+func (app *App) SendEvent(msg tea.Msg) {
+	app.events.Publish(pubsub.UpdatedEvent, msg)
+}
+
+// AgentNotifications returns the broker for agent notification events.
+func (app *App) AgentNotifications() *pubsub.Broker[notify.Notification] {
+	return app.agentNotifications
+}
+
+// RunCompletions returns the broker for the authoritative per-run
+// terminal RunComplete events. The dispatcher (backend.runAgent) uses
+// it to emit a reliable terminal event when a run fails before the
+// coordinator could publish one of its own.
+func (app *App) RunCompletions() *pubsub.Broker[notify.RunComplete] {
+	return app.runCompletions
+}
+
+// resolveSession resolves which session to use for a non-interactive run
+// If continueSessionID is set, it looks up that session by ID
+// If useLast is set, it returns the most recently updated top-level session
+// Otherwise, it creates a new session
+func (app *App) resolveSession(ctx context.Context, continueSessionID string, useLast bool) (session.Session, error) {
+	switch {
+	case continueSessionID != "":
+		if app.Sessions.IsAgentToolSession(continueSessionID) {
+			return session.Session{}, fmt.Errorf("cannot continue an agent tool session: %s", continueSessionID)
+		}
+		sess, err := app.Sessions.Get(ctx, continueSessionID)
+		if err != nil {
+			return session.Session{}, fmt.Errorf("session not found: %s", continueSessionID)
+		}
+		if sess.ParentSessionID != "" {
+			return session.Session{}, fmt.Errorf("cannot continue a child session: %s", continueSessionID)
+		}
+		return sess, nil
+
+	case useLast:
+		sess, err := app.Sessions.GetLast(ctx)
+		if err != nil {
+			return session.Session{}, fmt.Errorf("no sessions found to continue")
+		}
+		return sess, nil
+
+	default:
+		return app.Sessions.Create(ctx, agent.DefaultSessionName)
 	}
-	closeCtx, cancel := context.WithTimeout(ctx, closeTimeout)
+}
+
+// RunNonInteractive runs the application in non-interactive mode with the
+// given prompt, printing to stdout.
+func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, largeModel, smallModel string, hideSpinner bool, continueSessionID string, useLast bool) error {
+	slog.Info("Running in non-interactive mode")
+
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if a.cancelRoot != nil {
-		a.cancelRoot()
-	}
-
-	return closeSteps(closeCtx, a.closeSteps(), a.Logger)
-}
-
-// WorkDir returns the resolved, absolute project root the App was constructed
-// against. It is the same directory the tools registry and MCP roots are scoped
-// to, exposed read-only so a UI seam can report the current working directory.
-func (a *App) WorkDir() string {
-	if a == nil {
-		return ""
-	}
-	return a.workDir
-}
-
-// StartupYolo reports whether --yolo was passed at launch. Callers apply it
-// per-session (permission.SetAutoApproveSession) once they know the active
-// session id, so auto-approval is scoped to a session rather than global.
-func (a *App) StartupYolo() bool {
-	if a == nil {
-		return false
-	}
-	return a.startupYolo
-}
-
-func newBus() *Bus {
-	return &Bus{
-		Ledger:      pubsub.NewTopic[ledger.Summary]("app_ledger", 64),
-		FileChanges: pubsub.NewTopic[filetracker.Change]("app_file_changes", 128),
-		LSP:         pubsub.NewTopic[lsp.Diagnostic]("app_lsp_diagnostics", 256),
-		MCP:         pubsub.NewTopic[mcp.Event]("app_mcp", 64),
-		Agent:       pubsub.NewTopic[agent.Event]("app_agent", agentEventBufferSize),
-		Permission:  pubsub.NewTopic[pubsub.PermissionRequest]("app_permissions", 16),
-		Shell:       pubsub.NewTopic[pubsub.ShellJobPayload]("app_shell_jobs", 256),
-		ToolCalls:   pubsub.NewTopic[pubsub.ToolCallPayload]("app_tool_calls", 256),
-		Todo:        pubsub.NewTopic[tools.TodoEvent]("app_todo", 64),
-	}
-}
-
-func (a *App) closeSteps() []closeStep {
-	return []closeStep{
-		// closeSteps runs in reverse order, so the log file listed first is closed
-		// last — after every other subsystem has had the chance to log a close
-		// warning through the logger that writes to it.
-		{name: "logfile", close: closeLogFile(a.logFile)},
-		{name: "db", close: closeDB(a.DB)},
-		{name: "audit", close: closeAudit(a.Audit)},
-		{name: "pubsub", close: closeBus(a.Bus)},
-		// Listed after pubsub so the reverse-order teardown stops the fan-in
-		// pumps before the source topics they read from are closed.
-		{name: "ui_stream", close: closeUIStream(a.UI)},
-		{name: "shell", close: closeShell(a.Shell)},
-		{name: "lsp", close: closeLSP(a.LSP)},
-		{name: "mcp", close: closeMCP(a.MCP)},
-		{name: "agent", close: closeAgent(a.Agent)},
-	}
-}
-
-// closeLogFile releases the diagnostics log handle opened by newLoggerToFile.
-// It is a no-op when logging targets stderr (logFile is nil).
-func closeLogFile(f *os.File) func(context.Context) error {
-	return func(context.Context) error {
-		if f == nil {
-			return nil
+	if largeModel != "" || smallModel != "" {
+		if err := app.overrideModelsForNonInteractive(ctx, largeModel, smallModel); err != nil {
+			return fmt.Errorf("failed to override models: %w", err)
 		}
-		return f.Close()
 	}
-}
 
-func closeAgent(c *agent.Coordinator) func(context.Context) error {
-	return func(ctx context.Context) error {
-		if c == nil {
-			return nil
+	var (
+		spinner   *format.Spinner
+		stdoutTTY bool
+		stderrTTY bool
+		stdinTTY  bool
+		progress  bool
+	)
+
+	if f, ok := output.(*os.File); ok {
+		stdoutTTY = term.IsTerminal(f.Fd())
+	}
+	stderrTTY = term.IsTerminal(os.Stderr.Fd())
+	stdinTTY = term.IsTerminal(os.Stdin.Fd())
+	progress = app.config.Config().Options.Progress == nil || *app.config.Config().Options.Progress
+
+	if !hideSpinner && stderrTTY {
+		t := styles.ThemeForProvider(app.config.Config().Models[config.SelectedModelTypeLarge].Provider)
+
+		// Detect background color to set the appropriate color for the
+		// spinner's 'Generating...' text. Without this, that text would be
+		// unreadable in light terminals.
+		hasDarkBG := true
+		if f, ok := output.(*os.File); ok && stdinTTY && stdoutTTY {
+			hasDarkBG = lipgloss.HasDarkBackground(os.Stdin, f)
 		}
-		return c.Stop(ctx)
-	}
-}
+		defaultFG := lipgloss.LightDark(hasDarkBG)(charmtone.Pepper, t.WorkingLabelColor)
 
-func closeMCP(c *mcp.Client) func(context.Context) error {
-	return func(ctx context.Context) error {
-		if c == nil {
-			return nil
+		spinner = format.NewSpinner(ctx, cancel, anim.Settings{
+			Size:        10,
+			Label:       "Generating",
+			LabelColor:  defaultFG,
+			GradColorA:  t.WorkingGradFromColor,
+			GradColorB:  t.WorkingGradToColor,
+			CycleColors: true,
+		})
+		spinner.Start()
+	}
+
+	// Helper function to stop spinner once.
+	stopSpinner := func() {
+		if !hideSpinner && spinner != nil {
+			spinner.Stop()
+			spinner = nil
 		}
-		return c.Stop(ctx)
 	}
-}
 
-func closeLSP(m *lsp.Manager) func(context.Context) error {
-	return func(ctx context.Context) error {
-		if m == nil {
-			return nil
-		}
-		return m.Shutdown(ctx)
+	// Wait for MCP initialization to complete before reading MCP tools.
+	if err := mcp.WaitForInit(ctx); err != nil {
+		return fmt.Errorf("failed to wait for MCP initialization: %w", err)
 	}
-}
 
-func closeShell(sh *shell.Shell) func(context.Context) error {
-	return func(context.Context) error {
-		if sh == nil {
-			return nil
-		}
-		sh.Shutdown()
-		return nil
+	// force update of agent models before running so mcp tools are loaded
+	app.AgentCoordinator.UpdateModels(ctx)
+
+	defer stopSpinner()
+
+	sess, err := app.resolveSession(ctx, continueSessionID, useLast)
+	if err != nil {
+		return fmt.Errorf("failed to create session for non-interactive mode: %w", err)
 	}
-}
 
-func closeBus(b *Bus) func(context.Context) error {
-	return func(context.Context) error {
-		b.Close()
-		return nil
+	if continueSessionID != "" || useLast {
+		slog.Info("Continuing session for non-interactive run", "session_id", sess.ID)
+	} else {
+		slog.Info("Created session for non-interactive run", "session_id", sess.ID)
 	}
-}
 
-func closeUIStream(s *UIStream) func(context.Context) error {
-	return func(context.Context) error {
-		if s == nil {
-			return nil
-		}
-		s.Close()
-		return nil
+	// Automatically approve all permission requests for this non-interactive
+	// session.
+	app.Permissions.AutoApproveSession(sess.ID)
+
+	type response struct {
+		result *fantasy.AgentResult
+		err    error
 	}
-}
+	done := make(chan response, 1)
 
-func closeAudit(store *audit.Store) func(context.Context) error {
-	return func(context.Context) error {
-		if store == nil {
-			return nil
-		}
-		return store.Close()
-	}
-}
-
-func closeDB(database *db.DB) func(context.Context) error {
-	return func(context.Context) error {
-		if database == nil {
-			return nil
-		}
-		return database.Close()
-	}
-}
-
-type closeStep struct {
-	name  string
-	close func(context.Context) error
-}
-
-func closeSteps(ctx context.Context, steps []closeStep, logger *slog.Logger) error {
-	var errs []error
-	for i := len(steps) - 1; i >= 0; i-- {
-		step := steps[i]
-		if step.close == nil {
-			continue
-		}
-		if err := closeOne(ctx, step); err != nil {
-			if logger != nil {
-				logger.WarnContext(ctx, "Subsystem close failed", "subsystem", step.name, "err", err)
+	go func(ctx context.Context, sessionID, prompt string) {
+		result, err := app.AgentCoordinator.Run(ctx, sess.ID, prompt)
+		if err != nil {
+			done <- response{
+				err: fmt.Errorf("failed to start agent processing stream: %w", err),
 			}
-			errs = append(errs, err)
+			return
 		}
-	}
-	if len(errs) == 0 {
-		return nil
-	}
-	return errors.Join(errs...)
-}
+		done <- response{
+			result: result,
+		}
+	}(ctx, sess.ID, prompt)
 
-func closeOne(ctx context.Context, step closeStep) error {
-	done := make(chan error, 1)
-	go func() {
-		done <- step.close(ctx)
+	messageEvents := app.Messages.Subscribe(ctx)
+	messageReadBytes := make(map[string]int)
+	var printed bool
+
+	defer func() {
+		if progress && stderrTTY {
+			_, _ = fmt.Fprintf(os.Stderr, ansi.ResetProgressBar)
+		}
+
+		// Always print a newline at the end. If output is a TTY this will
+		// prevent the prompt from overwriting the last line of output.
+		_, _ = fmt.Fprintln(output)
 	}()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("closing %s: %w", step.name, err)
+	for {
+		if progress && stderrTTY {
+			// HACK: Reinitialize the terminal progress bar on every iteration
+			// so it doesn't get hidden by the terminal due to inactivity.
+			_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
 		}
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("closing %s: %w", step.name, ctx.Err())
+
+		select {
+		case result := <-done:
+			stopSpinner()
+			if result.err != nil {
+				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
+					slog.Debug("Non-interactive: agent processing cancelled", "session_id", sess.ID)
+					return nil
+				}
+				return fmt.Errorf("agent processing failed: %w", result.err)
+			}
+			return nil
+
+		case event := <-messageEvents:
+			msg := event.Payload
+			if msg.SessionID == sess.ID && msg.Role == message.Assistant && len(msg.Parts) > 0 {
+				stopSpinner()
+
+				content := msg.Content().String()
+				readBytes := messageReadBytes[msg.ID]
+
+				if len(content) < readBytes {
+					slog.Error("Non-interactive: message content is shorter than read bytes", "message_length", len(content), "read_bytes", readBytes)
+					return fmt.Errorf("message content is shorter than read bytes: %d < %d", len(content), readBytes)
+				}
+
+				part := content[readBytes:]
+				// Trim leading whitespace. Sometimes the LLM includes leading
+				// formatting and intentation, which we don't want here.
+				if readBytes == 0 {
+					part = strings.TrimLeft(part, " \t")
+				}
+				// Ignore initial whitespace-only messages.
+				if printed || strings.TrimSpace(part) != "" {
+					printed = true
+					fmt.Fprint(output, part)
+				}
+				messageReadBytes[msg.ID] = len(content)
+			}
+
+		case <-ctx.Done():
+			stopSpinner()
+			return ctx.Err()
+		}
 	}
 }
 
-// configuredProviders resolves every enabled provider from the registry and
-// applies the optional composable wrappers configured in cfg. Each provider is
-// wrapped, innermost-first, in a FailoverProvider when it declares fallbacks,
-// then in a CachingProvider when caching is enabled, so a cache hit short-
-// circuits before any failover chain runs. With no fallbacks and caching off
-// (the defaults) the raw registry provider is returned unchanged.
-func configuredProviders(cfg *config.Config, reg *llm.Registry) map[string]llm.Provider {
-	base := make(map[string]llm.Provider)
-	for _, provider := range cfg.Providers {
-		if provider.Disabled {
-			continue
-		}
-		name := strings.ToLower(provider.Name)
-		p, err := reg.Get(name)
-		if err == nil {
-			base[name] = p
+// RunGoal runs the application in autonomous goal mode: it drives the agent
+// across multiple turns via agent.RunToGoal until the goal is achieved, the
+// agent reports it is blocked, progress stalls, the iteration budget is
+// exhausted, or the context is cancelled. A short progress line is printed to
+// output for each iteration, followed by the final outcome and message. A
+// maxIterations of 0 uses the engine default.
+func (app *App) RunGoal(ctx context.Context, output io.Writer, goalText, largeModel, smallModel string, hideSpinner bool, continueSessionID string, useLast bool, maxIterations int) error {
+	slog.Info("Running in non-interactive goal mode")
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	if largeModel != "" || smallModel != "" {
+		if err := app.overrideModelsForNonInteractive(ctx, largeModel, smallModel); err != nil {
+			return fmt.Errorf("failed to override models: %w", err)
 		}
 	}
 
-	fallbacks := configuredFallbacks(cfg)
-	out := make(map[string]llm.Provider, len(base))
-	for name, primary := range base {
-		out[name] = wrapProvider(name, primary, base, fallbacks, cfg.Cache)
+	// Wait for MCP initialization to complete before reading MCP tools.
+	if err := mcp.WaitForInit(ctx); err != nil {
+		return fmt.Errorf("failed to wait for MCP initialization: %w", err)
 	}
-	return out
-}
 
-// configuredFallbacks indexes each provider's declared fallback names by the
-// lowercased provider name. A provider with no fallbacks is omitted, so the
-// common case allocates nothing per provider.
-func configuredFallbacks(cfg *config.Config) map[string][]string {
-	out := make(map[string][]string)
-	for _, provider := range cfg.Providers {
-		if provider.Disabled || len(provider.Fallbacks) == 0 {
-			continue
-		}
-		out[strings.ToLower(provider.Name)] = provider.Fallbacks
-	}
-	return out
-}
+	// Force update of agent models before running so MCP tools are loaded.
+	app.AgentCoordinator.UpdateModels(ctx)
 
-// wrapProvider applies the failover and caching wrappers to primary as
-// configured. Failover is applied first (innermost) so that an outer cache hit
-// avoids the chain entirely. Both wrappers degrade to a no-op pass-through when
-// not configured, so the returned provider equals primary in the default case.
-func wrapProvider(name string, primary llm.Provider, base map[string]llm.Provider, fallbacks map[string][]string, cache config.CacheConfig) llm.Provider {
-	p := primary
-	if chain := resolveFallbackChain(name, base, fallbacks); len(chain) > 0 {
-		if fp, err := llm.NewFailoverProvider(primary, chain...); err == nil {
-			p = fp
-		}
-	}
-	if cache.Enabled {
-		var store llm.ResponseCache
-		if cache.MaxEntries > 0 {
-			store = llm.NewLRUCache(cache.MaxEntries)
-		}
-		if cp, err := llm.NewCachingProvider(p, store); err == nil {
-			p = cp
-		}
-	}
-	return p
-}
-
-// resolveFallbackChain maps the configured fallback names for the named provider
-// to their resolved providers, in order, skipping unknown, disabled, or
-// self-referential names so a typo or a fallback to oneself never breaks the
-// chain.
-func resolveFallbackChain(name string, base map[string]llm.Provider, fallbacks map[string][]string) []llm.Provider {
-	names := fallbacks[name]
-	if len(names) == 0 {
-		return nil
-	}
-	chain := make([]llm.Provider, 0, len(names))
-	for _, fb := range names {
-		fbName := strings.ToLower(fb)
-		if fbName == name {
-			continue
-		}
-		if p, ok := base[fbName]; ok {
-			chain = append(chain, p)
-		}
-	}
-	return chain
-}
-
-// routerFromConfig returns the cost-aware router to install on every agent loop,
-// or nil when routing is disabled. Returning nil leaves each loop pinned to its
-// configured model — the non-breaking default.
-func routerFromConfig(cfg *config.Config) agent.Router {
-	if cfg == nil || !cfg.Routing.Enabled {
-		return nil
-	}
-	return agent.CostAwareRouter{
-		PromptLenThreshold: cfg.Routing.PromptLenThreshold,
-		ToolsImplyComplex:  cfg.Routing.ToolsImplyComplex,
-	}
-}
-
-func resolvePaths(opts Options) (projectDir, globalConfigPath, projectConfigPath, dbPath string, err error) {
-	projectDir = opts.ProjectDir
-	if projectDir == "" {
-		projectDir, err = os.Getwd()
-		if err != nil {
-			return "", "", "", "", fmt.Errorf("getting working directory: %w", err)
-		}
-	}
-	projectDir = util.ExpandPath(projectDir)
-	projectDir, err = filepath.Abs(projectDir)
+	sess, err := app.resolveSession(ctx, continueSessionID, useLast)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("resolving project directory: %w", err)
+		return fmt.Errorf("failed to create session for non-interactive goal mode: %w", err)
 	}
 
-	globalConfigPath = opts.ConfigPath
-	if globalConfigPath == "" {
-		globalConfigPath = config.GlobalPath()
+	if continueSessionID != "" || useLast {
+		slog.Info("Continuing session for non-interactive goal run", "session_id", sess.ID)
+	} else {
+		slog.Info("Created session for non-interactive goal run", "session_id", sess.ID)
 	}
-	if globalConfigPath != "" {
-		globalConfigPath = util.ExpandPath(globalConfigPath)
+
+	// Automatically approve all permission requests for this non-interactive
+	// session.
+	app.Permissions.AutoApproveSession(sess.ID)
+
+	onIteration := func(iter int, _ string) {
+		_, _ = fmt.Fprintf(output, "↻ goal iteration %d\n", iter)
 	}
-	projectConfigPath = config.ProjectPath(projectDir)
-	dbPath = defaultDBPath()
-	return projectDir, globalConfigPath, projectConfigPath, dbPath, nil
+
+	res, err := agent.RunToGoal(ctx, app.AgentCoordinator, sess.ID, goalText, maxIterations, onIteration)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, agent.ErrRequestCancelled) {
+			slog.Debug("Non-interactive: goal run cancelled", "session_id", sess.ID)
+			return nil
+		}
+		return fmt.Errorf("goal run failed: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(output, "\ngoal %s after %d iteration(s)\n", res.Outcome, res.Iterations)
+	if res.LastMessage != "" {
+		_, _ = fmt.Fprintln(output, res.LastMessage)
+	}
+	return nil
 }
 
-func defaultDBPath() string {
-	return filepath.Join(dataDir(), "bharatcode.db")
+func (app *App) UpdateAgentModel(ctx context.Context) error {
+	if app.AgentCoordinator == nil {
+		return fmt.Errorf("agent configuration is missing")
+	}
+	return app.AgentCoordinator.UpdateModels(ctx)
 }
 
-// defaultLogPath returns the append-only diagnostics log location, alongside the
-// database under the same data-dir convention as defaultDBPath.
-func defaultLogPath() string {
-	return filepath.Join(dataDir(), "bharatcode.log")
-}
+// overrideModelsForNonInteractive parses the model strings and temporarily
+// overrides the model configurations, then rebuilds the agent.
+// Format: "model-name" (searches all providers) or "provider/model-name".
+// Model matching is case-insensitive.
+// If largeModel is provided but smallModel is not, the small model defaults to
+// the provider's default small model.
+func (app *App) overrideModelsForNonInteractive(ctx context.Context, largeModel, smallModel string) error {
+	providers := app.config.Config().Providers.Copy()
 
-// dataDir resolves the BharatCode data directory using the XDG_DATA_HOME logic,
-// falling back to ~/.local/share and finally the current directory.
-func dataDir() string {
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			dataHome = filepath.Join(home, ".local", "share")
+	largeMatches, smallMatches, err := findModels(providers, largeModel, smallModel)
+	if err != nil {
+		return err
+	}
+
+	var largeProviderID string
+
+	// Override large model.
+	if largeModel != "" {
+		found, err := validateMatches(largeMatches, largeModel, "large")
+		if err != nil {
+			return err
+		}
+		largeProviderID = found.provider
+		slog.Info("Overriding large model for non-interactive run", "provider", found.provider, "model", found.modelID)
+		app.config.Config().Models[config.SelectedModelTypeLarge] = config.SelectedModel{
+			Provider: found.provider,
+			Model:    found.modelID,
 		}
 	}
-	if dataHome == "" {
-		dataHome = "."
+
+	// Override small model.
+	switch {
+	case smallModel != "":
+		found, err := validateMatches(smallMatches, smallModel, "small")
+		if err != nil {
+			return err
+		}
+		slog.Info("Overriding small model for non-interactive run", "provider", found.provider, "model", found.modelID)
+		app.config.Config().Models[config.SelectedModelTypeSmall] = config.SelectedModel{
+			Provider: found.provider,
+			Model:    found.modelID,
+		}
+
+	case largeModel != "":
+		// No small model specified, but large model was - use provider's default.
+		smallCfg := app.GetDefaultSmallModel(largeProviderID)
+		app.config.Config().Models[config.SelectedModelTypeSmall] = smallCfg
 	}
-	return filepath.Join(util.ExpandPath(dataHome), "bharatcode")
+
+	return app.AgentCoordinator.UpdateModels(ctx)
 }
 
-func levelFor(verbose bool) slog.Level {
-	if verbose {
-		return slog.LevelDebug
+// GetDefaultSmallModel returns the default small model for the given
+// provider. Falls back to the large model if no default is found.
+func (app *App) GetDefaultSmallModel(providerID string) config.SelectedModel {
+	cfg := app.config.Config()
+	largeModelCfg := cfg.Models[config.SelectedModelTypeLarge]
+
+	// Find the provider in the known providers list to get its default small model.
+	knownProviders, _ := config.Providers(cfg)
+	var knownProvider *catwalk.Provider
+	for _, p := range knownProviders {
+		if string(p.ID) == providerID {
+			knownProvider = &p
+			break
+		}
 	}
-	return slog.LevelInfo
+
+	// For unknown/local providers, use the large model as small.
+	if knownProvider == nil {
+		slog.Warn("Using large model as small model for unknown provider", "provider", providerID, "model", largeModelCfg.Model)
+		return largeModelCfg
+	}
+
+	defaultSmallModelID := knownProvider.DefaultSmallModelID
+	model := cfg.GetModel(providerID, defaultSmallModelID)
+	if model == nil {
+		slog.Warn("Default small model not found, using large model", "provider", providerID, "model", largeModelCfg.Model)
+		return largeModelCfg
+	}
+
+	slog.Info("Using provider default small model", "provider", providerID, "model", defaultSmallModelID)
+	return config.SelectedModel{
+		Provider:        providerID,
+		Model:           defaultSmallModelID,
+		MaxTokens:       model.DefaultMaxTokens,
+		ReasoningEffort: model.DefaultReasoningEffort,
+	}
 }
 
-func newLogger(verbose bool) *slog.Logger {
-	opts := &slog.HandlerOptions{Level: levelFor(verbose)}
-	if fileInfo, err := os.Stderr.Stat(); err == nil && fileInfo.Mode()&os.ModeCharDevice != 0 {
-		return slog.New(slog.NewTextHandler(os.Stderr, opts))
+func (app *App) setupEvents() {
+	ctx, cancel := context.WithCancel(app.globalCtx)
+	app.eventsCtx = ctx
+	setupSubscriber(ctx, app.serviceEventsWG, "sessions", app.Sessions.Subscribe, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "messages", app.Messages.Subscribe, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "permissions", app.Permissions.Subscribe, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "permissions-notifications", app.Permissions.SubscribeNotifications, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "history", app.History.Subscribe, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "agent-notifications", app.agentNotifications.Subscribe, app.events)
+	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "run-completions", app.runCompletions.Subscribe, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "mcp", mcp.SubscribeEvents, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "lsp", SubscribeLSPEvents, app.events)
+	if app.Skills != nil {
+		setupSubscriber(ctx, app.serviceEventsWG, "skills", app.Skills.SubscribeEvents, app.events)
 	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, opts))
+	cleanupFunc := func(context.Context) error {
+		cancel()
+		app.serviceEventsWG.Wait()
+		app.events.Shutdown()
+		return nil
+	}
+	app.cleanupFuncs = append(app.cleanupFuncs, cleanupFunc)
 }
 
-// newLoggerToFile builds a logger that appends diagnostics to path so slog
-// output never reaches the terminal and corrupts the TUI. The file is opened
-// O_CREATE|O_WRONLY|O_APPEND; verbose raises the threshold to Debug, writing
-// more to the file without ever routing back to stderr. If the file cannot be
-// opened the logger discards records — falling back to stderr would re-introduce
-// exactly the noise this redirect exists to prevent.
-// The returned *os.File is the open log handle (or nil if the file could not be
-// opened, in which case records are discarded). The caller owns the handle and
-// must close it on shutdown; App stores it and closes it in closeSteps.
-func newLoggerToFile(path string, verbose bool) (*slog.Logger, *os.File) {
-	opts := &slog.HandlerOptions{Level: levelFor(verbose)}
-	if dir := filepath.Dir(path); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+func setupSubscriber[T any](
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	name string,
+	subscriber func(context.Context) <-chan pubsub.Event[T],
+	broker *pubsub.Broker[tea.Msg],
+) {
+	wg.Go(func() {
+		subCh := subscriber(ctx)
+		for {
+			select {
+			case event, ok := <-subCh:
+				if !ok {
+					slog.Debug("Subscription channel closed", "name", name)
+					return
+				}
+				broker.Publish(pubsub.UpdatedEvent, tea.Msg(event))
+			case <-ctx.Done():
+				slog.Debug("Subscription cancelled", "name", name)
+				return
+			}
+		}
+	})
+}
+
+// setupSubscriberMustDeliver is the bounded-blocking fan-in variant of
+// setupSubscriber: it re-publishes upstream events onto the shared
+// app.events broker using PublishMustDeliver instead of Publish. Use
+// this for terminal events that subscribers cannot tolerate losing —
+// notably RunComplete, which is the authoritative end-of-run signal
+// for `bharatcode run`. A lossy fan-in here can drop the only terminal
+// event and hang non-interactive clients waiting on it.
+func setupSubscriberMustDeliver[T any](
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	name string,
+	subscriber func(context.Context) <-chan pubsub.Event[T],
+	broker *pubsub.Broker[tea.Msg],
+) {
+	wg.Go(func() {
+		subCh := subscriber(ctx)
+		for {
+			select {
+			case event, ok := <-subCh:
+				if !ok {
+					slog.Debug("Subscription channel closed", "name", name)
+					return
+				}
+				broker.PublishMustDeliver(ctx, pubsub.UpdatedEvent, tea.Msg(event))
+			case <-ctx.Done():
+				slog.Debug("Subscription cancelled", "name", name)
+				return
+			}
+		}
+	})
+}
+
+func (app *App) InitCoderAgent(ctx context.Context) error {
+	coderAgentCfg := app.config.Config().Agents[config.AgentCoder]
+	if coderAgentCfg.ID == "" {
+		return fmt.Errorf("coder agent configuration is missing")
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	var err error
+	app.AgentCoordinator, err = agent.NewCoordinator(
+		ctx,
+		app.config,
+		app.Sessions,
+		app.Messages,
+		app.Permissions,
+		app.History,
+		app.FileTracker,
+		app.LSPManager,
+		app.agentNotifications,
+		app.runCompletions,
+		app.Skills,
+	)
 	if err != nil {
-		return slog.New(slog.NewTextHandler(io.Discard, opts)), nil
+		slog.Error("Failed to create coder agent", "err", err)
+		return err
 	}
-	return slog.New(slog.NewTextHandler(f, opts)), f
+	return nil
+}
+
+// Subscribe sends events to the TUI as tea.Msgs.
+func (app *App) Subscribe(program *tea.Program) {
+	defer log.RecoverPanic("app.Subscribe", func() {
+		slog.Info("TUI subscription panic: attempting graceful shutdown")
+		program.Quit()
+	})
+
+	app.tuiWG.Add(1)
+	tuiCtx, tuiCancel := context.WithCancel(app.globalCtx)
+	app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
+		slog.Debug("Cancelling TUI message handler")
+		tuiCancel()
+		app.tuiWG.Wait()
+		return nil
+	})
+	defer app.tuiWG.Done()
+
+	events := app.events.Subscribe(tuiCtx)
+	for {
+		select {
+		case <-tuiCtx.Done():
+			slog.Debug("TUI message handler shutting down")
+			return
+		case ev, ok := <-events:
+			if !ok {
+				slog.Debug("TUI message channel closed")
+				return
+			}
+			program.Send(ev.Payload)
+		}
+	}
+}
+
+// Shutdown performs a graceful shutdown of the application.
+func (app *App) Shutdown() {
+	start := time.Now()
+	defer func() { slog.Debug("Shutdown took " + time.Since(start).String()) }()
+
+	// First, cancel all agents and wait for them to finish. This must complete
+	// before closing the DB so agents can finish writing their state.
+	if app.AgentCoordinator != nil {
+		app.AgentCoordinator.CancelAll()
+	}
+
+	// Shared shutdown context for all timeout-bounded cleanup.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Drain any debounced message updates before the DB-close cleanup
+	// runs in the parallel block below. message.Service buffers
+	// streaming deltas (see internal/message/message.go) and we must
+	// land them while the connection is still open.
+	if app.Messages != nil {
+		if err := app.Messages.FlushAll(shutdownCtx); err != nil {
+			slog.Error("Failed to flush pending message updates on shutdown", "error", err)
+		}
+	}
+
+	// Now run remaining cleanup tasks in parallel.
+	var wg sync.WaitGroup
+
+	// Send exit event
+	wg.Go(func() {
+		event.AppExited()
+	})
+
+	// Kill all background shells.
+	wg.Go(func() {
+		shell.GetBackgroundShellManager().KillAll(shutdownCtx)
+	})
+
+	// Shutdown all LSP clients.
+	wg.Go(func() {
+		app.LSPManager.KillAll(shutdownCtx)
+	})
+
+	// Call all cleanup functions.
+	for _, cleanup := range app.cleanupFuncs {
+		if cleanup != nil {
+			wg.Go(func() {
+				if err := cleanup(shutdownCtx); err != nil {
+					slog.Error("Failed to cleanup app properly on shutdown", "error", err)
+				}
+			})
+		}
+	}
+	wg.Wait()
+}
+
+// checkForUpdates checks for available updates.
+func (app *App) checkForUpdates(ctx context.Context) {
+	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	info, err := update.Check(checkCtx, version.Version, update.Default)
+	if err != nil || !info.Available() {
+		return
+	}
+	app.events.Publish(pubsub.UpdatedEvent, UpdateAvailableMsg{
+		CurrentVersion: info.Current,
+		LatestVersion:  info.Latest,
+		IsDevelopment:  info.IsDevelopment(),
+	})
 }

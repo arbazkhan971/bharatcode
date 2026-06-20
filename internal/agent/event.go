@@ -1,81 +1,51 @@
-// Package agent implements the agent loop, prompt assembly, and named-agent
-// coordination.
 package agent
 
 import (
-	"encoding/json"
-	"errors"
+	"time"
 
-	"github.com/arbazkhan971/bharatcode/internal/message"
+	"charm.land/fantasy"
+	"github.com/arbazkhan971/bharatcode/internal/event"
 )
 
-// EventKind enumerates agent event variants.
-type EventKind int
-
-const (
-	// EventTurnStarted indicates a user turn began.
-	EventTurnStarted EventKind = iota
-	// EventLLMResponse indicates assistant output was received.
-	EventLLMResponse
-	// EventToolCalled indicates a tool call is about to run.
-	EventToolCalled
-	// EventToolResult indicates a tool returned a result.
-	EventToolResult
-	// EventLoopDetected indicates repeated tool calls tripped the loop guard.
-	EventLoopDetected
-	// EventTurnFinished indicates a turn completed.
-	EventTurnFinished
-	// EventRunError indicates an infrastructure error or recovered panic.
-	EventRunError
-	// EventAutoCompacted indicates the loop automatically compacted the
-	// conversation because the context fill percentage reached the configured
-	// threshold. The TUI surfaces this as an inline notice so users know why
-	// the visible history shrank.
-	EventAutoCompacted
-	// EventLLMStreamStart indicates one provider stream attempt began. It is
-	// published before any EventLLMDelta of that attempt so consumers can
-	// discard text streamed by a previous failed attempt (a transient error
-	// retried by the loop re-streams the response from the beginning).
-	EventLLMStreamStart
-	// EventLLMDelta carries one incremental chunk of assistant text while the
-	// provider stream is in flight, in the Delta field. Deltas are advisory
-	// and lossy under load: the EventLLMResponse that follows carries the
-	// complete canonical text, so consumers must reconcile against it rather
-	// than rely on having seen every delta.
-	EventLLMDelta
-)
-
-// Event is published for significant agent-loop transitions.
-type Event struct {
-	SessionID string
-	AgentName string
-	Kind      EventKind
-	Message   *message.Message
-	ToolName  string
-	// ToolInput carries the raw JSON arguments of the tool call. It is set on
-	// EventToolCalled so consumers can render the invocation (e.g. the command
-	// a shell tool is about to run) without reaching back into history.
-	ToolInput json.RawMessage
-	// ToolResult carries the tool's result content in the same truncated form
-	// that is appended to the conversation history. It is set on
-	// EventToolResult so consumers can render the output inline.
-	ToolResult string
-	// Delta carries one incremental chunk of assistant text. It is set on
-	// EventLLMDelta only.
-	Delta string
-	Err   error
+func (a *sessionAgent) eventPromptSent(sessionID string) {
+	event.PromptSent(
+		a.eventCommon(sessionID, a.largeModel.Get())...,
+	)
 }
 
-// ErrUnknownAgent is returned when a requested named agent is not configured.
-var ErrUnknownAgent = errors.New("unknown agent")
+func (a *sessionAgent) eventPromptResponded(sessionID string, duration time.Duration) {
+	event.PromptResponded(
+		append(
+			a.eventCommon(sessionID, a.largeModel.Get()),
+			"prompt duration pretty", duration.String(),
+			"prompt duration in seconds", int64(duration.Seconds()),
+		)...,
+	)
+}
 
-// ErrLoopDetected is folded into the session when repeated, non-progressing
-// tool activity trips the guard: either the same call returning the same result
-// three times, or two steps oscillating in an A,B,A,B cycle.
-var ErrLoopDetected = errors.New("loop detected: repeated tool calls produced no progress")
+func (a *sessionAgent) eventTokensUsed(sessionID string, model Model, usage fantasy.Usage, cost float64) {
+	event.TokensUsed(
+		append(
+			a.eventCommon(sessionID, model),
+			"input tokens", usage.InputTokens,
+			"output tokens", usage.OutputTokens,
+			"cache read tokens", usage.CacheReadTokens,
+			"cache creation tokens", usage.CacheCreationTokens,
+			"total tokens", usage.InputTokens+usage.OutputTokens+usage.CacheReadTokens+usage.CacheCreationTokens,
+			"cost", cost,
+		)...,
+	)
+}
 
-// ErrContextOverflow is returned when the latest user message alone exceeds the
-// model's usable context window, so no amount of compaction or drop-oldest
-// truncation can make the turn fit. The loop returns it rather than looping
-// indefinitely or silently sending an over-window request.
-var ErrContextOverflow = errors.New("context overflow: latest user message exceeds the model context window")
+func (a *sessionAgent) eventCommon(sessionID string, model Model) []any {
+	m := model.ModelCfg
+
+	return []any{
+		"session id", sessionID,
+		"provider", m.Provider,
+		"model", m.Model,
+		"reasoning effort", m.ReasoningEffort,
+		"thinking mode", m.Think,
+		"yolo mode", a.isYolo,
+	}
+}

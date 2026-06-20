@@ -1,15 +1,0 @@
-]11;rgb:0000/0000/0000[?1049h[2J[H[1mBharatCode[m  session 7c9e6679-7425-40de-944b-e07fc1f90ae7
-started 2026-06-09T10:11:12Z
-[38;2;232;226;214m› build me a todo app[m
-[2K[38;2;120;200;255m⠋ working 1s[m
-[2K[38;2;120;200;255m⠹ working 4s[m
-[90mBash(go test ./...)[m
-[90m  ran in /private/tmp/run-7c9e/todo  (842ms)[m
-ok  github.com/example/todo  0.31s
-[97mDone — the todo app is built and its tests pass.[m
-
-Changed files:
-- /private/tmp/run-7c9e/todo/main.go (created)
-- /private/tmp/run-7c9e/todo/main_test.go (created)
-Verification: build/test passed.
-[?1049l

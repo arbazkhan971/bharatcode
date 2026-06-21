@@ -15,8 +15,6 @@ The state of CLI coding agents in May 2026:
 | OpenCode (sst) | TypeScript | MIT | Yes (75+ providers via Models.dev) |
 | Aider | Python | Apache-2.0 | Yes (any LLM) — but no agent loop, no MCP |
 | Cline | TypeScript | Apache-2.0 | Yes — but VS Code-origin |
-| Goose | Rust | Apache-2.0 | Yes — but Rust |
-| Codex CLI | Rust | Apache-2.0 | No — OpenAI only |
 | Gemini CLI | TypeScript | Apache-2.0 | No — Gemini only |
 
 Three gaps exist in this market:
@@ -99,12 +97,12 @@ The Indian AI ecosystem (Sarvam, Krutrim, BharatGPT, Hanooman) has no production
 
 - Indian developers paying out-of-pocket for AI tooling (rupee-sensitive).
 - Open-weight enthusiasts who want production-grade Kimi/DeepSeek/Qwen support, not a custom-endpoint workaround.
-- Go developers who want to contribute to a CLI agent without learning Rust (Codex/Goose) or TypeScript (Cline/OpenCode).
+- Go developers who want to contribute to a CLI agent without learning Rust or TypeScript (Cline/OpenCode).
 - Enterprises that want a MIT-licensed CLI agent they can fork.
 
 ## Phase 1 scope
 
-**Feature parity with leading terminal coding agents.** A comprehensive terminal-agent feature set, implemented in BharatCode. 18 modules. Realistic timeline if built by AI coding agents (Gemini CLI, Codex, Claude Code) with human review: **3-4 months wall-clock, ~$500-2000 in API spend** depending on how much rework happens.
+**Feature parity with leading terminal coding agents.** A comprehensive terminal-agent feature set, implemented in BharatCode. 18 modules. Realistic timeline if built by AI coding agents (Gemini CLI, Claude Code) with human review: **3-4 months wall-clock, ~$500-2000 in API spend** depending on how much rework happens.
 
 If the AI-agent-driven build proves faster or slower, we update this number honestly. We do not promise 90 days when we have no evidence for it.
 

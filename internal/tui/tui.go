@@ -723,7 +723,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Bracketed-paste delivers the clipboard content as one PasteMsg.
 		// Append it verbatim (preserving embedded newlines) so users can paste
 		// multi-line text — code snippets, bullet lists, error traces — into
-		// the prompt without losing structure. Mirrors Claude Code / goose.
+		// the prompt without losing structure, matching common multi-line input patterns.
 		if m.focus == focusInput {
 			s := string(msg)
 			m.inputHistory.pushUndo(m.input.String())
@@ -1045,7 +1045,7 @@ func (m *model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "alt+enter":
 		// Alt+Enter inserts a literal newline so users can compose multi-line
 		// prompts — useful for code blocks, numbered steps, or context that
-		// benefits from structure. Mirrors Shift+Enter in Claude Code / goose.
+		// benefits from structure, a common convention for multi-line input in agents.
 		if m.focus == focusInput {
 			m.inputHistory.pushUndo(m.input.String())
 			m.input.insert("\n")

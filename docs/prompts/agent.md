@@ -1,6 +1,6 @@
 # Agent prompts
 
-Copy-paste prompts for AI coding agents (Gemini CLI, Codex, Claude Code) building BharatCode. Each prompt is self-contained — the agent does not need other context.
+Copy-paste prompts for AI coding agents (Gemini CLI, Claude Code) building BharatCode. Each prompt is self-contained — the agent does not need other context.
 
 ## /goal — single-module build
 

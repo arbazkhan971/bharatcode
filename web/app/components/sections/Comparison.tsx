@@ -3,8 +3,8 @@ import { Section } from '../ui/Section';
 import { Badge } from '../ui/Badge';
 
 /**
- * Comparison — an honest, side-by-side matrix of BharatCode against the
- * mainstream terminal coding agents (Claude Code, OpenCode, Codex CLI).
+ * Comparison — an honest, side-by-side matrix of BharatCode against
+ * other mainstream terminal coding agents (Claude Code, OpenCode).
  *
  * Everything here is factual and conservative: licenses, host language,
  * provider model, and data-residency posture. No fabricated benchmarks,
@@ -40,7 +40,6 @@ const TOOLS: Tool[] = [
   { id: 'bharatcode', name: 'BharatCode', vendor: 'Open source', highlight: true },
   { id: 'claude', name: 'Claude Code', vendor: 'Anthropic' },
   { id: 'opencode', name: 'OpenCode', vendor: 'Open source' },
-  { id: 'codex', name: 'Codex CLI', vendor: 'OpenAI' },
 ];
 
 const ROWS: Row[] = [
@@ -51,7 +50,6 @@ const ROWS: Row[] = [
       bharatcode: { kind: 'text', note: 'Go (CGO-free)' },
       claude: { kind: 'text', note: 'TypeScript / Node' },
       opencode: { kind: 'text', note: 'TypeScript' },
-      codex: { kind: 'text', note: 'Rust' },
     },
   },
   {
@@ -61,7 +59,6 @@ const ROWS: Row[] = [
       bharatcode: { kind: 'text', note: 'MIT' },
       claude: { kind: 'text', note: 'Proprietary' },
       opencode: { kind: 'text', note: 'MIT' },
-      codex: { kind: 'text', note: 'Apache-2.0' },
     },
   },
   {
@@ -71,7 +68,6 @@ const ROWS: Row[] = [
       bharatcode: { kind: 'yes', note: 'By design' },
       claude: { kind: 'no', note: 'Claude only' },
       opencode: { kind: 'partial', note: 'Supported, not default' },
-      codex: { kind: 'no', note: 'OpenAI only' },
     },
   },
   {
@@ -81,7 +77,6 @@ const ROWS: Row[] = [
       bharatcode: { kind: 'yes', note: 'Local-first' },
       claude: { kind: 'no', note: 'Cloud (US)' },
       opencode: { kind: 'partial', note: 'Provider-dependent' },
-      codex: { kind: 'no', note: 'Cloud (US)' },
     },
   },
   {
@@ -91,7 +86,6 @@ const ROWS: Row[] = [
       bharatcode: { kind: 'yes', note: 'INR ledger' },
       claude: { kind: 'no' },
       opencode: { kind: 'no' },
-      codex: { kind: 'no' },
     },
   },
   {
@@ -101,7 +95,6 @@ const ROWS: Row[] = [
       bharatcode: { kind: 'yes', note: '10+ providers' },
       claude: { kind: 'no', note: 'Anthropic' },
       opencode: { kind: 'yes', note: 'Multi-provider' },
-      codex: { kind: 'no', note: 'OpenAI' },
     },
   },
 ];
@@ -205,7 +198,7 @@ function DesktopTable() {
     <div className="overflow-hidden rounded-2xl border border-border bg-surface/40">
       <table className="w-full border-collapse text-left">
         <caption className="sr-only">
-          Feature comparison of BharatCode, Claude Code, OpenCode, and Codex CLI.
+          Feature comparison of BharatCode, Claude Code, and OpenCode.
         </caption>
         <thead>
           <tr className="border-b border-border">

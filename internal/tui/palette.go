@@ -168,7 +168,7 @@ func (m *model) recordPaletteRecent(name string) {
 // openCommandPalette opens the interactive command palette dialog. The palette
 // shows all slash commands with descriptions, lets the user type-to-filter and
 // navigate with arrow keys, and executes the selected command on Enter —
-// matching the command-palette UX in Claude Code and opencode.
+// implementing a standard command-palette UX with type-to-filter navigation.
 func (m *model) openCommandPalette() (tea.Model, tea.Cmd) {
 	m.paletteFilter = ""
 	m.paletteCursor = 0
@@ -186,7 +186,7 @@ func (m *model) openCommandPalette() (tea.Model, tea.Cmd) {
 // indicator when the list is long enough to require windowing. When no filter
 // is active and recent commands exist, a "Recent" section header is shown above
 // the first row and a divider is inserted between the recent and full-list
-// sections — matching the UX in opencode and goose.
+// sections — a common UX pattern for command-palette recent items.
 func (m *model) paletteBody() string {
 	visible := m.visiblePaletteEntries()
 	lines := make([]string, 0, paletteWindow+6)

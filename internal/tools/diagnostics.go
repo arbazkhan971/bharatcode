@@ -208,7 +208,7 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		b.WriteByte('\n')
 		// Surface the offending source line indented beneath the message so the
 		// model sees the code at fault without a separate view, matching how the
-		// navigate tool and goose/opencode shape location results. Omitted when the
+		// navigate tool shapes location results. Omitted when the
 		// file or line cannot be read.
 		if snippet := sourceLine(lineCache, d.Path, d.Range.Start.Line); snippet != "" {
 			b.WriteString("    ")
@@ -217,7 +217,7 @@ func (t *diagnosticsTool) Run(ctx context.Context, raw json.RawMessage) (res Res
 		}
 		// Surface any related locations the server linked to this diagnostic (the
 		// conflicting declaration, the import's use site) so the model can act on
-		// the cross-reference without a separate lookup, matching goose/opencode.
+		// the cross-reference without a separate lookup, matching standard conventions.
 		for _, rel := range d.Related {
 			relPath := rel.Location.Path
 			if r, err := filepath.Rel(root, rel.Location.Path); err == nil && !strings.HasPrefix(r, "..") {

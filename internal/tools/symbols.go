@@ -108,7 +108,7 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 
 	// A full document outline (a path with no query) is rendered as an indented
 	// tree so the file's structure — methods under their class, fields under their
-	// struct — reads at a glance, matching how goose/opencode surface outlines. A
+	// struct — reads at a glance, using an indented tree format for clarity. A
 	// workspace search or a filtered outline stays flat: their results are not a
 	// contiguous hierarchy, so indentation would misrepresent the nesting. A kind
 	// filter removes nodes too, so it also drops to the flat rendering.
@@ -146,8 +146,8 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 
 	// A kind filter keeps only symbols whose rendered kind label is in the
 	// requested set, letting the model ask for just the functions, methods, or
-	// types in a file/workspace rather than scanning every kind — matching the
-	// kind narrowing goose/opencode expose on symbol queries.
+	// types in a file/workspace rather than scanning every kind — supporting the
+	// same kind narrowing on symbol queries.
 	if kindSpec != "" {
 		want, unknown := symbolKindFilter(kindSpec)
 		if len(unknown) > 0 {
@@ -208,8 +208,8 @@ func (t *symbolsTool) Run(ctx context.Context, raw json.RawMessage) (res Result,
 			s.Name,
 		)
 		// The server-supplied signature/type (e.g. "func(x int) error") makes the
-		// outline far more useful than bare names, matching how goose/opencode
-		// render document outlines. Only document symbols carry it.
+		// outline far more useful than bare names by including function signatures
+		// in document outlines. Only document symbols carry it.
 		if s.Detail != "" {
 			fmt.Fprintf(&b, " %s", s.Detail)
 		}

@@ -36,7 +36,7 @@ enterprise relationships, and being the trusted Indian vendor** — not the code
 
 The incumbents are *structurally* locked out of this segment:
 
-- **Claude Code** is Anthropic-only. **Codex CLI** is OpenAI-only. Neither can
+- **Claude Code** is Anthropic-only. Neither can
   tell an Indian bank "your source code never leaves the country" — that would
   break their business model.
 - India's **DPDP Act** (data protection, now in force) and sector regulators
@@ -63,14 +63,14 @@ BharatCode is already the trusted answer.
 
 ## Differentiation (honest)
 
-| Axis | BharatCode | Claude Code | OpenCode | Codex CLI |
-|---|---|---|---|---|
-| License | MIT | Closed | MIT | Apache-2.0 |
-| Open-weight-first | Yes | No | Multi-provider | No (OpenAI) |
-| Data residency / local-first | **Core** | No | Possible, not a focus | No |
-| Cost discipline (INR) | **Built-in ledger** | No | No | No |
-| Regulated-enterprise control plane | **Roadmap (the business)** | N/A | No | No |
-| OS-level sandbox | **Yes** | Partial | No | Yes |
+| Axis | BharatCode | Claude Code | OpenCode |
+|---|---|---|---|
+| License | MIT | Closed | MIT |
+| Open-weight-first | Yes | No | Multi-provider |
+| Data residency / local-first | **Core** | No | Possible, not a focus |
+| Cost discipline (INR) | **Built-in ledger** | No | No |
+| Regulated-enterprise control plane | **Roadmap (the business)** | N/A | No |
+| OS-level sandbox | **Yes** | Partial | No |
 
 We do **not** claim to beat frontier models on raw agentic coding — open weights
 trail there today. Our buyer is the cost- and compliance-constrained one, which
@@ -94,7 +94,7 @@ Gulf). Same product, same thesis, different flag.
 These are validation moves, not features:
 
 1. **3 design partners** in BFSI/govt who say, on record, "we cannot use
-   Claude Code / Codex for compliance reasons." One CISO sentence > any feature.
+   Claude Code for compliance reasons." One CISO sentence > any feature.
 2. **1 reference deployment** — a real team using BharatCode daily on a real
    codebase, self-hosted.
 3. **Reframe externally** from "OpenCode for India" (caps the ceiling, reads as

@@ -376,8 +376,8 @@ func SearchLinesRe(text string, re *regexp.Regexp) []int {
 	return matches
 }
 
-// Render returns the rendered transcript for width. The transcript flows like
-// Codex's: each turn is a marker-led block of plain, full-contrast content with
+// Render returns the rendered transcript for width. The transcript flows as
+// plain prose: each turn is a marker-led block of plain, full-contrast content with
 // no surrounding frame, and turns are separated by a single blank line so the
 // conversation reads as one continuous stream rather than a stack of boxes.
 func (l *List) Render(width int) string {
@@ -475,8 +475,8 @@ func (l *List) renderItem(idx int, width int) string {
 	// fast plain wrap so each delta does not pay the cost of a full markdown
 	// re-render (and to avoid flicker on partial, not-yet-valid markdown). The
 	// markdown flows directly under the header at the full pane width — no
-	// frame, no indent — so the assistant's answer reads as plain prose the
-	// way Codex shows it.
+	// frame, no indent — so the assistant's answer reads as plain prose in
+	// full contrast.
 	if l.md != nil && it.role == message.RoleAssistant && !it.streaming && it.body != "" {
 		if rendered, ok := l.md.Render(it.body, width); ok {
 			// glamour right-pads every line to the wrap width with trailing spaces;

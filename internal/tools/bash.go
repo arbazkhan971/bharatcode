@@ -43,7 +43,7 @@ type bashTool struct {
 	offline bool
 	// cwdMu protects lastCWD, the cached working directory from the previous
 	// foreground bash call. It lets the agent cd once and have subsequent calls
-	// default to that directory — parity with Claude Code / goose shell state.
+	// default to that directory — matching common shell state propagation in agents.
 	cwdMu   sync.Mutex
 	lastCWD string
 	// defaultTimeout, when positive, is the per-call timeout applied to
@@ -204,7 +204,7 @@ func (t *bashTool) Run(ctx context.Context, raw json.RawMessage) (Result, error)
 	opts := shell.RunOpts{Cwd: args.Cwd, Env: args.Env, Stdin: args.Stdin}
 	if opts.Cwd == "" {
 		// Use the last known CWD from a previous foreground call in this session,
-		// falling back to the workspace root. This mirrors Claude Code / goose: a
+		// falling back to the workspace root. This mirrors common agent behavior: a
 		// cd in one call propagates to the next without the caller re-specifying cwd.
 		t.cwdMu.Lock()
 		opts.Cwd = t.lastCWD

@@ -22,8 +22,8 @@ type mcpServerStatus struct {
 }
 
 // handleMCP pushes a panel listing the configured MCP servers with their
-// connection state and capability counts, mirroring how Claude Code, goose, and
-// opencode let users inspect their MCP wiring without leaving the session.
+// connection state and capability counts, letting users inspect their MCP
+// servers without leaving the session.
 func (m *model) handleMCP() (tea.Model, tea.Cmd) {
 	m.dialogs.Push(&dialog.Text{DialogID: "mcp", Title: "MCP servers", Body: m.mcpPanel(), Theme: m.theme})
 	return m, nil

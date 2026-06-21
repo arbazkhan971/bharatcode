@@ -1,6 +1,6 @@
 # BharatCode Feature Roadmap
 
-> Synthesized from a competitor scan (OpenAI Codex CLI, Pi coding agent) and a
+> Synthesized from a competitor scan (Pi coding agent) and a
 > module-by-module acceptance-criteria audit of the current codebase.
 > Goal: a prioritized, grounded plan that fixes UX-blocking gaps first and adopts
 > the highest-leverage peer features that can be built and tested **without any
@@ -56,7 +56,7 @@ actually correct. The **major gaps** are where real UX or correctness is missing
 
 ---
 
-## 2. Features to adopt from Codex CLI / Pi CLI / peers
+## 2. Features to adopt from Pi CLI / peers
 
 Effort and "has it" reflect the audit. Priority is BharatCode's, not the peer's.
 

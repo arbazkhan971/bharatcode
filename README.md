@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/arbazkhan971/bharatcode/main/instal
 
 See [all install methods](https://bharatcode.dev/docs/installation) (Windows, go install, source).
 
-BharatCode is a terminal-based AI pair programmer in the same class as Claude Code, OpenCode, and Codex CLI — but built open-weight-first and data-sovereign. It runs locally, talks to whatever model you choose (fully local Ollama / LM Studio, India- and Asia-hosted inference, or frontier APIs), and keeps an INR-aware cost ledger so spend is a number you can see, not a surprise at month-end. Built for teams who need their source code to never leave the country.
+BharatCode is a terminal-based AI pair programmer — built open-weight-first and data-sovereign. It runs locally, talks to whatever model you choose (fully local Ollama / LM Studio, India- and Asia-hosted inference, or frontier APIs), and keeps an INR-aware cost ledger so spend is a number you can see, not a surprise at month-end. Built for teams who need their source code to never leave the country.
 
 ---
 
@@ -173,16 +173,16 @@ BharatCode is decomposed into **19 modules** under `internal/`, arranged in five
 
 BharatCode plays in the same space as the leading terminal coding agents. The honest differentiation is openness and data sovereignty:
 
-| | **BharatCode** | Claude Code | OpenCode | Codex CLI |
-|---|:---:|:---:|:---:|:---:|
-| Language | Go | (closed) | TypeScript | Rust |
-| License | **MIT** | Proprietary | MIT | Apache-2.0 |
-| Open-weight-first | **✅** | ❌ | Multi-provider | ❌ |
-| Data residency / local-first | **✅** | ❌ | Local-capable | ❌ |
-| Cost-awareness (INR ledger) | **✅** | ❌ | ❌ | ❌ |
-| Provider lock-in | None | Anthropic only | None | OpenAI only |
+| | **BharatCode** | Claude Code | OpenCode |
+|---|:---:|:---:|:---:|
+| Language | Go | (closed) | TypeScript |
+| License | **MIT** | Proprietary | MIT |
+| Open-weight-first | **✅** | ❌ | Multi-provider |
+| Data residency / local-first | **✅** | ❌ | Local-capable |
+| Cost-awareness (INR ledger) | **✅** | ❌ | ❌ |
+| Provider lock-in | None | Anthropic only | None |
 
-OpenCode is the closest peer — MIT and multi-provider. BharatCode's distinct bet is to treat open-weight models and India/Asia data residency as the default, with cost surfaced in rupees.
+BharatCode's distinct bet is to treat open-weight models and India/Asia data residency as the default, with cost surfaced in rupees.
 
 ---
 

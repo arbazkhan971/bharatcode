@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRender_NoFramedBlocks asserts the transcript flows like Codex's: an
+// TestRender_NoFramedBlocks asserts the transcript flows as plain prose: an
 // assistant turn renders as plain content with no surrounding left-bar frame, so
 // none of the box-drawing border glyphs the old AssistantBlock/UserBlock drew
 // appear in the output.
@@ -46,7 +46,7 @@ func TestRender_TurnsSeparatedByBlankLineNotRule(t *testing.T) {
 
 // TestRender_AssistantProseFullContrast asserts finished assistant prose is
 // rendered in the primary body color (full contrast) rather than a recessive
-// muted/faint tone, so the answer reads as plain text the way Codex shows it. It
+// muted/faint tone, so the answer reads as plain text in full contrast. It
 // checks the plain-text (markdown-disabled) path, which the renderer styles with
 // styles.Primary.
 func TestRender_AssistantProseFullContrast(t *testing.T) {

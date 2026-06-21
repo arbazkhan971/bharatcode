@@ -1429,8 +1429,8 @@ func keyAltEnter() tea.KeyPressMsg {
 }
 
 // TestAltEnter_InsertsNewlineIntoInput verifies that Alt+Enter appends \n to
-// the prompt buffer instead of submitting it, enabling multi-line prompts. This
-// mirrors Shift+Enter in Claude Code and goose.
+// the prompt buffer instead of submitting it, enabling multi-line prompts via
+// Alt+Enter.
 func TestAltEnter_InsertsNewlineIntoInput(t *testing.T) {
 	t.Parallel()
 

@@ -39,7 +39,7 @@ const mentionTrailingPunct = ".,:;!?)]}"
 // regular files inside root and appends their contents to the prompt as an
 // "[Attached files]" section. The original text is preserved verbatim so the
 // user's @mention stays visible; the model additionally receives the file
-// bodies as context, matching the @-file behavior of goose and opencode.
+// bodies as context, matching common @-file conventions in coding agents.
 //
 // Image files (PNG/JPEG/GIF/WebP) are returned as ImageBlocks rather than
 // fenced text so vision-capable models can inspect them directly. A compact
@@ -204,8 +204,8 @@ func renderMentionBlock(rel string, body []byte, truncated bool) string {
 
 // mentionLang maps a file to a fenced-code language hint. It first checks the
 // base name for well-known files that carry no informative extension — a
-// Dockerfile, a Makefile, go.mod — the way opencode and Claude Code tag those
-// attachments by name rather than suffix; it then falls back to the extension.
+// Dockerfile, a Makefile, go.mod — common well-known files identified by name
+// rather than suffix; it then falls back to the extension.
 // An unrecognized name with no known extension yields an empty hint, which
 // renders as a plain block.
 func mentionLang(rel string) string {

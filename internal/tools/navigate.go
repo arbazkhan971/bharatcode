@@ -390,8 +390,8 @@ func navigateLocationsMetadata(root string, locs []lsp.Location) map[string]any 
 // locationsResult renders LSP locations as a sorted, deduplicated list of
 // `path:line:column: <source line>` entries, paths made workspace-relative
 // where possible. The trailing source line is the trimmed text at the location
-// so the model sees the code at each site, not just coordinates (matching how
-// goose/opencode surface navigation results); it is omitted when the file or
+// so the model sees the code at each site, not just coordinates (matching
+// standard coding-agent conventions); it is omitted when the file or
 // line cannot be read. When more than one location is found a summary header
 // "N <noun>s across M file(s):" is prepended so the model sees the scope
 // before scanning the list, matching how referencesResult and callsResult
@@ -413,8 +413,8 @@ func locationsResult(root string, locs []lsp.Location, emptyMsg, noun string) Re
 
 // referencesResult renders reference locations like locationsResult but prefixes
 // a summary line ("N reference(s) across M file(s):") so the model sees the
-// scope of a symbol's usage before scanning the list, matching how goose and
-// opencode surface reference searches. An empty input reports no references.
+// scope of a symbol's usage before scanning the list, matching standard
+// coding-agent conventions. An empty input reports no references.
 func referencesResult(root string, locs []lsp.Location) Result {
 	if len(locs) == 0 {
 		return Result{Content: "No references found."}

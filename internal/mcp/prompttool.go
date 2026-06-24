@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/arbazkhan971/bharatcode/internal/tools"
 )
@@ -222,7 +223,7 @@ func (t *promptsTool) render(ctx context.Context, name string, args promptsArgs)
 	out := b.String()
 	truncated := false
 	if len(out) > maxPromptBytes {
-		out = out[:maxPromptBytes]
+		out = truncateUTF8(out, maxPromptBytes)
 		truncated = true
 	}
 	if truncated {
@@ -232,6 +233,17 @@ func (t *promptsTool) render(ctx context.Context, name string, args promptsArgs)
 		Content:  strings.TrimRight(out, "\n"),
 		Metadata: map[string]any{"name": name, "server": prompt.Server, "messages": len(messages)},
 	}
+}
+
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	out := s[:maxBytes]
+	for len(out) > 0 && !utf8.ValidString(out) {
+		out = out[:len(out)-1]
+	}
+	return out
 }
 
 // resolve finds the advertised prompt named name. When server is set it pins the

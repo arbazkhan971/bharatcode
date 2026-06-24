@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/arbazkhan971/bharatcode/internal/shell"
@@ -18,6 +19,8 @@ type jobListTool struct {
 // it still rejects malformed JSON so the tool honours the shared garbage-args
 // contract rather than silently ignoring a broken call.
 type jobListArgs struct{}
+
+const maxJobListCommandRunes = 240
 
 var jobListSchema = json.RawMessage(`{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -70,7 +73,7 @@ func (t *jobListTool) Run(_ context.Context, raw json.RawMessage) (Result, error
 			b.WriteByte('\n')
 		}
 		// One compact line per job; the command can be long, so it goes last.
-		fmt.Fprintf(&b, "%s\t%s\texit %d\t%s", job.ID, job.Status, job.ExitCode, job.Command)
+		fmt.Fprintf(&b, "%s\t%s\texit %d\t%s", job.ID, job.Status, job.ExitCode, quoteJobCommand(job.Command))
 		meta = append(meta, map[string]any{
 			"job_id":    job.ID,
 			"status":    job.Status,
@@ -83,4 +86,12 @@ func (t *jobListTool) Run(_ context.Context, raw json.RawMessage) (Result, error
 		Content:  b.String(),
 		Metadata: map[string]any{"jobs": meta},
 	}, nil
+}
+
+func quoteJobCommand(command string) string {
+	runes := []rune(command)
+	if len(runes) > maxJobListCommandRunes {
+		command = string(runes[:maxJobListCommandRunes]) + "…"
+	}
+	return strconv.Quote(command)
 }

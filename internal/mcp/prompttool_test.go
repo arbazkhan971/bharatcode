@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -188,6 +189,22 @@ func TestPromptsTool_InvalidArgs(t *testing.T) {
 	content, isErr := runPromptsTool(t, &fakePromptProvider{}, `{"name":`)
 	require.True(t, isErr)
 	require.Contains(t, content, "invalid mcp_prompts arguments")
+}
+
+func TestPromptsTool_TruncatesAtUTF8Boundary(t *testing.T) {
+	p := &fakePromptProvider{
+		prompts: []Prompt{{Server: "review", Name: "big"}},
+		messages: []PromptMessage{{
+			Role:    "user",
+			Content: strings.Repeat("a", maxPromptBytes) + "🙂",
+		}},
+	}
+
+	content, isErr := runPromptsTool(t, p, `{"name":"big"}`)
+
+	require.False(t, isErr)
+	require.True(t, utf8.ValidString(content))
+	require.Contains(t, content, "truncated at")
 }
 
 func TestPromptsTool_NilProvider(t *testing.T) {

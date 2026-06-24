@@ -26,7 +26,11 @@ $Binary = "bharatcode.exe"
 function Fail($msg) { Write-Error "bharatcode-install: $msg"; exit 1 }
 
 # Map architecture to the GoReleaser asset tokens.
-$arch = $env:PROCESSOR_ARCHITECTURE
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq "x86" -and $env:PROCESSOR_ARCHITEW6432) {
+  $env:PROCESSOR_ARCHITEW6432
+} else {
+  $env:PROCESSOR_ARCHITECTURE
+}
 switch ($arch) {
   "AMD64" { $ArchToken = "x86_64" }
   "ARM64" { $ArchToken = "arm64" }
@@ -68,6 +72,7 @@ try {
     Write-Host "Added $InstallDir to your user PATH. Open a new terminal to use 'bharatcode'."
   }
   & (Join-Path $InstallDir $Binary) version
+  if ($LASTEXITCODE -ne 0) { Fail "installed binary failed validation" }
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

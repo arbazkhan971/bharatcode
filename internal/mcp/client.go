@@ -829,6 +829,9 @@ func (c *Client) refresh(ctx context.Context, server *Server, conn remoteClient)
 				return fmt.Errorf("marshaling schema for %q: %w", remoteTool.Name, err)
 			}
 		}
+		if !json.Valid(schema) {
+			return fmt.Errorf("invalid input schema for mcp tool %q on %q", remoteTool.Name, server.Name())
+		}
 		bridged = append(bridged, &toolAdapter{
 			server:      server,
 			perms:       c.perms,
